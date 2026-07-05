@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool, { initDb } from '@/lib/db'
-import { scrapeSingleProduct, scrapeCatalogPage, getOpenPageUrl, type ScrapeResult } from '@/lib/scraper'
+import { scrapeSingleProduct, scrapeCatalogPage, getOpenPageUrl, closeLoginWindow, type ScrapeResult } from '@/lib/scraper'
 import { downloadProductImages } from '@/lib/images'
 
 interface ScrapeRequestBody {
@@ -8,6 +8,7 @@ interface ScrapeRequestBody {
   categoryUrls?: string[]
   nextPageSelector?: string
   maxPages?: number
+  delayMs?: number
   loginId?: string
   loginPw?: string
   mode: 'single' | 'catalog'
@@ -75,6 +76,10 @@ async function saveProduct(sessionId: number, r: ScrapeResult) {
 }
 
 async function runScraping(sessionId: number, opts: ScrapeRequestBody) {
+  // 로그인 확인용으로 열어둔 화면은 여기서 닫는다 — 실제 스크래핑은 화면에 상품을 하나씩 띄우지 않고
+  // 백그라운드(헤드리스)로 진행한다. 로그인 세션(쿠키)은 프로필 디렉터리에 저장되어 그대로 재사용된다.
+  if (opts.siteId) await closeLoginWindow(opts.siteId)
+
   // 이미 스크랩된 상품은 목록에서 발견되어도 건너뛴다 (이어서 스크랩하기)
   const excluded = await pool.query<{ source_url: string }>(
     `SELECT DISTINCT source_url FROM products WHERE source_url IS NOT NULL`,
@@ -82,6 +87,7 @@ async function runScraping(sessionId: number, opts: ScrapeRequestBody) {
 
   const scrapeOpts = {
     url: opts.url, categoryUrls: opts.categoryUrls, nextPageSelector: opts.nextPageSelector, maxPages: opts.maxPages,
+    delayMs: opts.delayMs,
     loginId: opts.loginId, loginPw: opts.loginPw, productLinkSelector: opts.productLinkSelector, siteId: opts.siteId,
     excludeUrls: excluded.rows.map(r => r.source_url), sessionId,
   }

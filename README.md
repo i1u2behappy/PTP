@@ -1,5 +1,33 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Database
+
+PostgreSQL runs in its own Docker container dedicated to this project: `scrap-postgres`
+(started via `docker compose up -d`, see `docker-compose.yml`), separate from other projects'
+containers so it's not sharing a database instance with unrelated apps. Connection settings are
+in `.env.local` (`devuser`/`devpass`, port `5433` on the host to avoid clashing with other local
+Postgres instances on the default `5432`).
+
+The container has `restart: unless-stopped`, so it comes back on its own — but only once
+**Docker Desktop itself is running** (Docker Desktop → Settings → General → "Start Docker
+Desktop when you sign in" is enabled, so it should start automatically after login/reboot). If
+pages show empty lists or API routes 500 with a DB connection error, check `docker ps` lists
+`scrap-postgres` as `Up` before assuming it's a code bug.
+
+`lib/db.ts` builds its Postgres pool once at module load using `.env.local` values, so after
+changing DB connection settings you need to fully restart `npm run dev` — Next.js reloading
+`.env.local` alone won't re-create the pool. (`lib/ai.ts`'s Anthropic client already builds a
+fresh client per call for this same reason, since API keys get rotated more often.)
+
+## CAPTCHA solving (optional)
+
+Automated login (`lib/scraper.ts`'s `loginIfNeeded`, used by headless re-scrapes) can auto-solve
+a CAPTCHA challenge on the login form via [2Captcha](https://2captcha.com) if you set
+`TWOCAPTCHA_API_KEY` in `.env.local`. Supports reCAPTCHA v2, hCaptcha, and simple image captchas.
+Leave it blank to skip silently — normal login (and the manual "로그인 창 열기" flow, where you
+solve any CAPTCHA yourself in the visible browser window) keeps working without it. 2Captcha
+charges per solve, so only add a key if you've actually hit a CAPTCHA wall.
+
 ## Getting Started
 
 First, run the development server:

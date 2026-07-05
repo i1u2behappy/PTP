@@ -20,51 +20,6 @@ export interface ExtractedProduct {
   detail_image_urls: string[]
 }
 
-/** HTML에서 상품 데이터 추출 (Claude Haiku — 빠르고 저렴) */
-export async function extractProductFromHtml(html: string, url: string): Promise<ExtractedProduct> {
-  // HTML이 너무 길면 앞 50000자만 사용 (토큰 절약)
-  const trimmed = html.slice(0, 50_000)
-
-  const response = await getClient().messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 2048,
-    messages: [{
-      role: 'user',
-      content: `다음 쇼핑몰 HTML에서 상품 정보를 추출해줘. JSON만 반환해.
-
-URL: ${url}
-
-HTML:
-${trimmed}
-
-JSON 형식:
-{
-  "name": "상품명",
-  "price": 정상가(숫자, 없으면 null),
-  "sale_price": 판매가(숫자, 없으면 null),
-  "brand": "브랜드",
-  "manufacturer": "제조사",
-  "origin": "원산지",
-  "category": "카테고리",
-  "description": "상품 설명 (300자 이내 요약)",
-  "options": [{"name": "옵션명", "values": ["값1","값2"]}],
-  "thumbnail_url": "대표이미지 절대URL",
-  "detail_image_urls": ["상세이미지URL1", "상세이미지URL2"]
-}
-
-주의:
-- 이미지 URL은 반드시 절대 URL (http:// 또는 https:// 시작)
-- 가격은 숫자만 (쉼표, 원 제거)
-- 찾을 수 없는 필드는 빈문자열 또는 null`
-    }],
-  })
-
-  const text = (response.content[0] as { type: string; text: string }).text
-  const jsonMatch = text.match(/\{[\s\S]*\}/)
-  if (!jsonMatch) throw new Error('AI 응답에서 JSON을 찾지 못했습니다')
-  return JSON.parse(jsonMatch[0]) as ExtractedProduct
-}
-
 /** 대표이미지 URL → AI 상품명 생성 (20자 이내, 오픈마켓 등록용) */
 export async function generateProductName(imageUrl: string, originalName: string): Promise<string> {
   try {

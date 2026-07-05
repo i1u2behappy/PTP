@@ -39,6 +39,9 @@ yarn-error.log*
 # playwright login profiles (contains session cookies)
 /.playwright-profiles/
 
+# scraped product images (runtime data, not source)
+/public/scraped/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

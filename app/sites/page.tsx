@@ -17,11 +17,15 @@ export default function SitesPage() {
   const [loginId, setLoginId] = useState('')
   const [loginPw, setLoginPw] = useState('')
   const [editingId, setEditingId] = useState<number | null>(null)
+  const [loadError, setLoadError] = useState(false)
 
   const load = useCallback((query: string) => {
-    fetch(`/api/sites?q=${encodeURIComponent(query)}`).then(r => r.json()).then((d: Site[]) => {
-      if (Array.isArray(d)) setSites(d)
-    }).catch(() => {})
+    fetch(`/api/sites?q=${encodeURIComponent(query)}`).then(r => {
+      if (!r.ok) throw new Error()
+      return r.json()
+    }).then((d: Site[]) => {
+      if (Array.isArray(d)) { setSites(d); setLoadError(false) }
+    }).catch(() => setLoadError(true))
   }, [])
 
   useEffect(() => { load(q) }, [load, q])
@@ -33,28 +37,43 @@ export default function SitesPage() {
   async function handleSubmit() {
     if (!url) return alert('URL을 입력하세요.')
     const body = JSON.stringify({ name, url, loginId, loginPw })
-    if (editingId) {
-      await fetch(`/api/sites/${editingId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body })
-    } else {
-      await fetch('/api/sites', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+    try {
+      const res = editingId
+        ? await fetch(`/api/sites/${editingId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body })
+        : await fetch('/api/sites', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+      if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
+    } catch (e) {
+      alert(`저장에 실패했습니다: ${e instanceof Error ? e.message : e}\nDB 연결 상태를 확인해주세요.`)
+      return
     }
     resetForm()
     load(q)
   }
 
   async function handleEdit(site: Site) {
-    const res = await fetch(`/api/sites/${site.id}`)
-    const full = await res.json() as Site & { login_pw: string | null }
-    setEditingId(site.id)
-    setName(full.name || '')
-    setUrl(full.url)
-    setLoginId(full.login_id || '')
-    setLoginPw(full.login_pw || '')
+    try {
+      const res = await fetch(`/api/sites/${site.id}`)
+      if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
+      const full = await res.json() as Site & { login_pw: string | null }
+      setEditingId(site.id)
+      setName(full.name || '')
+      setUrl(full.url)
+      setLoginId(full.login_id || '')
+      setLoginPw(full.login_pw || '')
+    } catch (e) {
+      alert(`불러오기에 실패했습니다: ${e instanceof Error ? e.message : e}`)
+    }
   }
 
   async function handleDelete(id: number) {
     if (!confirm('이 쇼핑몰 등록 정보를 삭제할까요?')) return
-    await fetch(`/api/sites/${id}`, { method: 'DELETE' })
+    try {
+      const res = await fetch(`/api/sites/${id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
+    } catch (e) {
+      alert(`삭제에 실패했습니다: ${e instanceof Error ? e.message : e}`)
+      return
+    }
     if (editingId === id) resetForm()
     load(q)
   }
@@ -105,7 +124,9 @@ export default function SitesPage() {
           <input value={q} onChange={e => setQ(e.target.value)} placeholder="이름 또는 URL 검색..."
             className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
         </div>
-        {sites.length === 0 ? (
+        {loadError ? (
+          <div className="p-8 text-center text-sm text-red-500">목록을 불러오지 못했습니다. 서버(DB) 연결을 확인해주세요.</div>
+        ) : sites.length === 0 ? (
           <div className="p-8 text-center text-sm text-gray-400">등록된 쇼핑몰이 없습니다.</div>
         ) : (
           <div className="divide-y divide-gray-100">

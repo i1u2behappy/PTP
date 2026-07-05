@@ -1,0 +1,18 @@
+name: scrap
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: scrap-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: scrap
+      POSTGRES_USER: devuser
+      POSTGRES_PASSWORD: devpass
+    ports:
+      - '5433:5432'
+    volumes:
+      - scrap-db-data:/var/lib/postgresql/data
+
+volumes:
+  scrap-db-data:

@@ -1,5 +1,6 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
+import { useTabs } from '../shell/TabsContext'
 
 interface MasterRow {
   id: number
@@ -29,7 +30,8 @@ const MARKET_META: { id: Marketplace; color: string }[] = [
   { id: 'auction', color: 'bg-red-700' },
 ]
 
-export default function ExportPage() {
+export function ExportPanel() {
+  const { openTab, refreshSignals } = useTabs()
   const [rows, setRows]             = useState<MasterRow[]>([])
   const [configs, setConfigs]       = useState<MarketplaceConfig[]>([])
   const [selected, setSelected]     = useState<Set<number>>(new Set())
@@ -41,7 +43,7 @@ export default function ExportPage() {
     fetch('/api/marketplace-configs').then(r => r.json()).then((d: MarketplaceConfig[]) => { if (Array.isArray(d)) setConfigs(d) }).catch(() => {})
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load() }, [load, refreshSignals.master])
 
   const readyRows = rows.filter(r => r.status === 'ready')
 
@@ -98,7 +100,8 @@ export default function ExportPage() {
           {readyRows.length === 0 ? (
             <div className="p-8 text-center text-sm text-gray-400">
               <div className="text-3xl mb-2">📭</div>
-              <a href="/products/master" className="text-indigo-600 hover:underline">상품마스터에서 먼저 확정하기 →</a>
+              <button onClick={() => openTab({ id: 'master-list', type: 'master-list', title: '상품마스터', icon: '🗂️', closable: true })}
+                className="text-indigo-600 hover:underline">상품마스터에서 먼저 확정하기 →</button>
             </div>
           ) : (
             <div className="divide-y divide-gray-100 max-h-[600px] overflow-y-auto">

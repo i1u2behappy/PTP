@@ -5,7 +5,7 @@ interface NamingTemplate { id: number; name: string; prompt_template: string; ma
 interface MarketplaceConfig { code: string; name: string; max_batch_size: number; default_commission_rate: number; default_shipping_fee: number }
 interface Client { id: number; name: string; memo: string | null }
 
-export default function SettingsPage() {
+export function SettingsPanel() {
   const [baseUrl, setBaseUrl]         = useState('')
   const [baseUrlInput, setBaseUrlInput] = useState('')
   const [templates, setTemplates]     = useState<NamingTemplate[]>([])

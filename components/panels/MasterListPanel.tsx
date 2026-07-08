@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
 import Image from 'next/image'
+import { useTabs } from '../shell/TabsContext'
 
 interface MasterRow {
   id: number
@@ -35,7 +36,8 @@ function marginOf(row: MasterRow): number | null {
   return row.sale_price - cost - other
 }
 
-export default function ProductMasterPage() {
+export function MasterListPanel() {
+  const { openTab, refreshSignals, bumpRefresh } = useTabs()
   const [rows, setRows] = useState<MasterRow[]>([])
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<Set<number>>(new Set())
@@ -54,7 +56,7 @@ export default function ProductMasterPage() {
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load() }, [load, refreshSignals.master])
 
   function missing(row: MasterRow): string[] {
     const out: string[] = []
@@ -73,6 +75,10 @@ export default function ProductMasterPage() {
   }
   function selectAll() {
     setSelected(selected.size === visibleRows.length ? new Set() : new Set(visibleRows.map(r => r.id)))
+  }
+
+  function openDetail(row: MasterRow) {
+    openTab({ id: `master-detail:${row.id}`, type: 'master-detail', title: (row.name_final || row.name_ai || row.name_original)?.slice(0, 14) || `마스터 #${row.id}`, icon: '🗂️', params: { masterId: row.id }, closable: true })
   }
 
   async function genAiName(id: number) {
@@ -123,6 +129,7 @@ export default function ProductMasterPage() {
     await Promise.all(ids.map(id => fetch(`/api/master/${id}`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'ready' }),
     })))
+    bumpRefresh('master')
     load()
   }
 
@@ -145,8 +152,8 @@ export default function ProductMasterPage() {
     <div>
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-gray-800">2️⃣ 상품마스터</h1>
-          <p className="text-xs text-gray-400 mt-1">스크랩 데이터가 가공된 영속 상품마스터입니다. 가격/마진/카테고리/상품명을 직접 편집하고 확정합니다.</p>
+          <h1 className="text-2xl font-bold text-gray-800">🗂️ 상품마스터</h1>
+          <p className="text-xs text-gray-400 mt-1">가공된 영속 상품마스터입니다. 셀을 눌러 빠르게 수정하거나, 🔍 상세로 들어가 전체 항목을 편집합니다.</p>
         </div>
         <div className="flex gap-2">
           <button onClick={genAllAiNames}
@@ -166,7 +173,8 @@ export default function ProductMasterPage() {
         <div className="bg-white rounded-xl border border-gray-200 p-12 text-center text-gray-400">
           <div className="text-4xl mb-3">📭</div>
           <p className="text-sm">가공된 상품마스터가 없습니다.</p>
-          <a href="/products" className="mt-2 inline-block text-indigo-600 text-sm hover:underline">← 수집 확인에서 가공하기</a>
+          <button onClick={() => openTab({ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true })}
+            className="mt-2 inline-block text-indigo-600 text-sm hover:underline">← 수집 확인에서 가공하기</button>
         </div>
       ) : (
         <>
@@ -212,6 +220,7 @@ export default function ProductMasterPage() {
                     <th className="px-3 py-2 text-left">마진</th>
                     <th className="px-3 py-2 text-left">재고</th>
                     <th className="px-3 py-2 text-left">상태</th>
+                    <th className="w-10 px-2 py-2 text-left">상세</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -255,6 +264,9 @@ export default function ProductMasterPage() {
                         <td className="px-3 py-2 text-xs">
                           {row.status === 'ready' ? <span className="text-emerald-600 font-medium">확정됨</span> : <span className="text-gray-400">{row.status}</span>}
                         </td>
+                        <td className="px-2 py-2">
+                          <button onClick={() => openDetail(row)} title="상세 보기" className="text-indigo-500 hover:text-indigo-700">🔍</button>
+                        </td>
                       </tr>
                     )
                   })}
@@ -266,8 +278,10 @@ export default function ProductMasterPage() {
       )}
 
       <div className="mt-3 flex items-center justify-between text-xs text-gray-400">
-        <a href="/products" className="text-gray-500 hover:underline">← 수집 확인</a>
-        <a href="/export" className="text-indigo-600 hover:underline font-medium">엑셀 내보내기로 →</a>
+        <button onClick={() => openTab({ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true })}
+          className="text-gray-500 hover:underline">← 수집 확인</button>
+        <button onClick={() => openTab({ id: 'export', type: 'export', title: '엑셀 내보내기', icon: '📊', closable: true })}
+          className="text-indigo-600 hover:underline font-medium">엑셀 내보내기로 →</button>
       </div>
     </div>
   )

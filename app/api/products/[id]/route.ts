@@ -1,6 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 
+export async function GET(_: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params
+  const res = await pool.query(
+    `SELECT mp.*,
+            (SELECT storage_path FROM product_images pi WHERE pi.mall_product_id = mp.id AND pi.image_type = 'thumbnail' LIMIT 1) AS thumbnail_local,
+            COALESCE(
+              (SELECT json_agg(pi.storage_path ORDER BY pi.sort_order) FROM product_images pi WHERE pi.mall_product_id = mp.id AND pi.image_type = 'detail'),
+              '[]'
+            ) AS detail_image_local
+     FROM mall_products mp WHERE mp.id = $1`,
+    [id],
+  )
+  if (!res.rows.length) return NextResponse.json({ error: 'not found' }, { status: 404 })
+  return NextResponse.json(res.rows[0])
+}
+
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const body = await req.json() as Record<string, unknown>

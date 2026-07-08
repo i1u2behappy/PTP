@@ -1,6 +1,6 @@
 'use client'
 import { useState, useEffect, useRef, useMemo } from 'react'
-import Link from 'next/link'
+import { useTabs } from '../shell/TabsContext'
 
 type Status = 'idle' | 'running' | 'done' | 'error' | 'stopped'
 type LoginStep = 'none' | 'opened' | 'confirmed'
@@ -29,7 +29,8 @@ interface PreviewProduct {
   detail_image_urls: string[]
 }
 
-export default function ScraperPage() {
+export function ScraperPanel() {
+  const { openTab, bumpRefresh } = useTabs()
   const [sites, setSites]         = useState<Site[]>([])
   const [siteQuery, setSiteQuery] = useState('')
   const [selectedSite, setSelectedSite] = useState<Site | null>(null)
@@ -85,10 +86,11 @@ export default function ScraperPage() {
         setStatus(d.status as Status)
         setStopping(false)
         if (pollRef.current) clearInterval(pollRef.current)
+        if (d.status === 'done') bumpRefresh('products')
       }
     }, 2000)
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
-  }, [sessionId, status])
+  }, [sessionId, status, bumpRefresh])
 
   async function selectSite(site: Site) {
     const res = await fetch(`/api/sites/${site.id}`)
@@ -278,7 +280,9 @@ export default function ScraperPage() {
         <label className="block text-sm font-semibold text-gray-700 mb-2">쇼핑몰 선택 *</label>
         {sites.length === 0 ? (
           <div className="text-sm text-gray-400">
-            등록된 쇼핑몰이 없습니다. <Link href="/sites" className="text-indigo-600 hover:underline">쇼핑몰 등록관리에서 추가하기 →</Link>
+            등록된 쇼핑몰이 없습니다.{' '}
+            <button onClick={() => openTab({ id: 'sites-list', type: 'sites-list', title: '쇼핑몰 목록', icon: '📋', closable: true })}
+              className="text-indigo-600 hover:underline">쇼핑몰 등록관리에서 추가하기 →</button>
           </div>
         ) : selectedSite ? (
           <div className="flex items-center justify-between bg-indigo-50 rounded-lg px-3 py-2">
@@ -582,9 +586,10 @@ export default function ScraperPage() {
             </>
           )}
           {status === 'done' && (
-            <a href="/products" className="mt-3 inline-block text-sm text-indigo-600 font-medium hover:underline">
+            <button onClick={() => openTab({ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true })}
+              className="mt-3 inline-block text-sm text-indigo-600 font-medium hover:underline">
               → 상품 목록 확인
-            </a>
+            </button>
           )}
         </div>
       )}

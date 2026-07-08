@@ -1,0 +1,191 @@
+'use client'
+import { useCallback, useEffect, useState } from 'react'
+import Image from 'next/image'
+import { useTabs } from '../shell/TabsContext'
+
+interface MallProductDetail {
+  id: number
+  site_id: number
+  mall_product_code: string
+  source_url: string
+  mall_category: string
+  name_original: string
+  price: number | null
+  sale_price: number | null
+  brand: string
+  manufacturer: string
+  origin: string
+  description: string
+  stock_status: string | null
+  stock_qty: number | null
+  thumbnail_local: string | null
+  detail_image_local: string[]
+  last_scraped_at: string | null
+  master_product_id: number | null
+}
+
+const FIELDS: { key: keyof MallProductDetail; label: string; type: 'text' | 'number' | 'textarea' }[] = [
+  { key: 'name_original', label: '상품명', type: 'text' },
+  { key: 'mall_category', label: '카테고리', type: 'text' },
+  { key: 'brand', label: '브랜드', type: 'text' },
+  { key: 'manufacturer', label: '제조사', type: 'text' },
+  { key: 'origin', label: '원산지', type: 'text' },
+  { key: 'price', label: '정상가', type: 'number' },
+  { key: 'sale_price', label: '판매가', type: 'number' },
+  { key: 'description', label: '설명', type: 'textarea' },
+]
+
+export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: Record<string, unknown> }) {
+  const { openTab, closeTab, bumpRefresh } = useTabs()
+  const mallProductId = params?.mallProductId as number
+  const [data, setData]       = useState<MallProductDetail | null>(null)
+  const [form, setForm]       = useState<Record<string, string>>({})
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving]   = useState(false)
+  const [rescraping, setRescraping] = useState(false)
+  const [migrating, setMigrating]   = useState(false)
+
+  const load = useCallback(() => {
+    fetch(`/api/products/${mallProductId}`).then(r => r.json()).then((d: MallProductDetail) => {
+      setData(d)
+      setForm(Object.fromEntries(FIELDS.map(f => [f.key, d[f.key] == null ? '' : String(d[f.key])])))
+    }).finally(() => setLoading(false))
+  }, [mallProductId])
+
+  useEffect(() => { load() }, [load])
+
+  async function handleSave() {
+    setSaving(true)
+    try {
+      const body: Record<string, unknown> = {}
+      for (const f of FIELDS) {
+        body[f.key] = f.type === 'number' ? (form[f.key].trim() === '' ? null : Number(form[f.key])) : form[f.key]
+      }
+      await fetch(`/api/products/${mallProductId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      bumpRefresh('products')
+      load()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleRescrape() {
+    setRescraping(true)
+    try {
+      const res = await fetch(`/api/products/${mallProductId}/rescrape`, { method: 'POST' })
+      if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`재스크랩 실패: ${e.error || res.status}`); return }
+      bumpRefresh('products')
+      load()
+    } finally {
+      setRescraping(false)
+    }
+  }
+
+  async function handleMigrate() {
+    setMigrating(true)
+    try {
+      const res = await fetch('/api/master/migrate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mallProductIds: [mallProductId], clientId: 1 }),
+      })
+      const d = await res.json() as { masterIds: number[] }
+      if (!res.ok || !d.masterIds?.length) throw new Error('가공 실패')
+      bumpRefresh('products')
+      bumpRefresh('master')
+      openTab({ id: `master-detail:${d.masterIds[0]}`, type: 'master-detail', title: data?.name_original?.slice(0, 12) || '상품마스터', icon: '🗂️', params: { masterId: d.masterIds[0] }, closable: true })
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e))
+    } finally {
+      setMigrating(false)
+    }
+  }
+
+  async function handleDelete() {
+    if (!confirm('이 상품을 삭제할까요?')) return
+    await fetch(`/api/products/${mallProductId}`, { method: 'DELETE' })
+    bumpRefresh('products')
+    closeTab(tabId)
+  }
+
+  if (loading || !data) return <div className="text-center text-sm text-gray-400 py-12">불러오는 중...</div>
+
+  return (
+    <div className="max-w-3xl">
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-800">📦 {data.name_original || `상품 #${data.id}`}</h1>
+          <p className="text-xs text-gray-400 mt-1">몰 상품코드: {data.mall_product_code} · 마지막 스크랩: {data.last_scraped_at ? new Date(data.last_scraped_at).toLocaleString() : '-'}</p>
+        </div>
+        <div className="flex gap-2 shrink-0">
+          <button onClick={handleRescrape} disabled={rescraping}
+            className="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs font-semibold rounded-lg disabled:opacity-50 transition-colors">
+            {rescraping ? '재스크랩 중...' : '🔄 재스크랩'}
+          </button>
+          {data.master_product_id ? (
+            <button onClick={() => openTab({ id: `master-detail:${data.master_product_id}`, type: 'master-detail', title: data.name_original?.slice(0, 12) || '상품마스터', icon: '🗂️', params: { masterId: data.master_product_id }, closable: true })}
+              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg transition-colors">
+              🗂️ 상품마스터 보기
+            </button>
+          ) : (
+            <button onClick={handleMigrate} disabled={migrating}
+              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg disabled:opacity-50 transition-colors">
+              {migrating ? '가공 중...' : '➜ 상품마스터로 가공'}
+            </button>
+          )}
+          <button onClick={handleDelete} className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-semibold rounded-lg transition-colors">
+            🗑 삭제
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-[160px_1fr] gap-6">
+        <div>
+          <div className="w-full aspect-square relative rounded-xl overflow-hidden bg-gray-100 border border-gray-200">
+            {data.thumbnail_local ? (
+              <Image src={data.thumbnail_local} alt={data.name_original || ''} fill className="object-cover" unoptimized />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs">No image</div>
+            )}
+          </div>
+          {data.detail_image_local?.length > 0 && (
+            <div className="grid grid-cols-3 gap-1 mt-2">
+              {data.detail_image_local.slice(0, 6).map((src, i) => (
+                <div key={i} className="aspect-square relative rounded overflow-hidden bg-gray-100">
+                  <Image src={src} alt="" fill className="object-cover" unoptimized />
+                </div>
+              ))}
+            </div>
+          )}
+          <a href={data.source_url} target="_blank" rel="noreferrer" className="block mt-2 text-xs text-indigo-600 hover:underline truncate">원본 페이지 열기 →</a>
+          <div className="mt-2 text-xs">
+            재고: {data.stock_status === '품절' || data.stock_status?.startsWith('단종') ? (
+              <span className="text-red-500 font-medium">{data.stock_status}</span>
+            ) : (
+              <span className="text-emerald-600 font-medium">{data.stock_status || '-'}</span>
+            )}
+            {data.stock_qty != null && <span className="text-gray-400"> ({data.stock_qty}개)</span>}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-3">
+          {FIELDS.map(f => (
+            <div key={f.key}>
+              <label className="block text-xs text-gray-500 mb-1">{f.label}</label>
+              {f.type === 'textarea' ? (
+                <textarea value={form[f.key] ?? ''} onChange={e => setForm(v => ({ ...v, [f.key]: e.target.value }))} rows={3}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+              ) : (
+                <input type={f.type} value={form[f.key] ?? ''} onChange={e => setForm(v => ({ ...v, [f.key]: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+              )}
+            </div>
+          ))}
+          <button onClick={handleSave} disabled={saving}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg disabled:opacity-50 transition-colors">
+            {saving ? '저장 중...' : '변경사항 저장'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}

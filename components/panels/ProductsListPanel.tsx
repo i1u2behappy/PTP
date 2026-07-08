@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
 import Image from 'next/image'
+import { useTabs } from '../shell/TabsContext'
 
 interface MallProduct {
   id: number
@@ -38,7 +39,8 @@ function missingFields(p: MallProduct): string[] {
   return missing
 }
 
-export default function ProductsPage() {
+export function ProductsListPanel() {
+  const { openTab, refreshSignals, bumpRefresh } = useTabs()
   const [products, setProducts]   = useState<MallProduct[]>([])
   const [sessions, setSessions]   = useState<Session[]>([])
   const [selected, setSelected]   = useState<Set<number>>(new Set())
@@ -50,7 +52,7 @@ export default function ProductsPage() {
     fetch('/api/sessions').then(r => r.json()).then((d: Session[]) => { if (Array.isArray(d)) setSessions(d) }).catch(() => {})
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load() }, [load, refreshSignals.products])
 
   const visibleProducts = issuesOnly ? products.filter(p => missingFields(p).length > 0) : products
 
@@ -59,6 +61,10 @@ export default function ProductsPage() {
   }
   function selectAll() {
     setSelected(selected.size === visibleProducts.length ? new Set() : new Set(visibleProducts.map(p => p.id)))
+  }
+
+  function openDetail(p: MallProduct) {
+    openTab({ id: `product-detail:${p.id}`, type: 'product-detail', title: p.name_original?.slice(0, 14) || `상품 #${p.id}`, icon: '📦', params: { mallProductId: p.id }, closable: true })
   }
 
   async function migrateSelected() {
@@ -72,7 +78,9 @@ export default function ProductsPage() {
         body: JSON.stringify({ mallProductIds: ids, clientId: 1 }),
       })
       if (!res.ok) throw new Error('마이그레이션 실패')
-      window.location.href = '/products/master'
+      bumpRefresh('products')
+      bumpRefresh('master')
+      openTab({ id: 'master-list', type: 'master-list', title: '상품마스터', icon: '🗂️', closable: true })
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e))
     } finally {
@@ -93,8 +101,8 @@ export default function ProductsPage() {
     <div>
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-gray-800">1️⃣ 수집 확인</h1>
-          <p className="text-xs text-gray-400 mt-1">스크래핑한 원천 데이터를 그대로 조회하고, 누락된 데이터가 없는지 확인합니다.</p>
+          <h1 className="text-2xl font-bold text-gray-800">📥 수집 확인</h1>
+          <p className="text-xs text-gray-400 mt-1">스크래핑한 원천 데이터를 조회하고, 행을 클릭하면 상세/수정/재스크랩으로 이어집니다.</p>
         </div>
         <div className="flex gap-2">
           <button onClick={migrateSelected} disabled={migrating}
@@ -137,7 +145,8 @@ export default function ProductsPage() {
         <div className="bg-white rounded-xl border border-gray-200 p-12 text-center text-gray-400">
           <div className="text-4xl mb-3">📭</div>
           <p className="text-sm">수집된 상품이 없습니다.</p>
-          <a href="/scraper" className="mt-2 inline-block text-indigo-600 text-sm hover:underline">스크래핑 시작하기 →</a>
+          <button onClick={() => openTab({ id: 'scraper', type: 'scraper', title: '스크래핑', icon: '🔍', closable: true })}
+            className="mt-2 inline-block text-indigo-600 text-sm hover:underline">스크래핑 시작하기 →</button>
         </div>
       ) : (
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -166,9 +175,11 @@ export default function ProductsPage() {
                 {visibleProducts.map(p => {
                   const missing = missingFields(p)
                   return (
-                  <tr key={p.id}
-                    className={`border-b border-gray-100 hover:bg-gray-50 transition-colors ${selected.has(p.id) ? 'bg-indigo-50' : ''}`}>
-                    <td className="px-4 py-3"><input type="checkbox" checked={selected.has(p.id)} onChange={() => toggleSelect(p.id)} /></td>
+                  <tr key={p.id} onClick={() => openDetail(p)}
+                    className={`border-b border-gray-100 hover:bg-gray-50 transition-colors cursor-pointer ${selected.has(p.id) ? 'bg-indigo-50' : ''}`}>
+                    <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
+                      <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggleSelect(p.id)} />
+                    </td>
 
                     <td className="px-2 py-3">
                       <div className="w-16 h-16 relative rounded-lg overflow-hidden bg-gray-100">
@@ -220,7 +231,8 @@ export default function ProductsPage() {
 
       <div className="mt-3 flex items-center justify-between text-xs text-gray-400">
         <p>전체 {products.length}개 상품 · 선택 {selected.size}개 {totalIssues > 0 && `· 누락 데이터 있음 ${totalIssues}개`}</p>
-        <a href="/products/master" className="text-indigo-600 hover:underline font-medium">다음: 상품마스터 →</a>
+        <button onClick={() => openTab({ id: 'master-list', type: 'master-list', title: '상품마스터', icon: '🗂️', closable: true })}
+          className="text-indigo-600 hover:underline font-medium">다음: 상품마스터 →</button>
       </div>
     </div>
   )

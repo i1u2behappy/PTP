@@ -142,8 +142,8 @@ export function MasterListPanel() {
           <input autoFocus value={editValue} onChange={e => setEditValue(e.target.value)}
             onBlur={saveEdit}
             onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') setEditing(null) }}
-            className="w-20 border border-indigo-300 rounded px-1 py-0.5 text-xs focus:outline-none" />
-        ) : value == null || value === '' ? <span className="text-red-400">입력필요</span> : String(value)}
+            className="w-20 border border-teal-300 rounded px-1 py-0.5 text-xs focus:outline-none" />
+        ) : value == null || value === '' ? <span className="text-rose-400">입력필요</span> : String(value)}
       </td>
     )
   }
@@ -157,43 +157,43 @@ export function MasterListPanel() {
         </div>
         <div className="flex gap-2">
           <button onClick={genAllAiNames}
-            className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 transition-colors">
+            className="px-4 py-2 bg-teal-500 text-white text-sm font-semibold rounded-full hover:bg-teal-600 transition-colors">
             ✨ AI 상품명 생성 {selected.size > 0 ? `(${selected.size}개 선택)` : '(미생성 전체)'}
           </button>
           <button onClick={markReady}
-            className="px-4 py-2 bg-emerald-600 text-white text-sm rounded-lg hover:bg-emerald-700 transition-colors">
+            className="px-4 py-2 bg-emerald-600 text-white text-sm font-semibold rounded-full hover:bg-emerald-700 transition-colors">
             ✅ 선택 확정 (ready)
           </button>
         </div>
       </div>
 
       {loading ? (
-        <div className="bg-white rounded-xl border border-gray-200 p-12 text-center text-gray-400 text-sm">불러오는 중...</div>
+        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 text-sm">불러오는 중...</div>
       ) : rows.length === 0 ? (
-        <div className="bg-white rounded-xl border border-gray-200 p-12 text-center text-gray-400">
+        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400">
           <div className="text-4xl mb-3">📭</div>
           <p className="text-sm">가공된 상품마스터가 없습니다.</p>
           <button onClick={() => openTab({ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true })}
-            className="mt-2 inline-block text-indigo-600 text-sm hover:underline">← 수집 확인에서 가공하기</button>
+            className="mt-2 inline-block text-teal-500 text-sm hover:underline">← 수집 확인에서 가공하기</button>
         </div>
       ) : (
         <>
           <div className="grid grid-cols-3 gap-3 mb-4">
-            <div className="bg-white rounded-xl border border-gray-200 p-4 text-center">
+            <div className="bg-white rounded-2xl border border-gray-200 p-4 text-center">
               <div className="text-2xl font-bold text-gray-800">{rows.length}</div>
               <div className="text-xs text-gray-400 mt-1">전체 상품마스터</div>
             </div>
-            <div className="bg-white rounded-xl border border-gray-200 p-4 text-center">
+            <div className="bg-white rounded-2xl border border-gray-200 p-4 text-center">
               <div className="text-2xl font-bold text-emerald-600">{readyCount}</div>
               <div className="text-xs text-gray-400 mt-1">완성됨 (내보내기 가능)</div>
             </div>
-            <div className="bg-white rounded-xl border border-gray-200 p-4 text-center">
+            <div className="bg-white rounded-2xl border border-gray-200 p-4 text-center">
               <div className="text-2xl font-bold text-amber-600">{rows.length - readyCount}</div>
               <div className="text-xs text-gray-400 mt-1">미완성 (보완 필요)</div>
             </div>
           </div>
 
-          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50">
               <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer">
                 <input type="checkbox" checked={notReadyOnly} onChange={e => setNotReadyOnly(e.target.checked)} />
@@ -238,12 +238,12 @@ export function MasterListPanel() {
                           <input
                             defaultValue={row.name_final || row.name_ai || row.name_original || ''}
                             onBlur={e => e.target.value !== (row.name_final || '') && saveFinalName(row.id, e.target.value)}
-                            className="w-full border border-gray-200 rounded px-1.5 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                            className="w-full border border-gray-200 rounded px-1.5 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-teal-400"
                           />
                           <div className="flex items-center gap-1 mt-1">
-                            {row.name_ai && <span className="text-indigo-500 text-[10px] truncate">AI: {row.name_ai}</span>}
+                            {row.name_ai && <span className="text-teal-500 text-[10px] truncate">AI: {row.name_ai}</span>}
                             <button onClick={() => genAiName(row.id)} disabled={aiLoading.has(row.id)}
-                              className="text-[10px] text-indigo-500 hover:text-indigo-700 disabled:opacity-50 shrink-0">
+                              className="text-[10px] text-teal-500 hover:text-teal-600 disabled:opacity-50 shrink-0">
                               {aiLoading.has(row.id) ? '...' : '✨재생성'}
                             </button>
                           </div>
@@ -258,14 +258,14 @@ export function MasterListPanel() {
                         <EditableCell row={row} k="shipping_fee" label="배송비" />
                         <EditableCell row={row} k="other_cost" label="기타비용" />
                         <td className="px-3 py-2 text-xs font-medium">
-                          {margin == null ? '-' : <span className={margin >= 0 ? 'text-emerald-600' : 'text-red-500'}>₩{margin.toLocaleString()}</span>}
+                          {margin == null ? '-' : <span className={margin >= 0 ? 'text-emerald-600' : 'text-rose-500'}>₩{margin.toLocaleString()}</span>}
                         </td>
                         <td className="px-3 py-2 text-xs">{row.stock_status || '-'}{row.stock_qty != null && ` (${row.stock_qty})`}</td>
                         <td className="px-3 py-2 text-xs">
                           {row.status === 'ready' ? <span className="text-emerald-600 font-medium">확정됨</span> : <span className="text-gray-400">{row.status}</span>}
                         </td>
                         <td className="px-2 py-2">
-                          <button onClick={() => openDetail(row)} title="상세 보기" className="text-indigo-500 hover:text-indigo-700">🔍</button>
+                          <button onClick={() => openDetail(row)} aria-label={`${row.name_final || row.name_ai || row.name_original || '상품'} 상세 보기`} title="상세 보기" className="text-teal-500 hover:text-teal-600">🔍</button>
                         </td>
                       </tr>
                     )
@@ -281,7 +281,7 @@ export function MasterListPanel() {
         <button onClick={() => openTab({ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true })}
           className="text-gray-500 hover:underline">← 수집 확인</button>
         <button onClick={() => openTab({ id: 'export', type: 'export', title: '엑셀 내보내기', icon: '📊', closable: true })}
-          className="text-indigo-600 hover:underline font-medium">엑셀 내보내기로 →</button>
+          className="text-teal-500 hover:underline font-medium">엑셀 내보내기로 →</button>
       </div>
     </div>
   )

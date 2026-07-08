@@ -50,18 +50,18 @@ export function SitesListPanel() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-800">🏬 쇼핑몰 관리</h1>
         <button onClick={() => openDetail()}
-          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg transition-colors">
+          className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full transition-colors">
           ➕ 새 쇼핑몰 등록
         </button>
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
         <div className="px-4 py-3 border-b border-gray-100 bg-gray-50">
           <input value={q} onChange={e => setQ(e.target.value)} placeholder="이름 또는 URL 검색..."
-            className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+            className="w-full border border-gray-300 rounded-xl px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
         </div>
         {loadError ? (
-          <div className="p-8 text-center text-sm text-red-500">목록을 불러오지 못했습니다. 서버(DB) 연결을 확인해주세요.</div>
+          <div className="p-8 text-center text-sm text-rose-500">목록을 불러오지 못했습니다. 서버(DB) 연결을 확인해주세요.</div>
         ) : sites.length === 0 ? (
           <div className="p-8 text-center text-sm text-gray-400">등록된 쇼핑몰이 없습니다.</div>
         ) : (
@@ -73,8 +73,8 @@ export function SitesListPanel() {
                   <div className="text-xs text-gray-500 truncate">{s.url}</div>
                   {s.login_id && <div className="text-xs text-gray-400">ID: {s.login_id}</div>}
                 </button>
-                <button onClick={() => openDetail(s)} className="text-xs text-indigo-600 hover:underline shrink-0">수정</button>
-                <button onClick={() => handleDelete(s.id)} className="text-xs text-red-500 hover:underline shrink-0">삭제</button>
+                <button onClick={() => openDetail(s)} className="text-xs text-teal-500 hover:underline shrink-0">수정</button>
+                <button onClick={() => handleDelete(s.id)} className="text-xs text-rose-500 hover:underline shrink-0">삭제</button>
               </div>
             ))}
           </div>

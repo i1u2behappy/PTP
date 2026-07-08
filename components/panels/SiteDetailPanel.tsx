@@ -62,41 +62,41 @@ export function SiteDetailPanel({ tabId, params }: Props) {
     <div className="max-w-2xl">
       <h1 className="text-2xl font-bold text-gray-800 mb-6">{isNew ? '➕ 새 쇼핑몰 등록' : `🏬 ${name || url} 수정`}</h1>
 
-      <div className="bg-white rounded-xl border border-gray-200 p-6 mb-4">
+      <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
         <div className="grid grid-cols-2 gap-3 mb-3">
-          <div className="col-span-2">
-            <label className="block text-xs text-gray-500 mb-1">이름 (선택)</label>
+          <label className="col-span-2 block">
+            <span className="block text-xs text-gray-500 mb-1">이름 (선택)</span>
             <input value={name} onChange={e => setName(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-          </div>
-          <div className="col-span-2">
-            <label className="block text-xs text-gray-500 mb-1">URL *</label>
+              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          </label>
+          <label className="col-span-2 block">
+            <span className="block text-xs text-gray-500 mb-1">URL *</span>
             <input type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://shop.example.com"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">아이디 / 이메일</label>
+              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          </label>
+          <label className="block">
+            <span className="block text-xs text-gray-500 mb-1">아이디 / 이메일</span>
             <input value={loginId} onChange={e => setLoginId(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">비밀번호</label>
+              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          </label>
+          <label className="block">
+            <span className="block text-xs text-gray-500 mb-1">비밀번호</span>
             <input type="password" value={loginPw} onChange={e => setLoginPw(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-          </div>
+              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          </label>
         </div>
         <div className="flex items-center justify-between">
           <div className="flex gap-2">
             <button onClick={handleSave} disabled={saving}
-              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg disabled:opacity-50 transition-colors">
+              className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
               {saving ? '저장 중...' : isNew ? '등록' : '수정 저장'}
             </button>
-            <button onClick={() => closeTab(tabId)} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-medium rounded-lg transition-colors">
+            <button onClick={() => closeTab(tabId)} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-medium rounded-full transition-colors">
               취소
             </button>
           </div>
           {!isNew && (
-            <button onClick={handleDelete} className="text-xs text-red-500 hover:underline">🗑 이 쇼핑몰 삭제</button>
+            <button onClick={handleDelete} className="text-xs text-rose-500 hover:underline">🗑 이 쇼핑몰 삭제</button>
           )}
         </div>
       </div>

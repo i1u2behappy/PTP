@@ -106,12 +106,12 @@ export function ProductsListPanel() {
         </div>
         <div className="flex gap-2">
           <button onClick={migrateSelected} disabled={migrating}
-            className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors">
+            className="px-4 py-2 bg-teal-500 text-white text-sm font-semibold rounded-full hover:bg-teal-600 disabled:opacity-50 transition-colors">
             {migrating ? '처리 중...' : `➜ 상품마스터로 가공 ${selected.size > 0 ? `(${selected.size}개 선택)` : '(전체)'}`}
           </button>
           {selected.size > 0 && (
             <button onClick={deleteSelected}
-              className="px-4 py-2 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600 transition-colors">
+              className="px-4 py-2 bg-rose-50 text-rose-600 text-sm font-semibold rounded-full hover:bg-rose-100 transition-colors">
               🗑 삭제 ({selected.size})
             </button>
           )}
@@ -120,7 +120,7 @@ export function ProductsListPanel() {
 
       {/* 세션별 수집 검증 */}
       {sessions.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden mb-4">
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4">
           <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 text-xs font-semibold text-gray-500">
             세션별 수집 검증 — 원 상품페이지에서 찾은 개수 대비 실제 저장 개수
           </div>
@@ -142,14 +142,14 @@ export function ProductsListPanel() {
       )}
 
       {products.length === 0 ? (
-        <div className="bg-white rounded-xl border border-gray-200 p-12 text-center text-gray-400">
+        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400">
           <div className="text-4xl mb-3">📭</div>
           <p className="text-sm">수집된 상품이 없습니다.</p>
           <button onClick={() => openTab({ id: 'scraper', type: 'scraper', title: '스크래핑', icon: '🔍', closable: true })}
-            className="mt-2 inline-block text-indigo-600 text-sm hover:underline">스크래핑 시작하기 →</button>
+            className="mt-2 inline-block text-teal-500 text-sm hover:underline">스크래핑 시작하기 →</button>
         </div>
       ) : (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100 bg-gray-50">
             <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer">
               <input type="checkbox" checked={issuesOnly} onChange={e => setIssuesOnly(e.target.checked)} />
@@ -169,6 +169,7 @@ export function ProductsListPanel() {
                   <th className="w-24 px-2 py-3 text-left">재고상태</th>
                   <th className="px-2 py-3 text-left">누락 데이터</th>
                   <th className="w-24 px-2 py-3 text-left">가공 상태</th>
+                  <th className="w-10 px-2 py-3 text-left">상세</th>
                 </tr>
               </thead>
               <tbody>
@@ -176,13 +177,13 @@ export function ProductsListPanel() {
                   const missing = missingFields(p)
                   return (
                   <tr key={p.id} onClick={() => openDetail(p)}
-                    className={`border-b border-gray-100 hover:bg-gray-50 transition-colors cursor-pointer ${selected.has(p.id) ? 'bg-indigo-50' : ''}`}>
+                    className={`border-b border-gray-100 hover:bg-gray-50 transition-colors cursor-pointer ${selected.has(p.id) ? 'bg-teal-50' : ''}`}>
                     <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
                       <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggleSelect(p.id)} />
                     </td>
 
                     <td className="px-2 py-3">
-                      <div className="w-16 h-16 relative rounded-lg overflow-hidden bg-gray-100">
+                      <div className="w-16 h-16 relative rounded-xl overflow-hidden bg-gray-100">
                         {p.thumbnail_local ? (
                           <Image src={p.thumbnail_local} alt={p.name_original || ''} fill className="object-cover" unoptimized />
                         ) : (
@@ -203,7 +204,7 @@ export function ProductsListPanel() {
 
                     <td className="px-2 py-3 text-xs">
                       {p.stock_status === '품절' || p.stock_status?.startsWith('단종') ? (
-                        <span className="text-red-500">{p.stock_status}</span>
+                        <span className="text-rose-500">{p.stock_status}</span>
                       ) : (
                         <span className="text-emerald-600">{p.stock_status || '-'}</span>
                       )}
@@ -219,7 +220,10 @@ export function ProductsListPanel() {
                     </td>
 
                     <td className="px-2 py-3 text-xs">
-                      {p.master_product_id ? <span className="text-indigo-600">✓ 가공됨</span> : <span className="text-gray-400">미가공</span>}
+                      {p.master_product_id ? <span className="text-teal-500">✓ 가공됨</span> : <span className="text-gray-400">미가공</span>}
+                    </td>
+                    <td className="px-2 py-3" onClick={e => e.stopPropagation()}>
+                      <button onClick={() => openDetail(p)} aria-label={`${p.name_original || '상품'} 상세 보기`} title="상세 보기" className="text-teal-500 hover:text-teal-600">🔍</button>
                     </td>
                   </tr>
                 )})}
@@ -232,7 +236,7 @@ export function ProductsListPanel() {
       <div className="mt-3 flex items-center justify-between text-xs text-gray-400">
         <p>전체 {products.length}개 상품 · 선택 {selected.size}개 {totalIssues > 0 && `· 누락 데이터 있음 ${totalIssues}개`}</p>
         <button onClick={() => openTab({ id: 'master-list', type: 'master-list', title: '상품마스터', icon: '🗂️', closable: true })}
-          className="text-indigo-600 hover:underline font-medium">다음: 상품마스터 →</button>
+          className="text-teal-500 hover:underline font-medium">다음: 상품마스터 →</button>
       </div>
     </div>
   )

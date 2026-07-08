@@ -268,7 +268,7 @@ export function ScraperPanel() {
     })
   }
 
-  const statusColor = { idle: 'text-gray-500', running: 'text-indigo-600', done: 'text-emerald-600', error: 'text-red-600', stopped: 'text-amber-600' }
+  const statusColor = { idle: 'text-gray-500', running: 'text-teal-500', done: 'text-emerald-600', error: 'text-rose-600', stopped: 'text-amber-600' }
   const statusLabel = { idle: '대기 중', running: '스크래핑 중...', done: '완료', error: '오류 발생', stopped: '중지됨' }
 
   return (
@@ -276,16 +276,16 @@ export function ScraperPanel() {
       <h1 className="text-2xl font-bold text-gray-800 mb-6">🔍 스크래핑 설정</h1>
 
       {/* 쇼핑몰 선택 */}
-      <div className="bg-white rounded-xl border border-gray-200 p-6 mb-4">
-        <label className="block text-sm font-semibold text-gray-700 mb-2">쇼핑몰 선택 *</label>
+      <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
+        <div className="text-sm font-semibold text-gray-700 mb-2">쇼핑몰 선택 *</div>
         {sites.length === 0 ? (
           <div className="text-sm text-gray-400">
             등록된 쇼핑몰이 없습니다.{' '}
             <button onClick={() => openTab({ id: 'sites-list', type: 'sites-list', title: '쇼핑몰 목록', icon: '📋', closable: true })}
-              className="text-indigo-600 hover:underline">쇼핑몰 등록관리에서 추가하기 →</button>
+              className="text-teal-500 hover:underline">쇼핑몰 등록관리에서 추가하기 →</button>
           </div>
         ) : selectedSite ? (
-          <div className="flex items-center justify-between bg-indigo-50 rounded-lg px-3 py-2">
+          <div className="flex items-center justify-between bg-teal-50 rounded-xl px-3 py-2">
             <div>
               <div className="text-sm font-medium text-gray-800">{selectedSite.name || selectedSite.url}</div>
               <div className="text-xs text-gray-500">{selectedSite.url}</div>
@@ -296,9 +296,12 @@ export function ScraperPanel() {
           </div>
         ) : (
           <div>
-            <input value={siteQuery} onChange={e => setSiteQuery(e.target.value)} placeholder="이름 또는 URL 검색..."
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-            <div className="mt-2 border border-gray-100 rounded-lg divide-y divide-gray-100 max-h-52 overflow-y-auto">
+            <label className="block">
+              <span className="sr-only">쇼핑몰 이름 또는 URL 검색</span>
+              <input value={siteQuery} onChange={e => setSiteQuery(e.target.value)} placeholder="이름 또는 URL 검색..."
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+            </label>
+            <div className="mt-2 border border-gray-100 rounded-xl divide-y divide-gray-100 max-h-52 overflow-y-auto">
               {filteredSites.map(s => (
                 <button key={s.id} onClick={() => selectSite(s)}
                   className="w-full text-left px-3 py-2 hover:bg-gray-50 transition-colors">
@@ -314,29 +317,29 @@ export function ScraperPanel() {
 
       {/* 로그인 */}
       {selectedSite && (
-        <div className="bg-white rounded-xl border border-gray-200 p-6 mb-4">
-          <label className="block text-sm font-semibold text-gray-700 mb-3">로그인 정보</label>
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
+          <div className="text-sm font-semibold text-gray-700 mb-3">로그인 정보</div>
           <div className="grid grid-cols-2 gap-3 mb-4">
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">아이디 / 이메일</label>
+            <label className="block">
+              <span className="block text-xs text-gray-500 mb-1">아이디 / 이메일</span>
               <input type="text" value={loginId} onChange={e => { setLoginId(e.target.value); setLoginStep('none') }}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">비밀번호</label>
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+            </label>
+            <label className="block">
+              <span className="block text-xs text-gray-500 mb-1">비밀번호</span>
               <input type="password" value={loginPw} onChange={e => { setLoginPw(e.target.value); setLoginStep('none') }}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-            </div>
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+            </label>
           </div>
 
           {needsLogin ? (
             <div className="flex items-center gap-3 flex-wrap">
               <button onClick={handleOpenLogin} disabled={loginBusy}
-                className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white text-sm font-semibold rounded-lg disabled:opacity-50 transition-colors">
+                className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
                 {loginStep === 'opened' || loginStep === 'confirmed' ? '로그인 창 다시 열기' : '로그인 창 열기'}
               </button>
               <button onClick={handleConfirmLogin} disabled={loginBusy || loginStep === 'none'}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
                 로그인 확인
               </button>
               {loginStep === 'confirmed' && <span className="text-xs text-emerald-600 font-medium">✓ 로그인 확인됨 (스크래핑 시작 시 창은 자동으로 닫히고 백그라운드에서 진행됩니다)</span>}
@@ -350,17 +353,17 @@ export function ScraperPanel() {
 
       {/* 스크랩 대상 */}
       {selectedSite && (
-        <div className="bg-white rounded-xl border border-gray-200 p-6 mb-4">
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           {hasPriorSession && (
             <>
-              <label className="block text-sm font-semibold text-gray-700 mb-2">재스크랩 방식</label>
+              <div className="text-sm font-semibold text-gray-700 mb-2">재스크랩 방식</div>
               <div className="flex gap-3 mb-4">
                 {([
                   { id: 'full' as const, label: '전체 재스크랩' },
                   { id: 'incremental' as const, label: '증분 (변동사항만)' },
                 ]).map(m => (
                   <button key={m.id} onClick={() => setScrapeMode(m.id)}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium border transition-colors ${scrapeMode === m.id ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-600 border-gray-300 hover:border-emerald-400'}`}>
+                    className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${scrapeMode === m.id ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-600 border-gray-300 hover:border-emerald-400'}`}>
                     {m.label}
                   </button>
                 ))}
@@ -372,27 +375,29 @@ export function ScraperPanel() {
               )}
             </>
           )}
-          <label className="block text-sm font-semibold text-gray-700 mb-2">스크랩 모드</label>
+          <div className="text-sm font-semibold text-gray-700 mb-2">스크랩 모드</div>
           <div className="flex gap-3 mb-4">
             {(['single', 'catalog'] as const).map(m => (
               <button key={m} onClick={() => { setMode(m); setPreviewResult(null) }}
-                className={`px-4 py-2 rounded-lg text-sm font-medium border transition-colors ${mode === m ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400'}`}>
+                className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${mode === m ? 'bg-teal-500 text-white border-teal-500' : 'bg-white text-gray-600 border-gray-300 hover:border-teal-400'}`}>
                 {m === 'single' ? '단일 상품 페이지' : '목록/카탈로그 페이지'}
               </button>
             ))}
           </div>
 
-          <label className="block text-xs text-gray-500 mb-1">
-            시작 URL {loginStep === 'confirmed' && '(로그인 창에서 이동한 페이지를 그대로 사용할 수 있습니다)'}
-          </label>
-          <div className="flex gap-2 mb-1">
-            <input value={targetUrl} onChange={e => setTargetUrl(e.target.value)}
-              placeholder="https://shop.example.com/products/123"
-              disabled={mode === 'catalog' && categoryUrlsText.trim().length > 0}
-              className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:bg-gray-100 disabled:text-gray-400" />
+          <div className="flex gap-2 mb-1 items-end">
+            <label className="flex-1 block">
+              <span className="block text-xs text-gray-500 mb-1">
+                시작 URL {loginStep === 'confirmed' && '(로그인 창에서 이동한 페이지를 그대로 사용할 수 있습니다)'}
+              </span>
+              <input value={targetUrl} onChange={e => setTargetUrl(e.target.value)}
+                placeholder="https://shop.example.com/products/123"
+                disabled={mode === 'catalog' && categoryUrlsText.trim().length > 0}
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 disabled:bg-gray-100 disabled:text-gray-400" />
+            </label>
             {loginStep === 'confirmed' && (
               <button onClick={handleRefreshCurrentUrl} title="로그인 창에서 현재 보고 있는 페이지로 갱신"
-                className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-medium rounded-lg transition-colors shrink-0">
+                className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-medium rounded-full transition-colors shrink-0">
                 현재 페이지로
               </button>
             )}
@@ -406,15 +411,17 @@ export function ScraperPanel() {
 
           {mode === 'catalog' && (
             <>
-              <label className="block text-xs text-gray-500 mb-1">제품 링크 CSS 셀렉터 (비워두면 이미지가 있는 링크만 자동으로 제품으로 인식)</label>
-              <input value={linkSel} onChange={e => setLinkSel(e.target.value)}
-                placeholder=".product-list a, .item-card a"
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 mb-3" />
+              <label className="block">
+                <span className="block text-xs text-gray-500 mb-1">제품 링크 CSS 셀렉터 (비워두면 이미지가 있는 링크만 자동으로 제품으로 인식)</span>
+                <input value={linkSel} onChange={e => setLinkSel(e.target.value)}
+                  placeholder=".product-list a, .item-card a"
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 mb-3" />
+              </label>
 
               <div className="flex items-center justify-between mb-1">
-                <label className="block text-xs text-gray-500">카테고리 URL 목록 (한 줄에 하나씩, 입력 시 위 시작 URL 대신 각각 스크랩)</label>
+                <label htmlFor="category-urls" className="block text-xs text-gray-500">카테고리 URL 목록 (한 줄에 하나씩, 입력 시 위 시작 URL 대신 각각 스크랩)</label>
                 <button type="button" onClick={handleLoadCategories} disabled={categoriesLoading || !targetUrl}
-                  className="text-xs text-indigo-600 hover:underline disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ml-2">
+                  className="text-xs text-teal-500 hover:underline disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ml-2">
                   {categoriesLoading ? '불러오는 중...' : '🔍 시작 URL에서 카테고리 불러오기'}
                 </button>
               </div>
@@ -427,10 +434,10 @@ export function ScraperPanel() {
               )}
 
               {categories.length > 0 && (
-                <div className="mb-2 border border-gray-200 rounded-lg overflow-hidden">
+                <div className="mb-2 border border-gray-200 rounded-xl overflow-hidden">
                   <div className="flex items-center justify-between px-3 py-1.5 bg-gray-50 border-b border-gray-100">
                     <span className="text-xs text-gray-500">발견된 링크 {categories.length}개 — 스크랩할 항목을 선택하세요</span>
-                    <button type="button" onClick={toggleAllCategories} className="text-xs text-indigo-600 hover:underline shrink-0">
+                    <button type="button" onClick={toggleAllCategories} className="text-xs text-teal-500 hover:underline shrink-0">
                       {categories.every(c => isCategorySelected(c.href)) ? '전체 해제' : '전체 선택 (몰 전체상품)'}
                     </button>
                   </div>
@@ -446,36 +453,36 @@ export function ScraperPanel() {
                 </div>
               )}
 
-              <textarea value={categoryUrlsText} onChange={e => setCategoryUrlsText(e.target.value)} rows={3}
+              <textarea id="category-urls" value={categoryUrlsText} onChange={e => setCategoryUrlsText(e.target.value)} rows={3}
                 placeholder={'https://shop.example.com/category/food\nhttps://shop.example.com/category/beauty'}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 mb-3" />
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 mb-3" />
 
               <div className="grid grid-cols-3 gap-3 mb-4">
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">다음 페이지 셀렉터 (페이지네이션, 선택)</label>
+                <label className="block">
+                  <span className="block text-xs text-gray-500 mb-1">다음 페이지 셀렉터 (페이지네이션, 선택)</span>
                   <input value={nextPageSelector} onChange={e => setNextPageSelector(e.target.value)}
                     placeholder=".pagination .next"
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">최대 페이지 수</label>
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+                </label>
+                <label className="block">
+                  <span className="block text-xs text-gray-500 mb-1">최대 페이지 수</span>
                   <input type="number" min={1} value={maxPages} onChange={e => setMaxPages(Math.max(1, Number(e.target.value) || 1))}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">상품 페이지 간 지연 (ms, 차단 방지)</label>
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+                </label>
+                <label className="block">
+                  <span className="block text-xs text-gray-500 mb-1">상품 페이지 간 지연 (ms, 차단 방지)</span>
                   <input type="number" min={0} step={100} value={delayMs} onChange={e => setDelayMs(Math.max(0, Number(e.target.value) || 0))}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-                </div>
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+                </label>
               </div>
 
               <button type="button" onClick={handleTest} disabled={testLoading || (!targetUrl && !categoryUrlsText.trim())}
-                className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
                 {testLoading ? '테스트 중...' : '🧪 테스트 실행 (실제로 저장하지 않고 몇 개 잡히는지만 확인)'}
               </button>
 
               {testResult && (
-                <div className="mt-3 border border-gray-200 rounded-lg overflow-hidden">
+                <div className="mt-3 border border-gray-200 rounded-xl overflow-hidden">
                   <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-600">
                     상품 링크 <strong>{testResult.total}</strong>개 발견 — 감지된 몰 유형: {PLATFORM_LABELS[testResult.platform] || testResult.platform}
                   </div>
@@ -487,7 +494,7 @@ export function ScraperPanel() {
                     </div>
                   )}
                   {testResult.total === 0 && (
-                    <p className="px-3 py-2 text-xs text-red-500">매칭되는 상품 링크가 없습니다. 셀렉터나 시작 URL을 확인해주세요.</p>
+                    <p className="px-3 py-2 text-xs text-rose-500">매칭되는 상품 링크가 없습니다. 셀렉터나 시작 URL을 확인해주세요.</p>
                   )}
                 </div>
               )}
@@ -498,11 +505,11 @@ export function ScraperPanel() {
 
       {/* 상품 페이지 미리보기 */}
       {selectedSite && (
-        <div className="bg-white rounded-xl border border-gray-200 p-6 mb-4">
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           <div className="flex items-center justify-between mb-2">
             <label className="block text-sm font-semibold text-gray-700">상품 페이지 미리보기</label>
             <button type="button" onClick={handlePreview} disabled={previewLoading || !previewCandidateUrl}
-              className="text-xs text-indigo-600 hover:underline disabled:opacity-50 disabled:cursor-not-allowed shrink-0">
+              className="text-xs text-teal-500 hover:underline disabled:opacity-50 disabled:cursor-not-allowed shrink-0">
               {previewLoading ? '불러오는 중...' : '🔍 상품 페이지 열어서 확인'}
             </button>
           </div>
@@ -515,19 +522,19 @@ export function ScraperPanel() {
           )}
 
           {previewResult && (
-            <div className="mt-2 border border-gray-200 rounded-lg overflow-hidden">
+            <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
               <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500 truncate">{previewResult.sourceUrl}</div>
               <div className="p-3 flex gap-3">
                 {previewResult.product.thumbnail_url && (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={previewResult.product.thumbnail_url} alt="" className="w-20 h-20 object-cover rounded-lg border border-gray-100 shrink-0" />
+                  <img src={previewResult.product.thumbnail_url} alt="" className="w-20 h-20 object-cover rounded-xl border border-gray-100 shrink-0" />
                 )}
                 <div className="flex-1 min-w-0 text-xs space-y-1">
                   <div className="font-semibold text-gray-800 text-sm truncate">
-                    {previewResult.product.name || <span className="text-red-500">상품명을 찾지 못했습니다</span>}
+                    {previewResult.product.name || <span className="text-rose-500">상품명을 찾지 못했습니다</span>}
                   </div>
                   <div className="text-gray-600">
-                    가격: {previewResult.product.price != null ? `₩${previewResult.product.price.toLocaleString()}` : <span className="text-red-500">찾지 못함</span>}
+                    가격: {previewResult.product.price != null ? `₩${previewResult.product.price.toLocaleString()}` : <span className="text-rose-500">찾지 못함</span>}
                   </div>
                   <div className="text-gray-500">
                     브랜드: {previewResult.product.brand || '-'} · 제조사: {previewResult.product.manufacturer || '-'} · 원산지: {previewResult.product.origin || '-'}
@@ -550,26 +557,26 @@ export function ScraperPanel() {
       {/* 실행 버튼 */}
       {status === 'running' ? (
         <button onClick={handleStop} disabled={stopping}
-          className="w-full py-3 rounded-xl bg-red-500 text-white font-semibold text-sm hover:bg-red-600 disabled:opacity-50 transition-colors">
+          className="w-full py-3 rounded-2xl bg-rose-500 text-white font-semibold text-sm hover:bg-rose-600 disabled:opacity-50 transition-colors">
           {stopping ? '중지 처리 중...' : '⏸ 스크래핑 중지'}
         </button>
       ) : (
         <button onClick={handleStart} disabled={!canStart}
-          className="w-full py-3 rounded-xl bg-indigo-600 text-white font-semibold text-sm hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+          className="w-full py-3 rounded-2xl bg-teal-500 text-white font-semibold text-sm hover:bg-teal-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
           {status === 'stopped' || status === 'error' ? '이어서 스크랩하기 (기존 상품 제외)' : '스크래핑 시작'}
         </button>
       )}
 
       {/* 진행 상황 */}
       {status !== 'idle' && (
-        <div className="mt-4 bg-white rounded-xl border border-gray-200 p-5">
+        <div className="mt-4 bg-white rounded-2xl border border-gray-200 p-5">
           <div className="flex items-center justify-between mb-3">
             <span className="text-sm font-semibold text-gray-700">진행 상황</span>
             <span className={`text-sm font-semibold ${statusColor[status]}`}>{statusLabel[status]}</span>
           </div>
           {status === 'running' && (
             <div className="w-full bg-gray-100 rounded-full h-2 mb-3">
-              <div className="bg-indigo-500 h-2 rounded-full transition-all"
+              <div className="bg-teal-500 h-2 rounded-full transition-all"
                 style={{ width: progress.total > 0 ? `${Math.round(progress.saved / progress.total * 100)}%` : '10%' }} />
             </div>
           )}
@@ -578,16 +585,16 @@ export function ScraperPanel() {
           </p>
           {(status === 'error' || status === 'stopped') && (
             <>
-              {progress.error && <p className="mt-2 text-xs text-red-500 break-all">{progress.error}</p>}
+              {progress.error && <p className="mt-2 text-xs text-rose-500 break-all">{progress.error}</p>}
               <button onClick={handleBackToSettings}
-                className="mt-3 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium rounded-lg transition-colors">
+                className="mt-3 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium rounded-full transition-colors">
                 ← 설정 화면으로 돌아가기
               </button>
             </>
           )}
           {status === 'done' && (
             <button onClick={() => openTab({ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true })}
-              className="mt-3 inline-block text-sm text-indigo-600 font-medium hover:underline">
+              className="mt-3 inline-block text-sm text-teal-500 font-medium hover:underline">
               → 상품 목록 확인
             </button>
           )}

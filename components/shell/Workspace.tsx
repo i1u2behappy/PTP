@@ -17,7 +17,7 @@ export function Workspace() {
   if (!tab) return null
 
   return (
-    <div className="flex-1 overflow-y-auto p-6">
+    <div id={`panel-${tab.id}`} role="tabpanel" aria-labelledby={`tab-${tab.id}`} tabIndex={0} className="flex-1 overflow-y-auto p-6 focus:outline-none">
       {(() => {
         switch (tab.type) {
           case 'dashboard':      return <DashboardPanel key={tab.id} />

@@ -118,21 +118,21 @@ export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: 
         </div>
         <div className="flex gap-2 shrink-0">
           <button onClick={handleRescrape} disabled={rescraping}
-            className="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs font-semibold rounded-lg disabled:opacity-50 transition-colors">
+            className="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
             {rescraping ? '재스크랩 중...' : '🔄 재스크랩'}
           </button>
           {data.master_product_id ? (
             <button onClick={() => openTab({ id: `master-detail:${data.master_product_id}`, type: 'master-detail', title: data.name_original?.slice(0, 12) || '상품마스터', icon: '🗂️', params: { masterId: data.master_product_id }, closable: true })}
-              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg transition-colors">
+              className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors">
               🗂️ 상품마스터 보기
             </button>
           ) : (
             <button onClick={handleMigrate} disabled={migrating}
-              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg disabled:opacity-50 transition-colors">
+              className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
               {migrating ? '가공 중...' : '➜ 상품마스터로 가공'}
             </button>
           )}
-          <button onClick={handleDelete} className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-semibold rounded-lg transition-colors">
+          <button onClick={handleDelete} className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-semibold rounded-full transition-colors">
             🗑 삭제
           </button>
         </div>
@@ -140,7 +140,7 @@ export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: 
 
       <div className="grid grid-cols-[160px_1fr] gap-6">
         <div>
-          <div className="w-full aspect-square relative rounded-xl overflow-hidden bg-gray-100 border border-gray-200">
+          <div className="w-full aspect-square relative rounded-2xl overflow-hidden bg-gray-100 border border-gray-200">
             {data.thumbnail_local ? (
               <Image src={data.thumbnail_local} alt={data.name_original || ''} fill className="object-cover" unoptimized />
             ) : (
@@ -156,10 +156,10 @@ export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: 
               ))}
             </div>
           )}
-          <a href={data.source_url} target="_blank" rel="noreferrer" className="block mt-2 text-xs text-indigo-600 hover:underline truncate">원본 페이지 열기 →</a>
+          <a href={data.source_url} target="_blank" rel="noreferrer" className="block mt-2 text-xs text-teal-500 hover:underline truncate">원본 페이지 열기 →</a>
           <div className="mt-2 text-xs">
             재고: {data.stock_status === '품절' || data.stock_status?.startsWith('단종') ? (
-              <span className="text-red-500 font-medium">{data.stock_status}</span>
+              <span className="text-rose-500 font-medium">{data.stock_status}</span>
             ) : (
               <span className="text-emerald-600 font-medium">{data.stock_status || '-'}</span>
             )}
@@ -167,21 +167,21 @@ export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: 
           </div>
         </div>
 
-        <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-3">
+        <div className="bg-white rounded-2xl border border-gray-200 p-5 space-y-3">
           {FIELDS.map(f => (
-            <div key={f.key}>
-              <label className="block text-xs text-gray-500 mb-1">{f.label}</label>
+            <label key={f.key} className="block">
+              <span className="block text-xs text-gray-500 mb-1">{f.label}</span>
               {f.type === 'textarea' ? (
                 <textarea value={form[f.key] ?? ''} onChange={e => setForm(v => ({ ...v, [f.key]: e.target.value }))} rows={3}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
               ) : (
                 <input type={f.type} value={form[f.key] ?? ''} onChange={e => setForm(v => ({ ...v, [f.key]: e.target.value }))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
               )}
-            </div>
+            </label>
           ))}
           <button onClick={handleSave} disabled={saving}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg disabled:opacity-50 transition-colors">
+            className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
             {saving ? '저장 중...' : '변경사항 저장'}
           </button>
         </div>

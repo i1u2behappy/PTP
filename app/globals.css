@@ -2,25 +2,22 @@
 
 :root {
   --background: #ffffff;
-  --foreground: #171717;
+  --foreground: #1e293b;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-sans: 'Pretendard Variable', Pretendard, var(--font-geist), -apple-system, BlinkMacSystemFont, 'Malgun Gothic', sans-serif;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+}
+
+/* 파스텔 톤 UI에 맞춰 체크박스/라디오 강조색을 accent 컬러로 통일 */
+input[type='checkbox'], input[type='radio'] {
+  accent-color: #14b8a6;
 }

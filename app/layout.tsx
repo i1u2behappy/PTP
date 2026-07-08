@@ -12,7 +12,11 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="ko" className={`${geist.variable} h-full`}>
-      <body className="h-full font-[family-name:var(--font-geist)]">{children}</body>
+      <head>
+        {/* 국내 SaaS(플로우/두레이 등)에서 표준적으로 쓰이는 한글 웹폰트 — CDN 스타일시트, npm 의존성 추가 없음 */}
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css" />
+      </head>
+      <body className="h-full">{children}</body>
     </html>
   )
 }

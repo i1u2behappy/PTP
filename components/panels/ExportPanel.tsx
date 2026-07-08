@@ -88,7 +88,7 @@ export function ExportPanel() {
 
       <div className="grid grid-cols-[1fr_320px] gap-6">
         {/* 상품 선택 (확정된 상품만) */}
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50">
             <span className="text-sm font-semibold text-gray-700">확정(ready)된 상품 선택</span>
             <label className="flex items-center gap-2 text-xs text-gray-500 cursor-pointer">
@@ -101,12 +101,12 @@ export function ExportPanel() {
             <div className="p-8 text-center text-sm text-gray-400">
               <div className="text-3xl mb-2">📭</div>
               <button onClick={() => openTab({ id: 'master-list', type: 'master-list', title: '상품마스터', icon: '🗂️', closable: true })}
-                className="text-indigo-600 hover:underline">상품마스터에서 먼저 확정하기 →</button>
+                className="text-teal-500 hover:underline">상품마스터에서 먼저 확정하기 →</button>
             </div>
           ) : (
             <div className="divide-y divide-gray-100 max-h-[600px] overflow-y-auto">
               {readyRows.map(p => (
-                <label key={p.id} className={`flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50 transition-colors ${selected.has(p.id) ? 'bg-indigo-50' : ''}`}>
+                <label key={p.id} className={`flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50 transition-colors ${selected.has(p.id) ? 'bg-teal-50' : ''}`}>
                   <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggleSelect(p.id)} />
                   <div className="flex-1 min-w-0 text-xs text-gray-700 truncate">
                     {p.name_final || p.name_ai || p.name_original}
@@ -122,14 +122,14 @@ export function ExportPanel() {
 
         {/* 내보내기 설정 */}
         <div className="space-y-4">
-          <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <div className="bg-white rounded-2xl border border-gray-200 p-5">
             <h2 className="text-sm font-semibold text-gray-700 mb-4">등록 마켓 선택</h2>
             <div className="space-y-2">
               {MARKET_META.map(m => {
                 const c = configs.find(cc => cc.code === m.id)
                 return (
                   <button key={m.id} onClick={() => setMarket(m.id)}
-                    className={`w-full px-4 py-2.5 rounded-lg text-sm font-medium text-left transition-colors ${market === m.id ? `${m.color} text-white` : 'bg-gray-50 text-gray-700 hover:bg-gray-100'}`}>
+                    className={`w-full px-4 py-2.5 rounded-xl text-sm font-medium text-left transition-colors ${market === m.id ? `${m.color} text-white` : 'bg-gray-50 text-gray-700 hover:bg-gray-100'}`}>
                     {m.id === 'all' ? '전체 (마스터 + 전 마켓)' : c?.name || m.id}
                     {c && m.id !== 'all' && <span className="block text-[10px] opacity-70">1회 최대 {c.max_batch_size}개 · 수수료 {(c.default_commission_rate * 100).toFixed(0)}%</span>}
                   </button>
@@ -138,7 +138,7 @@ export function ExportPanel() {
             </div>
           </div>
 
-          <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <div className="bg-white rounded-2xl border border-gray-200 p-5">
             <div className="text-sm text-gray-600 mb-1">
               선택된 상품: <strong className="text-gray-800">{selectedCount}개</strong>
             </div>
@@ -151,12 +151,12 @@ export function ExportPanel() {
               내보낼 마켓: <strong className="text-gray-800">{market === 'all' ? '전체' : configs.find(c => c.code === market)?.name}</strong>
             </div>
             <button onClick={handleExport} disabled={downloading || readyRows.length === 0}
-              className="w-full py-3 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold rounded-xl disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+              className="w-full py-3 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
               {downloading ? '생성 중...' : '📥 엑셀 다운로드'}
             </button>
           </div>
 
-          <div className="bg-gray-50 rounded-xl border border-gray-200 p-4 text-xs text-gray-500 space-y-1">
+          <div className="bg-gray-50 rounded-2xl border border-gray-200 p-4 text-xs text-gray-500 space-y-1">
             <p className="font-semibold text-gray-600">포함되는 시트</p>
             <p>• 마스터데이터 (항상 포함)</p>
             <p>• 선택 마켓 대량등록 양식 (한도 초과 시 시트 분할)</p>

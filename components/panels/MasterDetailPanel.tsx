@@ -136,16 +136,16 @@ export function MasterDetailPanel({ tabId, params }: { tabId: string; params?: R
         <div className="flex gap-2 shrink-0">
           {data.mall_product_id && (
             <button onClick={() => openTab({ id: `product-detail:${data.mall_product_id}`, type: 'product-detail', title: data.name_original?.slice(0, 12) || '원본상품', icon: '📦', params: { mallProductId: data.mall_product_id }, closable: true })}
-              className="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs font-semibold rounded-lg transition-colors">
+              className="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs font-semibold rounded-full transition-colors">
               📦 원본 보기
             </button>
           )}
           {data.status !== 'ready' && (
-            <button onClick={handleMarkReady} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg transition-colors">
+            <button onClick={handleMarkReady} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-full transition-colors">
               ✅ 확정
             </button>
           )}
-          <button onClick={handleDelete} className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-semibold rounded-lg transition-colors">
+          <button onClick={handleDelete} className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-semibold rounded-full transition-colors">
             🗑 삭제
           </button>
         </div>
@@ -153,7 +153,7 @@ export function MasterDetailPanel({ tabId, params }: { tabId: string; params?: R
 
       <div className="grid grid-cols-[160px_1fr] gap-6">
         <div>
-          <div className="w-full aspect-square relative rounded-xl overflow-hidden bg-gray-100 border border-gray-200">
+          <div className="w-full aspect-square relative rounded-2xl overflow-hidden bg-gray-100 border border-gray-200">
             {data.thumbnail_local ? (
               <Image src={data.thumbnail_local} alt="" fill className="object-cover" unoptimized />
             ) : (
@@ -169,50 +169,52 @@ export function MasterDetailPanel({ tabId, params }: { tabId: string; params?: R
               ))}
             </div>
           )}
-          <div className="mt-3 bg-white border border-gray-200 rounded-lg p-3">
-            <label className="block text-xs text-gray-500 mb-1">AI 작명 템플릿</label>
-            <select value={templateId} onChange={e => setTemplateId(e.target.value ? Number(e.target.value) : '')}
-              className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs mb-2 focus:outline-none focus:ring-2 focus:ring-indigo-400">
-              {templates.map(t => <option key={t.id} value={t.id}>{t.name}{t.is_default ? ' (기본)' : ''}</option>)}
-            </select>
+          <div className="mt-3 bg-white border border-gray-200 rounded-xl p-3">
+            <label className="block">
+              <span className="block text-xs text-gray-500 mb-1">AI 작명 템플릿</span>
+              <select value={templateId} onChange={e => setTemplateId(e.target.value ? Number(e.target.value) : '')}
+                className="w-full border border-gray-300 rounded-xl px-2 py-1.5 text-xs mb-2 focus:outline-none focus:ring-2 focus:ring-teal-400">
+                {templates.map(t => <option key={t.id} value={t.id}>{t.name}{t.is_default ? ' (기본)' : ''}</option>)}
+              </select>
+            </label>
             <button onClick={handleGenAiName} disabled={aiLoading}
-              className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg disabled:opacity-50 transition-colors">
+              className="w-full py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
               {aiLoading ? '생성 중...' : '✨ AI 상품명 생성'}
             </button>
-            {data.name_ai && <p className="text-[11px] text-indigo-600 mt-2 truncate">AI: {data.name_ai}</p>}
+            {data.name_ai && <p className="text-[11px] text-teal-500 mt-2 truncate">AI: {data.name_ai}</p>}
           </div>
         </div>
 
-        <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-3">
+        <div className="bg-white rounded-2xl border border-gray-200 p-5 space-y-3">
           {TEXT_FIELDS.map(f => (
-            <div key={f.key}>
-              <label className="block text-xs text-gray-500 mb-1">{f.label}</label>
+            <label key={f.key} className="block">
+              <span className="block text-xs text-gray-500 mb-1">{f.label}</span>
               {f.type === 'textarea' ? (
                 <textarea value={form[f.key] ?? ''} onChange={e => setForm(v => ({ ...v, [f.key]: e.target.value }))} rows={3}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
               ) : (
                 <input value={form[f.key] ?? ''} onChange={e => setForm(v => ({ ...v, [f.key]: e.target.value }))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
               )}
-            </div>
+            </label>
           ))}
 
           <div className="grid grid-cols-2 gap-3 pt-2 border-t border-gray-100">
             {NUMBER_FIELDS.map(f => (
-              <div key={f.key}>
-                <label className="block text-xs text-gray-500 mb-1">{f.label}</label>
+              <label key={f.key} className="block">
+                <span className="block text-xs text-gray-500 mb-1">{f.label}</span>
                 <input type="number" value={form[f.key] ?? ''} onChange={e => setForm(v => ({ ...v, [f.key]: e.target.value }))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" />
-              </div>
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+              </label>
             ))}
           </div>
 
           <div className="text-sm text-gray-600">
-            예상 마진: {margin == null ? '-' : <span className={`font-semibold ${margin >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>₩{margin.toLocaleString()}</span>}
+            예상 마진: {margin == null ? '-' : <span className={`font-semibold ${margin >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>₩{margin.toLocaleString()}</span>}
           </div>
 
           <button onClick={handleSave} disabled={saving}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg disabled:opacity-50 transition-colors">
+            className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
             {saving ? '저장 중...' : '변경사항 저장'}
           </button>
         </div>

@@ -8,10 +8,10 @@ function NavGroup({ label, defaultOpen, children }: { label: string; defaultOpen
   const [open, setOpen] = useState(!!defaultOpen)
   return (
     <div>
-      <button onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors">
+      <button onClick={() => setOpen(o => !o)} aria-expanded={open}
+        className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-slate-400 hover:text-slate-600 transition-colors">
         <span>{label}</span>
-        <span className={`transition-transform duration-150 ${open ? 'rotate-90' : ''}`}>›</span>
+        <span className={`transition-transform duration-150 ${open ? 'rotate-90' : ''}`} aria-hidden="true">›</span>
       </button>
       {open && <div className="space-y-0.5 pb-1">{children}</div>}
     </div>
@@ -23,10 +23,10 @@ function NavLeaf({ tab }: { tab: Tab }) {
   const isActive = activeTabId === tab.id
   const isOpen = openTabs.some(t => t.id === tab.id)
   return (
-    <button onClick={() => openTab(tab)}
-      className={`w-full flex items-center gap-2 pl-6 pr-3 py-1.5 text-sm rounded-lg transition-colors text-left
-        ${isActive ? 'bg-indigo-600 text-white font-medium' : isOpen ? 'text-slate-200 bg-slate-800/60' : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'}`}>
-      <span className="shrink-0">{tab.icon}</span>
+    <button onClick={() => openTab(tab)} aria-current={isActive ? 'page' : undefined}
+      className={`w-full flex items-center gap-2 pl-6 pr-3 py-1.5 text-sm rounded-full transition-colors text-left
+        ${isActive ? 'bg-teal-50 text-teal-700 font-semibold' : isOpen ? 'text-slate-600 bg-slate-50' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}>
+      <span className="shrink-0" aria-hidden="true">{tab.icon}</span>
       <span className="truncate">{tab.title}</span>
     </button>
   )
@@ -41,25 +41,25 @@ export function Sidebar() {
   }, [])
 
   return (
-    <aside className="w-60 shrink-0 bg-slate-900 flex flex-col h-full overflow-y-auto">
-      <div className="px-4 h-14 flex items-center gap-2 border-b border-slate-800/80 shrink-0">
-        <span className="text-lg">⚡</span>
-        <span className="font-bold text-white text-sm tracking-wide">Scrap Tool</span>
+    <aside className="w-64 shrink-0 bg-white border-r border-slate-100 flex flex-col h-full overflow-y-auto">
+      <div className="px-5 h-16 flex items-center gap-2 shrink-0">
+        <span className="w-8 h-8 rounded-xl bg-teal-500 text-white flex items-center justify-center text-base shrink-0" aria-hidden="true">⚡</span>
+        <span className="font-bold text-slate-800 text-sm tracking-wide">Scrap Tool</span>
       </div>
 
-      <nav className="flex-1 py-3 space-y-1">
+      <nav className="flex-1 px-2 pb-3 space-y-1" aria-label="주 메뉴">
         <NavLeaf tab={{ id: 'dashboard', type: 'dashboard', title: '대시보드', icon: '📊', closable: false }} />
 
         <NavGroup label="🏬 쇼핑몰 관리" defaultOpen>
           <button onClick={() => openTab({ id: 'site-detail:new', type: 'site-detail', title: '새 쇼핑몰 등록', icon: '➕', closable: true })}
-            className="w-full flex items-center gap-2 pl-6 pr-3 py-1.5 text-sm rounded-lg text-indigo-400 hover:bg-slate-800/60 hover:text-indigo-300 transition-colors text-left">
-            <span>➕</span><span>새 쇼핑몰 등록</span>
+            className="w-full flex items-center gap-2 pl-6 pr-3 py-1.5 text-sm rounded-full text-teal-600 hover:bg-teal-50 transition-colors text-left">
+            <span aria-hidden="true">➕</span><span>새 쇼핑몰 등록</span>
           </button>
           <NavLeaf tab={{ id: 'sites-list', type: 'sites-list', title: '쇼핑몰 목록', icon: '📋', closable: true }} />
           {sites.map(s => (
             <button key={s.id}
               onClick={() => openTab({ id: `site-detail:${s.id}`, type: 'site-detail', title: s.name || s.url, icon: '🏬', params: { siteId: s.id }, closable: true })}
-              className="w-full flex items-center gap-2 pl-9 pr-3 py-1.5 text-xs rounded-lg text-slate-500 hover:bg-slate-800/60 hover:text-slate-300 transition-colors text-left truncate">
+              className="w-full flex items-center gap-2 pl-9 pr-3 py-1.5 text-xs rounded-full text-slate-400 hover:bg-slate-50 hover:text-slate-600 transition-colors text-left truncate">
               <span className="truncate">{s.name || s.url}</span>
             </button>
           ))}

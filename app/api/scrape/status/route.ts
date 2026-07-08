@@ -9,7 +9,7 @@ export async function GET(req: NextRequest) {
     `SELECT s.id, s.status, s.product_count, s.error,
             COUNT(p.id) AS saved_count
      FROM scrape_sessions s
-     LEFT JOIN products p ON p.session_id = s.id
+     LEFT JOIN mall_products p ON p.last_seen_session_id = s.id
      WHERE s.id = $1
      GROUP BY s.id`,
     [sessionId],

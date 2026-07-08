@@ -4,22 +4,27 @@ import Link from 'next/link'
 
 export default function Dashboard() {
   const [productCount, setProductCount] = useState(0)
+  const [masterCount, setMasterCount]   = useState(0)
 
   useEffect(() => {
     fetch('/api/products').then(r => r.json()).then((data: unknown[]) => {
       if (Array.isArray(data)) setProductCount(data.length)
     }).catch(() => {})
+    fetch('/api/master?clientId=1').then(r => r.json()).then((data: unknown[]) => {
+      if (Array.isArray(data)) setMasterCount(data.length)
+    }).catch(() => {})
   }, [])
 
   const cards = [
-    { label: '수집된 상품', value: productCount, color: 'bg-indigo-500', href: '/products', icon: '📦' },
     { label: '스크래핑 시작', value: '+', color: 'bg-emerald-500', href: '/scraper', icon: '🔍' },
+    { label: '수집된 원천 상품', value: productCount, color: 'bg-indigo-500', href: '/products', icon: '📦' },
+    { label: '상품마스터', value: masterCount, color: 'bg-slate-600', href: '/products/master', icon: '🗂️' },
     { label: '엑셀 내보내기', value: '→', color: 'bg-amber-500', href: '/export', icon: '📊' },
   ]
 
   const steps = [
-    'URL + 로그인 입력', 'Playwright 렌더링', 'AI 데이터 추출',
-    '이미지 로컬 백업', 'AI 상품명 생성 (20자)', '마켓 양식 변환', '엑셀 다운로드',
+    '몰 로그인 유지 스크랩', '재고/카테고리/코드 추출', '상품마스터로 가공(참조데이터 보완)',
+    '이미지 정규화+호스팅URL', 'AI 상품명 생성', '가격/마진 관리', '마켓별 시트 분할 다운로드',
   ]
 
   return (
@@ -27,7 +32,7 @@ export default function Dashboard() {
       <h1 className="text-2xl font-bold text-gray-800 mb-1">대시보드</h1>
       <p className="text-sm text-gray-500 mb-8">쇼핑몰 스크래핑 → 마스터 DB → 오픈마켓 대량등록 엑셀 변환</p>
 
-      <div className="grid grid-cols-3 gap-4 mb-8">
+      <div className="grid grid-cols-4 gap-4 mb-8">
         {cards.map(c => (
           <Link key={c.label} href={c.href}
             className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition-shadow flex items-center gap-4">

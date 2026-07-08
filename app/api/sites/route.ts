@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import pool, { initDb } from '@/lib/db'
+import pool, { initDb, encryptSecret } from '@/lib/db'
 
 export async function GET(req: NextRequest) {
   await initDb()
@@ -18,9 +18,10 @@ export async function POST(req: NextRequest) {
   const { name, url, loginId, loginPw } = await req.json() as { name?: string; url: string; loginId?: string; loginPw?: string }
   if (!url) return NextResponse.json({ error: 'url required' }, { status: 400 })
 
+  const { encrypted, iv } = loginPw ? encryptSecret(loginPw) : { encrypted: null, iv: null }
   const res = await pool.query<{ id: number }>(
-    `INSERT INTO sites (name, url, login_id, login_pw) VALUES ($1,$2,$3,$4) RETURNING id`,
-    [name || null, url, loginId || null, loginPw || null],
+    `INSERT INTO sites (name, url, login_id, login_pw_encrypted, login_pw_iv) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+    [name || null, url, loginId || null, encrypted, iv],
   )
   return NextResponse.json({ id: res.rows[0].id })
 }

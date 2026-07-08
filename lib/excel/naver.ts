@@ -1,9 +1,10 @@
 import ExcelJS from 'exceljs'
-import type { ProductRow } from './coupang'
+import type { ProductMasterRow, MarketplaceConfig } from './types'
+import { computePricing } from '../pricing'
 
 /** 네이버 스마트스토어 상품 일괄 등록 양식 */
-export function buildNaverSheet(wb: ExcelJS.Workbook, products: ProductRow[]) {
-  const ws = wb.addWorksheet('네이버스마트스토어')
+export function buildNaverSheet(wb: ExcelJS.Workbook, products: ProductMasterRow[], config: MarketplaceConfig, sheetSuffix = '') {
+  const ws = wb.addWorksheet(`네이버스마트스토어${sheetSuffix}`)
 
   const headers = [
     '상품명', '판매가', '재고수량', '카테고리ID', '브랜드', '제조사', '원산지',
@@ -17,20 +18,20 @@ export function buildNaverSheet(wb: ExcelJS.Workbook, products: ProductRow[]) {
   })
 
   for (const p of products) {
-    const detailImgs = (p.detail_images || []).map(d => d.local_path)
+    const pricing = computePricing(p, config)
     ws.addRow([
-      p.name_ai || p.name_original || '',
-      p.sale_price ?? p.price ?? '',
-      999,           // 재고
+      p.name_final || p.name_ai || p.name_original || '',
+      pricing.salePrice || '',
+      p.stock_qty ?? 0,
       '',            // 카테고리ID (직접 입력 필요)
       p.brand || '',
       p.manufacturer || '',
       p.origin || '국내산',
       '택배',
-      '3000',
-      p.thumbnail_local || '',
-      detailImgs[0] || '',
-      detailImgs[1] || '',
+      pricing.shippingFee || '',
+      p.thumbnail_url || '',
+      p.detail_image_urls[0] || '',
+      p.detail_image_urls[1] || '',
       p.options?.length ? 'Y' : 'N',
       p.options?.map(o => o.name).join(';') || '',
       p.options?.map(o => o.values.join(':')).join(';') || '',

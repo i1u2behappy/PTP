@@ -18,10 +18,27 @@ export interface ExtractedProduct {
   options: { name: string; values: string[] }[]
   thumbnail_url: string
   detail_image_urls: string[]
+  stock_status: string
+  stock_qty: number | null
+  mall_product_code: string
 }
 
-/** 대표이미지 URL → AI 상품명 생성 (20자 이내, 오픈마켓 등록용) */
-export async function generateProductName(imageUrl: string, originalName: string): Promise<string> {
+const DEFAULT_PROMPT_TEMPLATE = `원본 상품명: {{name}}
+
+위 이미지를 보고 오픈마켓(쿠팡, 네이버 등) 등록용 상품명을 한국어로 만들어줘.
+조건:
+- 20자 이내
+- 특수문자 최소화
+- 핵심 키워드 포함 (소재, 용도, 특징)
+- 상품명만 출력, 설명 없이`
+
+/** 대표이미지 URL → AI 상품명 생성. promptTemplate에 {{name}}이 원본상품명으로 치환된다. */
+export async function generateProductName(
+  imageUrl: string,
+  originalName: string,
+  promptTemplate?: string,
+  maxLength = 20,
+): Promise<string> {
   try {
     // 이미지를 base64로 다운로드
     const { default: axios } = await import('axios')
@@ -45,22 +62,15 @@ export async function generateProductName(imageUrl: string, originalName: string
           },
           {
             type: 'text',
-            text: `원본 상품명: ${originalName}
-
-위 이미지를 보고 오픈마켓(쿠팡, 네이버 등) 등록용 상품명을 한국어로 만들어줘.
-조건:
-- 20자 이내
-- 특수문자 최소화
-- 핵심 키워드 포함 (소재, 용도, 특징)
-- 상품명만 출력, 설명 없이`,
+            text: (promptTemplate || DEFAULT_PROMPT_TEMPLATE).replace('{{name}}', originalName),
           },
         ],
       }],
     })
 
-    return (response.content[0] as { type: string; text: string }).text.trim().slice(0, 20)
+    return (response.content[0] as { type: string; text: string }).text.trim().slice(0, maxLength)
   } catch {
     // 이미지 분석 실패 시 원본명 기반으로 축약
-    return originalName.slice(0, 20)
+    return originalName.slice(0, maxLength)
   }
 }

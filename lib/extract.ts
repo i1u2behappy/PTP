@@ -8,6 +8,9 @@ interface RawPageData {
   description: string
   images: string[]
   infoRows: [string, string][]
+  sku: string
+  availability: string
+  stockText: string
 }
 
 async function scrapePageData(page: Page): Promise<RawPageData> {
@@ -33,6 +36,8 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     let brand = ''
     let description = ''
     let images: string[] = []
+    let sku = ''
+    let availability = ''
 
     if (product) {
       name = (product.name as string) || ''
@@ -41,10 +46,12 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       description = (product.description as string) || ''
       const imgField = product.image
       images = Array.isArray(imgField) ? imgField as string[] : (imgField ? [imgField as string] : [])
+      sku = (product.sku as string) || (product.productID as string) || (product.mpn as string) || ''
       const offersField = product.offers
       const offers = Array.isArray(offersField) ? offersField : (offersField ? [offersField] : [])
-      const firstOffer = offers[0] as { price?: number | string } | undefined
+      const firstOffer = offers[0] as { price?: number | string; availability?: string } | undefined
       if (firstOffer?.price != null) price = Number(firstOffer.price)
+      availability = firstOffer?.availability || ''
     }
 
     if (!name) name = ogContent('og:title') || document.title || ''
@@ -64,6 +71,16 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       }
     }
 
+    // 품절/재입고/단종 배지 텍스트를 탐색 (ld+json availability가 없는 사이트 대비)
+    let stockText = ''
+    const stockEls = Array.from(document.querySelectorAll(
+      '[class*="soldout" i], [class*="sold-out" i], [class*="stock" i], [class*="status" i]',
+    ))
+    for (const el of stockEls) {
+      const t = (el.textContent || '').trim()
+      if (/품절|재입고|단종|일시품절/.test(t)) { stockText = t; break }
+    }
+
     // 국내 쇼핑몰은 전자상거래법상 "상품정보제공고시" 표를 의무 게시하므로, 라벨-값 테이블에서 부가 정보를 찾는다
     const infoRows: [string, string][] = []
     document.querySelectorAll('table tr').forEach(tr => {
@@ -71,12 +88,47 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       if (cells.length === 2 && cells[0] && cells[1]) infoRows.push([cells[0], cells[1]])
     })
 
-    return { name, price, brand, description, images, infoRows }
+    return { name, price, brand, description, images, infoRows, sku, availability, stockText }
   })
 }
 
 function findInfoValue(rows: [string, string][], labelPattern: RegExp): string {
   return rows.find(([label]) => labelPattern.test(label))?.[1] || ''
+}
+
+/** ld+json offers.availability 또는 페이지 내 품절/단종 배지 텍스트로 재고 상태를 판정한다. */
+export function extractStockStatus(availability: string, stockText: string): string {
+  if (/discontinued/i.test(availability)) return '단종'
+  if (/outofstock|soldout/i.test(availability)) return '품절'
+  if (/instock|limitedavailability/i.test(availability)) return '판매중'
+  if (/단종/.test(stockText)) return '단종'
+  if (/품절/.test(stockText)) return '품절'
+  return '판매중' // 명시적 신호가 없으면 판매중으로 간주
+}
+
+/** 상품정보고시 "재고" 행에서 숫자를 뽑아낸다. 없으면 null. */
+function resolveStockQty(rows: [string, string][]): number | null {
+  const value = findInfoValue(rows, /재고/i)
+  const m = value.match(/(\d+)/)
+  return m ? Number(m[1]) : null
+}
+
+/** ld+json sku가 없으면 URL 쿼리파라미터/경로에서 몰 상품코드를 추정한다. 그마저 없으면 URL 자체를 코드로 쓴다. */
+function extractMallProductCodeFromUrl(url: string): string {
+  try {
+    const u = new URL(url)
+    for (const key of ['branduid', 'goodsno', 'goods_no', 'product_no', 'productNo', 'idx', 'no']) {
+      const v = u.searchParams.get(key)
+      if (v) return v
+    }
+    const m = u.pathname.match(/(\d{3,})/)
+    if (m) return m[1]
+  } catch { /* URL 파싱 실패 시 아래 폴백으로 */ }
+  return url
+}
+
+export function extractMallProductCode(url: string, sku: string): string {
+  return sku || extractMallProductCodeFromUrl(url)
 }
 
 /**
@@ -99,5 +151,8 @@ export async function extractProductRuleBased(page: Page, url: string): Promise<
     options: [], // extractOptionsFromDom이 별도로 채운다
     thumbnail_url: raw.images[0] || '',
     detail_image_urls: raw.images.slice(1),
+    stock_status: extractStockStatus(raw.availability, raw.stockText),
+    stock_qty: resolveStockQty(raw.infoRows),
+    mall_product_code: extractMallProductCode(url, raw.sku),
   }
 }

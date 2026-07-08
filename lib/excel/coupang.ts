@@ -1,24 +1,10 @@
 import ExcelJS from 'exceljs'
-
-export interface ProductRow {
-  id: number
-  name_original: string
-  name_ai: string
-  price: number | null
-  sale_price: number | null
-  brand: string
-  manufacturer: string
-  origin: string
-  category: string
-  description: string
-  options: { name: string; values: string[] }[]
-  thumbnail_local: string
-  detail_images: { local_path: string }[]
-}
+import type { ProductMasterRow, MarketplaceConfig } from './types'
+import { computePricing } from '../pricing'
 
 /** 쿠팡 Wing 대량등록 양식 */
-export function buildCoupangSheet(wb: ExcelJS.Workbook, products: ProductRow[]) {
-  const ws = wb.addWorksheet('쿠팡Wing')
+export function buildCoupangSheet(wb: ExcelJS.Workbook, products: ProductMasterRow[], config: MarketplaceConfig, sheetSuffix = '') {
+  const ws = wb.addWorksheet(`쿠팡Wing${sheetSuffix}`)
 
   const headers = [
     '등록구분', '상품명', '브랜드', '제조사', '원산지', '판매가', '공급가', '배송비',
@@ -34,26 +20,26 @@ export function buildCoupangSheet(wb: ExcelJS.Workbook, products: ProductRow[]) 
   })
 
   for (const p of products) {
-    const detailImgs = (p.detail_images || []).map(d => d.local_path)
+    const pricing = computePricing(p, config)
     ws.addRow([
-      'N',                                      // 등록구분 (N=신규)
-      p.name_ai || p.name_original || '',        // 상품명
+      'N',                                        // 등록구분 (N=신규)
+      p.name_final || p.name_ai || p.name_original || '',
       p.brand    || '',
       p.manufacturer || '',
       p.origin   || '국내산',
-      p.sale_price ?? p.price ?? '',
-      Math.round((p.sale_price ?? p.price ?? 0) * 0.7) || '', // 공급가 (70%)
-      '3000',                                    // 배송비
+      pricing.salePrice || '',
+      pricing.supplyPrice || '',
+      pricing.shippingFee || '',
       p.category || '',
-      p.thumbnail_local || '',
-      detailImgs[0] || '',
-      detailImgs[1] || '',
-      detailImgs[2] || '',
+      p.thumbnail_url || '',
+      p.detail_image_urls[0] || '',
+      p.detail_image_urls[1] || '',
+      p.detail_image_urls[2] || '',
       p.options?.length ? '선택형' : '',
       p.options?.map(o => o.name).join('/') || '',
       p.options?.map(o => o.values.join(',')).join('/') || '',
-      '',                                        // 옵션재고
-      '',                                        // 옵션판매가
+      p.stock_qty ?? '',
+      pricing.salePrice || '',
       p.description || '',
       '',
     ])

@@ -2,20 +2,21 @@
 import { useEffect, useState, useCallback } from 'react'
 import Image from 'next/image'
 
-interface Product {
+interface MallProduct {
   id: number
-  session_id: number | null
+  site_id: number
+  mall_product_code: string
   name_original: string
-  name_ai: string | null
   price: number | null
   sale_price: number | null
   brand: string
-  category: string
+  mall_category: string
   thumbnail_local: string | null
-  thumbnail_url: string | null
-  detail_images: { url: string; local_path: string }[]
-  status: string
-  created_at: string
+  detail_image_urls: { url: string }[]
+  stock_status: string | null
+  stock_qty: number | null
+  last_scraped_at: string
+  master_product_id: number | null
 }
 
 interface Session {
@@ -27,29 +28,25 @@ interface Session {
   created_at: string
 }
 
-function missingFields(p: Product): string[] {
+function missingFields(p: MallProduct): string[] {
   const missing: string[] = []
   if (!p.name_original) missing.push('상품명')
   if (p.price == null && p.sale_price == null) missing.push('가격')
   if (!p.thumbnail_local) missing.push('대표이미지')
-  const failedDetail = (p.detail_images || []).filter(d => d.url && !d.local_path).length
-  if (failedDetail > 0) missing.push(`상세이미지 ${failedDetail}개 다운로드 실패`)
   if (!p.brand) missing.push('브랜드')
-  if (!p.category) missing.push('카테고리')
+  if (!p.mall_category) missing.push('카테고리')
   return missing
 }
 
 export default function ProductsPage() {
-  const [products, setProducts]   = useState<Product[]>([])
+  const [products, setProducts]   = useState<MallProduct[]>([])
   const [sessions, setSessions]   = useState<Session[]>([])
   const [selected, setSelected]   = useState<Set<number>>(new Set())
-  const [aiLoading, setAiLoading] = useState<Set<number>>(new Set())
-  const [editId, setEditId]       = useState<number | null>(null)
-  const [editName, setEditName]   = useState('')
+  const [migrating, setMigrating] = useState(false)
   const [issuesOnly, setIssuesOnly] = useState(false)
 
   const load = useCallback(() => {
-    fetch('/api/products').then(r => r.json()).then((d: Product[]) => { if (Array.isArray(d)) setProducts(d) }).catch(() => {})
+    fetch('/api/products').then(r => r.json()).then((d: MallProduct[]) => { if (Array.isArray(d)) setProducts(d) }).catch(() => {})
     fetch('/api/sessions').then(r => r.json()).then((d: Session[]) => { if (Array.isArray(d)) setSessions(d) }).catch(() => {})
   }, [])
 
@@ -64,26 +61,23 @@ export default function ProductsPage() {
     setSelected(selected.size === visibleProducts.length ? new Set() : new Set(visibleProducts.map(p => p.id)))
   }
 
-  async function genAiName(id: number) {
-    setAiLoading(s => new Set(s).add(id))
-    await fetch(`/api/products/${id}/ai-name`, { method: 'POST' })
-    load()
-    setAiLoading(s => { const n = new Set(s); n.delete(id); return n })
-  }
-
-  async function genAllAiNames() {
-    const ids = selected.size > 0 ? [...selected] : products.filter(p => !p.name_ai).map(p => p.id)
-    for (const id of ids) await genAiName(id)
-  }
-
-  async function saveEdit(id: number) {
-    await fetch(`/api/products/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name_ai: editName }),
-    })
-    setEditId(null)
-    load()
+  async function migrateSelected() {
+    const ids = selected.size > 0 ? [...selected] : products.map(p => p.id)
+    if (!ids.length) return
+    setMigrating(true)
+    try {
+      const res = await fetch('/api/master/migrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mallProductIds: ids, clientId: 1 }),
+      })
+      if (!res.ok) throw new Error('마이그레이션 실패')
+      window.location.href = '/products/master'
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e))
+    } finally {
+      setMigrating(false)
+    }
   }
 
   async function deleteSelected() {
@@ -100,12 +94,12 @@ export default function ProductsPage() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">1️⃣ 수집 확인</h1>
-          <p className="text-xs text-gray-400 mt-1">스크래핑한 상품을 그대로 조회하고, 누락된 데이터가 없는지 확인합니다.</p>
+          <p className="text-xs text-gray-400 mt-1">스크래핑한 원천 데이터를 그대로 조회하고, 누락된 데이터가 없는지 확인합니다.</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={genAllAiNames}
-            className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 transition-colors">
-            ✨ AI 상품명 생성 {selected.size > 0 ? `(${selected.size}개 선택)` : '(미생성 전체)'}
+          <button onClick={migrateSelected} disabled={migrating}
+            className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors">
+            {migrating ? '처리 중...' : `➜ 상품마스터로 가공 ${selected.size > 0 ? `(${selected.size}개 선택)` : '(전체)'}`}
           </button>
           {selected.size > 0 && (
             <button onClick={deleteSelected}
@@ -159,13 +153,13 @@ export default function ProductsPage() {
                 <tr className="bg-gray-50 border-b border-gray-200 text-xs font-semibold text-gray-500">
                   <th className="w-10 px-4 py-3 text-left"><input type="checkbox" checked={selected.size === visibleProducts.length && visibleProducts.length > 0} onChange={selectAll} /></th>
                   <th className="w-20 px-2 py-3 text-left">이미지</th>
-                  <th className="px-2 py-3 text-left">원본 상품명</th>
-                  <th className="px-2 py-3 text-left">AI 상품명 (20자)</th>
+                  <th className="px-2 py-3 text-left">상품명</th>
                   <th className="w-28 px-2 py-3 text-left">판매가</th>
                   <th className="w-24 px-2 py-3 text-left">브랜드</th>
                   <th className="w-40 px-2 py-3 text-left">카테고리</th>
+                  <th className="w-24 px-2 py-3 text-left">재고상태</th>
                   <th className="px-2 py-3 text-left">누락 데이터</th>
-                  <th className="w-16 px-2 py-3 text-left">액션</th>
+                  <th className="w-24 px-2 py-3 text-left">가공 상태</th>
                 </tr>
               </thead>
               <tbody>
@@ -176,7 +170,6 @@ export default function ProductsPage() {
                     className={`border-b border-gray-100 hover:bg-gray-50 transition-colors ${selected.has(p.id) ? 'bg-indigo-50' : ''}`}>
                     <td className="px-4 py-3"><input type="checkbox" checked={selected.has(p.id)} onChange={() => toggleSelect(p.id)} /></td>
 
-                    {/* 이미지 */}
                     <td className="px-2 py-3">
                       <div className="w-16 h-16 relative rounded-lg overflow-hidden bg-gray-100">
                         {p.thumbnail_local ? (
@@ -187,44 +180,25 @@ export default function ProductsPage() {
                       </div>
                     </td>
 
-                    {/* 원본명 */}
                     <td className="px-2 py-3 text-gray-700 text-xs leading-relaxed line-clamp-2">{p.name_original}</td>
 
-                    {/* AI 상품명 */}
-                    <td className="px-2 py-3">
-                      {editId === p.id ? (
-                        <div className="flex gap-1">
-                          <input value={editName} onChange={e => setEditName(e.target.value)} maxLength={20}
-                            className="border border-indigo-300 rounded px-2 py-1 text-xs flex-1 focus:outline-none focus:ring-1 focus:ring-indigo-400" />
-                          <button onClick={() => saveEdit(p.id)} className="text-xs bg-indigo-600 text-white px-2 py-1 rounded">저장</button>
-                          <button onClick={() => setEditId(null)} className="text-xs text-gray-400 px-1">✕</button>
-                        </div>
-                      ) : p.name_ai ? (
-                        <div className="flex items-center gap-1">
-                          <span className="text-indigo-700 font-medium text-xs">{p.name_ai}</span>
-                          <button onClick={() => { setEditId(p.id); setEditName(p.name_ai || '') }}
-                            className="text-gray-300 hover:text-gray-500 text-xs">✏️</button>
-                        </div>
-                      ) : (
-                        <button onClick={() => genAiName(p.id)} disabled={aiLoading.has(p.id)}
-                          className="text-xs text-indigo-500 hover:text-indigo-700 disabled:opacity-50">
-                          {aiLoading.has(p.id) ? '생성 중...' : '✨ 생성'}
-                        </button>
-                      )}
-                    </td>
-
-                    {/* 판매가 */}
                     <td className="px-2 py-3 text-gray-800 font-semibold text-xs">
                       {p.sale_price ? `₩${p.sale_price.toLocaleString()}` : p.price ? `₩${p.price.toLocaleString()}` : '-'}
                     </td>
 
-                    {/* 브랜드 */}
                     <td className="px-2 py-3 text-gray-500 text-xs">{p.brand || '-'}</td>
 
-                    {/* 카테고리 (몰의 카테고리명) */}
-                    <td className="px-2 py-3 text-gray-500 text-xs truncate max-w-[160px]" title={p.category}>{p.category || '-'}</td>
+                    <td className="px-2 py-3 text-gray-500 text-xs truncate max-w-[160px]" title={p.mall_category}>{p.mall_category || '-'}</td>
 
-                    {/* 누락 데이터 */}
+                    <td className="px-2 py-3 text-xs">
+                      {p.stock_status === '품절' || p.stock_status?.startsWith('단종') ? (
+                        <span className="text-red-500">{p.stock_status}</span>
+                      ) : (
+                        <span className="text-emerald-600">{p.stock_status || '-'}</span>
+                      )}
+                      {p.stock_qty != null && <span className="text-gray-400"> ({p.stock_qty})</span>}
+                    </td>
+
                     <td className="px-2 py-3 text-xs">
                       {missing.length === 0 ? (
                         <span className="text-emerald-600">✓ 완전</span>
@@ -233,13 +207,8 @@ export default function ProductsPage() {
                       )}
                     </td>
 
-                    {/* 액션 */}
-                    <td className="px-2 py-3">
-                      <button onClick={() => genAiName(p.id)} disabled={aiLoading.has(p.id)}
-                        title="AI 상품명 재생성"
-                        className="text-xs px-2 py-1 bg-indigo-50 text-indigo-600 rounded hover:bg-indigo-100 disabled:opacity-50">
-                        {aiLoading.has(p.id) ? '...' : '✨'}
-                      </button>
+                    <td className="px-2 py-3 text-xs">
+                      {p.master_product_id ? <span className="text-indigo-600">✓ 가공됨</span> : <span className="text-gray-400">미가공</span>}
                     </td>
                   </tr>
                 )})}
@@ -251,7 +220,7 @@ export default function ProductsPage() {
 
       <div className="mt-3 flex items-center justify-between text-xs text-gray-400">
         <p>전체 {products.length}개 상품 · 선택 {selected.size}개 {totalIssues > 0 && `· 누락 데이터 있음 ${totalIssues}개`}</p>
-        <a href="/products/complete" className="text-indigo-600 hover:underline font-medium">다음: 데이터 보완 →</a>
+        <a href="/products/master" className="text-indigo-600 hover:underline font-medium">다음: 상품마스터 →</a>
       </div>
     </div>
   )

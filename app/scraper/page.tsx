@@ -56,6 +56,8 @@ export default function ScraperPage() {
   const [previewLoading, setPreviewLoading] = useState(false)
 
   const [mode, setMode]           = useState<'single' | 'catalog'>('single')
+  const [scrapeMode, setScrapeMode] = useState<'full' | 'incremental'>('full')
+  const [hasPriorSession, setHasPriorSession] = useState(false)
   const [linkSel, setLinkSel]     = useState('')
   const [status, setStatus]       = useState<Status>('idle')
   const [sessionId, setSessionId] = useState<number | null>(null)
@@ -102,6 +104,8 @@ export default function ScraperPage() {
     setDetectedPlatform(null)
     setTestResult(null)
     setPreviewResult(null)
+    setScrapeMode('full')
+    fetch(`/api/products?siteId=${site.id}`).then(r => r.json()).then((d: unknown[]) => setHasPriorSession(Array.isArray(d) && d.length > 0)).catch(() => setHasPriorSession(false))
   }
 
   async function handleOpenLogin() {
@@ -245,7 +249,7 @@ export default function ScraperPage() {
         maxPages: mode === 'catalog' ? maxPages : undefined,
         delayMs: mode === 'catalog' ? delayMs : undefined,
         loginId: loginId || undefined, loginPw: loginPw || undefined,
-        mode, productLinkSelector: linkSel || undefined, siteId: selectedSite.id,
+        mode, scrapeMode, productLinkSelector: linkSel || undefined, siteId: selectedSite.id,
       }),
     })
     const data = await res.json() as { sessionId: number }
@@ -343,6 +347,27 @@ export default function ScraperPage() {
       {/* 스크랩 대상 */}
       {selectedSite && (
         <div className="bg-white rounded-xl border border-gray-200 p-6 mb-4">
+          {hasPriorSession && (
+            <>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">재스크랩 방식</label>
+              <div className="flex gap-3 mb-4">
+                {([
+                  { id: 'full' as const, label: '전체 재스크랩' },
+                  { id: 'incremental' as const, label: '증분 (변동사항만)' },
+                ]).map(m => (
+                  <button key={m.id} onClick={() => setScrapeMode(m.id)}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium border transition-colors ${scrapeMode === m.id ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-600 border-gray-300 hover:border-emerald-400'}`}>
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+              {scrapeMode === 'incremental' && (
+                <p className="text-xs text-gray-500 mb-4">
+                  이전에 스크랩된 상품 중 재고/가격이 바뀐 것만 이력에 남기고, 이번 회차에 안 보이는 기존 상품은 단종 추정으로 표시합니다.
+                </p>
+              )}
+            </>
+          )}
           <label className="block text-sm font-semibold text-gray-700 mb-2">스크랩 모드</label>
           <div className="flex gap-3 mb-4">
             {(['single', 'catalog'] as const).map(m => (

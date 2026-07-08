@@ -11,13 +11,13 @@ export const metadata: Metadata = {
 }
 
 const NAV = [
-  { href: '/',                  label: '대시보드' },
-  { href: '/sites',             label: '🏬 쇼핑몰 관리' },
-  { href: '/scraper',           label: '🔍 스크래핑' },
-  { href: '/products',          label: '1️⃣ 수집 확인' },
-  { href: '/products/complete', label: '2️⃣ 데이터 보완' },
-  { href: '/products/finalize', label: '3️⃣ 최종 완성' },
-  { href: '/export',            label: '📊 엑셀 내보내기' },
+  { href: '/',               label: '대시보드' },
+  { href: '/sites',          label: '🏬 쇼핑몰 관리' },
+  { href: '/scraper',        label: '🔍 스크래핑' },
+  { href: '/products',       label: '1️⃣ 수집 확인' },
+  { href: '/products/master', label: '2️⃣ 상품마스터' },
+  { href: '/export',         label: '3️⃣ 엑셀 내보내기' },
+  { href: '/settings',       label: '⚙️ 설정' },
 ]
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

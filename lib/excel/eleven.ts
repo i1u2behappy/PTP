@@ -1,9 +1,13 @@
 import ExcelJS from 'exceljs'
-import type { ProductRow } from './coupang'
+import type { ProductMasterRow, MarketplaceConfig } from './types'
+import { computePricing } from '../pricing'
 
 /** 11번가 / G마켓 / 옥션 공통 양식 (대량 등록) */
-export function buildElevenSheet(wb: ExcelJS.Workbook, products: ProductRow[], market: '11번가' | 'G마켓' | '옥션') {
-  const ws = wb.addWorksheet(market)
+export function buildElevenSheet(
+  wb: ExcelJS.Workbook, products: ProductMasterRow[], config: MarketplaceConfig,
+  market: '11번가' | 'G마켓' | '옥션', sheetSuffix = '',
+) {
+  const ws = wb.addWorksheet(`${market}${sheetSuffix}`)
 
   const headers = [
     '상품명', '판매가', '즉시구매가', '재고수량', '카테고리코드',
@@ -19,22 +23,22 @@ export function buildElevenSheet(wb: ExcelJS.Workbook, products: ProductRow[], m
   })
 
   for (const p of products) {
-    const detailImgs = (p.detail_images || []).map(d => d.local_path)
+    const pricing = computePricing(p, config)
     ws.addRow([
-      p.name_ai || p.name_original || '',
-      p.sale_price ?? p.price ?? '',
-      p.sale_price ?? p.price ?? '',
-      999,
+      p.name_final || p.name_ai || p.name_original || '',
+      pricing.salePrice || '',
+      pricing.salePrice || '',
+      p.stock_qty ?? 0,
       '',
       p.brand || '',
       p.manufacturer || '',
       p.origin || '국내산',
-      '3000',
+      pricing.shippingFee || '',
       '택배',
-      p.thumbnail_local || '',
-      detailImgs[0] || '',
-      detailImgs[1] || '',
-      detailImgs[2] || '',
+      p.thumbnail_url || '',
+      p.detail_image_urls[0] || '',
+      p.detail_image_urls[1] || '',
+      p.detail_image_urls[2] || '',
       p.options?.length ? 'Y' : 'N',
       p.options?.map(o => o.name).join('/') || '',
       p.options?.map(o => o.values.join(',')).join('/') || '',

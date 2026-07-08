@@ -24,6 +24,8 @@ export interface ScrapeOptions {
   loginBtnSelector?: string   // 기본: button[type=submit]
   /** 카탈로그 페이지인 경우 제품 링크 셀렉터 (없으면 단일 상품 페이지로 간주) */
   productLinkSelector?: string
+  /** 특정 상품만 지정해서 스크랩 (지정하면 목록 페이지 탐색을 건너뛰고 이 URL들만 스크랩) */
+  productUrls?: string[]
   /** 등록된 쇼핑몰 ID — 지정하면 해당 사이트 전용 로그인 세션(프로필)을 재사용 */
   siteId?: number
   /** 스크랩 세션 ID — 중지 요청 확인용 */
@@ -409,6 +411,10 @@ interface CollectedLinks {
 
 /** 목록 페이지(들)을 순회하며 제품 URL 후보를 모은다. 실제 상품 추출은 하지 않는다(테스트/실행 공용 로직). */
 async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<CollectedLinks> {
+  if (opts.productUrls?.length) {
+    return { urls: opts.productUrls, platform: 'unknown', categoryByUrl: new Map() }
+  }
+
   const listingUrls = opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])
   const maxPages = Math.max(1, opts.maxPages || 1)
 

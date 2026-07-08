@@ -19,15 +19,17 @@ interface MarketplaceConfig {
   default_shipping_fee: number
 }
 
-type Marketplace = 'coupang' | 'naver' | '11st' | 'gmarket' | 'auction' | 'all'
+type Marketplace = 'coupang' | 'naver' | '11st' | 'gmarket' | 'auction' | 'shoplinker' | 'sabangnet' | 'all'
 
 const MARKET_META: { id: Marketplace; color: string }[] = [
-  { id: 'all',     color: 'bg-gray-700' },
-  { id: 'coupang', color: 'bg-blue-600' },
-  { id: 'naver',   color: 'bg-green-600' },
-  { id: '11st',    color: 'bg-red-600' },
-  { id: 'gmarket', color: 'bg-orange-500' },
-  { id: 'auction', color: 'bg-red-700' },
+  { id: 'all',        color: 'bg-gray-700' },
+  { id: 'coupang',    color: 'bg-blue-600' },
+  { id: 'naver',      color: 'bg-green-600' },
+  { id: '11st',       color: 'bg-red-600' },
+  { id: 'gmarket',    color: 'bg-orange-500' },
+  { id: 'auction',    color: 'bg-red-700' },
+  { id: 'shoplinker', color: 'bg-purple-600' },
+  { id: 'sabangnet',  color: 'bg-cyan-600' },
 ]
 
 export function ExportPanel() {

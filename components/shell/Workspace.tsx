@@ -4,6 +4,7 @@ import { DashboardPanel } from '../panels/DashboardPanel'
 import { SitesListPanel } from '../panels/SitesListPanel'
 import { SiteDetailPanel } from '../panels/SiteDetailPanel'
 import { ScraperPanel } from '../panels/ScraperPanel'
+import { StagingReviewPanel } from '../panels/StagingReviewPanel'
 import { ProductsListPanel } from '../panels/ProductsListPanel'
 import { ProductDetailPanel } from '../panels/ProductDetailPanel'
 import { MasterListPanel } from '../panels/MasterListPanel'
@@ -24,6 +25,7 @@ export function Workspace() {
           case 'sites-list':     return <SitesListPanel key={tab.id} />
           case 'site-detail':    return <SiteDetailPanel key={tab.id} tabId={tab.id} params={tab.params} />
           case 'scraper':        return <ScraperPanel key={tab.id} />
+          case 'staging-review': return <StagingReviewPanel key={tab.id} />
           case 'products-list':  return <ProductsListPanel key={tab.id} />
           case 'product-detail': return <ProductDetailPanel key={tab.id} tabId={tab.id} params={tab.params} />
           case 'master-list':    return <MasterListPanel key={tab.id} />

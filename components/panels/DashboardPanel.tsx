@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useTabs } from '../shell/TabsContext'
-import { SearchIcon, InboxIcon, ArchiveIcon, ExportIcon } from '../shell/icons'
+import { SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ExportIcon } from '../shell/icons'
 
 const MARKETS = [
   { label: '쿠팡 Wing', className: 'bg-blue-50 text-blue-600' },
@@ -12,7 +12,7 @@ const MARKETS = [
 ]
 
 const STEPS = [
-  '몰 로그인 유지 스크랩', '재고/카테고리/코드 추출', '상품마스터로 가공',
+  '몰 로그인 유지 스크랩', '스크랩 결과 검토·병합', '재고/카테고리/코드 추출', '상품마스터로 가공',
   '이미지 정규화 + 호스팅URL', 'AI 상품명 생성', '가격/마진 관리', '마켓별 시트 분할 다운로드',
 ]
 
@@ -20,6 +20,7 @@ export function DashboardPanel() {
   const { openTab } = useTabs()
   const [productCount, setProductCount] = useState(0)
   const [masterCount, setMasterCount]   = useState(0)
+  const [pendingCount, setPendingCount] = useState(0)
 
   useEffect(() => {
     fetch('/api/products').then(r => r.json()).then((data: unknown[]) => {
@@ -28,12 +29,19 @@ export function DashboardPanel() {
     fetch('/api/master?clientId=1').then(r => r.json()).then((data: unknown[]) => {
       if (Array.isArray(data)) setMasterCount(data.length)
     }).catch(() => {})
+    fetch('/api/scrape-staging?status=pending').then(r => r.json()).then((data: unknown[]) => {
+      if (Array.isArray(data)) setPendingCount(data.length)
+    }).catch(() => {})
   }, [])
 
   const cards = [
     {
       label: '스크래핑 시작', value: '+', accent: 'bg-emerald-50 text-emerald-600', Icon: SearchIcon,
       open: () => openTab({ id: 'scraper', type: 'scraper', title: '스크래핑', icon: '🔍', closable: true }),
+    },
+    {
+      label: '검토 대기', value: pendingCount, accent: 'bg-amber-50 text-amber-600', Icon: ReviewIcon,
+      open: () => openTab({ id: 'staging-review', type: 'staging-review', title: '스크랩 검토', icon: '🔎', closable: true }),
     },
     {
       label: '수집된 원천 상품', value: productCount, accent: 'bg-teal-50 text-teal-600', Icon: InboxIcon,
@@ -44,7 +52,7 @@ export function DashboardPanel() {
       open: () => openTab({ id: 'master-list', type: 'master-list', title: '상품마스터', icon: '🗂️', closable: true }),
     },
     {
-      label: '엑셀 내보내기', value: '→', accent: 'bg-amber-50 text-amber-600', Icon: ExportIcon,
+      label: '엑셀 내보내기', value: '→', accent: 'bg-violet-50 text-violet-600', Icon: ExportIcon,
       open: () => openTab({ id: 'export', type: 'export', title: '엑셀 내보내기', icon: '📊', closable: true }),
     },
   ]
@@ -52,9 +60,9 @@ export function DashboardPanel() {
   return (
     <div>
       <h1 className="text-2xl font-bold text-slate-800 mb-1">대시보드</h1>
-      <p className="text-sm text-slate-500 mb-8">쇼핑몰 스크래핑 → 상품마스터 → 오픈마켓 대량등록 엑셀 변환</p>
+      <p className="text-sm text-slate-500 mb-8">Mall 스크래핑 → 상품마스터 → 오픈마켓 대량등록 엑셀 변환</p>
 
-      <div className="grid grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-5 gap-4 mb-6">
         {cards.map(c => (
           <button key={c.label} onClick={c.open}
             className="group bg-white rounded-2xl border border-slate-100 p-5 text-left transition-all duration-200

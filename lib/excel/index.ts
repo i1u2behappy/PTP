@@ -2,9 +2,10 @@ import ExcelJS from 'exceljs'
 import { buildCoupangSheet } from './coupang'
 import { buildNaverSheet }   from './naver'
 import { buildElevenSheet }  from './eleven'
+import { buildChannelSheet } from './channel'
 import type { ProductMasterRow, MarketplaceConfig } from './types'
 
-export type Marketplace = 'coupang' | 'naver' | '11st' | 'gmarket' | 'auction' | 'all'
+export type Marketplace = 'coupang' | 'naver' | '11st' | 'gmarket' | 'auction' | 'shoplinker' | 'sabangnet' | 'all'
 
 const MASTER_HEADERS = [
   '원본상품명', 'AI상품명', '최종상품명', '카테고리', '브랜드', '제조사', '원산지',
@@ -24,7 +25,7 @@ export async function generateExcel(
   configs: Record<string, MarketplaceConfig>,
 ): Promise<Buffer> {
   const wb = new ExcelJS.Workbook()
-  wb.creator = 'Scrap Tool'
+  wb.creator = 'Products Transformation Platform (PTP)'
   wb.created = new Date()
 
   // 마스터 시트 (항상 포함) — product_master에 이미 영속된 값을 그대로 보여준다
@@ -64,6 +65,8 @@ export async function generateExcel(
   if (marketplace === '11st'    || marketplace === 'all') buildBatched('11st', (wb, b, c, s) => buildElevenSheet(wb, b, c, '11번가', s))
   if (marketplace === 'gmarket' || marketplace === 'all') buildBatched('gmarket', (wb, b, c, s) => buildElevenSheet(wb, b, c, 'G마켓', s))
   if (marketplace === 'auction' || marketplace === 'all') buildBatched('auction', (wb, b, c, s) => buildElevenSheet(wb, b, c, '옥션', s))
+  if (marketplace === 'shoplinker' || marketplace === 'all') buildBatched('shoplinker', (wb, b, c, s) => buildChannelSheet(wb, b, c, '샵링커', s))
+  if (marketplace === 'sabangnet'  || marketplace === 'all') buildBatched('sabangnet', (wb, b, c, s) => buildChannelSheet(wb, b, c, '사방넷', s))
 
   const buf = await wb.xlsx.writeBuffer()
   return Buffer.from(buf)

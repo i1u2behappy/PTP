@@ -45,7 +45,7 @@ export function SiteDetailPanel({ tabId, params }: Props) {
   }
 
   async function handleDelete() {
-    if (isNew || !confirm('이 쇼핑몰 등록 정보를 삭제할까요?')) return
+    if (isNew || !confirm('이 Mall 등록 정보를 삭제할까요?')) return
     try {
       const res = await fetch(`/api/sites/${siteId}`, { method: 'DELETE' })
       if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
@@ -60,7 +60,7 @@ export function SiteDetailPanel({ tabId, params }: Props) {
 
   return (
     <div className="max-w-2xl">
-      <h1 className="text-2xl font-bold text-gray-800 mb-6">{isNew ? '➕ 새 쇼핑몰 등록' : `🏬 ${name || url} 수정`}</h1>
+      <h1 className="text-2xl font-bold text-gray-800 mb-6">{isNew ? '➕ 새 Mall 등록' : `🏬 ${name || url} 수정`}</h1>
 
       <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
         <div className="grid grid-cols-2 gap-3 mb-3">
@@ -96,7 +96,7 @@ export function SiteDetailPanel({ tabId, params }: Props) {
             </button>
           </div>
           {!isNew && (
-            <button onClick={handleDelete} className="text-xs text-rose-500 hover:underline">🗑 이 쇼핑몰 삭제</button>
+            <button onClick={handleDelete} className="text-xs text-rose-500 hover:underline">🗑 이 Mall 삭제</button>
           )}
         </div>
       </div>

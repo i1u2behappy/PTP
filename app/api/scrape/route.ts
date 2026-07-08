@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool, { initDb } from '@/lib/db'
 import { scrapeSingleProduct, scrapeCatalogPage, getOpenPageUrl, closeLoginWindow, type ScrapeResult } from '@/lib/scraper'
-import { downloadProductImages } from '@/lib/images'
-import { upsertMallProduct, markMissingAsDiscontinued } from '@/lib/scrape/incremental'
+import { stageScrapedProduct } from '@/lib/scrape/staging'
 
 type ScopeType = 'all' | 'category' | 'products' | 'page_range'
 
@@ -42,7 +41,7 @@ export async function POST(req: NextRequest) {
   const sessionId = sessionRes.rows[0].id
 
   // 비동기로 스크래핑 실행 (응답은 sessionId만 즉시 반환)
-  runScraping(sessionId, body, scopeType, scrapeMode).catch(err => {
+  runScraping(sessionId, body).catch(err => {
     pool.query(`UPDATE scrape_sessions SET status='error', error=$1 WHERE id=$2`, [String(err), sessionId])
   })
 
@@ -50,17 +49,14 @@ export async function POST(req: NextRequest) {
 }
 
 async function saveProduct(siteId: number, sessionId: number, r: ScrapeResult) {
-  const { id: mallProductId } = await upsertMallProduct({ siteId, sessionId }, r)
-  await downloadProductImages(
-    r.product.thumbnail_url,
-    r.product.detail_image_urls || [],
-    mallProductId,
-    r.product.name,
-  )
+  // mall_products는 여기서 바로 갱신하지 않는다 — 결과는 scrape_staging_items에 대기하고,
+  // 사용자가 "스크랩 검토" 화면에서 확인 후 병합해야 반영된다.
+  await stageScrapedProduct({ siteId, sessionId }, r)
 }
 
-async function runScraping(sessionId: number, opts: ScrapeRequestBody, scopeType: ScopeType, scrapeMode: 'full' | 'incremental') {
+async function runScraping(sessionId: number, opts: ScrapeRequestBody) {
   const siteId = opts.siteId!
+  const scrapeMode = opts.scrapeMode || 'full'
 
   // 로그인 확인용으로 열어둔 화면은 여기서 닫는다 — 실제 스크래핑은 화면에 상품을 하나씩 띄우지 않고
   // 백그라운드(헤드리스)로 진행한다. 로그인 세션(쿠키)은 프로필 디렉터리에 저장되어 그대로 재사용된다.
@@ -91,11 +87,8 @@ async function runScraping(sessionId: number, opts: ScrapeRequestBody, scopeType
     if (result) await saveProduct(siteId, sessionId, result)
   })
 
-  if (!stopped && scrapeMode === 'incremental' && scopeType === 'all') {
-    // 몰 전체를 다시 훑은 경우에만, 이번 회차에 없던 기존 상품을 단종 추정으로 표시한다.
-    await markMissingAsDiscontinued(siteId, sessionId)
-  }
-
+  // 단종 추정 판정은 스테이징 결과가 실제 병합된 뒤에만 의미가 있으므로 여기서 하지 않는다
+  // (lib/scrape/staging.ts의 mergeSessionStaging에서 병합 시점에 수행).
   await pool.query(
     `UPDATE scrape_sessions SET status=$1, product_count=$2 WHERE id=$3`,
     [stopped ? 'stopped' : 'done', total, sessionId],

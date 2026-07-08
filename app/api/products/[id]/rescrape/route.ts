@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool, { decryptSecret } from '@/lib/db'
 import { scrapeSingleProduct } from '@/lib/scraper'
-import { upsertMallProduct } from '@/lib/scrape/incremental'
-import { downloadProductImages } from '@/lib/images'
+import { stageScrapedProduct } from '@/lib/scrape/staging'
 
-/** 개별 상품 상세 화면에서 "재스크랩" — 원본 URL을 다시 열어 mall_products 한 행만 갱신한다. */
+/** 개별 상품 상세 화면에서 "재스크랩" — 원본 URL을 다시 열어 결과를 스테이징에 쌓는다 (즉시 반영하지 않음). */
 export async function POST(_: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
 
@@ -33,12 +32,14 @@ export async function POST(_: NextRequest, { params }: { params: Promise<{ id: s
       loginId: site?.login_id || undefined,
       loginPw: site ? decryptSecret(site.login_pw_encrypted, site.login_pw_iv) || undefined : undefined,
     })
-    const { id: mallProductId } = await upsertMallProduct({ siteId: mallProduct.site_id, sessionId }, result)
-    await downloadProductImages(result.product.thumbnail_url, result.product.detail_image_urls || [], mallProductId, result.product.name)
+    const { id: stagingId } = await stageScrapedProduct({ siteId: mallProduct.site_id, sessionId }, result)
+
+    const staged = await pool.query<{ is_already_migrated: boolean }>(
+      `SELECT is_already_migrated FROM scrape_staging_items WHERE id=$1`, [stagingId],
+    )
 
     await pool.query(`UPDATE scrape_sessions SET status='done', product_count=1 WHERE id=$1`, [sessionId])
-    const updated = await pool.query(`SELECT * FROM mall_products WHERE id=$1`, [mallProductId])
-    return NextResponse.json(updated.rows[0])
+    return NextResponse.json({ stagingId, isAlreadyMigrated: !!staged.rows[0]?.is_already_migrated })
   } catch (err) {
     await pool.query(`UPDATE scrape_sessions SET status='error', error=$1 WHERE id=$2`, [String(err), sessionId])
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 })

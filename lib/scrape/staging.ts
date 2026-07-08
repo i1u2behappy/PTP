@@ -1,0 +1,159 @@
+import pool from '../db'
+import type { ScrapeResult } from '../scraper'
+import type { ExtractedProduct } from '../ai'
+import { upsertMallProduct, markMissingAsDiscontinued } from './incremental'
+import { downloadProductImages } from '../images'
+
+export interface StageOptions {
+  siteId: number
+  sessionId: number
+}
+
+/**
+ * 스크랩 결과 1건을 mall_products에 바로 반영하지 않고 scrape_staging_items에 쌓아둔다.
+ * 사용자가 스크랩 검토 화면에서 확인 후 병합(mergeStagingItems)할 때까지 대기 상태로 남는다.
+ */
+export async function stageScrapedProduct(opts: StageOptions, result: ScrapeResult): Promise<{ id: number }> {
+  const { product, sourceUrl } = result
+  const code = product.mall_product_code || sourceUrl
+
+  const existing = await pool.query<{ id: number; master_product_id: number | null }>(
+    `SELECT id, master_product_id FROM mall_products WHERE site_id=$1 AND mall_product_code=$2`,
+    [opts.siteId, code],
+  )
+  const matched = existing.rows[0]
+
+  const inserted = await pool.query<{ id: number }>(
+    `INSERT INTO scrape_staging_items
+      (session_id, site_id, mall_product_code, source_url, mall_category, name_original, price, sale_price,
+       brand, manufacturer, origin, description, options, thumbnail_url, detail_image_urls,
+       stock_status, stock_qty, raw_data, matched_mall_product_id, is_new, is_already_migrated)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+     RETURNING id`,
+    [
+      opts.sessionId, opts.siteId, code, sourceUrl, product.category || null, product.name,
+      product.price, product.sale_price, product.brand, product.manufacturer, product.origin,
+      product.description, JSON.stringify(product.options || []),
+      product.thumbnail_url, JSON.stringify(product.detail_image_urls || []),
+      product.stock_status || null, product.stock_qty,
+      JSON.stringify(product),
+      matched?.id ?? null, !matched, !!matched?.master_product_id,
+    ],
+  )
+  return { id: inserted.rows[0].id }
+}
+
+interface StagingRow {
+  id: number
+  session_id: number
+  site_id: number
+  mall_product_code: string
+  source_url: string
+  mall_category: string | null
+  name_original: string
+  price: number | null
+  sale_price: number | null
+  brand: string
+  manufacturer: string
+  origin: string
+  description: string
+  options: { name: string; values: string[] }[]
+  thumbnail_url: string
+  detail_image_urls: string[]
+  stock_status: string | null
+  stock_qty: number | null
+  matched_mall_product_id: number | null
+  is_already_migrated: boolean
+  status: string
+}
+
+function toScrapeResult(row: StagingRow): ScrapeResult {
+  const product: ExtractedProduct = {
+    name: row.name_original,
+    price: row.price,
+    sale_price: row.sale_price,
+    brand: row.brand,
+    manufacturer: row.manufacturer,
+    origin: row.origin,
+    category: row.mall_category || '',
+    description: row.description,
+    options: row.options,
+    thumbnail_url: row.thumbnail_url,
+    detail_image_urls: row.detail_image_urls,
+    stock_status: row.stock_status || '',
+    stock_qty: row.stock_qty,
+    mall_product_code: row.mall_product_code,
+  }
+  return { sourceUrl: row.source_url, product }
+}
+
+export interface MergeResult {
+  merged: number[]
+  skipped: { id: number; reason: string }[]
+}
+
+/**
+ * 세션의 pending 스테이징이 0개가 됐는지(병합이든 무시든 전부 처리됐는지) 확인하고, 몰 전체 증분
+ * 스크랩 세션이었다면 그 시점에 단종 추정 판정을 수행한다. 병합/무시가 한 번에 몰아서 일어나든
+ * 여러 차례에 걸쳐 나뉘어 일어나든, 마지막으로 큐를 비운 호출에서 정확히 한 번만 실행된다.
+ */
+async function checkSessionCompletion(sessionId: number) {
+  const remaining = await pool.query<{ count: string }>(
+    `SELECT COUNT(*) FROM scrape_staging_items WHERE session_id=$1 AND status='pending'`, [sessionId],
+  )
+  if (Number(remaining.rows[0].count) > 0) return
+
+  const session = await pool.query<{ site_id: number; scope_type: string; mode: string }>(
+    `SELECT site_id, scope_type, mode FROM scrape_sessions WHERE id=$1`, [sessionId],
+  )
+  const s = session.rows[0]
+  if (s && s.scope_type === 'all' && s.mode === 'incremental') {
+    await markMissingAsDiscontinued(s.site_id, sessionId)
+  }
+}
+
+/**
+ * 스테이징 항목을 실제 mall_products에 반영한다. 이미 상품마스터로 가공된 상품(is_already_migrated)은
+ * force가 아닌 한 데이터를 덮어쓰지 않는다 — 대신 "이번 세션에도 보였다"는 사실만 반영해 단종 판정을
+ * 오작동시키지 않는다.
+ */
+export async function mergeStagingItems(ids: number[], opts: { force?: boolean } = {}): Promise<MergeResult> {
+  const merged: number[] = []
+  const skipped: { id: number; reason: string }[] = []
+  const touchedSessions = new Set<number>()
+
+  for (const id of ids) {
+    const res = await pool.query<StagingRow>(`SELECT * FROM scrape_staging_items WHERE id=$1 AND status='pending'`, [id])
+    const row = res.rows[0]
+    if (!row) continue
+    touchedSessions.add(row.session_id)
+
+    if (row.is_already_migrated && !opts.force) {
+      skipped.push({ id, reason: 'already_migrated' })
+      if (row.matched_mall_product_id) {
+        await pool.query(
+          `UPDATE mall_products SET last_seen_session_id=$1, last_scraped_at=NOW() WHERE id=$2`,
+          [row.session_id, row.matched_mall_product_id],
+        )
+      }
+      continue
+    }
+
+    const { id: mallProductId } = await upsertMallProduct({ siteId: row.site_id, sessionId: row.session_id }, toScrapeResult(row))
+    await downloadProductImages(row.thumbnail_url, row.detail_image_urls || [], mallProductId, row.name_original)
+    await pool.query(`UPDATE scrape_staging_items SET status='merged', updated_at=NOW() WHERE id=$1`, [id])
+    merged.push(id)
+  }
+
+  for (const sid of touchedSessions) await checkSessionCompletion(sid)
+
+  return { merged, skipped }
+}
+
+export async function discardStagingItems(ids: number[]): Promise<void> {
+  const rows = await pool.query<{ session_id: number }>(
+    `SELECT DISTINCT session_id FROM scrape_staging_items WHERE id = ANY($1::int[]) AND status='pending'`, [ids],
+  )
+  await pool.query(`UPDATE scrape_staging_items SET status='skipped', updated_at=NOW() WHERE id = ANY($1::int[]) AND status='pending'`, [ids])
+  for (const { session_id } of rows.rows) await checkSessionCompletion(session_id)
+}

@@ -86,7 +86,7 @@ export function ScraperPanel() {
         setStatus(d.status as Status)
         setStopping(false)
         if (pollRef.current) clearInterval(pollRef.current)
-        if (d.status === 'done') bumpRefresh('products')
+        if (d.status === 'done') bumpRefresh('staging')
       }
     }, 2000)
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
@@ -275,14 +275,14 @@ export function ScraperPanel() {
     <div className="max-w-2xl">
       <h1 className="text-2xl font-bold text-gray-800 mb-6">🔍 스크래핑 설정</h1>
 
-      {/* 쇼핑몰 선택 */}
+      {/* Mall 선택 */}
       <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-        <div className="text-sm font-semibold text-gray-700 mb-2">쇼핑몰 선택 *</div>
+        <div className="text-sm font-semibold text-gray-700 mb-2">Mall 선택 *</div>
         {sites.length === 0 ? (
           <div className="text-sm text-gray-400">
-            등록된 쇼핑몰이 없습니다.{' '}
-            <button onClick={() => openTab({ id: 'sites-list', type: 'sites-list', title: '쇼핑몰 목록', icon: '📋', closable: true })}
-              className="text-teal-500 hover:underline">쇼핑몰 등록관리에서 추가하기 →</button>
+            등록된 Mall이 없습니다.{' '}
+            <button onClick={() => openTab({ id: 'sites-list', type: 'sites-list', title: 'Mall 목록', icon: '📋', closable: true })}
+              className="text-teal-500 hover:underline">Mall 등록관리에서 추가하기 →</button>
           </div>
         ) : selectedSite ? (
           <div className="flex items-center justify-between bg-teal-50 rounded-xl px-3 py-2">
@@ -297,7 +297,7 @@ export function ScraperPanel() {
         ) : (
           <div>
             <label className="block">
-              <span className="sr-only">쇼핑몰 이름 또는 URL 검색</span>
+              <span className="sr-only">Mall 이름 또는 URL 검색</span>
               <input value={siteQuery} onChange={e => setSiteQuery(e.target.value)} placeholder="이름 또는 URL 검색..."
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
             </label>
@@ -593,9 +593,9 @@ export function ScraperPanel() {
             </>
           )}
           {status === 'done' && (
-            <button onClick={() => openTab({ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true })}
+            <button onClick={() => openTab({ id: 'staging-review', type: 'staging-review', title: '스크랩 검토', icon: '🔎', closable: true })}
               className="mt-3 inline-block text-sm text-teal-500 font-medium hover:underline">
-              → 상품 목록 확인
+              → 스크랩 결과 검토
             </button>
           )}
         </div>

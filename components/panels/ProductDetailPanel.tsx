@@ -74,8 +74,12 @@ export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: 
     try {
       const res = await fetch(`/api/products/${mallProductId}/rescrape`, { method: 'POST' })
       if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`재스크랩 실패: ${e.error || res.status}`); return }
-      bumpRefresh('products')
-      load()
+      const d = await res.json() as { stagingId: number; isAlreadyMigrated: boolean }
+      bumpRefresh('staging')
+      const goReview = confirm(
+        `재스크랩 결과가 검토 대기 상태로 저장되었습니다${d.isAlreadyMigrated ? ' (이미 상품마스터로 가공된 상품이라 자동 반영되지 않습니다)' : ''}.\n지금 스크랩 검토 화면으로 이동할까요?`,
+      )
+      if (goReview) openTab({ id: 'staging-review', type: 'staging-review', title: '스크랩 검토', icon: '🔎', closable: true })
     } finally {
       setRescraping(false)
     }

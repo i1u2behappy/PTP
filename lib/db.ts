@@ -149,6 +149,36 @@ export async function initDb() {
       UNIQUE (site_id, mall_product_code)
     );
 
+    -- 스크랩 직후 원시 결과 보관소. mall_products를 즉시 덮어쓰지 않고, 사용자가 검토 후 병합할 때까지 대기시킨다.
+    -- 같은 상품이 여러 세션에서 스크랩되면 세션마다 별도 행으로 쌓여 세션 간 비교/개별 병합이 가능하다.
+    CREATE TABLE IF NOT EXISTS scrape_staging_items (
+      id                       SERIAL PRIMARY KEY,
+      session_id               INT REFERENCES scrape_sessions(id) ON DELETE CASCADE,
+      site_id                  INT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+      mall_product_code        TEXT NOT NULL,
+      source_url               TEXT,
+      mall_category            TEXT,
+      name_original            TEXT,
+      price                    INT,
+      sale_price               INT,
+      brand                    TEXT,
+      manufacturer             TEXT,
+      origin                   TEXT,
+      description              TEXT,
+      options                  JSONB DEFAULT '[]',
+      thumbnail_url            TEXT,
+      detail_image_urls        JSONB DEFAULT '[]',
+      stock_status             TEXT,
+      stock_qty                INT,
+      raw_data                 JSONB DEFAULT '{}',
+      matched_mall_product_id  INT REFERENCES mall_products(id) ON DELETE SET NULL,
+      is_new                   BOOLEAN DEFAULT true,
+      is_already_migrated      BOOLEAN DEFAULT false,
+      status                   TEXT DEFAULT 'pending',
+      created_at               TIMESTAMPTZ DEFAULT NOW(),
+      updated_at               TIMESTAMPTZ DEFAULT NOW()
+    );
+
     -- 재고/가격 변동 이력 (증분 스크랩 diff 근거)
     CREATE TABLE IF NOT EXISTS stock_snapshots (
       id               SERIAL PRIMARY KEY,
@@ -312,7 +342,9 @@ export async function initDb() {
       ('naver', '네이버 스마트스토어', 1000, 0.06, 3000),
       ('11st', '11번가', 500, 0.12, 3000),
       ('gmarket', 'G마켓', 500, 0.12, 3000),
-      ('auction', '옥션', 500, 0.12, 3000)
+      ('auction', '옥션', 500, 0.12, 3000),
+      ('shoplinker', '샵링커', 1000, 0, 3000),
+      ('sabangnet', '사방넷', 1000, 0, 3000)
     ON CONFLICT (code) DO NOTHING;
   `)
 }

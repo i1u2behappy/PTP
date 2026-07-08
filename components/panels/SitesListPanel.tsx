@@ -30,12 +30,12 @@ export function SitesListPanel() {
   function openDetail(site?: Site) {
     openTab(site
       ? { id: `site-detail:${site.id}`, type: 'site-detail', title: site.name || site.url, icon: '🏬', params: { siteId: site.id }, closable: true }
-      : { id: 'site-detail:new', type: 'site-detail', title: '새 쇼핑몰 등록', icon: '➕', closable: true },
+      : { id: 'site-detail:new', type: 'site-detail', title: '새 Mall 등록', icon: '➕', closable: true },
     )
   }
 
   async function handleDelete(id: number) {
-    if (!confirm('이 쇼핑몰 등록 정보를 삭제할까요?')) return
+    if (!confirm('이 Mall 등록 정보를 삭제할까요?')) return
     try {
       const res = await fetch(`/api/sites/${id}`, { method: 'DELETE' })
       if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
@@ -48,10 +48,10 @@ export function SitesListPanel() {
   return (
     <div className="max-w-4xl">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-gray-800">🏬 쇼핑몰 관리</h1>
+        <h1 className="text-2xl font-bold text-gray-800">🏬 Mall 관리</h1>
         <button onClick={() => openDetail()}
           className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full transition-colors">
-          ➕ 새 쇼핑몰 등록
+          ➕ 새 Mall 등록
         </button>
       </div>
 
@@ -63,7 +63,7 @@ export function SitesListPanel() {
         {loadError ? (
           <div className="p-8 text-center text-sm text-rose-500">목록을 불러오지 못했습니다. 서버(DB) 연결을 확인해주세요.</div>
         ) : sites.length === 0 ? (
-          <div className="p-8 text-center text-sm text-gray-400">등록된 쇼핑몰이 없습니다.</div>
+          <div className="p-8 text-center text-sm text-gray-400">등록된 Mall이 없습니다.</div>
         ) : (
           <div className="divide-y divide-gray-100">
             {sites.map(s => (

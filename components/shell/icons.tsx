@@ -190,6 +190,26 @@ export function SettingsIcon({ active }: IconProps) {
   )
 }
 
+export function ReviewIcon({ active }: IconProps) {
+  return (
+    <Toggle active={active}
+      outline={
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-full h-full">
+          <rect x="4" y="3.5" width="16" height="17" rx="1.5" />
+          <path d="M7.5 8h5M7.5 12h9" />
+          <path d="M7.5 16l1.3 1.3L11.5 14.6" />
+        </svg>
+      }
+      solid={
+        <svg viewBox="0 0 24 24" className="w-full h-full">
+          <rect fill="currentColor" fillOpacity="0.2" stroke="none" x="4" y="3.5" width="16" height="17" rx="1.5" />
+          <path fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" d="M7.5 8h5M7.5 12h9" />
+          <path fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" d="M7.5 16l1.3 1.3L11.5 14.6" />
+        </svg>
+      } />
+  )
+}
+
 export function BoltIcon({ className }: IconProps) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" className={className}>

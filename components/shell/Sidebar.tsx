@@ -37,14 +37,17 @@ function NavLeaf({ tab, icon: Icon, nested }: { tab: Tab; icon: IconComponent; n
 }
 
 export function Sidebar() {
-  const { openTab } = useTabs()
+  const { openTab, refreshSignals } = useTabs()
   const [sites, setSites] = useState<Site[]>([])
   const [clients, setClients] = useState<Client[]>([])
 
   useEffect(() => {
     fetch('/api/sites').then(r => r.json()).then((d: Site[]) => { if (Array.isArray(d)) setSites(d) }).catch(() => {})
+  }, [refreshSignals.sites])
+
+  useEffect(() => {
     fetch('/api/clients').then(r => r.json()).then((d: Client[]) => { if (Array.isArray(d)) setClients(d) }).catch(() => {})
-  }, [])
+  }, [refreshSignals.clients])
 
   return (
     <aside className="w-64 shrink-0 bg-white border-r border-slate-100 flex flex-col h-full overflow-y-auto">

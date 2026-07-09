@@ -99,11 +99,31 @@ export async function initDb() {
     );
 
     CREATE TABLE IF NOT EXISTS supply_clients (
-      id          SERIAL PRIMARY KEY,
-      name        TEXT NOT NULL,
-      memo        TEXT,
-      created_at  TIMESTAMPTZ DEFAULT NOW()
+      id                   SERIAL PRIMARY KEY,
+      name                 TEXT NOT NULL,
+      memo                 TEXT,
+      business_reg_no      TEXT,
+      representative_name  TEXT,
+      business_address     TEXT,
+      business_type        TEXT,
+      business_item        TEXT,
+      contact_name         TEXT,
+      contact_phone        TEXT,
+      contact_email        TEXT,
+      created_at           TIMESTAMPTZ DEFAULT NOW()
     );
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS business_reg_no TEXT;
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS representative_name TEXT;
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS business_address TEXT;
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS business_type TEXT;
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS business_item TEXT;
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS contact_name TEXT;
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS contact_phone TEXT;
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS contact_email TEXT;
+
+    ALTER TABLE sites DROP COLUMN IF EXISTS client_name;
+    ALTER TABLE sites DROP COLUMN IF EXISTS client_contact;
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS client_id INT REFERENCES supply_clients(id) ON DELETE SET NULL;
 
     CREATE TABLE IF NOT EXISTS scrape_sessions (
       id            SERIAL PRIMARY KEY,

@@ -7,6 +7,8 @@ interface Props {
   params?: Record<string, unknown>
 }
 
+interface ClientOption { id: number; name: string }
+
 export function SiteDetailPanel({ tabId, params }: Props) {
   const { closeTab, bumpRefresh } = useTabs()
   const siteId = params?.siteId as number | undefined
@@ -16,20 +18,27 @@ export function SiteDetailPanel({ tabId, params }: Props) {
   const [url, setUrl] = useState('')
   const [loginId, setLoginId] = useState('')
   const [loginPw, setLoginPw] = useState('')
+  const [clientId, setClientId] = useState<number | ''>((params?.clientId as number | undefined) ?? '')
+  const [clients, setClients] = useState<ClientOption[]>([])
   const [loading, setLoading] = useState(!isNew)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
+    fetch('/api/clients').then(r => r.json()).then((d: ClientOption[]) => { if (Array.isArray(d)) setClients(d) }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
     if (isNew) return
-    fetch(`/api/sites/${siteId}`).then(r => r.json()).then((d: { name: string | null; url: string; login_id: string | null; login_pw: string | null }) => {
+    fetch(`/api/sites/${siteId}`).then(r => r.json()).then((d: { name: string | null; url: string; login_id: string | null; login_pw: string | null; client_id: number | null }) => {
       setName(d.name || ''); setUrl(d.url); setLoginId(d.login_id || ''); setLoginPw(d.login_pw || '')
+      setClientId(d.client_id ?? '')
     }).finally(() => setLoading(false))
   }, [siteId, isNew])
 
   async function handleSave() {
     if (!url) return alert('URL을 입력하세요.')
     setSaving(true)
-    const body = JSON.stringify({ name, url, loginId, loginPw })
+    const body = JSON.stringify({ name, url, loginId, loginPw, clientId: clientId === '' ? null : clientId })
     try {
       const res = isNew
         ? await fetch('/api/sites', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
@@ -83,6 +92,14 @@ export function SiteDetailPanel({ tabId, params }: Props) {
             <span className="block text-xs text-gray-500 mb-1">비밀번호</span>
             <input type="password" value={loginPw} onChange={e => setLoginPw(e.target.value)}
               className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          </label>
+          <label className="col-span-2 block">
+            <span className="block text-xs text-gray-500 mb-1">거래처</span>
+            <select value={clientId} onChange={e => setClientId(e.target.value === '' ? '' : Number(e.target.value))}
+              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
+              <option value="">(선택 안 함)</option>
+              {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
           </label>
         </div>
         <div className="flex items-center justify-between">

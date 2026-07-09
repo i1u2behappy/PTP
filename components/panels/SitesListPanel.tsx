@@ -7,6 +7,7 @@ interface Site {
   name: string | null
   url: string
   login_id: string | null
+  client_name: string | null
   created_at: string
 }
 
@@ -72,6 +73,7 @@ export function SitesListPanel() {
                   <div className="text-sm font-medium text-gray-800">{s.name || '(이름 없음)'}</div>
                   <div className="text-xs text-gray-500 truncate">{s.url}</div>
                   {s.login_id && <div className="text-xs text-gray-400">ID: {s.login_id}</div>}
+                  {s.client_name && <div className="text-xs text-teal-500">거래처: {s.client_name}</div>}
                 </button>
                 <button onClick={() => openDetail(s)} className="text-xs text-teal-500 hover:underline shrink-0">수정</button>
                 <button onClick={() => handleDelete(s.id)} className="text-xs text-rose-500 hover:underline shrink-0">삭제</button>

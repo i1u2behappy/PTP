@@ -55,6 +55,27 @@ export function StoreIcon({ active }: IconProps) {
   )
 }
 
+export function ClientIcon({ active }: IconProps) {
+  return (
+    <Toggle active={active}
+      outline={
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-full h-full">
+          <rect x="3.5" y="8" width="17" height="11" rx="1.5" />
+          <path d="M8.5 8V6a1.5 1.5 0 011.5-1.5h4A1.5 1.5 0 0115.5 6v2" />
+          <path d="M3.5 13h17" />
+        </svg>
+      }
+      solid={
+        <svg viewBox="0 0 24 24" className="w-full h-full">
+          <path fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" d="M8.5 8V6a1.5 1.5 0 011.5-1.5h4A1.5 1.5 0 0115.5 6v2" />
+          <rect fill="currentColor" fillOpacity="0.22" stroke="none" x="3.5" y="8" width="17" height="11" rx="1.5" />
+          <path fill="none" stroke="currentColor" strokeWidth="1.75" d="M3.5 8h17v11a1.5 1.5 0 01-1.5 1.5h-14A1.5 1.5 0 013.5 19V8z" />
+          <path fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" d="M3.5 13h17" />
+        </svg>
+      } />
+  )
+}
+
 export function PlusIcon({ active }: IconProps) {
   return (
     <Toggle active={active}

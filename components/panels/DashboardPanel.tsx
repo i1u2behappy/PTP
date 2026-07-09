@@ -9,6 +9,8 @@ const MARKETS = [
   { label: '11번가', className: 'bg-rose-50 text-rose-600' },
   { label: 'G마켓', className: 'bg-orange-50 text-orange-600' },
   { label: '옥션', className: 'bg-red-50 text-red-600' },
+  { label: '샵링커', className: 'bg-indigo-50 text-indigo-600' },
+  { label: '사방넷', className: 'bg-cyan-50 text-cyan-600' },
 ]
 
 const STEPS = [

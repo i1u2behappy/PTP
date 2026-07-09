@@ -1,6 +1,8 @@
 'use client'
 import { useTabs } from './TabsContext'
 import { DashboardPanel } from '../panels/DashboardPanel'
+import { ClientsListPanel } from '../panels/ClientsListPanel'
+import { ClientDetailPanel } from '../panels/ClientDetailPanel'
 import { SitesListPanel } from '../panels/SitesListPanel'
 import { SiteDetailPanel } from '../panels/SiteDetailPanel'
 import { ScraperPanel } from '../panels/ScraperPanel'
@@ -22,6 +24,8 @@ export function Workspace() {
       {(() => {
         switch (tab.type) {
           case 'dashboard':      return <DashboardPanel key={tab.id} />
+          case 'clients-list':   return <ClientsListPanel key={tab.id} />
+          case 'client-detail':  return <ClientDetailPanel key={tab.id} tabId={tab.id} params={tab.params} />
           case 'sites-list':     return <SitesListPanel key={tab.id} />
           case 'site-detail':    return <SiteDetailPanel key={tab.id} tabId={tab.id} params={tab.params} />
           case 'scraper':        return <ScraperPanel key={tab.id} />

@@ -1,9 +1,10 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useTabs, type Tab } from './TabsContext'
-import { BoltIcon, DashboardIcon, StoreIcon, PlusIcon, ListIcon, SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ExportIcon, SettingsIcon } from './icons'
+import { BoltIcon, DashboardIcon, ClientIcon, StoreIcon, PlusIcon, ListIcon, SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ExportIcon, SettingsIcon } from './icons'
 
 interface Site { id: number; name: string | null; url: string }
+interface Client { id: number; name: string }
 type IconComponent = (props: { active?: boolean }) => React.ReactNode
 
 function NavGroup({ label, icon: Icon, defaultOpen, children }: { label: string; icon: IconComponent; defaultOpen?: boolean; children: React.ReactNode }) {
@@ -38,9 +39,11 @@ function NavLeaf({ tab, icon: Icon, nested }: { tab: Tab; icon: IconComponent; n
 export function Sidebar() {
   const { openTab } = useTabs()
   const [sites, setSites] = useState<Site[]>([])
+  const [clients, setClients] = useState<Client[]>([])
 
   useEffect(() => {
     fetch('/api/sites').then(r => r.json()).then((d: Site[]) => { if (Array.isArray(d)) setSites(d) }).catch(() => {})
+    fetch('/api/clients').then(r => r.json()).then((d: Client[]) => { if (Array.isArray(d)) setClients(d) }).catch(() => {})
   }, [])
 
   return (
@@ -54,6 +57,22 @@ export function Sidebar() {
 
       <nav className="flex-1 px-2 pb-3 space-y-1" aria-label="주 메뉴">
         <NavLeaf tab={{ id: 'dashboard', type: 'dashboard', title: '대시보드', icon: '📊', closable: false }} icon={DashboardIcon} />
+
+        <NavGroup label="거래처 관리" icon={ClientIcon}>
+          <button onClick={() => openTab({ id: 'client-detail:new', type: 'client-detail', title: '새 거래처 등록', icon: '➕', closable: true })}
+            className="group w-full flex items-center gap-2 pl-6 pr-3 py-1.5 text-sm rounded-full text-teal-600 hover:bg-teal-50 transition-colors text-left">
+            <PlusIcon />
+            <span>새 거래처 등록</span>
+          </button>
+          <NavLeaf tab={{ id: 'clients-list', type: 'clients-list', title: '거래처 목록', icon: '📋', closable: true }} icon={ListIcon} nested />
+          {clients.map(c => (
+            <button key={c.id}
+              onClick={() => openTab({ id: `client-detail:${c.id}`, type: 'client-detail', title: c.name, icon: '🏢', params: { clientId: c.id }, closable: true })}
+              className="w-full flex items-center gap-2 pl-9 pr-3 py-1.5 text-xs rounded-full text-slate-400 hover:bg-slate-50 hover:text-slate-600 transition-colors text-left truncate">
+              <span className="truncate">{c.name}</span>
+            </button>
+          ))}
+        </NavGroup>
 
         <NavGroup label="Mall 관리" icon={StoreIcon} defaultOpen>
           <button onClick={() => openTab({ id: 'site-detail:new', type: 'site-detail', title: '새 Mall 등록', icon: '➕', closable: true })}

@@ -2,7 +2,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 
 export type TabType =
-  | 'dashboard' | 'sites-list' | 'site-detail' | 'scraper' | 'staging-review'
+  | 'dashboard' | 'clients-list' | 'client-detail' | 'sites-list' | 'site-detail' | 'scraper' | 'staging-review'
   | 'products-list' | 'product-detail' | 'master-list' | 'master-detail'
   | 'export' | 'settings'
 
@@ -15,7 +15,7 @@ export interface Tab {
   closable: boolean
 }
 
-export type RefreshScope = 'sites' | 'products' | 'master' | 'staging'
+export type RefreshScope = 'sites' | 'products' | 'master' | 'staging' | 'clients'
 
 interface TabsState {
   openTabs: Tab[]
@@ -36,7 +36,7 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
   const [openTabs, setOpenTabs] = useState<Tab[]>([DASHBOARD_TAB])
   const [activeTabId, setActiveTabId] = useState(DASHBOARD_TAB.id)
   const [hydrated, setHydrated] = useState(false)
-  const [refreshSignals, setRefreshSignals] = useState<Record<RefreshScope, number>>({ sites: 0, products: 0, master: 0, staging: 0 })
+  const [refreshSignals, setRefreshSignals] = useState<Record<RefreshScope, number>>({ sites: 0, products: 0, master: 0, staging: 0, clients: 0 })
 
   // 마운트 시 이전 세션의 열린 탭 복원.
   // localStorage는 서버에 없으므로 SSR 결과와 맞추려면 기본값으로 먼저 그린 뒤 마운트 후 동기 반영이 불가피하다

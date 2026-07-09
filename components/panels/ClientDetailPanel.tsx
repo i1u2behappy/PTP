@@ -1,6 +1,7 @@
 'use client'
 import { useCallback, useEffect, useState } from 'react'
 import { useTabs } from '../shell/TabsContext'
+import { MemoLog } from './MemoLog'
 
 interface Props {
   tabId: string
@@ -138,7 +139,7 @@ export function ClientDetailPanel({ tabId, params }: Props) {
       </div>
 
       {!isNew && (
-        <div className="bg-white rounded-2xl border border-gray-200 p-6">
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold text-gray-700">등록된 Mall ({malls.length})</h2>
             <button onClick={() => openMall()} className="text-xs text-teal-600 hover:underline shrink-0">➕ Mall 추가</button>
@@ -161,6 +162,8 @@ export function ClientDetailPanel({ tabId, params }: Props) {
           )}
         </div>
       )}
+
+      {!isNew && <MemoLog baseUrl={`/api/clients/${clientId}/memos`} />}
     </div>
   )
 }

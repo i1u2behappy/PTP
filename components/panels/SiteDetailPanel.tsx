@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useTabs } from '../shell/TabsContext'
+import { MemoLog } from './MemoLog'
 
 interface Props {
   tabId: string
@@ -117,6 +118,8 @@ export function SiteDetailPanel({ tabId, params }: Props) {
           )}
         </div>
       </div>
+
+      {!isNew && <MemoLog baseUrl={`/api/sites/${siteId}/memos`} />}
     </div>
   )
 }

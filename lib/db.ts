@@ -125,6 +125,22 @@ export async function initDb() {
     ALTER TABLE sites DROP COLUMN IF EXISTS client_contact;
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS client_id INT REFERENCES supply_clients(id) ON DELETE SET NULL;
 
+    CREATE TABLE IF NOT EXISTS site_memos (
+      id         SERIAL PRIMARY KEY,
+      site_id    INT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+      memo_date  DATE NOT NULL DEFAULT CURRENT_DATE,
+      content    TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS client_memos (
+      id         SERIAL PRIMARY KEY,
+      client_id  INT NOT NULL REFERENCES supply_clients(id) ON DELETE CASCADE,
+      memo_date  DATE NOT NULL DEFAULT CURRENT_DATE,
+      content    TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS scrape_sessions (
       id            SERIAL PRIMARY KEY,
       url           TEXT NOT NULL,

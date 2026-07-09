@@ -14,10 +14,11 @@ interface Client {
 export function ClientsListPanel() {
   const { openTab, refreshSignals } = useTabs()
   const [clients, setClients] = useState<Client[]>([])
+  const [q, setQ] = useState('')
   const [loadError, setLoadError] = useState(false)
 
-  const load = useCallback(() => {
-    fetch('/api/clients').then(r => {
+  const load = useCallback((query: string) => {
+    fetch(`/api/clients?q=${encodeURIComponent(query)}`).then(r => {
       if (!r.ok) throw new Error()
       return r.json()
     }).then((d: Client[]) => {
@@ -25,7 +26,7 @@ export function ClientsListPanel() {
     }).catch(() => setLoadError(true))
   }, [])
 
-  useEffect(() => { load() }, [load, refreshSignals.clients])
+  useEffect(() => { load(q) }, [load, q, refreshSignals.clients])
 
   function openDetail(client?: Client) {
     openTab(client
@@ -39,7 +40,7 @@ export function ClientsListPanel() {
     try {
       const res = await fetch(`/api/clients/${id}`, { method: 'DELETE' })
       if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
-      load()
+      load(q)
     } catch (e) {
       alert(`삭제에 실패했습니다: ${e instanceof Error ? e.message : e}`)
     }
@@ -56,6 +57,10 @@ export function ClientsListPanel() {
       </div>
 
       <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-100 bg-gray-50">
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="거래처명, 사업자번호, 대표자, 담당자, 연락처, 메모 검색..."
+            className="w-full border border-gray-300 rounded-xl px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+        </div>
         {loadError ? (
           <div className="p-8 text-center text-sm text-rose-500">목록을 불러오지 못했습니다. 서버(DB) 연결을 확인해주세요.</div>
         ) : clients.length === 0 ? (

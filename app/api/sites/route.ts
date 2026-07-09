@@ -7,7 +7,7 @@ export async function GET(req: NextRequest) {
   const res = await pool.query(
     `SELECT s.id, s.name, s.url, s.login_id, s.client_id, c.name AS client_name, s.created_at
      FROM sites s LEFT JOIN supply_clients c ON c.id = s.client_id
-     WHERE s.name ILIKE $1 OR s.url ILIKE $1
+     WHERE s.name ILIKE $1 OR s.url ILIKE $1 OR s.login_id ILIKE $1 OR c.name ILIKE $1
      ORDER BY s.created_at DESC`,
     [`%${q}%`],
   )

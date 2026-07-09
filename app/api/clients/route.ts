@@ -14,11 +14,17 @@ interface ClientBody {
   contactEmail?: string
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const q = req.nextUrl.searchParams.get('q') || ''
   const res = await pool.query(
     `SELECT id, name, memo, business_reg_no, representative_name, business_address, business_type, business_item,
             contact_name, contact_phone, contact_email, created_at
-     FROM supply_clients ORDER BY created_at DESC`,
+     FROM supply_clients
+     WHERE name ILIKE $1 OR memo ILIKE $1 OR business_reg_no ILIKE $1 OR representative_name ILIKE $1
+        OR business_address ILIKE $1 OR business_type ILIKE $1 OR business_item ILIKE $1
+        OR contact_name ILIKE $1 OR contact_phone ILIKE $1 OR contact_email ILIKE $1
+     ORDER BY created_at DESC`,
+    [`%${q}%`],
   )
   return NextResponse.json(res.rows)
 }

@@ -219,7 +219,8 @@ async function loginIfNeeded(page: import('playwright').Page, opts: { url: strin
     ? [opts.loginBtnSelector]
     : ['button[type="submit"]', 'input[type="submit"]', 'a[onclick*="login" i]', 'button']
 
-  await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {})
+  // networkidle은 채팅위젯/분석 스크립트의 지속 연결 때문에 타임아웃까지 다 채우고 넘어가는 사이트가 많아 'load'로 대체
+  await page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
   const idEl = page.locator(idSel).first()
   if (await idEl.isVisible({ timeout: 5_000 }).catch(() => false)) {
     await idEl.fill(opts.loginId)
@@ -239,7 +240,7 @@ async function loginIfNeeded(page: import('playwright').Page, opts: { url: strin
     }
     if (!clicked) await pwEl.press('Enter')
 
-    await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {})
+    await page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
   }
 }
 
@@ -325,8 +326,9 @@ async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
       try {
         const firstSelect = (await page.$$('select'))[0]
         if (!firstSelect) break
-        await firstSelect.selectOption({ index: i })
-        await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {})
+        // 기본 30초 대기 없이 짧게 시도하고 넘어간다 — 비활성화된(품절 등) option 하나가 스크랩 전체를 30초씩 붙잡는 것을 방지
+        await firstSelect.selectOption({ index: i }, { timeout: 3_000 })
+        await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {})
         mergeIn(await scanSelectOptions(page))
       } catch { /* 개별 실패는 skip */ }
     }
@@ -344,10 +346,10 @@ export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeRe
     for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
       try {
         if (opts.url) {
-          await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 })
+          await page.goto(opts.url, { waitUntil: 'load', timeout: 30_000 })
           await loginIfNeeded(page, { url: opts.url, ...opts })
           if (opts.loginId) {
-            await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 })
+            await page.goto(opts.url, { waitUntil: 'load', timeout: 30_000 })
           }
         }
         const sourceUrl = opts.url || page.url()
@@ -433,11 +435,11 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
   const maxPages = Math.max(1, opts.maxPages || 1)
 
   if (opts.url || opts.categoryUrls?.length) {
-    await page.goto(listingUrls[0], { waitUntil: 'networkidle', timeout: 30_000 })
+    await page.goto(listingUrls[0], { waitUntil: 'load', timeout: 30_000 })
     await loginIfNeeded(page, { url: listingUrls[0], ...opts })
     // 로그인 필수 페이지는 로그인 폼으로 리다이렉트되므로, 로그인 시도 후 원래 목표 페이지로 다시 이동한다.
     if (opts.loginId && page.url() !== listingUrls[0]) {
-      await page.goto(listingUrls[0], { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => {})
+      await page.goto(listingUrls[0], { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     }
   }
 
@@ -455,7 +457,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
 
   for (const listingUrl of listingUrls) {
     if (page.url() !== listingUrl) {
-      await page.goto(listingUrl, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => {})
+      await page.goto(listingUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     }
 
     const categoryLabel = await detectCategoryLabel(page)
@@ -483,7 +485,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
       const nextBtn = page.locator(nextPageSelector).first()
       if (!(await nextBtn.isVisible({ timeout: 3_000 }).catch(() => false))) break
       await nextBtn.click()
-      await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {})
+      await page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
     }
   }
 
@@ -541,7 +543,7 @@ export async function scrapeCatalogPage(
       let result: ScrapeResult | null = null
       for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
         try {
-          await page.goto(pUrl, { waitUntil: 'networkidle', timeout: 30_000 })
+          await page.goto(pUrl, { waitUntil: 'load', timeout: 30_000 })
           const product = await extractProductRuleBased(page, pUrl)
           const domOptions = await extractOptionsFromDom(page)
           if (domOptions.length) product.options = domOptions
@@ -591,11 +593,11 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
   return withContext(opts, async page => {
     const url = opts.url || page.url()
     if (opts.url) {
-      await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 })
+      await page.goto(opts.url, { waitUntil: 'load', timeout: 30_000 })
       await loginIfNeeded(page, { url: opts.url, ...opts })
       // 로그인 필수 페이지는 로그인 폼으로 리다이렉트되므로, 로그인 시도 후 원래 목표 페이지로 다시 이동한다.
       if (opts.loginId && page.url() !== opts.url) {
-        await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => {})
+        await page.goto(opts.url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
       }
     }
 

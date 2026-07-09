@@ -340,18 +340,32 @@ async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
 /** 단일 상품 페이지 스크랩 (url 생략 시 현재 열려있는 페이지를 그대로 사용) */
 export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeResult> {
   return withContext(opts, async page => {
-    if (opts.url) {
-      await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 })
-      await loginIfNeeded(page, { url: opts.url, ...opts })
-      if (opts.loginId) {
-        await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 })
+    let lastError: unknown = null
+    for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
+      try {
+        if (opts.url) {
+          await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 })
+          await loginIfNeeded(page, { url: opts.url, ...opts })
+          if (opts.loginId) {
+            await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 })
+          }
+        }
+        const sourceUrl = opts.url || page.url()
+        const product = await extractProductRuleBased(page, sourceUrl)
+        const domOptions = await extractOptionsFromDom(page)
+        if (domOptions.length) product.options = domOptions
+        // 가격과 이미지가 둘 다 없으면 실제 상품 페이지가 아니라 봇 차단/오류 안내 페이지를 받았을 가능성이
+        // 높다 (빠른 연속 요청을 감지해 안내 페이지로 대신 응답하는 몰이 있음) — 그대로 반환하지 않고 재시도한다.
+        if (product.price == null && !product.thumbnail_url) {
+          throw new Error('가격/이미지를 모두 찾지 못함 (차단 또는 일시 오류로 추정)')
+        }
+        return { sourceUrl, product }
+      } catch (err) {
+        lastError = err
+        if (attempt < RETRY_COUNT) await sleep(2_000 * (attempt + 1) + Math.random() * 2_000)
       }
     }
-    const sourceUrl = opts.url || page.url()
-    const product = await extractProductRuleBased(page, sourceUrl)
-    const domOptions = await extractOptionsFromDom(page)
-    if (domOptions.length) product.options = domOptions
-    return { sourceUrl, product }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError))
   })
 }
 
@@ -531,13 +545,18 @@ export async function scrapeCatalogPage(
           const product = await extractProductRuleBased(page, pUrl)
           const domOptions = await extractOptionsFromDom(page)
           if (domOptions.length) product.options = domOptions
+          // 가격과 이미지가 둘 다 없으면 실제 상품 페이지가 아니라 봇 차단/오류 안내 페이지를 받았을 가능성이
+          // 높다 (빠른 연속 요청을 감지해 안내 페이지로 대신 응답하는 몰이 있음) — 그대로 저장하지 않고 재시도한다.
+          if (product.price == null && !product.thumbnail_url) {
+            throw new Error('가격/이미지를 모두 찾지 못함 (차단 또는 일시 오류로 추정)')
+          }
           const category = categoryByUrl.get(pUrl)
           if (category) product.category = category
           result = { sourceUrl: pUrl, product }
           break
         } catch (err) {
           lastError = err
-          if (attempt < RETRY_COUNT) await sleep(1_000 * (attempt + 1))
+          if (attempt < RETRY_COUNT) await sleep(2_000 * (attempt + 1) + Math.random() * 2_000)
         }
       }
       if (result) saved++

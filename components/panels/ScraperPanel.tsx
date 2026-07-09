@@ -16,6 +16,10 @@ const PLATFORM_LABELS: Record<string, string> = {
   cafe24: '카페24', makeshop: '메이크샵', godomall: '고도몰', unknown: '알 수 없음 (범용 방식 사용)',
 }
 
+// 스크랩 검토 탭으로 넘어갔다 돌아와도(탭 전환 시 이 패널은 언마운트된다) 방금 진행/완료한 세션 정보가
+// 유지되도록 site+sessionId만 남겨두고, 되돌아왔을 때 서버에서 최신 상태를 다시 조회해 복원한다.
+const LAST_SESSION_KEY = 'scrap.scraper.lastSession'
+
 interface PreviewProduct {
   name: string
   price: number | null
@@ -68,6 +72,20 @@ export function ScraperPanel() {
 
   useEffect(() => {
     fetch('/api/sites').then(r => r.json()).then((d: Site[]) => { if (Array.isArray(d)) setSites(d) }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    const raw = localStorage.getItem(LAST_SESSION_KEY)
+    if (!raw) return
+    try {
+      const saved = JSON.parse(raw) as { site: Site; sessionId: number }
+      fetch(`/api/scrape/status?sessionId=${saved.sessionId}`).then(r => r.json()).then((d: { status: string; product_count: number; saved_count: number; error?: string }) => {
+        setSelectedSite(saved.site)
+        setSessionId(saved.sessionId)
+        setStatus(d.status as Status)
+        setProgress({ saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error })
+      }).catch(() => {})
+    } catch { /* 손상된 저장값은 무시 */ }
   }, [])
 
   const filteredSites = useMemo(() => {
@@ -234,6 +252,7 @@ export function ScraperPanel() {
     setStatus('idle')
     setSessionId(null)
     setProgress({ saved: 0, total: 0 })
+    localStorage.removeItem(LAST_SESSION_KEY)
   }
 
   async function handleStart() {
@@ -256,6 +275,7 @@ export function ScraperPanel() {
     })
     const data = await res.json() as { sessionId: number }
     setSessionId(data.sessionId)
+    localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ site: selectedSite, sessionId: data.sessionId }))
   }
 
   async function handleStop() {

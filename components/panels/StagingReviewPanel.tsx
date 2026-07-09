@@ -39,7 +39,7 @@ const FIELD_LABELS: Record<string, string> = {
 }
 
 export function StagingReviewPanel() {
-  const { bumpRefresh, refreshSignals } = useTabs()
+  const { openTab, bumpRefresh, refreshSignals } = useTabs()
   const [sites, setSites] = useState<Site[]>([])
   const [siteId, setSiteId] = useState<number | ''>('')
   const [sessions, setSessions] = useState<SessionSummary[]>([])
@@ -132,6 +132,10 @@ export function StagingReviewPanel() {
   return (
     <div>
       <div className="mb-6">
+        <button onClick={() => openTab({ id: 'scraper', type: 'scraper', title: '스크래핑', icon: '🔍', closable: true })}
+          className="block text-sm text-gray-500 hover:text-gray-700 hover:underline mb-2">
+          ← 스크래핑으로 돌아가기
+        </button>
         <h1 className="text-2xl font-bold text-gray-800">🔎 스크랩 검토</h1>
         <p className="text-xs text-gray-400 mt-1">스크랩 결과는 여기서 검토 후 병합해야 수집 확인 목록에 반영됩니다. 이미 상품마스터로 가공된 상품은 기본적으로 덮어쓰지 않습니다.</p>
       </div>

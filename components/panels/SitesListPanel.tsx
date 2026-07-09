@@ -8,6 +8,7 @@ interface Site {
   url: string
   login_id: string | null
   client_name: string | null
+  blocked: boolean
   created_at: string
 }
 
@@ -70,7 +71,10 @@ export function SitesListPanel() {
             {sites.map(s => (
               <div key={s.id} className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors">
                 <button onClick={() => openDetail(s)} className="flex-1 min-w-0 text-left">
-                  <div className="text-sm font-medium text-gray-800">{s.name || '(이름 없음)'}</div>
+                  <div className="text-sm font-medium text-gray-800">
+                    {s.name || '(이름 없음)'}
+                    {s.blocked && <span className="ml-2 text-xs font-semibold text-rose-500">차단</span>}
+                  </div>
                   <div className="text-xs text-gray-500 truncate">{s.url}</div>
                   {s.login_id && <div className="text-xs text-gray-400">ID: {s.login_id}</div>}
                   {s.client_name && <div className="text-xs text-teal-500">거래처: {s.client_name}</div>}

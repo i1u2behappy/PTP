@@ -36,6 +36,10 @@ export function SitesListPanel() {
     )
   }
 
+  function openScraper(site: Site) {
+    openTab({ id: `scraper:${site.id}`, type: 'scraper', title: site.name || site.url, icon: '🔍', params: { siteId: site.id }, closable: true })
+  }
+
   async function handleDelete(id: number) {
     if (!confirm('이 Mall 등록 정보를 삭제할까요?')) return
     try {
@@ -70,7 +74,7 @@ export function SitesListPanel() {
           <div className="divide-y divide-gray-100">
             {sites.map(s => (
               <div key={s.id} className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors">
-                <button onClick={() => openDetail(s)} className="flex-1 min-w-0 text-left">
+                <button onClick={() => openScraper(s)} className="flex-1 min-w-0 text-left">
                   <div className="text-sm font-medium text-gray-800">
                     {s.name || '(이름 없음)'}
                     {s.blocked && <span className="ml-2 text-xs font-semibold text-rose-500">차단</span>}

@@ -33,8 +33,9 @@ interface PreviewProduct {
   detail_image_urls: string[]
 }
 
-export function ScraperPanel() {
+export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const { openTab, bumpRefresh } = useTabs()
+  const initialSiteId = params?.siteId as number | undefined
   const [sites, setSites]         = useState<Site[]>([])
   const [siteQuery, setSiteQuery] = useState('')
   const [selectedSite, setSelectedSite] = useState<Site | null>(null)
@@ -75,6 +76,8 @@ export function ScraperPanel() {
   }, [])
 
   useEffect(() => {
+    // Mall 목록에서 특정 몰을 지정해 들어온 경우, 그 몰을 새로 선택하는 게 우선이므로 이전 세션 복원은 건너뛴다.
+    if (initialSiteId) { selectSite(initialSiteId); return }
     const raw = localStorage.getItem(LAST_SESSION_KEY)
     if (!raw) return
     try {
@@ -86,6 +89,7 @@ export function ScraperPanel() {
         setProgress({ saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error })
       }).catch(() => {})
     } catch { /* 손상된 저장값은 무시 */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 마운트 시 1회만: initialSiteId는 탭 생성 시 고정되는 값
   }, [])
 
   const filteredSites = useMemo(() => {
@@ -110,10 +114,10 @@ export function ScraperPanel() {
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [sessionId, status, bumpRefresh])
 
-  async function selectSite(site: Site) {
-    const res = await fetch(`/api/sites/${site.id}`)
+  async function selectSite(siteId: number) {
+    const res = await fetch(`/api/sites/${siteId}`)
     const full = await res.json() as Site & { login_pw: string | null }
-    setSelectedSite(site)
+    setSelectedSite({ id: full.id, name: full.name, url: full.url, login_id: full.login_id })
     setLoginId(full.login_id || '')
     setLoginPw(full.login_pw || '')
     setLoginStep('none')
@@ -125,7 +129,7 @@ export function ScraperPanel() {
     setTestResult(null)
     setPreviewResult(null)
     setScrapeMode('full')
-    fetch(`/api/products?siteId=${site.id}`).then(r => r.json()).then((d: unknown[]) => setHasPriorSession(Array.isArray(d) && d.length > 0)).catch(() => setHasPriorSession(false))
+    fetch(`/api/products?siteId=${siteId}`).then(r => r.json()).then((d: unknown[]) => setHasPriorSession(Array.isArray(d) && d.length > 0)).catch(() => setHasPriorSession(false))
   }
 
   async function handleOpenLogin() {
@@ -301,7 +305,7 @@ export function ScraperPanel() {
         {sites.length === 0 ? (
           <div className="text-sm text-gray-400">
             등록된 Mall이 없습니다.{' '}
-            <button onClick={() => openTab({ id: 'sites-list', type: 'sites-list', title: 'Mall 목록', icon: '📋', closable: true })}
+            <button onClick={() => openTab({ id: 'sites-list', type: 'sites-list', title: 'Mall 상세관리', icon: '📋', closable: true })}
               className="text-teal-500 hover:underline">Mall 등록관리에서 추가하기 →</button>
           </div>
         ) : selectedSite ? (
@@ -323,7 +327,7 @@ export function ScraperPanel() {
             </label>
             <div className="mt-2 border border-gray-100 rounded-xl divide-y divide-gray-100 max-h-52 overflow-y-auto">
               {filteredSites.map(s => (
-                <button key={s.id} onClick={() => selectSite(s)}
+                <button key={s.id} onClick={() => selectSite(s.id)}
                   className="w-full text-left px-3 py-2 hover:bg-gray-50 transition-colors">
                   <div className="text-sm text-gray-800">{s.name || '(이름 없음)'}</div>
                   <div className="text-xs text-gray-500 truncate">{s.url}</div>

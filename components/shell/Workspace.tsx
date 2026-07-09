@@ -28,7 +28,7 @@ export function Workspace() {
           case 'client-detail':  return <ClientDetailPanel key={tab.id} tabId={tab.id} params={tab.params} />
           case 'sites-list':     return <SitesListPanel key={tab.id} />
           case 'site-detail':    return <SiteDetailPanel key={tab.id} tabId={tab.id} params={tab.params} />
-          case 'scraper':        return <ScraperPanel key={tab.id} />
+          case 'scraper':        return <ScraperPanel key={tab.id} params={tab.params} />
           case 'staging-review': return <StagingReviewPanel key={tab.id} />
           case 'products-list':  return <ProductsListPanel key={tab.id} />
           case 'product-detail': return <ProductDetailPanel key={tab.id} tabId={tab.id} params={tab.params} />

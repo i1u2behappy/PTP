@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react'
 import { useTabs, type Tab } from './TabsContext'
 import { BoltIcon, DashboardIcon, ClientIcon, StoreIcon, PlusIcon, ListIcon, SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ExportIcon, SettingsIcon } from './icons'
 
-interface Site { id: number; name: string | null; url: string }
 interface Client { id: number; name: string }
 type IconComponent = (props: { active?: boolean }) => React.ReactNode
 
@@ -38,12 +37,7 @@ function NavLeaf({ tab, icon: Icon, nested }: { tab: Tab; icon: IconComponent; n
 
 export function Sidebar() {
   const { openTab, refreshSignals } = useTabs()
-  const [sites, setSites] = useState<Site[]>([])
   const [clients, setClients] = useState<Client[]>([])
-
-  useEffect(() => {
-    fetch('/api/sites').then(r => r.json()).then((d: Site[]) => { if (Array.isArray(d)) setSites(d) }).catch(() => {})
-  }, [refreshSignals.sites])
 
   useEffect(() => {
     fetch('/api/clients').then(r => r.json()).then((d: Client[]) => { if (Array.isArray(d)) setClients(d) }).catch(() => {})
@@ -77,21 +71,7 @@ export function Sidebar() {
           ))}
         </NavGroup>
 
-        <NavGroup label="Mall 관리" icon={StoreIcon} defaultOpen>
-          <button onClick={() => openTab({ id: 'site-detail:new', type: 'site-detail', title: '새 Mall 등록', icon: '➕', closable: true })}
-            className="group w-full flex items-center gap-2 pl-6 pr-3 py-1.5 text-sm rounded-full text-teal-600 hover:bg-teal-50 transition-colors text-left">
-            <PlusIcon />
-            <span>새 Mall 등록</span>
-          </button>
-          <NavLeaf tab={{ id: 'sites-list', type: 'sites-list', title: 'Mall 목록', icon: '📋', closable: true }} icon={ListIcon} nested />
-          {sites.map(s => (
-            <button key={s.id}
-              onClick={() => openTab({ id: `site-detail:${s.id}`, type: 'site-detail', title: s.name || s.url, icon: '🏬', params: { siteId: s.id }, closable: true })}
-              className="w-full flex items-center gap-2 pl-9 pr-3 py-1.5 text-xs rounded-full text-slate-400 hover:bg-slate-50 hover:text-slate-600 transition-colors text-left truncate">
-              <span className="truncate">{s.name || s.url}</span>
-            </button>
-          ))}
-        </NavGroup>
+        <NavLeaf tab={{ id: 'sites-list', type: 'sites-list', title: 'Mall 상세관리', icon: '📋', closable: true }} icon={StoreIcon} />
 
         {/* 대시보드 작업 플로우 순서(스크래핑 → 스크랩 검토 → 수집확인 → 상품마스터 → 엑셀 내보내기)와 동일하게 배치 */}
         <NavLeaf tab={{ id: 'scraper', type: 'scraper', title: '스크래핑', icon: '🔍', closable: true }} icon={SearchIcon} />

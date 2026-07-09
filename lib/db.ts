@@ -128,18 +128,34 @@ export async function initDb() {
     CREATE TABLE IF NOT EXISTS site_memos (
       id         SERIAL PRIMARY KEY,
       site_id    INT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
-      memo_date  DATE NOT NULL DEFAULT CURRENT_DATE,
+      memo_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       content    TEXT NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+    DO $do$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='site_memos' AND column_name='memo_date') THEN
+        ALTER TABLE site_memos RENAME COLUMN memo_date TO memo_at;
+      END IF;
+    END $do$;
+    ALTER TABLE site_memos ALTER COLUMN memo_at TYPE TIMESTAMPTZ USING memo_at::timestamptz;
+    ALTER TABLE site_memos ALTER COLUMN memo_at SET DEFAULT NOW();
 
     CREATE TABLE IF NOT EXISTS client_memos (
       id         SERIAL PRIMARY KEY,
       client_id  INT NOT NULL REFERENCES supply_clients(id) ON DELETE CASCADE,
-      memo_date  DATE NOT NULL DEFAULT CURRENT_DATE,
+      memo_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       content    TEXT NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+    DO $do$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='client_memos' AND column_name='memo_date') THEN
+        ALTER TABLE client_memos RENAME COLUMN memo_date TO memo_at;
+      END IF;
+    END $do$;
+    ALTER TABLE client_memos ALTER COLUMN memo_at TYPE TIMESTAMPTZ USING memo_at::timestamptz;
+    ALTER TABLE client_memos ALTER COLUMN memo_at SET DEFAULT NOW();
 
     CREATE TABLE IF NOT EXISTS scrape_sessions (
       id            SERIAL PRIMARY KEY,

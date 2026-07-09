@@ -3,10 +3,10 @@ import pool from '@/lib/db'
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ memoId: string }> }) {
   const { memoId } = await params
-  const { memoDate, content } = await req.json() as { memoDate: string; content: string }
+  const { memoAt, content } = await req.json() as { memoAt: string; content: string }
   if (!content) return NextResponse.json({ error: 'content required' }, { status: 400 })
 
-  await pool.query(`UPDATE client_memos SET memo_date=$1, content=$2 WHERE id=$3`, [memoDate, content, memoId])
+  await pool.query(`UPDATE client_memos SET memo_at=$1, content=$2 WHERE id=$3`, [memoAt, content, memoId])
   return NextResponse.json({ ok: true })
 }
 

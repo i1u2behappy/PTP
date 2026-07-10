@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool, { initDb } from '@/lib/db'
-import { scrapeSingleProduct, scrapeCatalogPage, getOpenPageUrl, closeLoginWindow, type ScrapeResult } from '@/lib/scraper'
-import { stageScrapedProduct } from '@/lib/scrape/staging'
+import { getOpenPageUrl } from '@/lib/scraper'
+import { runScraping } from '@/lib/scrape/run'
 
 type ScopeType = 'all' | 'category' | 'products' | 'page_range'
 
@@ -12,6 +12,7 @@ interface ScrapeRequestBody {
   nextPageSelector?: string
   maxPages?: number
   delayMs?: number
+  concurrency?: number
   loginId?: string
   loginPw?: string
   mode: 'single' | 'catalog'
@@ -40,57 +41,23 @@ export async function POST(req: NextRequest) {
   )
   const sessionId = sessionRes.rows[0].id
 
+  // 예약/일괄 재스크랩이 그대로 재현할 수 있도록 이번 설정을 저장해둔다 (로그인 정보는 site에 이미 있으니 제외).
+  // productUrls 지정 스크랩(실패 재시도 등)은 일회성이라 평소 설정을 덮어쓰지 않는다.
+  if (!body.productUrls?.length) {
+    await pool.query(`UPDATE sites SET last_scrape_config=$1 WHERE id=$2`, [
+      JSON.stringify({
+        mode: body.mode, url: body.url, categoryUrls: body.categoryUrls,
+        productLinkSelector: body.productLinkSelector, nextPageSelector: body.nextPageSelector,
+        maxPages: body.maxPages, delayMs: body.delayMs, concurrency: body.concurrency,
+      }),
+      body.siteId,
+    ])
+  }
+
   // 비동기로 스크래핑 실행 (응답은 sessionId만 즉시 반환)
-  runScraping(sessionId, body).catch(err => {
+  runScraping(sessionId, { ...body, siteId: body.siteId }).catch(err => {
     pool.query(`UPDATE scrape_sessions SET status='error', error=$1 WHERE id=$2`, [String(err), sessionId])
   })
 
   return NextResponse.json({ sessionId })
-}
-
-async function saveProduct(siteId: number, sessionId: number, r: ScrapeResult) {
-  // mall_products는 여기서 바로 갱신하지 않는다 — 결과는 scrape_staging_items에 대기하고,
-  // 사용자가 "스크랩 검토" 화면에서 확인 후 병합해야 반영된다.
-  await stageScrapedProduct({ siteId, sessionId }, r)
-}
-
-async function runScraping(sessionId: number, opts: ScrapeRequestBody) {
-  const siteId = opts.siteId!
-  const scrapeMode = opts.scrapeMode || 'full'
-
-  // 로그인 확인용으로 열어둔 화면은 여기서 닫는다 — 실제 스크래핑은 화면에 상품을 하나씩 띄우지 않고
-  // 백그라운드(헤드리스)로 진행한다. 로그인 세션(쿠키)은 프로필 디렉터리에 저장되어 그대로 재사용된다.
-  await closeLoginWindow(siteId)
-
-  // 이미 스크랩된 상품(같은 몰)은 목록에서 발견되어도 건너뛴다 (이어서 스크랩하기)
-  const excluded = await pool.query<{ source_url: string }>(
-    `SELECT DISTINCT source_url FROM mall_products WHERE site_id=$1 AND source_url IS NOT NULL`,
-    [siteId],
-  )
-
-  const scrapeOpts = {
-    url: opts.url, categoryUrls: opts.categoryUrls, productUrls: opts.productUrls,
-    nextPageSelector: opts.nextPageSelector, maxPages: opts.maxPages, delayMs: opts.delayMs,
-    loginId: opts.loginId, loginPw: opts.loginPw, productLinkSelector: opts.productLinkSelector, siteId,
-    excludeUrls: scrapeMode === 'incremental' ? [] : excluded.rows.map(r => r.source_url), sessionId,
-  }
-
-  if (opts.mode === 'single') {
-    const result = await scrapeSingleProduct(scrapeOpts)
-    await saveProduct(siteId, sessionId, result)
-    await pool.query(`UPDATE scrape_sessions SET status='done', product_count=1 WHERE id=$1`, [sessionId])
-    return
-  }
-
-  const { total, stopped } = await scrapeCatalogPage(scrapeOpts, async ({ total, result }) => {
-    await pool.query(`UPDATE scrape_sessions SET product_count=$1 WHERE id=$2`, [total, sessionId])
-    if (result) await saveProduct(siteId, sessionId, result)
-  })
-
-  // 단종 추정 판정은 스테이징 결과가 실제 병합된 뒤에만 의미가 있으므로 여기서 하지 않는다
-  // (lib/scrape/staging.ts의 mergeSessionStaging에서 병합 시점에 수행).
-  await pool.query(
-    `UPDATE scrape_sessions SET status=$1, product_count=$2 WHERE id=$3`,
-    [stopped ? 'stopped' : 'done', total, sessionId],
-  )
 }

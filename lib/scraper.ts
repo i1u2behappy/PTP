@@ -1,7 +1,8 @@
 import path from 'path'
 import { chromium, type BrowserContext, type Page } from 'playwright'
 import type { ExtractedProduct } from './ai'
-import { extractProductRuleBased } from './extract'
+import { extractProductFieldsWithAI } from './ai'
+import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
 
 export interface ScrapeOptions {
@@ -17,6 +18,8 @@ export interface ScrapeOptions {
   excludeUrls?: string[]
   /** 상품 페이지 방문 사이 최소 지연(ms). 실제 지연은 이 값~2배 사이 랜덤 (차단 방지) */
   delayMs?: number
+  /** 카탈로그 모드에서 동시에 처리할 상품 페이지 수 (기본 1 = 순차 처리, 최대 8) */
+  concurrency?: number
   loginId?: string
   loginPw?: string
   loginIdSelector?: string    // 기본: input[type=email], input[name*=id], input[name*=email]
@@ -30,6 +33,10 @@ export interface ScrapeOptions {
   siteId?: number
   /** 스크랩 세션 ID — 중지 요청 확인용 */
   sessionId?: number
+  /** Mall별 수동 추출 셀렉터 (자동 감지가 실패하는 테마용, Mall 상세관리에서 설정) */
+  nameSelector?: string
+  priceSelector?: string
+  thumbnailSelector?: string
 }
 
 function profileDir(siteId: number) {
@@ -96,7 +103,7 @@ export async function closeLoginWindow(siteId: number) {
   }
 }
 
-async function withContext<T>(opts: ScrapeOptions, fn: (page: Page) => Promise<T>): Promise<T> {
+async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, context: BrowserContext) => Promise<T>): Promise<T> {
   const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 
   if (opts.siteId) {
@@ -105,12 +112,12 @@ async function withContext<T>(opts: ScrapeOptions, fn: (page: Page) => Promise<T
       // 로그인 창이 열려있으면 그대로 재사용 (닫지 않음)
       const pages = openContext.pages()
       const page = pages.length ? pages[pages.length - 1] : await openContext.newPage()
-      return await fn(page)
+      return await fn(page, openContext)
     }
     const context = await chromium.launchPersistentContext(profileDir(opts.siteId), { headless: true, userAgent })
     try {
       const page = context.pages()[0] || await context.newPage()
-      return await fn(page)
+      return await fn(page, context)
     } finally {
       await context.close()
     }
@@ -120,10 +127,41 @@ async function withContext<T>(opts: ScrapeOptions, fn: (page: Page) => Promise<T
   try {
     const ctx  = await browser.newContext({ userAgent })
     const page = await ctx.newPage()
-    return await fn(page)
+    return await fn(page, ctx)
   } finally {
     await browser.close()
   }
+}
+
+function selectorOverrides(opts: ScrapeOptions): ExtractSelectorOverrides {
+  return { nameSelector: opts.nameSelector, priceSelector: opts.priceSelector, thumbnailSelector: opts.thumbnailSelector }
+}
+
+/**
+ * 'load' 이후 실제 추출 대상(가격/이름 신호)이 이미 나타나 있으면 즉시 진행하고, 없으면 짧게 추가로 기다린다.
+ * networkidle처럼 무조건 오래 기다리지 않고, 콘텐츠가 실제로 준비됐는지로 판단해 빠른 사이트는 즉시 다음으로 넘어간다.
+ */
+async function waitForExtractableContent(page: Page, timeoutMs = 2_500) {
+  await page.waitForFunction(() => {
+    const hasLdJsonProduct = Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
+      .some(s => (s.textContent || '').includes('"Product"'))
+    const hasOgTitle = !!document.querySelector('meta[property="og:title"]')
+    const hasPriceText = Array.from(document.querySelectorAll('[class*="price" i], [id*="price" i]'))
+      .some(el => /[\d,]{3,}\s*원/.test(el.textContent || ''))
+    return hasLdJsonProduct || hasOgTitle || hasPriceText
+  }, { timeout: timeoutMs }).catch(() => { /* 타임아웃까지도 안 나타나면 그냥 진행 — 이후 재시도/AI 폴백이 처리 */ })
+}
+
+/**
+ * 규칙 기반 추출이 재시도까지 다 실패했을 때 마지막 수단: 페이지의 눈에 보이는 텍스트를 AI에 보여줘
+ * 상품명/가격만 보정한다. AI도 가격을 못 찾으면 null을 반환해 호출부가 최종 실패로 처리하게 한다.
+ */
+async function tryAiFallback(page: Page, product: ExtractedProduct): Promise<ExtractedProduct | null> {
+  const text = await page.evaluate(() => document.body.innerText).catch(() => '')
+  if (!text) return null
+  const ai = await extractProductFieldsWithAI(text)
+  if (ai.price == null) return null
+  return { ...product, name: ai.name || product.name, price: ai.price, sale_price: ai.price }
 }
 
 export interface ScrapeResult {
@@ -343,6 +381,8 @@ async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
 export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeResult> {
   return withContext(opts, async page => {
     let lastError: unknown = null
+    let lastProduct: ExtractedProduct | null = null
+    let lastUrl = opts.url || ''
     for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
       try {
         if (opts.url) {
@@ -352,10 +392,13 @@ export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeRe
             await page.goto(opts.url, { waitUntil: 'load', timeout: 30_000 })
           }
         }
+        await waitForExtractableContent(page)
         const sourceUrl = opts.url || page.url()
-        const product = await extractProductRuleBased(page, sourceUrl)
+        lastUrl = sourceUrl
+        const product = await extractProductRuleBased(page, sourceUrl, selectorOverrides(opts))
         const domOptions = await extractOptionsFromDom(page)
         if (domOptions.length) product.options = domOptions
+        lastProduct = product
         // 가격과 이미지가 둘 다 없으면 실제 상품 페이지가 아니라 봇 차단/오류 안내 페이지를 받았을 가능성이
         // 높다 (빠른 연속 요청을 감지해 안내 페이지로 대신 응답하는 몰이 있음) — 그대로 반환하지 않고 재시도한다.
         if (product.price == null && !product.thumbnail_url) {
@@ -366,6 +409,11 @@ export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeRe
         lastError = err
         if (attempt < RETRY_COUNT) await sleep(2_000 * (attempt + 1) + Math.random() * 2_000)
       }
+    }
+
+    if (lastProduct) {
+      const aiProduct = await tryAiFallback(page, lastProduct)
+      if (aiProduct) return { sourceUrl: lastUrl, product: aiProduct }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError))
   })
@@ -514,7 +562,9 @@ export async function testCatalogSelectors(opts: ScrapeOptions): Promise<TestCat
 export interface CatalogItemEvent {
   done: number
   total: number
+  url: string
   result: ScrapeResult | null
+  error?: string
 }
 
 export interface CatalogScrapeSummary {
@@ -523,30 +573,31 @@ export interface CatalogScrapeSummary {
   stopped: boolean
 }
 
-/** 목록 페이지(들)에서 제품 URL 수집 후 각각 스크랩. 카테고리 여러 개 + 페이지네이션 + 중지 + 이미 스크랩한 상품 제외 지원 */
+/** 목록 페이지(들)에서 제품 URL 수집 후 각각 스크랩. 카테고리 여러 개 + 페이지네이션 + 중지 + 이미 스크랩한 상품 제외 + 동시 처리 지원 */
 export async function scrapeCatalogPage(
   opts: ScrapeOptions,
   onItem: (event: CatalogItemEvent) => Promise<void> | void,
 ): Promise<CatalogScrapeSummary> {
-  return withContext(opts, async page => {
+  return withContext(opts, async (page, context) => {
     const { urls: productUrls, categoryByUrl } = await collectProductUrls(page, opts)
 
     let saved = 0
+    let done = 0
     let stopped = false
     let lastError: unknown = null
+    let cursor = 0
+    const concurrency = Math.max(1, Math.min(opts.concurrency || 1, 8))
 
-    for (let i = 0; i < productUrls.length; i++) {
-      if (isStopRequested(opts.sessionId)) { stopped = true; break }
-      if (i > 0) await throttle(opts.delayMs)
-
-      const pUrl = productUrls[i]
-      let result: ScrapeResult | null = null
+    async function scrapeOne(workerPage: Page, pUrl: string): Promise<ScrapeResult | null> {
+      let lastProduct: ExtractedProduct | null = null
       for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
         try {
-          await page.goto(pUrl, { waitUntil: 'load', timeout: 30_000 })
-          const product = await extractProductRuleBased(page, pUrl)
-          const domOptions = await extractOptionsFromDom(page)
+          await workerPage.goto(pUrl, { waitUntil: 'load', timeout: 30_000 })
+          await waitForExtractableContent(workerPage)
+          const product = await extractProductRuleBased(workerPage, pUrl, selectorOverrides(opts))
+          const domOptions = await extractOptionsFromDom(workerPage)
           if (domOptions.length) product.options = domOptions
+          lastProduct = product
           // 가격과 이미지가 둘 다 없으면 실제 상품 페이지가 아니라 봇 차단/오류 안내 페이지를 받았을 가능성이
           // 높다 (빠른 연속 요청을 감지해 안내 페이지로 대신 응답하는 몰이 있음) — 그대로 저장하지 않고 재시도한다.
           if (product.price == null && !product.thumbnail_url) {
@@ -554,16 +605,47 @@ export async function scrapeCatalogPage(
           }
           const category = categoryByUrl.get(pUrl)
           if (category) product.category = category
-          result = { sourceUrl: pUrl, product }
-          break
+          return { sourceUrl: pUrl, product }
         } catch (err) {
           lastError = err
           if (attempt < RETRY_COUNT) await sleep(2_000 * (attempt + 1) + Math.random() * 2_000)
         }
       }
-      if (result) saved++
-      await onItem({ done: i + 1, total: productUrls.length, result })
+      if (lastProduct) {
+        const aiProduct = await tryAiFallback(workerPage, lastProduct)
+        if (aiProduct) {
+          const category = categoryByUrl.get(pUrl)
+          if (category) aiProduct.category = category
+          return { sourceUrl: pUrl, product: aiProduct }
+        }
+      }
+      return null
     }
+
+    async function worker(workerPage: Page) {
+      while (true) {
+        if (isStopRequested(opts.sessionId)) { stopped = true; return }
+        const i = cursor++
+        if (i >= productUrls.length) return
+        if (i > 0) await throttle(opts.delayMs)
+
+        const pUrl = productUrls[i]
+        const result = await scrapeOne(workerPage, pUrl)
+        if (result) saved++
+        done++
+        await onItem({
+          done, total: productUrls.length, url: pUrl, result,
+          error: result ? undefined : (lastError instanceof Error ? lastError.message : String(lastError)),
+        })
+      }
+    }
+
+    const workerCount = Math.min(concurrency, productUrls.length || 1)
+    const workerPages = await Promise.all(
+      Array.from({ length: workerCount }, (_, idx) => (idx === 0 ? page : context.newPage())),
+    )
+    await Promise.all(workerPages.map(p => worker(p)))
+    await Promise.all(workerPages.slice(1).map(p => p.close().catch(() => {})))
 
     if (opts.sessionId !== undefined) stopRequests.delete(opts.sessionId)
 

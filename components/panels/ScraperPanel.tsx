@@ -20,6 +20,13 @@ const PLATFORM_LABELS: Record<string, string> = {
 // 유지되도록 site+sessionId만 남겨두고, 되돌아왔을 때 서버에서 최신 상태를 다시 조회해 복원한다.
 const LAST_SESSION_KEY = 'scrap.scraper.lastSession'
 
+interface ItemLogRow {
+  id: number
+  url: string
+  status: 'success' | 'failed'
+  error: string | null
+}
+
 interface PreviewProduct {
   name: string
   price: number | null
@@ -50,6 +57,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [nextPageSelector, setNextPageSelector] = useState('')
   const [maxPages, setMaxPages]             = useState(1)
   const [delayMs, setDelayMs]               = useState(1000)
+  const [concurrency, setConcurrency]       = useState(1)
 
   const [categories, setCategories]         = useState<{ href: string; text: string }[]>([])
   const [categoriesLoading, setCategoriesLoading] = useState(false)
@@ -69,6 +77,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [sessionId, setSessionId] = useState<number | null>(null)
   const [progress, setProgress]   = useState<{ saved: number; total: number; error?: string }>({ saved: 0, total: 0 })
   const [stopping, setStopping]   = useState(false)
+  const [itemLog, setItemLog]     = useState<ItemLogRow[]>([])
+  const [retrying, setRetrying]   = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
@@ -104,6 +114,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       const r = await fetch(`/api/scrape/status?sessionId=${sessionId}`)
       const d = await r.json() as { status: string; product_count: number; saved_count: number; error?: string }
       setProgress({ saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error })
+      fetch(`/api/scrape/log?sessionId=${sessionId}`).then(r => r.json()).then((rows: ItemLogRow[]) => {
+        if (Array.isArray(rows)) setItemLog(rows)
+      }).catch(() => {})
       if (d.status === 'done' || d.status === 'error' || d.status === 'stopped') {
         setStatus(d.status as Status)
         setStopping(false)
@@ -113,6 +126,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     }, 2000)
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [sessionId, status, bumpRefresh])
+
+  const failedUrls = itemLog.filter(r => r.status === 'failed').map(r => r.url)
 
   async function selectSite(siteId: number) {
     const res = await fetch(`/api/sites/${siteId}`)
@@ -264,6 +279,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
     setStatus('running')
     setProgress({ saved: 0, total: 0 })
+    setItemLog([])
     const res = await fetch('/api/scrape', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -273,6 +289,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         nextPageSelector: mode === 'catalog' ? (nextPageSelector || undefined) : undefined,
         maxPages: mode === 'catalog' ? maxPages : undefined,
         delayMs: mode === 'catalog' ? delayMs : undefined,
+        concurrency: mode === 'catalog' ? concurrency : undefined,
         loginId: loginId || undefined, loginPw: loginPw || undefined,
         mode, scrapeMode, productLinkSelector: linkSel || undefined, siteId: selectedSite.id,
       }),
@@ -280,6 +297,28 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const data = await res.json() as { sessionId: number }
     setSessionId(data.sessionId)
     localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ site: selectedSite, sessionId: data.sessionId }))
+  }
+
+  async function handleRetryFailed() {
+    if (!selectedSite || failedUrls.length === 0) return
+    setRetrying(true)
+    setStatus('running')
+    setProgress({ saved: 0, total: 0 })
+    setItemLog([])
+    try {
+      const res = await fetch('/api/scrape', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          productUrls: failedUrls, mode: 'catalog', scrapeMode: 'incremental',
+          loginId: loginId || undefined, loginPw: loginPw || undefined, siteId: selectedSite.id,
+        }),
+      })
+      const data = await res.json() as { sessionId: number }
+      setSessionId(data.sessionId)
+      localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ site: selectedSite, sessionId: data.sessionId }))
+    } finally {
+      setRetrying(false)
+    }
   }
 
   async function handleStop() {
@@ -481,7 +520,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 placeholder={'https://shop.example.com/category/food\nhttps://shop.example.com/category/beauty'}
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 mb-3" />
 
-              <div className="grid grid-cols-3 gap-3 mb-4">
+              <div className="grid grid-cols-4 gap-3 mb-4">
                 <label className="block">
                   <span className="block text-xs text-gray-500 mb-1">다음 페이지 셀렉터 (페이지네이션, 선택)</span>
                   <input value={nextPageSelector} onChange={e => setNextPageSelector(e.target.value)}
@@ -496,6 +535,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 <label className="block">
                   <span className="block text-xs text-gray-500 mb-1">상품 페이지 간 지연 (ms, 차단 방지)</span>
                   <input type="number" min={0} step={100} value={delayMs} onChange={e => setDelayMs(Math.max(0, Number(e.target.value) || 0))}
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+                </label>
+                <label className="block">
+                  <span className="block text-xs text-gray-500 mb-1">동시 처리 개수 (빠르지만 차단 위험↑)</span>
+                  <input type="number" min={1} max={8} value={concurrency} onChange={e => setConcurrency(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
                     className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
                 </label>
               </div>
@@ -606,7 +650,24 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           )}
           <p className="text-sm text-gray-600">
             수집 완료: <strong>{progress.saved}</strong>개 {progress.total > 0 && `/ ${progress.total}개`}
+            {failedUrls.length > 0 && <span className="text-rose-500"> · 실패 {failedUrls.length}개</span>}
           </p>
+
+          {itemLog.length > 0 && (
+            <div className="mt-3 border border-gray-100 rounded-xl overflow-hidden">
+              <div className="max-h-40 overflow-y-auto divide-y divide-gray-100">
+                {itemLog.map(row => (
+                  <div key={row.id} className="flex items-center gap-2 px-3 py-1.5 text-xs">
+                    <span className={row.status === 'success' ? 'text-emerald-600' : 'text-rose-500'}>
+                      {row.status === 'success' ? '✓' : '✗'}
+                    </span>
+                    <span className="text-gray-500 truncate flex-1" title={row.error || undefined}>{row.url}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {(status === 'error' || status === 'stopped') && (
             <>
               {progress.error && <p className="mt-2 text-xs text-rose-500 break-all">{progress.error}</p>}
@@ -617,10 +678,18 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </>
           )}
           {status === 'done' && (
-            <button onClick={() => openTab({ id: 'staging-review', type: 'staging-review', title: '스크랩 검토', icon: '🔎', closable: true })}
-              className="mt-3 inline-block text-sm text-teal-500 font-medium hover:underline">
-              → 스크랩 결과 검토
-            </button>
+            <div className="mt-3 flex items-center gap-3">
+              <button onClick={() => openTab({ id: 'staging-review', type: 'staging-review', title: '스크랩 검토', icon: '🔎', closable: true })}
+                className="inline-block text-sm text-teal-500 font-medium hover:underline">
+                → 스크랩 결과 검토
+              </button>
+              {failedUrls.length > 0 && (
+                <button onClick={handleRetryFailed} disabled={retrying}
+                  className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+                  {retrying ? '재시도 중...' : `실패 ${failedUrls.length}개 재시도`}
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}

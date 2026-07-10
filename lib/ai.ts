@@ -74,3 +74,34 @@ export async function generateProductName(
     return originalName.slice(0, maxLength)
   }
 }
+
+export interface AiExtractedFallback {
+  name: string | null
+  price: number | null
+}
+
+/**
+ * 규칙 기반 추출(schema.org/og메타/가격패턴)이 전부 실패했을 때 마지막 수단으로 쓰는 폴백.
+ * 페이지의 눈에 보이는 텍스트를 그대로 Claude에 던져 상품명/가격만 뽑아낸다 — 나머지 필드는 규칙 기반 결과를 그대로 쓴다.
+ * ANTHROPIC_API_KEY가 없으면 조용히 null을 반환한다(폴백 자체를 건너뜀).
+ */
+export async function extractProductFieldsWithAI(pageText: string): Promise<AiExtractedFallback> {
+  if (!process.env.ANTHROPIC_API_KEY) return { name: null, price: null }
+  try {
+    const response = await getClient().messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 200,
+      messages: [{
+        role: 'user',
+        content: `다음은 쇼핑몰 상품 상세페이지에서 눈에 보이는 텍스트를 그대로 가져온 것입니다. 상품명과 판매가격(원, 숫자만)을 찾아 JSON으로만 답해주세요. 못 찾으면 null로 표시하세요.\n형식: {"name": "...", "price": 12345}\n\n${pageText.slice(0, 4000)}`,
+      }],
+    })
+    const text = (response.content[0] as { type: string; text: string }).text
+    const match = text.match(/\{[\s\S]*\}/)
+    if (!match) return { name: null, price: null }
+    const parsed = JSON.parse(match[0]) as { name?: string | null; price?: number | null }
+    return { name: parsed.name || null, price: typeof parsed.price === 'number' ? parsed.price : null }
+  } catch {
+    return { name: null, price: null }
+  }
+}

@@ -131,15 +131,22 @@ export function extractMallProductCode(url: string, sku: string): string {
   return sku || extractMallProductCodeFromUrl(url)
 }
 
+export interface ExtractSelectorOverrides {
+  nameSelector?: string
+  priceSelector?: string
+  thumbnailSelector?: string
+}
+
 /**
  * AI 호출 없이 페이지의 구조화 데이터(schema.org, og 메타태그)와 상품정보고시 표를 읽어 상품 정보를 추출한다.
  * ld+json Product가 없는 사이트에서는 og 메타태그/가격 텍스트 패턴으로 대체하지만, brand/manufacturer/origin/category처럼
  * 표에 없으면 알아낼 방법이 없는 필드는 빈 값으로 남는다 — AI 추측 대신 정직하게 비워두는 쪽을 택했다.
+ * overrides로 몰별 수동 CSS 셀렉터가 지정되면(Mall 상세관리에서 설정), 자동 추출 결과보다 우선한다.
  */
-export async function extractProductRuleBased(page: Page, url: string): Promise<ExtractedProduct> {
+export async function extractProductRuleBased(page: Page, url: string, overrides?: ExtractSelectorOverrides): Promise<ExtractedProduct> {
   const raw = await scrapePageData(page)
 
-  return {
+  const result: ExtractedProduct = {
     name: raw.name || url,
     price: raw.price,
     sale_price: raw.price,
@@ -155,4 +162,24 @@ export async function extractProductRuleBased(page: Page, url: string): Promise<
     stock_qty: resolveStockQty(raw.infoRows),
     mall_product_code: extractMallProductCode(url, raw.sku),
   }
+
+  if (overrides?.nameSelector) {
+    const text = await page.locator(overrides.nameSelector).first().textContent({ timeout: 3_000 }).catch(() => null)
+    if (text?.trim()) result.name = text.trim()
+  }
+  if (overrides?.priceSelector) {
+    const text = await page.locator(overrides.priceSelector).first().textContent({ timeout: 3_000 }).catch(() => null)
+    const m = text?.match(/[\d,]{2,}/)
+    if (m) {
+      const n = Number(m[0].replace(/,/g, ''))
+      result.price = n
+      result.sale_price = n
+    }
+  }
+  if (overrides?.thumbnailSelector) {
+    const src = await page.locator(overrides.thumbnailSelector).first().getAttribute('src', { timeout: 3_000 }).catch(() => null)
+    if (src) result.thumbnail_url = src
+  }
+
+  return result
 }

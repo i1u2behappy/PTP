@@ -21,6 +21,11 @@ export function SiteDetailPanel({ tabId, params }: Props) {
   const [loginPw, setLoginPw] = useState('')
   const [clientId, setClientId] = useState<number | ''>((params?.clientId as number | undefined) ?? '')
   const [clients, setClients] = useState<ClientOption[]>([])
+  const [nameSelector, setNameSelector] = useState('')
+  const [priceSelector, setPriceSelector] = useState('')
+  const [thumbnailSelector, setThumbnailSelector] = useState('')
+  const [autoScrapeEnabled, setAutoScrapeEnabled] = useState(false)
+  const [autoScrapeHour, setAutoScrapeHour] = useState(3)
   const [loading, setLoading] = useState(!isNew)
   const [saving, setSaving] = useState(false)
 
@@ -30,16 +35,28 @@ export function SiteDetailPanel({ tabId, params }: Props) {
 
   useEffect(() => {
     if (isNew) return
-    fetch(`/api/sites/${siteId}`).then(r => r.json()).then((d: { name: string | null; url: string; login_id: string | null; login_pw: string | null; client_id: number | null }) => {
+    fetch(`/api/sites/${siteId}`).then(r => r.json()).then((d: {
+      name: string | null; url: string; login_id: string | null; login_pw: string | null; client_id: number | null
+      custom_name_selector: string | null; custom_price_selector: string | null; custom_thumbnail_selector: string | null
+      auto_scrape_enabled: boolean; auto_scrape_hour: number | null
+    }) => {
       setName(d.name || ''); setUrl(d.url); setLoginId(d.login_id || ''); setLoginPw(d.login_pw || '')
       setClientId(d.client_id ?? '')
+      setNameSelector(d.custom_name_selector || ''); setPriceSelector(d.custom_price_selector || '')
+      setThumbnailSelector(d.custom_thumbnail_selector || '')
+      setAutoScrapeEnabled(!!d.auto_scrape_enabled); setAutoScrapeHour(d.auto_scrape_hour ?? 3)
     }).finally(() => setLoading(false))
   }, [siteId, isNew])
 
   async function handleSave() {
     if (!url) return alert('URL을 입력하세요.')
     setSaving(true)
-    const body = JSON.stringify({ name, url, loginId, loginPw, clientId: clientId === '' ? null : clientId })
+    const body = JSON.stringify({
+      name, url, loginId, loginPw, clientId: clientId === '' ? null : clientId,
+      customNameSelector: nameSelector || undefined, customPriceSelector: priceSelector || undefined,
+      customThumbnailSelector: thumbnailSelector || undefined,
+      autoScrapeEnabled, autoScrapeHour: autoScrapeEnabled ? autoScrapeHour : null,
+    })
     try {
       const res = isNew
         ? await fetch('/api/sites', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
@@ -103,6 +120,44 @@ export function SiteDetailPanel({ tabId, params }: Props) {
             </select>
           </label>
         </div>
+
+        <details className="mb-3">
+          <summary className="text-xs text-gray-500 cursor-pointer select-none mb-2">고급 설정: 수동 추출 셀렉터 · 자동 재스크랩</summary>
+          <div className="grid grid-cols-3 gap-3 mb-3">
+            <label className="block">
+              <span className="block text-xs text-gray-500 mb-1">상품명 CSS 셀렉터 (선택)</span>
+              <input value={nameSelector} onChange={e => setNameSelector(e.target.value)} placeholder=".product-title"
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+            </label>
+            <label className="block">
+              <span className="block text-xs text-gray-500 mb-1">가격 CSS 셀렉터 (선택)</span>
+              <input value={priceSelector} onChange={e => setPriceSelector(e.target.value)} placeholder=".price"
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+            </label>
+            <label className="block">
+              <span className="block text-xs text-gray-500 mb-1">이미지 CSS 셀렉터 (선택)</span>
+              <input value={thumbnailSelector} onChange={e => setThumbnailSelector(e.target.value)} placeholder=".product-image img"
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+            </label>
+          </div>
+          <p className="text-xs text-gray-400 mb-3">자동 추출(구조화 데이터/메타태그)이 이 몰에서 실패할 때만 채워주세요. 지정하면 자동 추출 결과보다 우선합니다.</p>
+
+          <label className="flex items-center gap-2 text-sm text-gray-600 mb-2">
+            <input type="checkbox" checked={autoScrapeEnabled} onChange={e => setAutoScrapeEnabled(e.target.checked)} />
+            매일 자동 재스크랩 (증분)
+          </label>
+          {autoScrapeEnabled && (
+            <label className="block max-w-[160px]">
+              <span className="block text-xs text-gray-500 mb-1">실행 시각</span>
+              <select value={autoScrapeHour} onChange={e => setAutoScrapeHour(Number(e.target.value))}
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
+                {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+              </select>
+            </label>
+          )}
+          <p className="text-xs text-gray-400 mt-2">스크래핑 화면에서 최소 한 번 스크랩을 실행해야(그 설정이 저장돼야) 자동 재스크랩이 동작합니다.</p>
+        </details>
+
         <div className="flex items-center justify-between">
           <div className="flex gap-2">
             <button onClick={handleSave} disabled={saving}

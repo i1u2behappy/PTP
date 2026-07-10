@@ -13,10 +13,11 @@ interface Site {
 }
 
 export function SitesListPanel() {
-  const { openTab, refreshSignals } = useTabs()
+  const { openTab, refreshSignals, bumpRefresh } = useTabs()
   const [sites, setSites] = useState<Site[]>([])
   const [q, setQ] = useState('')
   const [loadError, setLoadError] = useState(false)
+  const [rescrapingAll, setRescrapingAll] = useState(false)
 
   const load = useCallback((query: string) => {
     fetch(`/api/sites?q=${encodeURIComponent(query)}`).then(r => {
@@ -51,14 +52,35 @@ export function SitesListPanel() {
     }
   }
 
+  async function handleRescrapeAll() {
+    if (!confirm('마지막으로 스크랩 설정이 저장된 모든 Mall을 증분 재스크랩할까요? 각 Mall은 백그라운드에서 실행됩니다.')) return
+    setRescrapingAll(true)
+    try {
+      const res = await fetch('/api/scrape/all', { method: 'POST' })
+      const d = await res.json() as { started: number; skipped: number }
+      alert(`${d.started}개 Mall 재스크랩을 시작했습니다${d.skipped > 0 ? ` (스크랩 설정이 없어 ${d.skipped}개는 건너뜀)` : ''}. 스크랩 검토 화면에서 결과를 확인하세요.`)
+      bumpRefresh('staging')
+    } catch (e) {
+      alert(`전체 재스크랩 실행에 실패했습니다: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setRescrapingAll(false)
+    }
+  }
+
   return (
     <div className="max-w-4xl">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-800">🏬 Mall 관리</h1>
-        <button onClick={() => openDetail()}
-          className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full transition-colors">
-          ➕ 새 Mall 등록
-        </button>
+        <div className="flex gap-2">
+          <button onClick={handleRescrapeAll} disabled={rescrapingAll}
+            className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+            {rescrapingAll ? '실행 중...' : '🔄 전체 Mall 재스크랩'}
+          </button>
+          <button onClick={() => openDetail()}
+            className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full transition-colors">
+            ➕ 새 Mall 등록
+          </button>
+        </div>
       </div>
 
       <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">

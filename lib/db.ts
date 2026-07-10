@@ -87,16 +87,34 @@ export async function getProductMasterRows(ids: number[]): Promise<RawMasterRow[
 }
 
 export async function initDb() {
+  // 동적 import로 지연 로드 — scheduler.ts가 이 파일의 pool/decryptSecret을 정적으로 import하므로
+  // 최상단에서 바로 import하면 순환참조가 된다. startScheduler()는 자체적으로 1회만 실행되도록 가드한다.
+  import('./scheduler').then(m => m.startScheduler()).catch(() => {})
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS sites (
-      id                 SERIAL PRIMARY KEY,
-      name               TEXT,
-      url                TEXT NOT NULL,
-      login_id           TEXT,
-      login_pw_encrypted TEXT,
-      login_pw_iv        TEXT,
-      created_at         TIMESTAMPTZ DEFAULT NOW()
+      id                         SERIAL PRIMARY KEY,
+      name                       TEXT,
+      url                        TEXT NOT NULL,
+      login_id                   TEXT,
+      login_pw_encrypted         TEXT,
+      login_pw_iv                TEXT,
+      custom_name_selector       TEXT,
+      custom_price_selector      TEXT,
+      custom_thumbnail_selector  TEXT,
+      auto_scrape_enabled        BOOLEAN DEFAULT false,
+      auto_scrape_hour           INT,
+      last_auto_scrape_date      DATE,
+      last_scrape_config         JSONB,
+      created_at                 TIMESTAMPTZ DEFAULT NOW()
     );
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS custom_name_selector TEXT;
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS custom_price_selector TEXT;
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS custom_thumbnail_selector TEXT;
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS auto_scrape_enabled BOOLEAN DEFAULT false;
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS auto_scrape_hour INT;
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS last_auto_scrape_date DATE;
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS last_scrape_config JSONB;
 
     CREATE TABLE IF NOT EXISTS supply_clients (
       id                   SERIAL PRIMARY KEY,
@@ -170,6 +188,16 @@ export async function initDb() {
       scope_params  JSONB DEFAULT '{}',
       mode          TEXT DEFAULT 'full',
       created_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- 카탈로그 스크랩 중 상품별 성공/실패 로그 (진행 화면의 실시간 로그 + 실패 재시도 큐 근거)
+    CREATE TABLE IF NOT EXISTS scrape_item_log (
+      id         SERIAL PRIMARY KEY,
+      session_id INT NOT NULL REFERENCES scrape_sessions(id) ON DELETE CASCADE,
+      url        TEXT NOT NULL,
+      status     TEXT NOT NULL,
+      error      TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     -- 1단계 원천 스크랩 데이터. 몰 상품코드 기준 upsert (증분 재스크랩의 정체성 앵커)

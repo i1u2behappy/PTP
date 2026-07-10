@@ -13,8 +13,12 @@ export async function POST(_: NextRequest, { params }: { params: Promise<{ id: s
   const mallProduct = mpRes.rows[0]
   if (!mallProduct?.source_url) return NextResponse.json({ error: 'not found' }, { status: 404 })
 
-  const siteRes = await pool.query<{ login_id: string | null; login_pw_encrypted: string | null; login_pw_iv: string | null }>(
-    `SELECT login_id, login_pw_encrypted, login_pw_iv FROM sites WHERE id=$1`, [mallProduct.site_id],
+  const siteRes = await pool.query<{
+    login_id: string | null; login_pw_encrypted: string | null; login_pw_iv: string | null
+    custom_name_selector: string | null; custom_price_selector: string | null; custom_thumbnail_selector: string | null
+  }>(
+    `SELECT login_id, login_pw_encrypted, login_pw_iv, custom_name_selector, custom_price_selector, custom_thumbnail_selector
+     FROM sites WHERE id=$1`, [mallProduct.site_id],
   )
   const site = siteRes.rows[0]
 
@@ -31,6 +35,9 @@ export async function POST(_: NextRequest, { params }: { params: Promise<{ id: s
       siteId: mallProduct.site_id,
       loginId: site?.login_id || undefined,
       loginPw: site ? decryptSecret(site.login_pw_encrypted, site.login_pw_iv) || undefined : undefined,
+      nameSelector: site?.custom_name_selector || undefined,
+      priceSelector: site?.custom_price_selector || undefined,
+      thumbnailSelector: site?.custom_thumbnail_selector || undefined,
     })
     const { id: stagingId } = await stageScrapedProduct({ siteId: mallProduct.site_id, sessionId }, result)
 

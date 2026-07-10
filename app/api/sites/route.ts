@@ -19,17 +19,32 @@ export async function GET(req: NextRequest) {
   return NextResponse.json(res.rows)
 }
 
+interface SiteBody {
+  name?: string
+  url: string
+  loginId?: string
+  loginPw?: string
+  clientId?: number | null
+  customNameSelector?: string
+  customPriceSelector?: string
+  customThumbnailSelector?: string
+  autoScrapeEnabled?: boolean
+  autoScrapeHour?: number | null
+}
+
 export async function POST(req: NextRequest) {
   await initDb()
-  const { name, url, loginId, loginPw, clientId } = await req.json() as
-    { name?: string; url: string; loginId?: string; loginPw?: string; clientId?: number | null }
-  if (!url) return NextResponse.json({ error: 'url required' }, { status: 400 })
+  const b = await req.json() as SiteBody
+  if (!b.url) return NextResponse.json({ error: 'url required' }, { status: 400 })
 
-  const { encrypted, iv } = loginPw ? encryptSecret(loginPw) : { encrypted: null, iv: null }
+  const { encrypted, iv } = b.loginPw ? encryptSecret(b.loginPw) : { encrypted: null, iv: null }
   const res = await pool.query<{ id: number }>(
-    `INSERT INTO sites (name, url, login_id, login_pw_encrypted, login_pw_iv, client_id)
-     VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-    [name || null, url, loginId || null, encrypted, iv, clientId || null],
+    `INSERT INTO sites (name, url, login_id, login_pw_encrypted, login_pw_iv, client_id,
+       custom_name_selector, custom_price_selector, custom_thumbnail_selector, auto_scrape_enabled, auto_scrape_hour)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+    [b.name || null, b.url, b.loginId || null, encrypted, iv, b.clientId || null,
+      b.customNameSelector || null, b.customPriceSelector || null, b.customThumbnailSelector || null,
+      !!b.autoScrapeEnabled, b.autoScrapeHour ?? null],
   )
   return NextResponse.json({ id: res.rows[0].id })
 }

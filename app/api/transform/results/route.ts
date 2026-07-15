@@ -29,11 +29,20 @@ export async function PUT(req: NextRequest) {
   return NextResponse.json({ ok: true })
 }
 
-/** 확정: product_master에 매핑된 컬럼 값을 반영한다. */
+/** 확정(반영): product_master에 매핑된 컬럼 값을 반영한다. */
 export async function POST(req: NextRequest) {
   const b = await req.json() as { id: number; clientId: number }
   if (!b.id || !b.clientId) return NextResponse.json({ error: 'id, clientId required' }, { status: 400 })
 
   const productMasterId = await commitGeneratedRow(b.id, b.clientId)
   return NextResponse.json({ productMasterId })
+}
+
+/** 취소: 아직 확정 전(draft)인 생성 결과를 지워 되돌린다 — 확정된 행은 지우지 않는다. */
+export async function DELETE(req: NextRequest) {
+  const id = Number(req.nextUrl.searchParams.get('id'))
+  if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
+
+  await pool.query(`DELETE FROM transform_generated_rows WHERE id = $1 AND status = 'draft'`, [id])
+  return NextResponse.json({ ok: true })
 }

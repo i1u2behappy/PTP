@@ -160,6 +160,7 @@ export function TransformPanel() {
 
   const [generatedRows, setGeneratedRows] = useState<GeneratedRow[]>([])
   const [committing, setCommitting] = useState<number | null>(null)
+  const [discarding, setDiscarding] = useState<number | null>(null)
 
   const loadGuide = useCallback((siteId: number) => {
     fetch(`/api/transform/guide?siteId=${siteId}`).then(r => r.json())
@@ -336,14 +337,40 @@ export function TransformPanel() {
       const res = await fetch('/api/transform/results', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: row.id, clientId: selectedSite.client_id }),
       })
-      if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`확정 실패: ${e.error || res.status}`); return }
+      if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`반영 실패: ${e.error || res.status}`); return }
       loadGeneratedRows(selectedSite.id)
     } finally {
       setCommitting(null)
     }
   }
 
+  /** 취소: 확정 전 생성 결과를 지우고 되돌린다 — 필요하면 대상 상품에서 다시 생성할 수 있다. */
+  async function handleDiscard(row: GeneratedRow) {
+    if (!selectedSite) return
+    if (!confirm(`${row.name_original || row.mall_product_code} 항목의 생성 결과를 취소할까요? 되돌린 뒤 다시 생성해야 합니다.`)) return
+    setDiscarding(row.id)
+    try {
+      const res = await fetch(`/api/transform/results?id=${row.id}`, { method: 'DELETE' })
+      if (!res.ok) { alert('취소에 실패했습니다.'); return }
+      loadGeneratedRows(selectedSite.id)
+    } finally {
+      setDiscarding(null)
+    }
+  }
+
   const columnHeaders = toBeUpload?.column_headers || []
+  const rulesByColumn = new Map(rules.map(r => [r.column_name, r]))
+
+  /** 2차 검증 시 이 값이 어떤 기준으로 생성됐는지 컬럼마다 다시 보여준다. */
+  function ruleSummary(rule?: ColumnRule): string {
+    if (!rule) return ''
+    if (rule.mode === 'ai') return `AI 생성 — ${rule.ai_instruction || '예시 패턴 기반 자동 생성'}`
+    if (rule.mode === 'copy') return `그대로 복사 — ${SOURCE_FIELDS.find(f => f.value === rule.source_field)?.label || rule.source_field || '(미지정)'}`
+    if (rule.mode === 'lookup') return `값 매핑 — ${SOURCE_FIELDS.find(f => f.value === rule.source_field)?.label || rule.source_field || '(미지정)'} 기준`
+    const cfg = rule.composite_config
+    if (cfg.op === 'multiply' || cfg.op === 'add') return `${cfg.op === 'multiply' ? '배율' : '가산'} ${cfg.factor ?? ''} — ${(cfg.fields || [])[0] || '(미지정)'}`
+    return `문자열 합성 — ${cfg.template || (cfg.fields || []).map(f => `{${f}}`).join(' ')}`
+  }
 
   return (
     <div className="max-w-4xl">
@@ -621,19 +648,29 @@ export function TransformPanel() {
 
               {generatedRows.length > 0 && (
                 <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-                  <div className="text-xs font-semibold text-gray-500 mb-3">생성 결과 검토 & 확정</div>
+                  <div className="text-xs font-semibold text-gray-500 mb-1">2차 검증 — 생성 결과 검토 & 반영</div>
+                  <p className="text-[11px] text-gray-400 mb-3">컬럼마다 어떤 기준으로 생성됐는지 다시 표시했습니다. 값을 확인·수정한 뒤 행마다 반영하거나, 마음에 안 들면 취소해 되돌리세요.</p>
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs border-collapse">
                       <thead>
                         <tr className="text-left text-gray-500 border-b border-gray-200">
-                          <th className="px-2 py-2">상품</th>
-                          {columnHeaders.map(h => <th key={h} className="px-2 py-2">{h}</th>)}
-                          <th className="px-2 py-2">상태</th>
-                          <th className="px-2 py-2">확정</th>
+                          <th className="px-2 py-2 align-top">상품</th>
+                          {columnHeaders.map(h => (
+                            <th key={h} className="px-2 py-2 align-top">
+                              <div>{h}</div>
+                              <div className="text-[10px] font-normal text-gray-400 mt-0.5 max-w-[140px] truncate" title={ruleSummary(rulesByColumn.get(h))}>
+                                {ruleSummary(rulesByColumn.get(h)) || '규칙 미설정'}
+                              </div>
+                            </th>
+                          ))}
+                          <th className="px-2 py-2 align-top">상태</th>
+                          <th className="px-2 py-2 align-top">반영 / 취소</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {generatedRows.map(row => (
+                        {generatedRows.map(row => {
+                          const locked = row.status === 'committed' || committing === row.id || discarding === row.id
+                          return (
                           <tr key={row.id} className="border-b border-gray-100">
                             <td className="px-2 py-2 whitespace-nowrap">
                               <div className="font-mono text-gray-500">{row.mall_product_code}</div>
@@ -642,20 +679,28 @@ export function TransformPanel() {
                             {columnHeaders.map(h => (
                               <td key={h} className="px-2 py-2">
                                 <input defaultValue={row.generated_values[h] ?? ''} onBlur={e => saveGeneratedCell(row.id, h, e.target.value)}
-                                  className="w-28 border border-gray-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-teal-300" />
+                                  disabled={row.status === 'committed'}
+                                  className="w-28 border border-gray-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-teal-300 disabled:bg-gray-50 disabled:text-gray-400" />
                               </td>
                             ))}
                             <td className="px-2 py-2">
-                              {row.status === 'committed' ? <span className="text-emerald-600 font-semibold">확정됨</span> : <span className="text-gray-400">검토중</span>}
+                              {row.status === 'committed' ? <span className="text-emerald-600 font-semibold">반영됨</span> : <span className="text-gray-400">검토중</span>}
                             </td>
                             <td className="px-2 py-2">
-                              <button onClick={() => handleCommit(row)} disabled={committing === row.id}
-                                className="px-3 py-1 bg-emerald-500 hover:bg-emerald-600 text-white rounded-full disabled:opacity-50">
-                                {committing === row.id ? '처리중...' : '확정'}
-                              </button>
+                              <div className="flex gap-1">
+                                <button onClick={() => handleCommit(row)} disabled={locked}
+                                  className="px-3 py-1 bg-emerald-500 hover:bg-emerald-600 text-white rounded-full disabled:opacity-50">
+                                  {committing === row.id ? '처리중...' : '반영'}
+                                </button>
+                                <button onClick={() => handleDiscard(row)} disabled={locked}
+                                  className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-full disabled:opacity-50">
+                                  {discarding === row.id ? '취소 중...' : '취소'}
+                                </button>
+                              </div>
                             </td>
                           </tr>
-                        ))}
+                          )
+                        })}
                       </tbody>
                     </table>
                   </div>

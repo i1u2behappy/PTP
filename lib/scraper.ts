@@ -6,11 +6,15 @@
  * 짜야 한다. (예: 대표이미지/상세이미지의 개수·파일명, 옵션 값, 재고수량, 상세페이지 내 텍스트 설명 등)
  */
 import path from 'path'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import { chromium, type BrowserContext, type Page } from 'playwright'
 import type { ExtractedProduct } from './ai'
 import { extractProductFieldsWithAI } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
+
+const execFileAsync = promisify(execFile)
 
 export interface ScrapeOptions {
   /** 시작 URL. 생략하면 로그인 창에서 현재 열려있는 페이지를 그대로 사용 */
@@ -76,9 +80,26 @@ function isStopRequested(sessionId?: number) {
   return sessionId !== undefined && stopRequests.has(sessionId)
 }
 
+/**
+ * 이 siteId의 프로필 폴더를 이미 점유 중인 Chrome 프로세스가 있으면 강제 종료한다.
+ * 코드 수정으로 서버가 핫리로드되면 openSessions(메모리) 참조는 끊기지만 실제 Chrome 창은 그대로 떠서
+ * 프로필 폴더를 계속 잠그고 있을 수 있다 — 메모리 상태를 믿지 않고 매번 OS 프로세스 목록에서 직접 찾아
+ * 정리해야 새 로그인 창이 확실히 열린다.
+ * ponytail: Windows 전용(taskkill/PowerShell) — 이 도구는 사용자 로컬 Windows 환경 전용이라 충분하다.
+ */
+async function killOrphanedProfileProcess(siteId: number): Promise<void> {
+  if (process.platform !== 'win32') return
+  const dir = profileDir(siteId)
+  const script = `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
+    `Where-Object { $_.CommandLine -like '*${dir}*' -and $_.CommandLine -notlike '*--type=*' } | ` +
+    `ForEach-Object { taskkill /PID $_.ProcessId /F /T }`
+  await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script]).catch(() => {})
+}
+
 /** 사용자가 직접 로그인을 확인할 수 있도록 화면에 보이는 브라우저 창을 연다 */
 export async function openLoginWindow(siteId: number, opts: { url: string; loginId?: string; loginPw?: string }) {
   await closeLoginWindow(siteId)
+  await killOrphanedProfileProcess(siteId)
   const context = await chromium.launchPersistentContext(profileDir(siteId), {
     headless: false,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',

@@ -1,14 +1,17 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
 import { useTabs } from '../shell/TabsContext'
+import { SITES_LIST_TAB } from '../shell/menuTabs'
 
 interface Site {
   id: number
   name: string | null
   url: string
   login_id: string | null
+  login_pw_masked: string | null
   client_name: string | null
   blocked: boolean
+  latest_memo: string | null
   created_at: string
 }
 
@@ -31,14 +34,11 @@ export function SitesListPanel() {
   useEffect(() => { load(q) }, [load, q, refreshSignals.sites])
 
   function openDetail(site?: Site) {
-    openTab(site
-      ? { id: `site-detail:${site.id}`, type: 'site-detail', title: site.name || site.url, icon: '🏬', params: { siteId: site.id }, closable: true }
-      : { id: 'site-detail:new', type: 'site-detail', title: '새 Mall 등록', icon: '➕', closable: true },
-    )
+    openTab({ ...SITES_LIST_TAB, type: 'site-detail', params: site ? { siteId: site.id } : undefined })
   }
 
   function openScraper(site: Site) {
-    openTab({ id: `scraper:${site.id}`, type: 'scraper', title: site.name || site.url, icon: '🔍', params: { siteId: site.id }, closable: true })
+    openTab({ id: 'scraper', type: 'scraper', title: '스크래핑', icon: '🔍', params: { siteId: site.id }, closable: true })
   }
 
   async function handleDelete(id: number) {
@@ -68,8 +68,8 @@ export function SitesListPanel() {
   }
 
   return (
-    <div className="max-w-4xl">
-      <div className="flex items-center justify-between mb-6">
+    <div className="h-full flex flex-col">
+      <div className="flex items-center justify-between mb-6 shrink-0">
         <h1 className="text-2xl font-bold text-gray-800">🏬 Mall 관리</h1>
         <div className="flex gap-2">
           <button onClick={handleRescrapeAll} disabled={rescrapingAll}
@@ -83,35 +83,54 @@ export function SitesListPanel() {
         </div>
       </div>
 
-      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-        <div className="px-4 py-3 border-b border-gray-100 bg-gray-50">
-          <input value={q} onChange={e => setQ(e.target.value)} placeholder="이름 또는 URL 검색..."
-            className="w-full border border-gray-300 rounded-xl px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-        </div>
-        {loadError ? (
-          <div className="p-8 text-center text-sm text-rose-500">목록을 불러오지 못했습니다. 서버(DB) 연결을 확인해주세요.</div>
-        ) : sites.length === 0 ? (
-          <div className="p-8 text-center text-sm text-gray-400">등록된 Mall이 없습니다.</div>
-        ) : (
-          <div className="divide-y divide-gray-100">
-            {sites.map(s => (
-              <div key={s.id} className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors">
-                <button onClick={() => openScraper(s)} className="flex-1 min-w-0 text-left">
-                  <div className="text-sm font-medium text-gray-800">
-                    {s.name || '(이름 없음)'}
-                    {s.blocked && <span className="ml-2 text-xs font-semibold text-rose-500">차단</span>}
-                  </div>
-                  <div className="text-xs text-gray-500 truncate">{s.url}</div>
-                  {s.login_id && <div className="text-xs text-gray-400">ID: {s.login_id}</div>}
-                  {s.client_name && <div className="text-xs text-teal-500">거래처: {s.client_name}</div>}
-                </button>
-                <button onClick={() => openDetail(s)} className="text-xs text-teal-500 hover:underline shrink-0">수정</button>
-                <button onClick={() => handleDelete(s.id)} className="text-xs text-rose-500 hover:underline shrink-0">삭제</button>
-              </div>
-            ))}
-          </div>
-        )}
+      <div className="mb-4 shrink-0">
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="이름 또는 URL 검색..."
+          className="w-full max-w-md border border-gray-300 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
       </div>
+
+      {loadError ? (
+        <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-sm text-rose-500">목록을 불러오지 못했습니다. 서버(DB) 연결을 확인해주세요.</div>
+      ) : sites.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-sm text-gray-400">등록된 Mall이 없습니다.</div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-0 flex flex-col">
+          <div className="overflow-auto flex-1 min-h-0">
+            <table className="text-xs border-collapse whitespace-nowrap">
+              <thead className="sticky top-0 z-10 bg-gray-50">
+                <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+                  <th className="px-3 py-2 text-left sticky left-0 bg-gray-50 z-20">이름</th>
+                  <th className="px-3 py-2 text-left">URL</th>
+                  <th className="px-3 py-2 text-left">로그인ID</th>
+                  <th className="px-3 py-2 text-left">비밀번호</th>
+                  <th className="px-3 py-2 text-left">거래처</th>
+                  <th className="px-3 py-2 text-left">상태</th>
+                  <th className="px-3 py-2 text-left">메모</th>
+                  <th className="px-3 py-2 text-left">등록일</th>
+                  <th className="px-3 py-2 text-left">관리</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sites.map(s => (
+                  <tr key={s.id} onClick={() => openScraper(s)} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
+                    <td className="px-3 py-2 text-gray-800 font-medium sticky left-0 bg-white">{s.name || '(이름 없음)'}</td>
+                    <td className="px-3 py-2 text-gray-500 max-w-[280px] truncate" title={s.url}>{s.url}</td>
+                    <td className="px-3 py-2 text-gray-500">{s.login_id || '-'}</td>
+                    <td className="px-3 py-2 text-gray-500 font-mono">{s.login_pw_masked || '-'}</td>
+                    <td className="px-3 py-2 text-teal-600">{s.client_name || '-'}</td>
+                    <td className="px-3 py-2">{s.blocked ? <span className="font-semibold text-rose-500">차단</span> : <span className="text-emerald-600">정상</span>}</td>
+                    <td className="px-3 py-2 text-gray-500 max-w-[220px] truncate" title={s.latest_memo || ''}>{s.latest_memo || '-'}</td>
+                    <td className="px-3 py-2 text-gray-400">{new Date(s.created_at).toLocaleDateString()}</td>
+                    <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
+                      <button onClick={() => openDetail(s)} className="text-teal-500 hover:underline mr-2">수정</button>
+                      <button onClick={() => handleDelete(s.id)} className="text-rose-500 hover:underline">삭제</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

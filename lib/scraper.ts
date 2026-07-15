@@ -83,7 +83,8 @@ export async function openLoginWindow(siteId: number, opts: { url: string; login
   })
   const page = context.pages()[0] || await context.newPage()
   await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => {})
-  await loginIfNeeded(page, { url: opts.url, loginId: opts.loginId, loginPw: opts.loginPw })
+  // 아이디/비번만 채워두고 제출은 하지 않는다 — 사용자가 직접 로그인 버튼을 눌러야 이후 "로그인 확인" 흐름과 맞는다.
+  await loginIfNeeded(page, { url: opts.url, loginId: opts.loginId, loginPw: opts.loginPw }, { autoSubmit: false })
 }
 
 /** 현재 로그인 창에서 사용자가 보고 있는 페이지 URL (없으면 null) */
@@ -244,7 +245,11 @@ async function solveCaptchaIfPresent(page: Page) {
   } catch { /* 캡차 풀이 실패는 로그인 실패로 이어질 뿐, 스크래핑 전체를 죽이지 않는다 */ }
 }
 
-async function loginIfNeeded(page: import('playwright').Page, opts: { url: string; loginId?: string; loginPw?: string; loginIdSelector?: string; loginPwSelector?: string; loginBtnSelector?: string }) {
+async function loginIfNeeded(
+  page: import('playwright').Page,
+  opts: { url: string; loginId?: string; loginPw?: string; loginIdSelector?: string; loginPwSelector?: string; loginBtnSelector?: string },
+  { autoSubmit = true }: { autoSubmit?: boolean } = {},
+) {
   if (!opts.loginId || !opts.loginPw) return
 
   // name*="id" 등은 hidden/checkbox 필드(예: SNS연동용 hidden input, "아이디 저장" 체크박스)도 함께 매칭될 수 있어
@@ -267,6 +272,9 @@ async function loginIfNeeded(page: import('playwright').Page, opts: { url: strin
 
     await solveCaptchaIfPresent(page)
 
+    // autoSubmit=false(로그인 창을 직접 여는 경우)는 아이디/비번만 채워두고, 실제 로그인 버튼 클릭은 사용자가 직접 한다.
+    if (!autoSubmit) return
+
     let clicked = false
     for (const sel of btnSelectors) {
       const btn = page.locator(sel).first()
@@ -287,11 +295,19 @@ interface DomOption { name: string; values: string[] }
 const OPTION_SELECT_EXCLUDE_RE = /수량|qty|quantity|정렬|sort|perpage|page/i
 const OPTION_PLACEHOLDER_RE = /^(선택|선택하세요|choose|please select)/i
 
+// 은행/언어/빠른 카테고리 이동 등 헤더·푸터의 바로가기 <select>는 onchange에서 즉시 페이지 이동을 일으켜
+// 상품 옵션과 혼동하면 안 된다 (선택할 때마다 새 창이 열리거나 페이지가 이동해 옵션 스캔이 멈추거나 지연됨).
+const OPTION_SELECT_NAV_ONCHANGE_RE = /location|window\.open|\.href/i
+// 위 정규식과 같은 기준으로 실제 상호작용(selectOption) 대상을 고를 때 쓰는 CSS 셀렉터
+const PRODUCT_SELECT_LOCATOR = 'select:not([onchange*="location" i]):not([onchange*="window.open" i]):not([onchange*=".href" i])'
+
 async function scanSelectOptions(page: Page): Promise<DomOption[]> {
-  return page.evaluate(({ excludeSrc, placeholderSrc }) => {
+  return page.evaluate(({ excludeSrc, placeholderSrc, navOnchangeSrc }) => {
     const excludeRe = new RegExp(excludeSrc, 'i')
     const placeholderRe = new RegExp(placeholderSrc, 'i')
+    const navOnchangeRe = new RegExp(navOnchangeSrc, 'i')
     return Array.from(document.querySelectorAll('select'))
+      .filter(sel => !navOnchangeRe.test(sel.getAttribute('onchange') || ''))
       .map(sel => {
         const name = sel.getAttribute('title') || sel.name || sel.id || ''
         const values = Array.from((sel as HTMLSelectElement).options)
@@ -300,7 +316,7 @@ async function scanSelectOptions(page: Page): Promise<DomOption[]> {
         return { name, values }
       })
       .filter(o => o.values.length > 0 && !excludeRe.test(o.name))
-  }, { excludeSrc: OPTION_SELECT_EXCLUDE_RE.source, placeholderSrc: OPTION_PLACEHOLDER_RE.source })
+  }, { excludeSrc: OPTION_SELECT_EXCLUDE_RE.source, placeholderSrc: OPTION_PLACEHOLDER_RE.source, navOnchangeSrc: OPTION_SELECT_NAV_ONCHANGE_RE.source })
 }
 
 /** <select>가 아니라 라디오/체크박스 또는 색상·옵션 스와치(li/button/a)로 렌더되는 옵션 UI를 읽는다. */
@@ -362,8 +378,8 @@ async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
     const optionCount = Math.min(initial[0].values.length, 20)
     for (let i = 0; i < optionCount; i++) {
       try {
-        const firstSelect = (await page.$$('select'))[0]
-        if (!firstSelect) break
+        const firstSelect = page.locator(PRODUCT_SELECT_LOCATOR).first()
+        if (await firstSelect.count() === 0) break
         // 기본 30초 대기 없이 짧게 시도하고 넘어간다 — 비활성화된(품절 등) option 하나가 스크랩 전체를 30초씩 붙잡는 것을 방지
         await firstSelect.selectOption({ index: i }, { timeout: 3_000 })
         await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {})
@@ -401,7 +417,7 @@ export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeRe
         lastProduct = product
         // 가격과 이미지가 둘 다 없으면 실제 상품 페이지가 아니라 봇 차단/오류 안내 페이지를 받았을 가능성이
         // 높다 (빠른 연속 요청을 감지해 안내 페이지로 대신 응답하는 몰이 있음) — 그대로 반환하지 않고 재시도한다.
-        if (product.price == null && !product.thumbnail_url) {
+        if (product.price == null && !product.thumbnail_urls.length) {
           throw new Error('가격/이미지를 모두 찾지 못함 (차단 또는 일시 오류로 추정)')
         }
         return { sourceUrl, product }
@@ -424,15 +440,18 @@ export type MallPlatform = 'cafe24' | 'makeshop' | 'godomall' | 'unknown'
 interface PlatformProfile {
   productLinkSelector: string | null
   nextPageSelector: string | null
+  /** 실제 상품 상세페이지 URL 패턴. 목록 컨테이너 셀렉터가 로고/검색/카테고리 배너 등 상품이 아닌
+   *  링크까지 함께 잡아내는 스킨이 있어, 이 패턴에 맞는 URL만 상품으로 인정해 걸러낸다. */
+  detailUrlPattern: RegExp | null
 }
 
 // 국내 대표 쇼핑몰 구축 플랫폼별로 알려진 상품링크/다음페이지 셀렉터 기본값.
 // 스킨(테마)마다 클래스명이 달라질 수 있어 100% 보장되진 않으며, 사용자가 직접 입력하면 항상 그게 우선한다.
 const PLATFORM_PROFILES: Record<MallPlatform, PlatformProfile> = {
-  cafe24:   { productLinkSelector: '.xans-product-listmain a, ul.prdList li a, .prdList .thumbnail a', nextPageSelector: '.xans-product-listpagination a.next' },
-  makeshop: { productLinkSelector: '.item_gallery_type a, .prd_list_wrap a', nextPageSelector: '.paging a.next' },
-  godomall: { productLinkSelector: '.item_cont a, .goods_list a', nextPageSelector: '.paginate a.next' },
-  unknown:  { productLinkSelector: null, nextPageSelector: null },
+  cafe24:   { productLinkSelector: '.xans-product-listmain a, ul.prdList li a, .prdList .thumbnail a', nextPageSelector: '.xans-product-listpagination a.next', detailUrlPattern: /\/product\/detail\.html/ },
+  makeshop: { productLinkSelector: '.item_gallery_type a, .prd_list_wrap a', nextPageSelector: '.paging a.next', detailUrlPattern: /shopdetail\.html\?branduid=/ },
+  godomall: { productLinkSelector: '.item_cont a, .goods_list a', nextPageSelector: '.paginate a.next', detailUrlPattern: /goods_view\.php\?goodsno=/ },
+  unknown:  { productLinkSelector: null, nextPageSelector: null, detailUrlPattern: null },
 }
 
 /** 페이지의 meta/스크립트/URL 패턴을 보고 어떤 쇼핑몰 구축 플랫폼인지 추정한다. */
@@ -471,12 +490,14 @@ interface CollectedLinks {
   platform: MallPlatform
   /** 각 상품 URL이 발견된 목록 페이지의 카테고리 경로 */
   categoryByUrl: Map<string, string>
+  /** 목록 페이지에서 바로 얻을 수 있는 상품명/썸네일 (실제 상품 페이지를 열지 않아 빠른 미리보기용) */
+  linkInfo: Map<string, { name: string; thumbnail: string }>
 }
 
 /** 목록 페이지(들)을 순회하며 제품 URL 후보를 모은다. 실제 상품 추출은 하지 않는다(테스트/실행 공용 로직). */
 async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<CollectedLinks> {
   if (opts.productUrls?.length) {
-    return { urls: opts.productUrls, platform: 'unknown', categoryByUrl: new Map() }
+    return { urls: opts.productUrls, platform: 'unknown', categoryByUrl: new Map(), linkInfo: new Map() }
   }
 
   const listingUrls = opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])
@@ -502,6 +523,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
   const baseUrl = new URL(listingUrls[0]).origin
   const productUrlSet = new Set<string>()
   const categoryByUrl = new Map<string, string>()
+  const linkInfo = new Map<string, { name: string; thumbnail: string }>()
 
   for (const listingUrl of listingUrls) {
     if (page.url() !== listingUrl) {
@@ -511,22 +533,31 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
     const categoryLabel = await detectCategoryLabel(page)
 
     for (let p = 0; p < maxPages; p++) {
-      const hrefs: string[] = await page.evaluate(({ userSel, platformSel }) => {
-        const pick = (sel: string, requireImg: boolean) => Array.from(document.querySelectorAll(sel))
+      const items: { href: string; name: string; thumbnail: string }[] = await page.evaluate(({ userSel, platformSel, detailPatternSrc }) => {
+        const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc) : null
+        const pick = (sel: string, requireImg: boolean, applyDetailFilter: boolean) => Array.from(document.querySelectorAll(sel))
           .filter(a => !requireImg || a.querySelector('img'))
-          .map(a => (a as HTMLAnchorElement).href)
-          .filter(h => h && h.startsWith('http'))
+          .map(a => {
+            const img = a.querySelector('img') as HTMLImageElement | null
+            return { href: (a as HTMLAnchorElement).href, name: (img?.alt || a.textContent || '').trim(), thumbnail: img?.src || '' }
+          })
+          .filter(item => item.href && item.href.startsWith('http'))
+          // 목록 컨테이너 셀렉터가 로고/검색/카테고리 배너 등 상품이 아닌 링크까지 잡아내는 스킨 대비 —
+          // 상품 상세 URL 패턴을 아는 플랫폼이면 그 패턴에 맞는 것만 상품으로 인정한다. 사용자가 직접 지정한
+          // 셀렉터는 의도를 존중해 이 필터를 적용하지 않는다.
+          .filter(item => !applyDetailFilter || !detailRe || detailRe.test(item.href))
 
-        if (userSel) return pick(userSel, false)
+        if (userSel) return pick(userSel, false, false)
         if (platformSel) {
-          const viaProfile = pick(platformSel, false)
+          const viaProfile = pick(platformSel, false, true)
           if (viaProfile.length > 0) return viaProfile
         }
-        return pick('a', true) // 범용 폴백: 썸네일 이미지를 감싼 링크만 제품으로 인식
-      }, { userSel, platformSel })
-      hrefs.filter(h => h.startsWith(baseUrl)).forEach(h => {
-        productUrlSet.add(h)
-        if (categoryLabel && !categoryByUrl.has(h)) categoryByUrl.set(h, categoryLabel)
+        return pick('a', true, true) // 범용 폴백: 썸네일 이미지를 감싼 링크만 제품으로 인식
+      }, { userSel, platformSel, detailPatternSrc: profile.detailUrlPattern?.source })
+      items.filter(item => item.href.startsWith(baseUrl)).forEach(item => {
+        productUrlSet.add(item.href)
+        if (categoryLabel && !categoryByUrl.has(item.href)) categoryByUrl.set(item.href, categoryLabel)
+        if (!linkInfo.has(item.href) && (item.name || item.thumbnail)) linkInfo.set(item.href, { name: item.name, thumbnail: item.thumbnail })
       })
 
       if (p >= maxPages - 1 || !nextPageSelector) break
@@ -542,20 +573,55 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
   const excludeSet  = new Set(opts.excludeUrls || [])
   const urls = [...productUrlSet].filter(h => !listingSet.has(h) && !excludeSet.has(h))
 
-  return { urls, platform, categoryByUrl }
+  return { urls, platform, categoryByUrl, linkInfo }
 }
 
-export interface TestCatalogResult {
+export interface CatalogPreviewItem {
+  url: string
+  name: string
+  thumbnail: string
+}
+
+export interface CatalogPreviewResult {
+  /** 지금 설정(셀렉터/카테고리)으로 목록에서 찾은 전체 상품 수 (페이징 끝까지 확인) */
   total: number
-  samples: string[]
   platform: MallPlatform
+  /** 그중 첫 번째 상품을 실제로 열어 추출한 결과 (찾은 상품이 없으면 null) */
+  preview: ScrapeResult | null
+  /** 나머지 상품들의 목록 페이지 기준 정보(상품명/썸네일) — 실제로 열어보지 않아 빠르다 */
+  items: CatalogPreviewItem[]
 }
 
-/** 실제로 상품을 스크랩하지 않고, 지금 설정(셀렉터/페이지네이션)으로 몇 개가 잡히는지만 미리 확인한다. */
-export async function testCatalogSelectors(opts: ScrapeOptions): Promise<TestCatalogResult> {
+// 미리보기는 실제 스크랩(maxPages 설정)과 무관하게 페이징 끝까지 따라가 정확한 총 개수를 보여준다.
+// 페이지네이션이 무한 루프에 빠지는 몰을 대비한 안전장치용 상한일 뿐, 일반적인 카테고리는 이 안에서 다 끝난다.
+const PREVIEW_MAX_PAGES = 50
+
+/**
+ * 카탈로그(목록) 모드 전용 — 목록에서 상품 링크를 모아 개수를 확인하고, 첫 번째 상품을 곧바로 열어
+ * 미리보기까지 한 번의 브라우저 세션으로 처리한다. 목록 수집과 미리보기를 별도 요청으로 나누면
+ * 매번 새 세션을 여느라 느려지므로, 하나로 합쳐 빠르게 확인할 수 있게 한다.
+ * ponytail: 미리보기 전용이라 재시도/AI폴백 없이 1회만 시도한다 — 실패하면 버튼을 다시 누르면 됨.
+ */
+export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPreviewResult> {
   return withContext(opts, async page => {
-    const { urls, platform } = await collectProductUrls(page, opts)
-    return { total: urls.length, samples: urls.slice(0, 10), platform }
+    const { urls, platform, linkInfo } = await collectProductUrls(page, { ...opts, maxPages: PREVIEW_MAX_PAGES })
+    const items: CatalogPreviewItem[] = urls.map(url => ({
+      url, name: linkInfo.get(url)?.name || '', thumbnail: linkInfo.get(url)?.thumbnail || '',
+    }))
+    if (!urls.length) return { total: 0, platform, preview: null, items: [] }
+
+    const firstUrl = urls[0]
+    await page.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 })
+    await loginIfNeeded(page, { url: firstUrl, ...opts })
+    if (opts.loginId && page.url() !== firstUrl) {
+      await page.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+    }
+    await waitForExtractableContent(page)
+    const product = await extractProductRuleBased(page, firstUrl, selectorOverrides(opts))
+    const domOptions = await extractOptionsFromDom(page)
+    if (domOptions.length) product.options = domOptions
+
+    return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product }, items }
   })
 }
 
@@ -593,6 +659,12 @@ export async function scrapeCatalogPage(
       for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
         try {
           await workerPage.goto(pUrl, { waitUntil: 'load', timeout: 30_000 })
+          // 장시간 카탈로그 스크랩 중 세션이 만료되면 로그인 페이지로 리다이렉트되는 몰이 있다 — 매 상품마다
+          // 재로그인을 시도해 세션을 회복하고(이미 로그인돼 있으면 아이디 필드가 없어 즉시 지나간다), 원래 상품 페이지로 되돌아간다.
+          await loginIfNeeded(workerPage, { url: pUrl, ...opts })
+          if (opts.loginId && workerPage.url() !== pUrl) {
+            await workerPage.goto(pUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+          }
           await waitForExtractableContent(workerPage)
           const product = await extractProductRuleBased(workerPage, pUrl, selectorOverrides(opts))
           const domOptions = await extractOptionsFromDom(workerPage)
@@ -600,7 +672,7 @@ export async function scrapeCatalogPage(
           lastProduct = product
           // 가격과 이미지가 둘 다 없으면 실제 상품 페이지가 아니라 봇 차단/오류 안내 페이지를 받았을 가능성이
           // 높다 (빠른 연속 요청을 감지해 안내 페이지로 대신 응답하는 몰이 있음) — 그대로 저장하지 않고 재시도한다.
-          if (product.price == null && !product.thumbnail_url) {
+          if (product.price == null && !product.thumbnail_urls.length) {
             throw new Error('가격/이미지를 모두 찾지 못함 (차단 또는 일시 오류로 추정)')
           }
           const category = categoryByUrl.get(pUrl)

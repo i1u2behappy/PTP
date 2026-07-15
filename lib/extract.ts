@@ -6,7 +6,8 @@ interface RawPageData {
   price: number | null
   brand: string
   description: string
-  images: string[]
+  mainImages: string[]
+  detailImages: string[]
   infoRows: [string, string][]
   sku: string
   availability: string
@@ -35,7 +36,7 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     let price: number | null = null
     let brand = ''
     let description = ''
-    let images: string[] = []
+    let mainImages: string[] = []
     let sku = ''
     let availability = ''
 
@@ -45,7 +46,7 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       brand = (typeof brandField === 'string' ? brandField : brandField?.name) || ''
       description = (product.description as string) || ''
       const imgField = product.image
-      images = Array.isArray(imgField) ? imgField as string[] : (imgField ? [imgField as string] : [])
+      mainImages = Array.isArray(imgField) ? imgField as string[] : (imgField ? [imgField as string] : [])
       sku = (product.sku as string) || (product.productID as string) || (product.mpn as string) || ''
       const offersField = product.offers
       const offers = Array.isArray(offersField) ? offersField : (offersField ? [offersField] : [])
@@ -55,10 +56,15 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     }
 
     if (!name) name = ogContent('og:title') || document.title || ''
-    if (!images.length) {
+    if (!mainImages.length) {
       const ogImg = ogContent('og:image')
-      if (ogImg) images = [ogImg]
+      if (ogImg) mainImages = [ogImg]
     }
+    // ld+json/og의 대표 이미지 갤러리(여러 장일 수 있음)와는 별개로, 카페24 표준 상세설명 영역(#prdDetail)에
+    // 판매자가 직접 올린 상품별 상세 이미지(사이즈/소재 등 텍스트로는 안 남는 구분 정보)를 모은다
+    const detailImages = Array.from(document.querySelectorAll<HTMLImageElement>('#prdDetail img'))
+      .map(img => img.src)
+      .filter(src => src && !mainImages.includes(src))
     if (!description) {
       description = ogContent('og:description') || document.querySelector('meta[name="description"]')?.getAttribute('content') || ''
     }
@@ -88,7 +94,7 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       if (cells.length === 2 && cells[0] && cells[1]) infoRows.push([cells[0], cells[1]])
     })
 
-    return { name, price, brand, description, images, infoRows, sku, availability, stockText }
+    return { name, price, brand, description, mainImages, detailImages, infoRows, sku, availability, stockText }
   })
 }
 
@@ -156,8 +162,8 @@ export async function extractProductRuleBased(page: Page, url: string, overrides
     category: '',
     description: raw.description,
     options: [], // extractOptionsFromDom이 별도로 채운다
-    thumbnail_url: raw.images[0] || '',
-    detail_image_urls: raw.images.slice(1),
+    thumbnail_urls: raw.mainImages,
+    detail_image_urls: raw.detailImages,
     stock_status: extractStockStatus(raw.availability, raw.stockText),
     stock_qty: resolveStockQty(raw.infoRows),
     mall_product_code: extractMallProductCode(url, raw.sku),
@@ -177,8 +183,10 @@ export async function extractProductRuleBased(page: Page, url: string, overrides
     }
   }
   if (overrides?.thumbnailSelector) {
-    const src = await page.locator(overrides.thumbnailSelector).first().getAttribute('src', { timeout: 3_000 }).catch(() => null)
-    if (src) result.thumbnail_url = src
+    const srcs = await page.locator(overrides.thumbnailSelector).evaluateAll(
+      (els: HTMLImageElement[]) => els.map(el => el.src).filter(Boolean),
+    ).catch(() => [])
+    if (srcs.length) result.thumbnail_urls = srcs
   }
 
   return result

@@ -9,6 +9,7 @@ interface Site {
   id: number
   name: string | null
   url: string
+  login_url: string | null
   login_id: string | null
 }
 
@@ -18,7 +19,7 @@ const PLATFORM_LABELS: Record<string, string> = {
 
 // 스크랩 검토 탭으로 넘어갔다 돌아와도(탭 전환 시 이 패널은 언마운트된다) 방금 진행/완료한 세션 정보가
 // 유지되도록 site+sessionId만 남겨두고, 되돌아왔을 때 서버에서 최신 상태를 다시 조회해 복원한다.
-const LAST_SESSION_KEY = 'scrap.scraper.lastSession'
+const LAST_SESSION_KEY = 'scrape.scraper.lastSession'
 
 interface ItemLogRow {
   id: number
@@ -36,8 +37,14 @@ interface PreviewProduct {
   origin: string
   description: string
   options: { name: string; values: string[] }[]
-  thumbnail_url: string
+  thumbnail_urls: string[]
   detail_image_urls: string[]
+}
+
+interface PreviewItem {
+  url: string
+  name: string
+  thumbnail: string
 }
 
 export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
@@ -63,10 +70,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [categoriesLoading, setCategoriesLoading] = useState(false)
   const [detectedPlatform, setDetectedPlatform] = useState<string | null>(null)
 
-  const [testResult, setTestResult]   = useState<{ total: number; samples: string[]; platform: string } | null>(null)
-  const [testLoading, setTestLoading] = useState(false)
-
   const [previewResult, setPreviewResult]   = useState<{ sourceUrl: string; product: PreviewProduct } | null>(null)
+  const [previewTotal, setPreviewTotal]     = useState<number | null>(null)
+  const [previewItems, setPreviewItems]     = useState<PreviewItem[]>([])
   const [previewLoading, setPreviewLoading] = useState(false)
 
   const [mode, setMode]           = useState<'single' | 'catalog'>('single')
@@ -132,7 +138,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   async function selectSite(siteId: number) {
     const res = await fetch(`/api/sites/${siteId}`)
     const full = await res.json() as Site & { login_pw: string | null }
-    setSelectedSite({ id: full.id, name: full.name, url: full.url, login_id: full.login_id })
+    setSelectedSite({ id: full.id, name: full.name, url: full.url, login_url: full.login_url, login_id: full.login_id })
     setLoginId(full.login_id || '')
     setLoginPw(full.login_pw || '')
     setLoginStep('none')
@@ -141,10 +147,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setCategoryUrlsText('') // 이전 사이트의 카테고리 목록이 남아 시작 URL을 무시하는 것을 방지
     setCategories([])
     setDetectedPlatform(null)
-    setTestResult(null)
     setPreviewResult(null)
+    setPreviewTotal(null)
+    setPreviewItems([])
     setScrapeMode('full')
     fetch(`/api/products?siteId=${siteId}`).then(r => r.json()).then((d: unknown[]) => setHasPriorSession(Array.isArray(d) && d.length > 0)).catch(() => setHasPriorSession(false))
+    // 탭 전환 등으로 이 화면이 다시 마운트돼도, 로그인 창이 서버에 실제로 열려있으면 그 상태를 그대로 복원한다
+    // (loginStep은 이 컴포넌트의 로컬 상태라 마운트될 때마다 초기화되지만, 실제 브라우저 세션은 서버에 계속 살아있을 수 있다)
+    fetch(`/api/scrape/current-url?siteId=${siteId}`).then(r => r.json()).then((d: { url: string | null }) => {
+      if (d.url) setLoginStep('confirmed')
+    }).catch(() => {})
   }
 
   async function handleOpenLogin() {
@@ -154,7 +166,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       await fetch('/api/scrape/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ siteId: selectedSite.id, url: selectedSite.url, loginId, loginPw }),
+        body: JSON.stringify({ siteId: selectedSite.id, url: selectedSite.login_url || selectedSite.url, loginId, loginPw }),
       })
       setLoginStep('opened')
     } finally {
@@ -216,49 +228,75 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setCategoryUrlsText(allSelected ? '' : categories.map(c => c.href).join('\n'))
   }
 
-  async function handleTest() {
-    if (!selectedSite) return
-    const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
-    setTestLoading(true)
-    setTestResult(null)
-    setPreviewResult(null)
-    try {
-      const res = await fetch('/api/scrape/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: categoryUrls.length ? undefined : (targetUrl || undefined),
-          categoryUrls: categoryUrls.length ? categoryUrls : undefined,
-          nextPageSelector: nextPageSelector || undefined,
-          maxPages,
-          loginId: loginId || undefined, loginPw: loginPw || undefined,
-          productLinkSelector: linkSel || undefined, siteId: selectedSite.id,
-        }),
-      })
-      if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`테스트 실패: ${e.error || res.status}`); return }
-      const d = await res.json() as { total: number; samples: string[]; platform: string }
-      setTestResult(d)
-      setDetectedPlatform(d.platform || null)
-    } finally {
-      setTestLoading(false)
-    }
+  const canPreview = mode === 'catalog'
+    ? (!!targetUrl.trim() || categoryUrlsText.trim().length > 0)
+    : !!targetUrl.trim()
+
+  function applyCatalogPreview(d: { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[] }) {
+    setPreviewTotal(d.total)
+    setDetectedPlatform(d.platform || null)
+    setPreviewItems((d.items || []).slice(d.preview ? 1 : 0)) // 첫 상품은 위 상세 카드에 이미 나오니 그리드에서는 제외
+    if (d.preview) setPreviewResult(d.preview)
   }
 
-  const previewCandidateUrl = mode === 'catalog' ? (testResult?.samples[0] || '') : targetUrl
+  /** 주어진 url을 목록 페이지로 간주해 상품 개수 + 첫 상품을 찾아본다. 찾으면 true. */
+  async function tryPreviewAsListing(url: string): Promise<boolean> {
+    if (!selectedSite) return false
+    const res = await fetch('/api/scrape/preview-catalog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, loginId: loginId || undefined, loginPw: loginPw || undefined, siteId: selectedSite.id }),
+    })
+    if (!res.ok) return false
+    const d = await res.json() as { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[] }
+    applyCatalogPreview(d)
+    return !!d.preview
+  }
 
+  /**
+   * 단일 상품 모드: 시작 URL을 상품 페이지로 보고 바로 미리본다. 실패하면(목록/로그인 페이지 등 상품 페이지가
+   * 아니었을 수 있음) 그 URL을 목록 페이지로 다시 간주해 첫 상품을 찾아본다 — 어떤 URL을 넣어도 직접 하나하나
+   * 열어보지 않고 빠르게 확인할 수 있도록 자동으로 폴백한다.
+   * 카탈로그(목록) 모드: 목록에서 상품 개수를 세는 것과 첫 상품 미리보기를 한 번의 요청(한 브라우저 세션)으로 같이 처리한다
+   * — 예전에는 "테스트 실행"과 "미리보기"가 별도 버튼/요청이라 세션을 두 번 열어야 해서 느렸다. 개수는 페이징 끝까지
+   * 따라가 실제 전체 개수를 보여주고, 나머지 상품은 (열어보지 않고) 목록 정보만 그리드로 함께 보여준다.
+   */
   async function handlePreview() {
-    if (!selectedSite || !previewCandidateUrl) return
+    if (!selectedSite || !canPreview) return
     setPreviewLoading(true)
     setPreviewResult(null)
+    setPreviewTotal(null)
+    setPreviewItems([])
     try {
-      const res = await fetch('/api/scrape/preview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: previewCandidateUrl, siteId: selectedSite.id, loginId: loginId || undefined, loginPw: loginPw || undefined }),
-      })
-      if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`미리보기 실패: ${e.error || res.status}`); return }
-      const d = await res.json() as { sourceUrl: string; product: PreviewProduct }
-      setPreviewResult(d)
+      if (mode === 'catalog') {
+        const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
+        const res = await fetch('/api/scrape/preview-catalog', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: categoryUrls.length ? undefined : (targetUrl || undefined),
+            categoryUrls: categoryUrls.length ? categoryUrls : undefined,
+            nextPageSelector: nextPageSelector || undefined,
+            loginId: loginId || undefined, loginPw: loginPw || undefined,
+            productLinkSelector: linkSel || undefined, siteId: selectedSite.id,
+          }),
+        })
+        if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`확인 실패: ${e.error || res.status}`); return }
+        const d = await res.json() as { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[] }
+        applyCatalogPreview(d)
+      } else {
+        const res = await fetch('/api/scrape/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: targetUrl, siteId: selectedSite.id, loginId: loginId || undefined, loginPw: loginPw || undefined }),
+        })
+        if (res.ok) {
+          const d = await res.json() as { sourceUrl: string; product: PreviewProduct }
+          setPreviewResult(d)
+        } else if (!(await tryPreviewAsListing(targetUrl))) {
+          alert('상품 정보를 찾지 못했습니다. 시작 URL을 확인해주세요.')
+        }
+      }
     } finally {
       setPreviewLoading(false)
     }
@@ -364,15 +402,22 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               <input value={siteQuery} onChange={e => setSiteQuery(e.target.value)} placeholder="이름 또는 URL 검색..."
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
             </label>
-            <div className="mt-2 border border-gray-100 rounded-xl divide-y divide-gray-100 max-h-52 overflow-y-auto">
-              {filteredSites.map(s => (
-                <button key={s.id} onClick={() => selectSite(s.id)}
-                  className="w-full text-left px-3 py-2 hover:bg-gray-50 transition-colors">
-                  <div className="text-sm text-gray-800">{s.name || '(이름 없음)'}</div>
-                  <div className="text-xs text-gray-500 truncate">{s.url}</div>
-                </button>
-              ))}
-              {filteredSites.length === 0 && <div className="px-3 py-2 text-xs text-gray-400">검색 결과가 없습니다.</div>}
+            <div className="mt-2 border border-gray-100 rounded-xl max-h-52 overflow-y-auto">
+              {filteredSites.length === 0 ? (
+                <div className="px-3 py-2 text-xs text-gray-400">검색 결과가 없습니다.</div>
+              ) : (
+                <table className="w-full text-xs border-collapse">
+                  <tbody>
+                    {filteredSites.map(s => (
+                      <tr key={s.id} onClick={() => selectSite(s.id)}
+                        className="border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors">
+                        <td className="px-3 py-2 text-gray-800 font-medium whitespace-nowrap">{s.name || '(이름 없음)'}</td>
+                        <td className="px-3 py-2 text-gray-500 max-w-[280px] truncate" title={s.url}>{s.url}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
         )}
@@ -441,7 +486,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           <div className="text-sm font-semibold text-gray-700 mb-2">스크랩 모드</div>
           <div className="flex gap-3 mb-4">
             {(['single', 'catalog'] as const).map(m => (
-              <button key={m} onClick={() => { setMode(m); setPreviewResult(null) }}
+              <button key={m} onClick={() => { setMode(m); setPreviewResult(null); setPreviewTotal(null); setPreviewItems([]) }}
                 className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${mode === m ? 'bg-teal-500 text-white border-teal-500' : 'bg-white text-gray-600 border-gray-300 hover:border-teal-400'}`}>
                 {m === 'single' ? '단일 상품 페이지' : '목록/카탈로그 페이지'}
               </button>
@@ -504,14 +549,21 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       {categories.every(c => isCategorySelected(c.href)) ? '전체 해제' : '전체 선택 (몰 전체상품)'}
                     </button>
                   </div>
-                  <div className="max-h-40 overflow-y-auto divide-y divide-gray-100">
-                    {categories.map(c => (
-                      <label key={c.href} className="flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-gray-50 cursor-pointer">
-                        <input type="checkbox" checked={isCategorySelected(c.href)} onChange={() => toggleCategory(c.href)} className="shrink-0" />
-                        <span className="text-gray-700 shrink-0">{c.text}</span>
-                        <span className="text-gray-400 truncate">{c.href}</span>
-                      </label>
-                    ))}
+                  <div className="max-h-40 overflow-y-auto">
+                    <table className="w-full text-xs border-collapse">
+                      <tbody>
+                        {categories.map(c => (
+                          <tr key={c.href} onClick={() => toggleCategory(c.href)}
+                            className="border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer">
+                            <td className="px-3 py-1.5 w-6">
+                              <input type="checkbox" checked={isCategorySelected(c.href)} onChange={() => toggleCategory(c.href)} onClick={e => e.stopPropagation()} />
+                            </td>
+                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">{c.text}</td>
+                            <td className="px-3 py-1.5 text-gray-400 max-w-[320px] truncate" title={c.href}>{c.href}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               )}
@@ -544,28 +596,6 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 </label>
               </div>
 
-              <button type="button" onClick={handleTest} disabled={testLoading || (!targetUrl && !categoryUrlsText.trim())}
-                className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-                {testLoading ? '테스트 중...' : '🧪 테스트 실행 (실제로 저장하지 않고 몇 개 잡히는지만 확인)'}
-              </button>
-
-              {testResult && (
-                <div className="mt-3 border border-gray-200 rounded-xl overflow-hidden">
-                  <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-600">
-                    상품 링크 <strong>{testResult.total}</strong>개 발견 — 감지된 몰 유형: {PLATFORM_LABELS[testResult.platform] || testResult.platform}
-                  </div>
-                  {testResult.samples.length > 0 && (
-                    <div className="max-h-32 overflow-y-auto divide-y divide-gray-100">
-                      {testResult.samples.map(url => (
-                        <div key={url} className="px-3 py-1.5 text-xs text-gray-500 truncate">{url}</div>
-                      ))}
-                    </div>
-                  )}
-                  {testResult.total === 0 && (
-                    <p className="px-3 py-2 text-xs text-rose-500">매칭되는 상품 링크가 없습니다. 셀렉터나 시작 URL을 확인해주세요.</p>
-                  )}
-                </div>
-              )}
             </>
           )}
         </div>
@@ -576,26 +606,39 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           <div className="flex items-center justify-between mb-2">
             <label className="block text-sm font-semibold text-gray-700">상품 페이지 미리보기</label>
-            <button type="button" onClick={handlePreview} disabled={previewLoading || !previewCandidateUrl}
+            <button type="button" onClick={handlePreview} disabled={previewLoading || !canPreview}
               className="text-xs text-teal-500 hover:underline disabled:opacity-50 disabled:cursor-not-allowed shrink-0">
-              {previewLoading ? '불러오는 중...' : '🔍 상품 페이지 열어서 확인'}
+              {previewLoading ? '확인 중...' : '🔍 상품 페이지 열어서 확인'}
             </button>
           </div>
 
-          {mode === 'catalog' && !previewCandidateUrl && (
-            <p className="text-xs text-gray-400">먼저 위에서 &quot;테스트 실행&quot;으로 상품 링크를 찾아야 미리볼 수 있습니다.</p>
+          {mode === 'catalog' && !canPreview && (
+            <p className="text-xs text-gray-400">시작 URL 또는 카테고리 목록을 입력하면 카테고리 내 상품 개수와 첫 상품 페이지를 바로 확인할 수 있습니다.</p>
           )}
-          {mode === 'single' && !previewCandidateUrl && (
+          {mode === 'single' && !canPreview && (
             <p className="text-xs text-gray-400">시작 URL을 입력하면 실제로 열어서 추출될 내용을 미리 확인할 수 있습니다.</p>
+          )}
+
+          {previewTotal !== null && (
+            <p className="text-xs text-gray-600 mb-2">
+              {mode === 'single' && '(입력한 URL이 상품 페이지가 아니라 목록으로 인식됨) '}
+              스크랩 대상 상품 <strong>{previewTotal}</strong>개 발견
+              {detectedPlatform && ` — 감지된 몰 유형: ${PLATFORM_LABELS[detectedPlatform] || detectedPlatform}`}
+              {previewTotal === 0 && <span className="text-rose-500"> (매칭되는 상품 링크가 없습니다. 셀렉터나 시작 URL을 확인해주세요.)</span>}
+            </p>
           )}
 
           {previewResult && (
             <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
               <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500 truncate">{previewResult.sourceUrl}</div>
               <div className="p-3 flex gap-3">
-                {previewResult.product.thumbnail_url && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={previewResult.product.thumbnail_url} alt="" className="w-20 h-20 object-cover rounded-xl border border-gray-100 shrink-0" />
+                {previewResult.product.thumbnail_urls.length > 0 && (
+                  <div className="flex gap-1 shrink-0">
+                    {previewResult.product.thumbnail_urls.slice(0, 3).map((src, i) => (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img key={i} src={src} alt="" className="w-20 h-20 object-cover rounded-xl border border-gray-100" />
+                    ))}
+                  </div>
                 )}
                 <div className="flex-1 min-w-0 text-xs space-y-1">
                   <div className="font-semibold text-gray-800 text-sm truncate">
@@ -616,6 +659,45 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                     <div className="text-gray-400 line-clamp-2">{previewResult.product.description}</div>
                   )}
                 </div>
+              </div>
+            </div>
+          )}
+
+          {previewItems.length > 0 && (
+            <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
+              <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500">
+                나머지 {previewItems.length}개 (목록 페이지 기준 정보만 — 직접 열어보지 않아 빠릅니다)
+              </div>
+              <div className="max-h-72 overflow-y-auto">
+                <table className="w-full text-xs border-collapse">
+                  <thead className="sticky top-0 z-10 bg-gray-50">
+                    <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+                      <th className="px-2 py-2 text-left w-14">이미지</th>
+                      <th className="px-2 py-2 text-left">상품명</th>
+                      <th className="px-2 py-2 text-left w-20">링크</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {previewItems.map(item => (
+                      <tr key={item.url} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                        <td className="px-2 py-1.5">
+                          <div className="w-10 h-10 rounded-lg overflow-hidden bg-gray-100">
+                            {item.thumbnail ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img src={item.thumbnail} alt="" className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center text-gray-300">-</div>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-2 py-1.5 text-gray-700 truncate max-w-[320px]" title={item.name}>{item.name || '-'}</td>
+                        <td className="px-2 py-1.5">
+                          <a href={item.url} target="_blank" rel="noreferrer" className="text-teal-500 hover:underline">열기 ↗</a>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
@@ -679,7 +761,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           )}
           {status === 'done' && (
             <div className="mt-3 flex items-center gap-3">
-              <button onClick={() => openTab({ id: 'staging-review', type: 'staging-review', title: '스크랩 검토', icon: '🔎', closable: true })}
+              <button onClick={() => openTab({ id: 'migration-dashboard', type: 'migration-dashboard', title: '데이터 마이그 목록', icon: '📊', closable: true })}
                 className="inline-block text-sm text-teal-500 font-medium hover:underline">
                 → 스크랩 결과 검토
               </button>

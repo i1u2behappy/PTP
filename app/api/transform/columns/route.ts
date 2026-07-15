@@ -10,7 +10,7 @@ export async function GET(req: NextRequest) {
   if (!siteId) return NextResponse.json({ error: 'siteId required' }, { status: 400 })
 
   const uploadRes = await pool.query<{ column_headers: string[] }>(
-    `SELECT column_headers FROM transform_reference_uploads WHERE site_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    `SELECT column_headers FROM transform_reference_uploads WHERE site_id = $1 AND kind = 'to_be' ORDER BY created_at DESC LIMIT 1`,
     [siteId],
   )
   const headers = uploadRes.rows[0]?.column_headers || []

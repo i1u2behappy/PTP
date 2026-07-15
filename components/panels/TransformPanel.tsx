@@ -16,7 +16,9 @@ interface Session {
   skipped_count: number
   created_at: string
 }
-interface Upload { id: number; file_name: string; column_headers: string[]; code_column: string | null; row_count: number; matched_count: number }
+type UploadKind = 'as_is' | 'to_be'
+interface UploadSummary { id: number; file_name: string; column_headers: string[]; code_column: string | null; row_count: number; matched_count: number }
+interface GuidePair { code: string; asIs: Record<string, string>; toBe: Record<string, string> }
 type RuleMode = 'ai' | 'lookup' | 'copy' | 'composite'
 interface ColumnRule {
   id: number | null
@@ -46,6 +48,77 @@ const SOURCE_FIELDS: { value: string; label: string }[] = [
   { value: 'stock_status', label: '재고상태(원본)' }, { value: 'stock_qty', label: '재고수량(원본)' },
 ]
 
+/** 지금 몇 단계인지, 이전 단계가 끝났는지 한눈에 보이도록 하는 번호 배지. */
+function StepHeader({ n, title, done }: { n: number; title: string; done: boolean }) {
+  return (
+    <div className="flex items-center gap-2 mb-2">
+      <div className={`w-6 h-6 shrink-0 rounded-full flex items-center justify-center text-xs font-bold ${done ? 'bg-emerald-500 text-white' : 'bg-teal-500 text-white'}`}>
+        {done ? '✓' : n}
+      </div>
+      <span className="text-sm font-semibold text-gray-700">{title}</span>
+    </div>
+  )
+}
+
+/** AS-IS/TO-BE 업로드 카드 — 둘의 UI가 완전히 동일해 kind만 다르게 재사용한다. */
+function UploadCard({ label, upload, file, onFileChange, uploading, onUpload, pending, codeColumn, onCodeColumnChange, onConfirm }: {
+  label: string
+  upload: UploadSummary | null
+  file: File | null
+  onFileChange: (f: File | null) => void
+  uploading: boolean
+  onUpload: () => void
+  pending: { headers: string[] } | null
+  codeColumn: string
+  onCodeColumnChange: (v: string) => void
+  onConfirm: () => void
+}) {
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200 p-6">
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-xs font-semibold text-gray-500">{label}</span>
+        {upload && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-600 font-semibold">업로드됨</span>}
+      </div>
+      {upload && (
+        <p className="mb-3 text-xs text-gray-600">
+          📄 {upload.file_name} — {upload.row_count}행 {upload.code_column && `(코드컬럼: ${upload.code_column})`}
+        </p>
+      )}
+      {pending ? (
+        <div className="bg-amber-50 rounded-xl p-3">
+          <p className="text-xs text-gray-600 mb-2">몰 상품코드에 해당하는 컬럼을 선택하세요.</p>
+          <div className="flex items-center gap-2">
+            <select value={codeColumn} onChange={e => onCodeColumnChange(e.target.value)}
+              className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+              {pending.headers.map(h => <option key={h} value={h}>{h}</option>)}
+            </select>
+            <button onClick={onConfirm} className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full">
+              확정 & 매칭
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <input type="file" accept=".xlsx,.xls" onChange={e => onFileChange(e.target.files?.[0] || null)}
+            className="text-xs text-gray-600 file:mr-2 file:px-2 file:py-1 file:rounded-full file:border-0 file:bg-teal-50 file:text-teal-600 file:text-xs file:font-semibold hover:file:bg-teal-100" />
+          <button onClick={onUpload} disabled={!file || uploading}
+            className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50">
+            {uploading ? '업로드 중...' : (upload ? '다시 업로드' : '업로드')}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** AS-IS/TO-BE 쌍을 필드명 기준으로 나란히 비교할 수 있게 정리한다 — 값이 다르면 TO-BE 쪽을 강조 표시. */
+function diffFields(pair: GuidePair, toBeHeaders: string[]): { key: string; asIs: string; toBe: string; changed: boolean }[] {
+  const keys = [...new Set([...toBeHeaders, ...Object.keys(pair.asIs), ...Object.keys(pair.toBe)])]
+  return keys
+    .map(key => ({ key, asIs: pair.asIs[key] || '', toBe: pair.toBe[key] || '', changed: (pair.asIs[key] || '') !== (pair.toBe[key] || '') }))
+    .filter(f => f.asIs || f.toBe)
+}
+
 export function TransformPanel() {
   const [clients, setClients] = useState<Client[]>([])
   const [clientId, setClientId] = useState<number | ''>('')
@@ -59,10 +132,13 @@ export function TransformPanel() {
   const [searched, setSearched] = useState(false)
   const [selectedSite, setSelectedSite] = useState<Site | null>(null)
 
-  const [uploads, setUploads] = useState<Upload[]>([])
-  const [uploadFile, setUploadFile] = useState<File | null>(null)
-  const [uploading, setUploading] = useState(false)
-  const [pendingUpload, setPendingUpload] = useState<{ id: number; headers: string[]; guessedCodeColumn: string | null } | null>(null)
+  const [asIsUpload, setAsIsUpload] = useState<UploadSummary | null>(null)
+  const [toBeUpload, setToBeUpload] = useState<UploadSummary | null>(null)
+  const [guidePairs, setGuidePairs] = useState<GuidePair[]>([])
+  const [asIsFile, setAsIsFile] = useState<File | null>(null)
+  const [toBeFile, setToBeFile] = useState<File | null>(null)
+  const [uploadingKind, setUploadingKind] = useState<UploadKind | null>(null)
+  const [pendingUpload, setPendingUpload] = useState<{ id: number; kind: UploadKind; headers: string[]; guessedCodeColumn: string | null } | null>(null)
   const [codeColumn, setCodeColumn] = useState('')
 
   const [rules, setRules] = useState<ColumnRule[]>([])
@@ -75,15 +151,22 @@ export function TransformPanel() {
   const [generatedRows, setGeneratedRows] = useState<GeneratedRow[]>([])
   const [committing, setCommitting] = useState<number | null>(null)
 
-  const loadUploads = useCallback((siteId: number) => {
-    fetch(`/api/transform/uploads?siteId=${siteId}`).then(r => r.json()).then((d: Upload[]) => setUploads(Array.isArray(d) ? d : []))
+  const loadGuide = useCallback((siteId: number) => {
+    fetch(`/api/transform/guide?siteId=${siteId}`).then(r => r.json())
+      .then((d: { asIsUpload: UploadSummary | null; toBeUpload: UploadSummary | null; pairs: GuidePair[] }) => {
+        setAsIsUpload(d.asIsUpload || null)
+        setToBeUpload(d.toBeUpload || null)
+        setGuidePairs(Array.isArray(d.pairs) ? d.pairs : [])
+      }).catch(() => {})
   }, [])
   const loadRules = useCallback((siteId: number) => {
     fetch(`/api/transform/columns?siteId=${siteId}`).then(r => r.json())
       .then((d: { rows: ColumnRule[] }) => setRules(d.rows || []))
   }, [])
-  const loadProducts = useCallback((siteId: number) => {
-    fetch(`/api/products?siteId=${siteId}`).then(r => r.json())
+  const loadProducts = useCallback((siteId: number, sessionId: number | '') => {
+    const qs = new URLSearchParams({ siteId: String(siteId) })
+    if (sessionId !== '') qs.set('sessionId', String(sessionId))
+    fetch(`/api/products?${qs}`).then(r => r.json())
       .then((d: MallProduct[]) => setProducts(Array.isArray(d) ? d.filter(p => !p.master_product_id) : []))
   }, [])
   const loadGeneratedRows = useCallback((siteId: number) => {
@@ -96,23 +179,24 @@ export function TransformPanel() {
     fetch('/api/sessions').then(r => r.json()).then((d: Session[]) => { if (Array.isArray(d)) setSessions(d) }).catch(() => {})
   }, [])
 
-  function selectSite(site: Site) {
+  function selectSite(site: Site, sessionId: number | '') {
     setSelectedSite(site)
     setPendingUpload(null)
     setSelectedProductIds(new Set())
-    loadUploads(site.id)
+    loadGuide(site.id)
     loadRules(site.id)
-    loadProducts(site.id)
+    loadProducts(site.id, sessionId)
     loadGeneratedRows(site.id)
   }
 
-  // 스크래핑 목록에서 세션을 고르면(마이그레이션 화면과 동일한 검색·선택 방식), 그 세션이 속한 몰을 선택한다.
+  // 스크래핑 목록에서 세션을 고르면(마이그레이션 화면과 동일한 검색·선택 방식), 그 세션이 속한 몰을 선택하고
+  // 3단계 대상 상품도 이 세션 기준으로 좁힌다.
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (selectedSessionId === '') return
     const session = sessions.find(s => s.id === selectedSessionId)
     const site = session && sites.find(s => s.id === session.site_id)
-    if (site) selectSite(site)
+    if (site) selectSite(site, selectedSessionId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSessionId])
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -139,21 +223,23 @@ export function TransformPanel() {
     setSearched(true)
   }
 
-  async function handleUpload() {
-    if (!selectedSite || !uploadFile) return
-    setUploading(true)
+  async function handleUpload(kind: UploadKind) {
+    const file = kind === 'as_is' ? asIsFile : toBeFile
+    if (!selectedSite || !file) return
+    setUploadingKind(kind)
     try {
       const fd = new FormData()
-      fd.append('file', uploadFile)
+      fd.append('file', file)
       fd.append('siteId', String(selectedSite.id))
+      fd.append('kind', kind)
       const res = await fetch('/api/transform/uploads', { method: 'POST', body: fd })
       if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`업로드 실패: ${e.error || res.status}`); return }
       const d = await res.json() as { id: number; headers: string[]; guessedCodeColumn: string | null }
-      setPendingUpload(d)
+      setPendingUpload({ id: d.id, kind, headers: d.headers, guessedCodeColumn: d.guessedCodeColumn })
       setCodeColumn(d.guessedCodeColumn || d.headers[0] || '')
-      setUploadFile(null)
+      if (kind === 'as_is') setAsIsFile(null); else setToBeFile(null)
     } finally {
-      setUploading(false)
+      setUploadingKind(null)
     }
   }
 
@@ -163,10 +249,12 @@ export function TransformPanel() {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codeColumn }),
     })
     const stats = await res.json() as { total: number; matched: number }
-    alert(`매칭 완료: 총 ${stats.total}개 중 ${stats.matched}개 매칭됨`)
+    const kindLabel = pendingUpload.kind === 'as_is' ? 'AS-IS' : 'TO-BE'
+    const wasToBe = pendingUpload.kind === 'to_be'
+    alert(`${kindLabel} 매칭 완료: 총 ${stats.total}행 중 ${stats.matched}개가 현재 mall_products와 일치`)
     setPendingUpload(null)
-    loadUploads(selectedSite.id)
-    loadRules(selectedSite.id)
+    loadGuide(selectedSite.id)
+    if (wasToBe) loadRules(selectedSite.id)
   }
 
   async function saveRule(rule: ColumnRule) {
@@ -238,16 +326,19 @@ export function TransformPanel() {
     }
   }
 
-  const columnHeaders = uploads[0]?.column_headers || []
+  const columnHeaders = toBeUpload?.column_headers || []
 
   return (
     <div className="max-w-4xl">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-800">🧬 마이그레이션2_Transform</h1>
-        <p className="text-xs text-gray-400 mt-1">스크래핑 목록에서 세션을 검색·선택하면, 그 세션이 속한 몰 기준으로 완성본 업로드·컬럼 규칙·생성을 진행할 수 있습니다.</p>
+        <p className="text-xs text-gray-400 mt-1">
+          ① 스크랩한 데이터를 조회·선택 → ② 기존 AS-IS/TO-BE 샘플로 마이그레이션 기준을 파악 → ③ 그 기준대로 선택한 데이터를 마이그레이션합니다.
+        </p>
       </div>
 
-      {/* 상단: 거래처/몰/일시로 검색하는 스크래핑 목록 (마이그레이션 화면과 동일한 검색·선택 방식) */}
+      {/* 1. 스크랩한 데이터 조회 및 선택 */}
+      <StepHeader n={1} title="스크랩한 데이터 조회 및 선택" done={!!selectedSite} />
       <div className="bg-white rounded-2xl border border-gray-200 p-4 mb-4 flex flex-wrap items-center gap-3">
         <label className="flex items-center gap-2 text-sm text-gray-600">
           거래처
@@ -293,7 +384,7 @@ export function TransformPanel() {
       )}
 
       {selectedSite && (
-        <div className="flex items-center justify-between bg-teal-50 rounded-xl px-4 py-2 mb-4 text-sm">
+        <div className="flex items-center justify-between bg-teal-50 rounded-xl px-4 py-2 mb-8 text-sm">
           <span>선택된 Mall: <strong className="text-gray-800">{selectedSite.name || selectedSite.url}</strong></span>
           <button onClick={() => { setSelectedSite(null); setSelectedSessionId('') }} className="text-xs text-gray-500 hover:underline">선택 해제</button>
         </div>
@@ -301,49 +392,67 @@ export function TransformPanel() {
 
       {selectedSite && (
         <>
-          {/* 1단계: 완성본 업로드 */}
-          <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-            <div className="text-sm font-semibold text-gray-700 mb-3">1. 기존 작업내역 완성본 업로드</div>
+          {/* 2. AS-IS / TO-BE 샘플 가이드 */}
+          <StepHeader n={2} title="AS-IS / TO-BE 샘플 가이드" done={!!toBeUpload} />
 
-            {uploads.length > 0 && (
-              <ul className="mb-3 text-xs text-gray-600 space-y-1">
-                {uploads.map(u => (
-                  <li key={u.id}>
-                    📄 {u.file_name} — {u.row_count}행 중 {u.matched_count}개 매칭 {u.code_column && `(코드컬럼: ${u.code_column})`}
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            {pendingUpload ? (
-              <div className="bg-amber-50 rounded-xl p-3">
-                <p className="text-xs text-gray-600 mb-2">몰 상품코드에 해당하는 컬럼을 선택하세요.</p>
-                <div className="flex items-center gap-2">
-                  <select value={codeColumn} onChange={e => setCodeColumn(e.target.value)}
-                    className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
-                    {pendingUpload.headers.map(h => <option key={h} value={h}>{h}</option>)}
-                  </select>
-                  <button onClick={confirmCodeColumn} className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full">
-                    확정 & 매칭
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <input type="file" accept=".xlsx,.xls" onChange={e => setUploadFile(e.target.files?.[0] || null)}
-                  className="text-xs text-gray-600 file:mr-2 file:px-2 file:py-1 file:rounded-full file:border-0 file:bg-teal-50 file:text-teal-600 file:text-xs file:font-semibold hover:file:bg-teal-100" />
-                <button onClick={handleUpload} disabled={!uploadFile || uploading}
-                  className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50">
-                  {uploading ? '업로드 중...' : '업로드'}
-                </button>
-              </div>
-            )}
+          <div className="grid grid-cols-2 gap-4 mb-4">
+            <UploadCard label="AS-IS (기존/원본) 엑셀" upload={asIsUpload} file={asIsFile} onFileChange={setAsIsFile}
+              uploading={uploadingKind === 'as_is'} onUpload={() => handleUpload('as_is')}
+              pending={pendingUpload?.kind === 'as_is' ? pendingUpload : null}
+              codeColumn={codeColumn} onCodeColumnChange={setCodeColumn} onConfirm={confirmCodeColumn} />
+            <UploadCard label="TO-BE (완성본) 엑셀" upload={toBeUpload} file={toBeFile} onFileChange={setToBeFile}
+              uploading={uploadingKind === 'to_be'} onUpload={() => handleUpload('to_be')}
+              pending={pendingUpload?.kind === 'to_be' ? pendingUpload : null}
+              codeColumn={codeColumn} onCodeColumnChange={setCodeColumn} onConfirm={confirmCodeColumn} />
           </div>
 
-          {/* 2단계: 컬럼 규칙 */}
-          {columnHeaders.length > 0 && (
+          {guidePairs.length > 0 && (
             <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-              <div className="text-sm font-semibold text-gray-700 mb-3">2. 컬럼별 생성 규칙</div>
+              <div className="text-xs font-semibold text-gray-500 mb-3">어떻게 마이그레이션 되었는지 ({guidePairs.length}개 상품코드 매칭됨) — 상품코드를 눌러 펼쳐보세요</div>
+              <div className="max-h-96 overflow-y-auto space-y-2">
+                {guidePairs.map(pair => {
+                  const fields = diffFields(pair, columnHeaders)
+                  return (
+                    <details key={pair.code} className="border border-gray-100 rounded-xl overflow-hidden group">
+                      <summary className="px-3 py-2 bg-gray-50 text-xs font-mono text-gray-600 cursor-pointer select-none flex items-center justify-between hover:bg-gray-100">
+                        <span>{pair.code}</span>
+                        <span className="text-gray-400 transition-transform group-open:rotate-90">›</span>
+                      </summary>
+                      <table className="w-full text-xs border-collapse">
+                        <thead>
+                          <tr className="text-left text-gray-400 border-b border-gray-100">
+                            <th className="px-3 py-1.5 font-normal w-1/4">필드</th>
+                            <th className="px-3 py-1.5 font-normal w-1/3">AS-IS</th>
+                            <th className="px-3 py-1.5 font-normal w-1/3">TO-BE</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {fields.map(f => (
+                            <tr key={f.key} className="border-b border-gray-50 last:border-0">
+                              <td className="px-3 py-1.5 text-gray-400 whitespace-nowrap">{f.key}</td>
+                              <td className="px-3 py-1.5 text-gray-500">{f.asIs || '-'}</td>
+                              <td className={`px-3 py-1.5 ${f.changed ? 'text-teal-700 font-semibold bg-teal-50/60' : 'text-gray-700'}`}>{f.toBe || '-'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </details>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+          {asIsUpload && toBeUpload && guidePairs.length === 0 && (
+            <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4 text-xs text-gray-400">
+              AS-IS와 TO-BE 업로드 간에 코드가 일치하는 행이 없습니다. 두 파일의 상품코드 컬럼과 값을 확인해주세요.
+            </div>
+          )}
+
+          {columnHeaders.length > 0 && (
+            <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-8">
+              <div className="text-xs font-semibold text-gray-500 mb-3">
+                컬럼별 생성 규칙 (TO-BE 컬럼 기준) — {rules.filter(r => r.target_field).length}/{rules.length}개 매핑됨
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs border-collapse">
                   <thead>
@@ -443,74 +552,85 @@ export function TransformPanel() {
             </div>
           )}
 
-          {/* 3단계: 생성 대상 선택 */}
+          {/* 3. 마이그레이션 진행 */}
           {columnHeaders.length > 0 && (
-            <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-              <div className="flex items-center justify-between mb-3">
-                <div className="text-sm font-semibold text-gray-700">3. 생성 대상 선택 (아직 상품마스터에 없는 상품)</div>
-                <button onClick={handleGenerate} disabled={generating || selectedProductIds.size === 0}
-                  className="px-4 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50">
-                  {generating ? '생성 중...' : `선택 ${selectedProductIds.size}개 생성`}
-                </button>
-              </div>
-              {products.length === 0 ? (
-                <p className="text-xs text-gray-400">대상 상품이 없습니다.</p>
-              ) : (
-                <div className="max-h-48 overflow-y-auto border border-gray-100 rounded-xl">
-                  {products.map(p => (
-                    <label key={p.id} className="flex items-center gap-2 px-3 py-1.5 text-xs border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer">
-                      <input type="checkbox" checked={selectedProductIds.has(p.id)} onChange={() => toggleProduct(p.id)} />
-                      <span className="text-gray-500 font-mono">{p.mall_product_code}</span>
-                      <span className="text-gray-700 truncate">{p.name_original}</span>
+            <>
+              <StepHeader n={3} title="마이그레이션 진행"
+                done={generatedRows.length > 0 && generatedRows.every(r => r.status === 'committed')} />
+
+              <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-xs font-semibold text-gray-500">대상 상품 (선택한 세션 · 아직 상품마스터에 없는 상품)</div>
+                  <button onClick={handleGenerate} disabled={generating || selectedProductIds.size === 0}
+                    className="px-4 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50">
+                    {generating ? '마이그레이션 진행 중...' : `선택 ${selectedProductIds.size}개 마이그레이션 진행`}
+                  </button>
+                </div>
+                {products.length === 0 ? (
+                  <p className="text-xs text-gray-400">이 세션에는 대상 상품이 없습니다.</p>
+                ) : (
+                  <div className="border border-gray-100 rounded-xl overflow-hidden">
+                    <label className="flex items-center gap-2 px-3 py-1.5 text-xs bg-gray-50 border-b border-gray-100 cursor-pointer">
+                      <input type="checkbox" checked={selectedProductIds.size === products.length}
+                        onChange={() => setSelectedProductIds(selectedProductIds.size === products.length ? new Set() : new Set(products.map(p => p.id)))} />
+                      <span className="font-semibold text-gray-500">전체 선택 ({products.length}개)</span>
                     </label>
-                  ))}
+                    <div className="max-h-48 overflow-y-auto">
+                      {products.map(p => (
+                        <label key={p.id} className="flex items-center gap-2 px-3 py-1.5 text-xs border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer">
+                          <input type="checkbox" checked={selectedProductIds.has(p.id)} onChange={() => toggleProduct(p.id)} />
+                          <span className="text-gray-500 font-mono">{p.mall_product_code}</span>
+                          <span className="text-gray-700 truncate">{p.name_original}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {generatedRows.length > 0 && (
+                <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
+                  <div className="text-xs font-semibold text-gray-500 mb-3">생성 결과 검토 & 확정</div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr className="text-left text-gray-500 border-b border-gray-200">
+                          <th className="px-2 py-2">상품</th>
+                          {columnHeaders.map(h => <th key={h} className="px-2 py-2">{h}</th>)}
+                          <th className="px-2 py-2">상태</th>
+                          <th className="px-2 py-2">확정</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {generatedRows.map(row => (
+                          <tr key={row.id} className="border-b border-gray-100">
+                            <td className="px-2 py-2 whitespace-nowrap">
+                              <div className="font-mono text-gray-500">{row.mall_product_code}</div>
+                              <div className="text-gray-700 truncate max-w-[160px]">{row.name_original}</div>
+                            </td>
+                            {columnHeaders.map(h => (
+                              <td key={h} className="px-2 py-2">
+                                <input defaultValue={row.generated_values[h] ?? ''} onBlur={e => saveGeneratedCell(row.id, h, e.target.value)}
+                                  className="w-28 border border-gray-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-teal-300" />
+                              </td>
+                            ))}
+                            <td className="px-2 py-2">
+                              {row.status === 'committed' ? <span className="text-emerald-600 font-semibold">확정됨</span> : <span className="text-gray-400">검토중</span>}
+                            </td>
+                            <td className="px-2 py-2">
+                              <button onClick={() => handleCommit(row)} disabled={committing === row.id}
+                                className="px-3 py-1 bg-emerald-500 hover:bg-emerald-600 text-white rounded-full disabled:opacity-50">
+                                {committing === row.id ? '처리중...' : '확정'}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
-            </div>
-          )}
-
-          {/* 4단계: 검토 & 확정 */}
-          {generatedRows.length > 0 && (
-            <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-              <div className="text-sm font-semibold text-gray-700 mb-3">4. 생성 결과 검토 & 확정</div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs border-collapse">
-                  <thead>
-                    <tr className="text-left text-gray-500 border-b border-gray-200">
-                      <th className="px-2 py-2">상품</th>
-                      {columnHeaders.map(h => <th key={h} className="px-2 py-2">{h}</th>)}
-                      <th className="px-2 py-2">상태</th>
-                      <th className="px-2 py-2">확정</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {generatedRows.map(row => (
-                      <tr key={row.id} className="border-b border-gray-100">
-                        <td className="px-2 py-2 whitespace-nowrap">
-                          <div className="font-mono text-gray-500">{row.mall_product_code}</div>
-                          <div className="text-gray-700 truncate max-w-[160px]">{row.name_original}</div>
-                        </td>
-                        {columnHeaders.map(h => (
-                          <td key={h} className="px-2 py-2">
-                            <input defaultValue={row.generated_values[h] ?? ''} onBlur={e => saveGeneratedCell(row.id, h, e.target.value)}
-                              className="w-28 border border-gray-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-teal-300" />
-                          </td>
-                        ))}
-                        <td className="px-2 py-2">
-                          {row.status === 'committed' ? <span className="text-emerald-600 font-semibold">확정됨</span> : <span className="text-gray-400">검토중</span>}
-                        </td>
-                        <td className="px-2 py-2">
-                          <button onClick={() => handleCommit(row)} disabled={committing === row.id}
-                            className="px-3 py-1 bg-emerald-500 hover:bg-emerald-600 text-white rounded-full disabled:opacity-50">
-                            {committing === row.id ? '처리중...' : '확정'}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            </>
           )}
         </>
       )}

@@ -1,6 +1,7 @@
 import pool from '../db'
 import { generateTransformColumns, type TransformFewShotExample } from '../ai'
 import { migrateToMaster } from '../master/migrate'
+import { getGuidePairs } from './matching'
 
 /** product_master 컬럼 중 이 기능이 덮어써도 되는 필드만 허용 (target_field를 그대로 SQL에 꽂아 넣으므로 반드시 화이트리스트를 거친다) */
 export const ALLOWED_TARGET_FIELDS = new Set([
@@ -74,23 +75,10 @@ async function getLookupMap(ruleId: number): Promise<Map<string, string>> {
   return new Map(res.rows.map(r => [r.source_value, r.target_value ?? '']))
 }
 
-/** 완성본 중 mall_products와 매칭된 행들을 few-shot 예시(원본 필드 → 완성값)로 변환한다. */
+/** AS-IS/TO-BE 업로드를 몰상품코드로 매칭한 쌍을 few-shot 예시(원본 데이터 → 완성값)로 변환한다. */
 async function getFewShotExamples(siteId: number, limit = 8): Promise<TransformFewShotExample[]> {
-  const res = await pool.query(`
-    SELECT rr.row_values,
-           mp.name_original, mp.price, mp.sale_price, mp.brand, mp.manufacturer, mp.origin,
-           mp.description, mp.mall_category, mp.stock_status, mp.stock_qty, mp.options
-    FROM transform_reference_rows rr
-    JOIN transform_reference_uploads u ON u.id = rr.upload_id
-    JOIN mall_products mp ON mp.id = rr.matched_mall_product_id
-    WHERE u.site_id = $1 AND rr.matched_mall_product_id IS NOT NULL
-    ORDER BY rr.id DESC
-    LIMIT $2
-  `, [siteId, limit])
-  return res.rows.map(r => ({
-    sourceFields: buildSourceFields(r as MallProductRow),
-    targetValues: r.row_values as Record<string, string>,
-  }))
+  const pairs = await getGuidePairs(siteId)
+  return pairs.slice(0, limit).map(pair => ({ sourceFields: pair.asIs, targetValues: pair.toBe }))
 }
 
 function applyComposite(cfg: CompositeConfig, source: Record<string, unknown>): string {

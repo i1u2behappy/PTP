@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
-import { parseReferenceWorkbook, guessCodeColumn } from '@/lib/transform/matching'
+import { parseReferenceWorkbook, guessCodeColumn, type UploadKind } from '@/lib/transform/matching'
+
+const VALID_KINDS = new Set<UploadKind>(['as_is', 'to_be'])
 
 export async function GET(req: NextRequest) {
   const siteId = Number(req.nextUrl.searchParams.get('siteId'))
   if (!siteId) return NextResponse.json({ error: 'siteId required' }, { status: 400 })
 
   const res = await pool.query(`
-    SELECT u.id, u.file_name, u.column_headers, u.code_column, u.created_at,
+    SELECT u.id, u.kind, u.file_name, u.column_headers, u.code_column, u.created_at,
            COUNT(rr.id)::int AS row_count,
            COUNT(rr.matched_mall_product_id)::int AS matched_count
     FROM transform_reference_uploads u
@@ -23,16 +25,18 @@ export async function POST(req: NextRequest) {
   const form = await req.formData()
   const file = form.get('file')
   const siteId = Number(form.get('siteId'))
+  const kind = String(form.get('kind') || '')
   if (!(file instanceof File)) return NextResponse.json({ error: 'file required' }, { status: 400 })
   if (!siteId) return NextResponse.json({ error: 'siteId required' }, { status: 400 })
+  if (!VALID_KINDS.has(kind as UploadKind)) return NextResponse.json({ error: 'kind must be as_is or to_be' }, { status: 400 })
 
   const buffer = Buffer.from(await file.arrayBuffer())
   const { headers, rows } = await parseReferenceWorkbook(buffer)
   if (!headers.length) return NextResponse.json({ error: '엑셀 헤더를 읽지 못했습니다.' }, { status: 400 })
 
   const uploadRes = await pool.query<{ id: number }>(
-    `INSERT INTO transform_reference_uploads (site_id, file_name, column_headers) VALUES ($1, $2, $3) RETURNING id`,
-    [siteId, file.name, JSON.stringify(headers)],
+    `INSERT INTO transform_reference_uploads (site_id, kind, file_name, column_headers) VALUES ($1, $2, $3, $4) RETURNING id`,
+    [siteId, kind, file.name, JSON.stringify(headers)],
   )
   const uploadId = uploadRes.rows[0].id
 

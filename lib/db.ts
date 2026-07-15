@@ -448,7 +448,7 @@ export async function initDb() {
     ALTER TABLE mall_products ADD CONSTRAINT mall_products_master_product_id_fkey
       FOREIGN KEY (master_product_id) REFERENCES product_master(id) ON DELETE SET NULL;
 
-    -- 마이그레이션2_Transform: 몰별 "기존 작업내역 완성본" 업로드 (헤더/컬럼 구성이 몰마다 달라 JSONB로 보관)
+    -- 마이그레이션2_Transform: 몰별 AS-IS(원본)/TO-BE(완성본) 샘플 업로드 — 헤더/컬럼 구성이 몰마다 달라 JSONB로 보관
     CREATE TABLE IF NOT EXISTS transform_reference_uploads (
       id              SERIAL PRIMARY KEY,
       site_id         INT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
@@ -457,6 +457,7 @@ export async function initDb() {
       code_column     TEXT,
       created_at      TIMESTAMPTZ DEFAULT NOW()
     );
+    ALTER TABLE transform_reference_uploads ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'to_be';
 
     -- 완성본 원본 행. mall_product_code로 mall_products와 매칭해 few-shot 예시(원본→완성값 쌍)를 만든다
     CREATE TABLE IF NOT EXISTS transform_reference_rows (

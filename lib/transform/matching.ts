@@ -45,6 +45,59 @@ export function guessCodeColumn(headers: string[]): string | null {
   return headers.find(h => CODE_HEADER_RE.test(h)) || null
 }
 
+export type UploadKind = 'as_is' | 'to_be'
+
+export interface UploadSummary {
+  id: number
+  file_name: string
+  column_headers: string[]
+  code_column: string | null
+  row_count: number
+  matched_count: number
+}
+
+/** siteId의 특정 종류(AS-IS/TO-BE) 최신 업로드 1건을 요약과 함께 가져온다. */
+export async function getLatestUpload(siteId: number, kind: UploadKind): Promise<UploadSummary | null> {
+  const res = await pool.query<UploadSummary>(`
+    SELECT u.id, u.file_name, u.column_headers, u.code_column,
+           COUNT(rr.id)::int AS row_count, COUNT(rr.matched_mall_product_id)::int AS matched_count
+    FROM transform_reference_uploads u
+    LEFT JOIN transform_reference_rows rr ON rr.upload_id = u.id
+    WHERE u.site_id = $1 AND u.kind = $2
+    GROUP BY u.id
+    ORDER BY u.created_at DESC
+    LIMIT 1
+  `, [siteId, kind])
+  return res.rows[0] || null
+}
+
+export interface GuidePair {
+  code: string
+  asIs: Record<string, string>
+  toBe: Record<string, string>
+}
+
+/**
+ * 몰의 최신 AS-IS 업로드와 최신 TO-BE 업로드를 각 행의 몰상품코드(code_column에서 추출한 값)로 매칭해,
+ * "이 상품이 이렇게 마이그레이션 되었다"는 예시 쌍을 만든다. 어느 한쪽이라도 없으면 빈 배열.
+ */
+export async function getGuidePairs(siteId: number): Promise<GuidePair[]> {
+  const [asIs, toBe] = await Promise.all([getLatestUpload(siteId, 'as_is'), getLatestUpload(siteId, 'to_be')])
+  if (!asIs || !toBe) return []
+
+  const [asIsRows, toBeRows] = await Promise.all([
+    pool.query<{ mall_product_code: string | null; row_values: Record<string, string> }>(
+      'SELECT mall_product_code, row_values FROM transform_reference_rows WHERE upload_id = $1', [asIs.id]),
+    pool.query<{ mall_product_code: string | null; row_values: Record<string, string> }>(
+      'SELECT mall_product_code, row_values FROM transform_reference_rows WHERE upload_id = $1', [toBe.id]),
+  ])
+  const toBeByCode = new Map(toBeRows.rows.filter(r => r.mall_product_code).map(r => [r.mall_product_code!, r.row_values]))
+
+  return asIsRows.rows
+    .filter(r => r.mall_product_code && toBeByCode.has(r.mall_product_code))
+    .map(r => ({ code: r.mall_product_code!, asIs: r.row_values, toBe: toBeByCode.get(r.mall_product_code!)! }))
+}
+
 /**
  * upload의 code_column을 기준으로 각 참조 행의 mall_product_code를 다시 뽑고,
  * 같은 site의 mall_products와 코드로 매칭한다. { total, matched }를 반환한다.

@@ -628,8 +628,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           <div className="flex items-center justify-between mb-2">
             <label className="block text-sm font-semibold text-gray-700">상품 페이지 미리보기</label>
             <button type="button" onClick={handlePreview} disabled={previewLoading || !canPreview}
-              className="text-xs text-teal-500 hover:underline disabled:opacity-50 disabled:cursor-not-allowed shrink-0">
-              {previewLoading ? '확인 중...' : '🔍 상품 페이지 열어서 확인'}
+              className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0">
+              {previewLoading ? '확인 중...' : '🔍 스크랩 미리보기'}
             </button>
           </div>
 

@@ -203,7 +203,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (d.url) { setTargetUrl(d.url); setCategoryUrlsText('') }
   }
 
-  /** 로그인 창이 열려있으면 그 안에 새 탭으로 열어 로그인된 상태로 보여준다. 없으면 일반 새 탭으로 폴백. */
+  /** 로그인 창에 새 탭으로 열어 로그인된 상태로 보여준다. 로그인 창이 닫혀있으면 서버가 저장된 로그인
+   * 쿠키로 새 창을 띄운다 — 요청이 아예 실패했을 때만 일반 새 탭으로 폴백한다. */
   async function handleOpenItem(url: string) {
     if (selectedSite) {
       try {
@@ -211,8 +212,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ siteId: selectedSite.id, url }),
         })
-        const d = await res.json() as { opened: boolean }
-        if (d.opened) return
+        if (res.ok) return
       } catch { /* 폴백으로 진행 */ }
     }
     window.open(url, '_blank', 'noreferrer')

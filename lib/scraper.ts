@@ -106,8 +106,9 @@ async function killOrphanedProfileProcess(siteId: number): Promise<void> {
   await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script]).catch(() => {})
 }
 
-/** 사용자가 직접 로그인을 확인할 수 있도록 화면에 보이는 브라우저 창을 연다 */
-export async function openLoginWindow(siteId: number, opts: { url: string; loginId?: string; loginPw?: string }) {
+/** 화면에 보이는(headed) 브라우저 창을 새로 띄우고 openSessions에 등록한다. 프로필 디렉터리가 그대로라
+ * 예전에 로그인했던 쿠키가 남아있으면 자동으로 로그인된 상태로 뜬다. */
+async function launchVisibleWindow(siteId: number): Promise<BrowserContext> {
   await closeLoginWindow(siteId)
   await killOrphanedProfileProcess(siteId)
   const context = await chromium.launchPersistentContext(profileDir(siteId), {
@@ -119,6 +120,12 @@ export async function openLoginWindow(siteId: number, opts: { url: string; login
   context.on('close', () => {
     if (openSessions.get(siteId) === context) openSessions.delete(siteId)
   })
+  return context
+}
+
+/** 사용자가 직접 로그인을 확인할 수 있도록 화면에 보이는 브라우저 창을 연다 */
+export async function openLoginWindow(siteId: number, opts: { url: string; loginId?: string; loginPw?: string }) {
+  const context = await launchVisibleWindow(siteId)
   const page = context.pages()[0] || await context.newPage()
   await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => {})
   // 아이디/비번만 채워두고 제출은 하지 않는다 — 사용자가 직접 로그인 버튼을 눌러야 이후 "로그인 확인" 흐름과 맞는다.
@@ -134,18 +141,22 @@ export function getOpenPageUrl(siteId: number): string | null {
 }
 
 /**
- * 미리보기 화면의 "열기" 링크처럼, 로그인된 상태로 특정 상품 페이지를 확인하고 싶을 때 쓴다. 이미 열려있는
- * 로그인 창(세션 쿠키를 가진 그 브라우저)에 새 탭을 띄워 이동시킨다 — 사용자의 일반 브라우저로 그냥 열면
- * 로그인 쿠키가 없어 로그아웃 상태로 보인다. 열려있는 로그인 창이 없으면 false를 반환해 호출부가
- * 폴백(일반 브라우저 새 탭)하도록 한다.
+ * 미리보기 화면의 "열기" 버튼처럼, 로그인된 상태로 특정 상품 페이지를 확인하고 싶을 때 쓴다. 로그인 창이
+ * 열려있으면 그 창(세션 쿠키를 가진 그 브라우저)에 새 탭을 띄워 이동시킨다. 사용자가 창을 닫아 열려있는
+ * 로그인 창이 없어도, 같은 프로필 디렉터리에 남아있는 예전 로그인 쿠키를 그대로 재사용해 새 창을 띄운다
+ * (그 쿠키가 만료됐으면 그 사이트 자체가 로그인 페이지로 돌려보낼 뿐 — 이 함수가 할 수 있는 건 여기까지).
  */
-export async function openUrlInLoginWindow(siteId: number, url: string): Promise<boolean> {
-  const context = openSessions.get(siteId)
-  if (!context) return false
-  const page = await context.newPage()
+export async function openUrlInLoginWindow(siteId: number, url: string): Promise<void> {
+  const existing = openSessions.get(siteId)
+  if (existing) {
+    const page = await existing.newPage()
+    await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+    await page.bringToFront().catch(() => {})
+    return
+  }
+  const context = await launchVisibleWindow(siteId)
+  const page = context.pages()[0] || await context.newPage()
   await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
-  await page.bringToFront().catch(() => {})
-  return true
 }
 
 /** 사용자가 명시적으로 닫을 때만 호출 — 로그인 확인 시에는 창을 닫지 않는다 */

@@ -64,7 +64,7 @@ export function ProductsListPanel() {
     <div className="h-full flex flex-col">
       <div className="flex items-center justify-between mb-6 shrink-0">
         <div>
-          <h1 className="text-2xl font-bold text-gray-800">📥 수집 확인</h1>
+          <h1 className="text-2xl font-bold text-gray-800">📥 스크랩 Raw 확인</h1>
           <p className="text-xs text-gray-400 mt-1">
             사용 절차: ① 스크래핑 실행 → ② <b className="text-gray-500">여기서 수집 내용이 잘 스크랩됐는지 확인/검증</b> (확정 전=미확정) → ③ 마이그레이션으로 넘겨 병합 → ④ 상품마스터로 가공.
             아래 표는 병합 여부와 상관없이 이 스크래핑에서 수집된 모든 항목을 보여줍니다.

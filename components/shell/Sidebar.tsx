@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { useTabs, type Tab } from './TabsContext'
 import { BoltIcon, DashboardIcon, ClientIcon, StoreIcon, ListIcon, SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ImageEditIcon, ExportIcon, SettingsIcon, TagIcon, MapIcon, CoinIcon } from './icons'
-import { CLIENTS_LIST_TAB, SITES_LIST_TAB, MASTER_LIST_TAB } from './menuTabs'
+import { CLIENTS_LIST_TAB, SITES_LIST_TAB, MASTER_LIST_TAB, PRODUCTS_LIST_TAB } from './menuTabs'
 
 type IconComponent = (props: { active?: boolean }) => React.ReactNode
 
@@ -58,7 +58,7 @@ export function Sidebar() {
 
         {/* 대시보드 작업 플로우 순서(스크래핑 → 수집확인 → 마이그레이션 → 상품마스터 → 엑셀 내보내기)와 동일하게 배치 */}
         <NavLeaf tab={{ id: 'scraper', type: 'scraper', title: '스크래핑', icon: '🔍', closable: true }} icon={SearchIcon} />
-        <NavLeaf tab={{ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true }} icon={InboxIcon} />
+        <NavLeaf tab={PRODUCTS_LIST_TAB} icon={InboxIcon} />
 
         {/* 컬럼별 전처리/변환 작업을 단계별 하위 메뉴로 구분. 그룹명 클릭 시 하위 작업 진행현황 대시보드가 열린다 */}
         <NavGroup label="마이그레이션" icon={ReviewIcon} defaultOpen

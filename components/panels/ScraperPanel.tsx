@@ -1,6 +1,7 @@
 'use client'
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useTabs } from '../shell/TabsContext'
+import { PRODUCTS_LIST_TAB } from '../shell/menuTabs'
 
 type Status = 'idle' | 'running' | 'done' | 'error' | 'stopped'
 type LoginStep = 'none' | 'opened' | 'confirmed'
@@ -856,9 +857,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           )}
           {status === 'done' && (
             <div className="mt-3 flex items-center gap-3">
-              <button onClick={() => openTab({ id: 'migration-dashboard', type: 'migration-dashboard', title: '데이터 마이그 목록', icon: '📊', closable: true })}
+              <button onClick={() => openTab(PRODUCTS_LIST_TAB)}
                 className="inline-block text-sm text-teal-500 font-medium hover:underline">
-                → 스크랩 결과 검토
+                → 스크랩 Raw 확인
               </button>
               {failedUrls.length > 0 && (
                 <button onClick={handleRetryFailed} disabled={retrying}

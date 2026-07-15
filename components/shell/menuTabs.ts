@@ -5,3 +5,4 @@ import type { Tab } from './TabsContext'
 export const CLIENTS_LIST_TAB: Tab = { id: 'clients-list', type: 'clients-list', title: '거래처 관리', icon: '🏢', closable: true }
 export const SITES_LIST_TAB: Tab = { id: 'sites-list', type: 'sites-list', title: 'Mall 상세관리', icon: '📋', closable: true }
 export const MASTER_LIST_TAB: Tab = { id: 'master-list', type: 'master-list', title: '상품마스터', icon: '🗂️', closable: true }
+export const PRODUCTS_LIST_TAB: Tab = { id: 'products-list', type: 'products-list', title: '스크랩 Raw 확인', icon: '📥', closable: true }

@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useTabs } from '../shell/TabsContext'
 import { SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ExportIcon } from '../shell/icons'
+import { PRODUCTS_LIST_TAB } from '../shell/menuTabs'
 
 const MARKETS = [
   { label: '쿠팡 Wing', className: 'bg-blue-50 text-blue-600' },
@@ -47,7 +48,7 @@ export function DashboardPanel() {
     },
     {
       label: '수집된 원천 상품', value: productCount, accent: 'bg-teal-50 text-teal-600', Icon: InboxIcon,
-      open: () => openTab({ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true }),
+      open: () => openTab(PRODUCTS_LIST_TAB),
     },
     {
       label: '상품마스터', value: masterCount, accent: 'bg-slate-100 text-slate-600', Icon: ArchiveIcon,

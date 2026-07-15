@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import Image from 'next/image'
 import { useTabs } from '../shell/TabsContext'
-import { MASTER_LIST_TAB } from '../shell/menuTabs'
+import { MASTER_LIST_TAB, PRODUCTS_LIST_TAB } from '../shell/menuTabs'
 
 interface MasterRow {
   id: number
@@ -231,8 +231,8 @@ export function MasterListPanel() {
         <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 shrink-0">
           <div className="text-4xl mb-3">📭</div>
           <p className="text-sm">가공된 상품마스터가 없습니다.</p>
-          <button onClick={() => openTab({ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true })}
-            className="mt-2 inline-block text-teal-500 text-sm hover:underline">← 수집 확인에서 가공하기</button>
+          <button onClick={() => openTab(PRODUCTS_LIST_TAB)}
+            className="mt-2 inline-block text-teal-500 text-sm hover:underline">← 스크랩 Raw 확인에서 가공하기</button>
         </div>
       ) : (
         <div className="flex-1 min-h-0 flex flex-col">
@@ -336,8 +336,8 @@ export function MasterListPanel() {
       )}
 
       <div className="mt-3 flex items-center justify-between text-xs text-gray-400 shrink-0">
-        <button onClick={() => openTab({ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true })}
-          className="text-gray-500 hover:underline">← 수집 확인</button>
+        <button onClick={() => openTab(PRODUCTS_LIST_TAB)}
+          className="text-gray-500 hover:underline">← 스크랩 Raw 확인</button>
         <button onClick={() => openTab({ id: 'export', type: 'export', title: '엑셀 내보내기', icon: '📊', closable: true })}
           className="text-teal-500 hover:underline font-medium">엑셀 내보내기로 →</button>
       </div>

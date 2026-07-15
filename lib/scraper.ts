@@ -619,6 +619,19 @@ function resetToFirstPage(url: string): string {
   } catch { return url }
 }
 
+/**
+ * URL의 page 쿼리파라미터를 지정한 값으로 바꾼다(없으면 추가). 카페24 등은 페이지 번호가 눈에 보이는
+ * 링크(1 2 3 ...)로만 제공되고 "다음" 화살표가 없는 경우가 흔한데(보여줄 페이지 수가 적을 때), 그런
+ * 스킨에서도 이 파라미터로 직접 이동하면 다음 페이지를 안정적으로 가져올 수 있다.
+ */
+function withPageParam(url: string, pageNum: number): string {
+  try {
+    const u = new URL(url)
+    u.searchParams.set('page', String(pageNum))
+    return u.toString()
+  } catch { return url }
+}
+
 /** 목록 페이지(들)을 순회하며 제품 URL 후보를 모은다. 실제 상품 추출은 하지 않는다(테스트/실행 공용 로직). */
 async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<CollectedLinks> {
   if (opts.productUrls?.length) {
@@ -650,46 +663,68 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
   const categoryByUrl = new Map<string, string>()
   const linkInfo = new Map<string, { name: string; thumbnail: string }>()
 
+  async function scanCurrentPage(): Promise<{ href: string; name: string; thumbnail: string }[]> {
+    const items: { href: string; name: string; thumbnail: string }[] = await page.evaluate(({ userSel, platformSel, detailPatternSrc }) => {
+      const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc) : null
+      const pick = (sel: string, requireImg: boolean, applyDetailFilter: boolean) => Array.from(document.querySelectorAll(sel))
+        .filter(a => !requireImg || a.querySelector('img'))
+        .map(a => {
+          const img = a.querySelector('img') as HTMLImageElement | null
+          return { href: (a as HTMLAnchorElement).href, name: (img?.alt || a.textContent || '').trim(), thumbnail: img?.src || '' }
+        })
+        .filter(item => item.href && item.href.startsWith('http'))
+        // 목록 컨테이너 셀렉터가 로고/검색/카테고리 배너 등 상품이 아닌 링크까지 잡아내는 스킨 대비 —
+        // 상품 상세 URL 패턴을 아는 플랫폼이면 그 패턴에 맞는 것만 상품으로 인정한다. 사용자가 직접 지정한
+        // 셀렉터는 의도를 존중해 이 필터를 적용하지 않는다.
+        .filter(item => !applyDetailFilter || !detailRe || detailRe.test(item.href))
+
+      if (userSel) return pick(userSel, false, false)
+      if (platformSel) {
+        const viaProfile = pick(platformSel, false, true)
+        if (viaProfile.length > 0) return viaProfile
+      }
+      return pick('a', true, true) // 범용 폴백: 썸네일 이미지를 감싼 링크만 제품으로 인식
+    }, { userSel, platformSel, detailPatternSrc: profile.detailUrlPattern?.source })
+    return items.filter(item => item.href.startsWith(baseUrl))
+  }
+
   for (const listingUrl of listingUrls) {
     if (page.url() !== listingUrl) {
       await page.goto(listingUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     }
 
     const categoryLabel = await detectCategoryLabel(page)
+    let prevHrefs: Set<string> | null = null
 
     for (let p = 0; p < maxPages; p++) {
-      const items: { href: string; name: string; thumbnail: string }[] = await page.evaluate(({ userSel, platformSel, detailPatternSrc }) => {
-        const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc) : null
-        const pick = (sel: string, requireImg: boolean, applyDetailFilter: boolean) => Array.from(document.querySelectorAll(sel))
-          .filter(a => !requireImg || a.querySelector('img'))
-          .map(a => {
-            const img = a.querySelector('img') as HTMLImageElement | null
-            return { href: (a as HTMLAnchorElement).href, name: (img?.alt || a.textContent || '').trim(), thumbnail: img?.src || '' }
-          })
-          .filter(item => item.href && item.href.startsWith('http'))
-          // 목록 컨테이너 셀렉터가 로고/검색/카테고리 배너 등 상품이 아닌 링크까지 잡아내는 스킨 대비 —
-          // 상품 상세 URL 패턴을 아는 플랫폼이면 그 패턴에 맞는 것만 상품으로 인정한다. 사용자가 직접 지정한
-          // 셀렉터는 의도를 존중해 이 필터를 적용하지 않는다.
-          .filter(item => !applyDetailFilter || !detailRe || detailRe.test(item.href))
+      let matched = await scanCurrentPage()
+      let hrefsThisPage = new Set(matched.map(m => m.href))
+      const isDeadEnd = (hrefs: Set<string>) => hrefs.size === 0 || (prevHrefs !== null && [...hrefs].every(h => prevHrefs!.has(h)))
 
-        if (userSel) return pick(userSel, false, false)
-        if (platformSel) {
-          const viaProfile = pick(platformSel, false, true)
-          if (viaProfile.length > 0) return viaProfile
+      // page 파라미터로 다음 페이지 이동을 시도했는데도 상품 목록이 그대로거나 비었으면(그 파라미터를 안 쓰는
+      // 몰이거나 스킨 구조가 다른 경우), "다음" 버튼 클릭 방식으로 한 번 더 시도해본다.
+      if (isDeadEnd(hrefsThisPage) && p > 0 && nextPageSelector) {
+        const nextBtn = page.locator(nextPageSelector).first()
+        if (await nextBtn.isVisible({ timeout: 2_000 }).catch(() => false)) {
+          await nextBtn.click()
+          await page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
+          matched = await scanCurrentPage()
+          hrefsThisPage = new Set(matched.map(m => m.href))
         }
-        return pick('a', true, true) // 범용 폴백: 썸네일 이미지를 감싼 링크만 제품으로 인식
-      }, { userSel, platformSel, detailPatternSrc: profile.detailUrlPattern?.source })
-      items.filter(item => item.href.startsWith(baseUrl)).forEach(item => {
+      }
+      if (isDeadEnd(hrefsThisPage)) break
+      prevHrefs = hrefsThisPage
+
+      matched.forEach(item => {
         productUrlSet.add(item.href)
         if (categoryLabel && !categoryByUrl.has(item.href)) categoryByUrl.set(item.href, categoryLabel)
         if (!linkInfo.has(item.href) && (item.name || item.thumbnail)) linkInfo.set(item.href, { name: item.name, thumbnail: item.thumbnail })
       })
 
-      if (p >= maxPages - 1 || !nextPageSelector) break
-      const nextBtn = page.locator(nextPageSelector).first()
-      if (!(await nextBtn.isVisible({ timeout: 3_000 }).catch(() => false))) break
-      await nextBtn.click()
-      await page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
+      if (p >= maxPages - 1) break
+      // 스킨마다 다른 "다음" 버튼 클래스에 기대는 대신, page 쿼리파라미터를 다음 번호로 바꿔 직접 이동한다 —
+      // cafe24 등 대부분의 몰이 페이지 번호 링크 없이도(숫자가 안 보여도) 이 파라미터로 페이지를 넘겨준다.
+      await page.goto(withPageParam(page.url(), p + 2), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
     }
   }
 

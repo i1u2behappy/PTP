@@ -16,7 +16,7 @@ export interface ExtractedProduct {
   category: string
   description: string
   options: { name: string; values: string[] }[]
-  thumbnail_url: string
+  thumbnail_urls: string[]
   detail_image_urls: string[]
   stock_status: string
   stock_qty: number | null
@@ -72,6 +72,67 @@ export async function generateProductName(
   } catch {
     // 이미지 분석 실패 시 원본명 기반으로 축약
     return originalName.slice(0, maxLength)
+  }
+}
+
+export interface TransformFewShotExample {
+  /** 원본 mall_products 필드 (name_original, price, brand, mall_category, description, options 등) */
+  sourceFields: Record<string, unknown>
+  /** 완성본에서 이 상품에 해당하는 { 컬럼명: 값 } */
+  targetValues: Record<string, string>
+}
+
+/**
+ * 몰의 "기존 작업내역 완성본" few-shot 예시를 보고, 같은 패턴으로 신규 상품의 AI 대상 컬럼 값을 생성한다.
+ * 정규식 파싱 대신 tool-call로 스키마를 강제해 컬럼 여러 개를 한 번에 안전하게 받는다.
+ * ANTHROPIC_API_KEY가 없으면 조용히 빈 객체를 반환한다(호출부에서 전체 배치를 막지 않도록).
+ */
+export async function generateTransformColumns(
+  siteName: string,
+  columns: { name: string; instruction: string }[],
+  examples: TransformFewShotExample[],
+  sourceFields: Record<string, unknown>,
+): Promise<Record<string, string>> {
+  if (!process.env.ANTHROPIC_API_KEY || !columns.length) return {}
+
+  const properties: Record<string, { type: string; description: string }> = {}
+  columns.forEach(c => { properties[c.name] = { type: 'string', description: c.instruction || c.name } })
+
+  const exampleText = examples.map((ex, i) =>
+    `[예시 ${i + 1}]\n원본 데이터: ${JSON.stringify(ex.sourceFields)}\n완성값: ${JSON.stringify(ex.targetValues)}`,
+  ).join('\n\n')
+
+  const prompt = `몰 '${siteName}'의 기존 작업 완성 예시들이다 (원본 스크래핑 데이터 → 완성값). 같은 패턴으로 아래 신규 상품의 값을 만들어라.
+
+${exampleText || '(참고할 예시 없음 — 컬럼 지시문만 보고 판단할 것)'}
+
+[신규 상품 원본 데이터]
+${JSON.stringify(sourceFields)}
+
+각 컬럼의 지시문:
+${columns.map(c => `- ${c.name}: ${c.instruction || '(지시문 없음, 예시 패턴을 참고해 합리적으로 생성)'}`).join('\n')}`
+
+  try {
+    const response = await getClient().messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      tools: [{
+        name: 'set_columns',
+        description: '각 컬럼명을 key로, 생성한 값을 value(문자열)로 채워 반환한다.',
+        input_schema: {
+          type: 'object',
+          properties,
+          required: columns.map(c => c.name),
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'set_columns' },
+      messages: [{ role: 'user', content: prompt }],
+    })
+    const toolUse = response.content.find(b => b.type === 'tool_use')
+    if (!toolUse || toolUse.type !== 'tool_use') return {}
+    return toolUse.input as Record<string, string>
+  } catch {
+    return {}
   }
 }
 

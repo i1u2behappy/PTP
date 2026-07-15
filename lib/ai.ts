@@ -17,7 +17,10 @@ export interface ExtractedProduct {
   description: string
   options: { name: string; values: string[] }[]
   thumbnail_urls: string[]
+  thumbnail_names: string[]
   detail_image_urls: string[]
+  detail_image_names: string[]
+  detail_text: string
   stock_status: string
   stock_qty: number | null
   mall_product_code: string

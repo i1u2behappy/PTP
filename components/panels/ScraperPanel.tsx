@@ -38,7 +38,12 @@ interface PreviewProduct {
   description: string
   options: { name: string; values: string[] }[]
   thumbnail_urls: string[]
+  thumbnail_names: string[]
   detail_image_urls: string[]
+  detail_image_names: string[]
+  detail_text: string
+  stock_status: string
+  stock_qty: number | null
 }
 
 interface PreviewItem {
@@ -373,7 +378,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const statusLabel = { idle: '대기 중', running: '스크래핑 중...', done: '완료', error: '오류 발생', stopped: '중지됨' }
 
   return (
-    <div className="max-w-2xl">
+    <div>
       <h1 className="text-2xl font-bold text-gray-800 mb-6">🔍 스크래핑 설정</h1>
 
       {/* Mall 선택 */}
@@ -630,8 +635,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
           {previewResult && (
             <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
-              <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500 truncate">{previewResult.sourceUrl}</div>
-              <div className="p-3 flex gap-3">
+              <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500 flex items-center justify-between gap-2">
+                <span className="truncate">{previewResult.sourceUrl}</span>
+                <button type="button" onClick={handlePreview} disabled={previewLoading || !canPreview}
+                  title="다시 미리보기" className="text-teal-500 hover:underline disabled:opacity-50 disabled:cursor-not-allowed shrink-0">
+                  {previewLoading ? '확인 중...' : '🔄 새로고침'}
+                </button>
+              </div>
+              <div className="p-3 flex gap-3 border-b border-gray-100">
                 {previewResult.product.thumbnail_urls.length > 0 && (
                   <div className="flex gap-1 shrink-0">
                     {previewResult.product.thumbnail_urls.slice(0, 3).map((src, i) => (
@@ -644,22 +655,59 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   <div className="font-semibold text-gray-800 text-sm truncate">
                     {previewResult.product.name || <span className="text-rose-500">상품명을 찾지 못했습니다</span>}
                   </div>
-                  <div className="text-gray-600">
-                    가격: {previewResult.product.price != null ? `₩${previewResult.product.price.toLocaleString()}` : <span className="text-rose-500">찾지 못함</span>}
-                  </div>
-                  <div className="text-gray-500">
-                    브랜드: {previewResult.product.brand || '-'} · 제조사: {previewResult.product.manufacturer || '-'} · 원산지: {previewResult.product.origin || '-'}
-                  </div>
-                  {previewResult.product.options.length > 0 && (
-                    <div className="text-gray-500">
-                      옵션: {previewResult.product.options.map(o => `${o.name}(${o.values.length}개)`).join(', ')}
-                    </div>
-                  )}
                   {previewResult.product.description && (
                     <div className="text-gray-400 line-clamp-2">{previewResult.product.description}</div>
                   )}
                 </div>
               </div>
+              <div className="overflow-x-auto">
+                <table className="text-xs border-collapse whitespace-nowrap">
+                  <thead className="bg-gray-50">
+                    <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+                      <th className="px-3 py-2 text-left">가격</th>
+                      <th className="px-3 py-2 text-left">브랜드</th>
+                      <th className="px-3 py-2 text-left">제조사</th>
+                      <th className="px-3 py-2 text-left">원산지</th>
+                      <th className="px-3 py-2 text-left">재고</th>
+                      <th className="px-3 py-2 text-left">대표이미지</th>
+                      <th className="px-3 py-2 text-left">상세이미지</th>
+                      {previewResult.product.options.map(o => (
+                        <th key={o.name} className="px-3 py-2 text-left">{o.name}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td className="px-3 py-2 text-gray-700">
+                        {previewResult.product.price != null ? `₩${previewResult.product.price.toLocaleString()}` : <span className="text-rose-500">찾지 못함</span>}
+                      </td>
+                      <td className="px-3 py-2 text-gray-700">{previewResult.product.brand || '-'}</td>
+                      <td className="px-3 py-2 text-gray-700">{previewResult.product.manufacturer || '-'}</td>
+                      <td className="px-3 py-2 text-gray-700">{previewResult.product.origin || '-'}</td>
+                      <td className="px-3 py-2 text-gray-700">
+                        {previewResult.product.stock_status || '-'}{previewResult.product.stock_qty != null && ` (${previewResult.product.stock_qty}개)`}
+                      </td>
+                      <td className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={previewResult.product.thumbnail_names.join(', ')}>
+                        {previewResult.product.thumbnail_urls.length}장 — {previewResult.product.thumbnail_names.join(', ') || '-'}
+                      </td>
+                      <td className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={previewResult.product.detail_image_names.join(', ')}>
+                        {previewResult.product.detail_image_urls.length}장 — {previewResult.product.detail_image_names.join(', ') || '-'}
+                      </td>
+                      {previewResult.product.options.map(o => (
+                        <td key={o.name} className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={o.values.join(', ')}>
+                          {o.values.join(', ')}
+                        </td>
+                      ))}
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              {previewResult.product.detail_text && (
+                <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-500">
+                  <span className="text-gray-400">상세페이지 텍스트: </span>
+                  <span className="line-clamp-3">{previewResult.product.detail_text}</span>
+                </div>
+              )}
             </div>
           )}
 

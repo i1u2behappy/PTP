@@ -7,11 +7,15 @@ interface RawPageData {
   brand: string
   description: string
   mainImages: string[]
+  mainImageNames: string[]
   detailImages: string[]
+  detailImageNames: string[]
+  detailText: string
   infoRows: [string, string][]
   sku: string
   availability: string
   stockText: string
+  stockQtyText: string
 }
 
 async function scrapePageData(page: Page): Promise<RawPageData> {
@@ -60,11 +64,31 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       const ogImg = ogContent('og:image')
       if (ogImg) mainImages = [ogImg]
     }
+
+    // ld+json/og 이미지는 URL만 있고 alt 텍스트가 없으니, 페이지의 실제 <img> 태그에서 src 기준으로 alt를 찾아 붙인다.
+    // alt가 없는 이미지는 파일명(URL 마지막 경로)을 이름으로 대신 쓴다.
+    const imgAltBySrc = new Map<string, string>()
+    document.querySelectorAll('img').forEach(img => {
+      const alt = img.getAttribute('alt')?.trim()
+      if (alt && img.src) imgAltBySrc.set(img.src, alt)
+    })
+    const nameForImage = (src: string) => {
+      const alt = imgAltBySrc.get(src)
+      if (alt) return alt
+      try { return decodeURIComponent(new URL(src, location.href).pathname.split('/').pop() || '') } catch { return '' }
+    }
+    const mainImageNames = mainImages.map(nameForImage)
+
     // ld+json/og의 대표 이미지 갤러리(여러 장일 수 있음)와는 별개로, 카페24 표준 상세설명 영역(#prdDetail)에
     // 판매자가 직접 올린 상품별 상세 이미지(사이즈/소재 등 텍스트로는 안 남는 구분 정보)를 모은다
-    const detailImages = Array.from(document.querySelectorAll<HTMLImageElement>('#prdDetail img'))
-      .map(img => img.src)
-      .filter(src => src && !mainImages.includes(src))
+    const detailImageEls = Array.from(document.querySelectorAll<HTMLImageElement>('#prdDetail img'))
+      .filter(img => img.src && !mainImages.includes(img.src))
+    const detailImages = detailImageEls.map(img => img.src)
+    const detailImageNames = detailImageEls.map(img => nameForImage(img.src))
+
+    // 상세페이지에 이미지가 아니라 텍스트로 직접 박혀 있는 설명 내용 (소재/사이즈 안내 등)
+    const detailText = (document.querySelector('#prdDetail')?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 3000)
+
     if (!description) {
       description = ogContent('og:description') || document.querySelector('meta[name="description"]')?.getAttribute('content') || ''
     }
@@ -77,14 +101,17 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       }
     }
 
-    // 품절/재입고/단종 배지 텍스트를 탐색 (ld+json availability가 없는 사이트 대비)
+    // 품절/재입고/단종 배지 텍스트 및 재고수량 문구를 탐색 (ld+json availability/상품정보고시 표가 없는 사이트 대비)
     let stockText = ''
+    let stockQtyText = ''
     const stockEls = Array.from(document.querySelectorAll(
       '[class*="soldout" i], [class*="sold-out" i], [class*="stock" i], [class*="status" i]',
     ))
     for (const el of stockEls) {
       const t = (el.textContent || '').trim()
-      if (/품절|재입고|단종|일시품절/.test(t)) { stockText = t; break }
+      if (!stockText && /품절|재입고|단종|일시품절/.test(t)) stockText = t
+      if (!stockQtyText && /재고\s*(?:수량)?\s*[:：]?\s*\d+\s*개?/.test(t)) stockQtyText = t
+      if (stockText && stockQtyText) break
     }
 
     // 국내 쇼핑몰은 전자상거래법상 "상품정보제공고시" 표를 의무 게시하므로, 라벨-값 테이블에서 부가 정보를 찾는다
@@ -94,7 +121,10 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       if (cells.length === 2 && cells[0] && cells[1]) infoRows.push([cells[0], cells[1]])
     })
 
-    return { name, price, brand, description, mainImages, detailImages, infoRows, sku, availability, stockText }
+    return {
+      name, price, brand, description, mainImages, mainImageNames, detailImages, detailImageNames, detailText,
+      infoRows, sku, availability, stockText, stockQtyText,
+    }
   })
 }
 
@@ -112,11 +142,12 @@ export function extractStockStatus(availability: string, stockText: string): str
   return '판매중' // 명시적 신호가 없으면 판매중으로 간주
 }
 
-/** 상품정보고시 "재고" 행에서 숫자를 뽑아낸다. 없으면 null. */
-function resolveStockQty(rows: [string, string][]): number | null {
-  const value = findInfoValue(rows, /재고/i)
-  const m = value.match(/(\d+)/)
-  return m ? Number(m[1]) : null
+/** 상품정보고시 "재고" 행에서 숫자를 뽑는다. 표에 없으면 페이지 내 "재고 N개" 류 문구로 대체한다. 그마저 없으면 null. */
+function resolveStockQty(rows: [string, string][], stockQtyText: string): number | null {
+  const fromTable = findInfoValue(rows, /재고/i).match(/(\d+)/)
+  if (fromTable) return Number(fromTable[1])
+  const fromText = stockQtyText.match(/(\d+)/)
+  return fromText ? Number(fromText[1]) : null
 }
 
 /** ld+json sku가 없으면 URL 쿼리파라미터/경로에서 몰 상품코드를 추정한다. 그마저 없으면 URL 자체를 코드로 쓴다. */
@@ -163,9 +194,12 @@ export async function extractProductRuleBased(page: Page, url: string, overrides
     description: raw.description,
     options: [], // extractOptionsFromDom이 별도로 채운다
     thumbnail_urls: raw.mainImages,
+    thumbnail_names: raw.mainImageNames,
     detail_image_urls: raw.detailImages,
+    detail_image_names: raw.detailImageNames,
+    detail_text: raw.detailText,
     stock_status: extractStockStatus(raw.availability, raw.stockText),
-    stock_qty: resolveStockQty(raw.infoRows),
+    stock_qty: resolveStockQty(raw.infoRows, raw.stockQtyText),
     mall_product_code: extractMallProductCode(url, raw.sku),
   }
 

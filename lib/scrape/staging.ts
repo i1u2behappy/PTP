@@ -62,12 +62,16 @@ interface StagingRow {
   detail_image_urls: string[]
   stock_status: string | null
   stock_qty: number | null
+  raw_data: Partial<ExtractedProduct> | null
   matched_mall_product_id: number | null
   is_already_migrated: boolean
   status: string
 }
 
 function toScrapeResult(row: StagingRow): ScrapeResult {
+  // raw_data는 스크랩 당시 ExtractedProduct 전체를 그대로 담아둔 것 — 개별 컬럼이 없는
+  // 부가 필드(이미지명, 상세 텍스트 등)는 여기서 복원한다. 개별 컬럼이 있는 필드는 그쪽이 우선(최신 검토값).
+  const extra = row.raw_data || {}
   const product: ExtractedProduct = {
     name: row.name_original,
     price: row.price,
@@ -79,7 +83,10 @@ function toScrapeResult(row: StagingRow): ScrapeResult {
     description: row.description,
     options: row.options,
     thumbnail_urls: row.thumbnail_urls,
+    thumbnail_names: extra.thumbnail_names || [],
     detail_image_urls: row.detail_image_urls,
+    detail_image_names: extra.detail_image_names || [],
+    detail_text: extra.detail_text || '',
     stock_status: row.stock_status || '',
     stock_qty: row.stock_qty,
     mall_product_code: row.mall_product_code,

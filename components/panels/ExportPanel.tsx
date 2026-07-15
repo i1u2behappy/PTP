@@ -86,7 +86,13 @@ export function ExportPanel() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-800 mb-6">📊 엑셀 내보내기</h1>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold text-gray-800">📊 엑셀 내보내기</h1>
+        <button onClick={handleExport} disabled={downloading || readyRows.length === 0}
+          className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0">
+          {downloading ? '생성 중...' : `📥 엑셀 다운로드 (${selectedCount}개)`}
+        </button>
+      </div>
 
       <div className="grid grid-cols-[1fr_320px] gap-6">
         {/* 상품 선택 (확정된 상품만) */}
@@ -106,18 +112,21 @@ export function ExportPanel() {
                 className="text-teal-500 hover:underline">상품마스터에서 먼저 확정하기 →</button>
             </div>
           ) : (
-            <div className="divide-y divide-gray-100 max-h-[600px] overflow-y-auto">
-              {readyRows.map(p => (
-                <label key={p.id} className={`flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50 transition-colors ${selected.has(p.id) ? 'bg-teal-50' : ''}`}>
-                  <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggleSelect(p.id)} />
-                  <div className="flex-1 min-w-0 text-xs text-gray-700 truncate">
-                    {p.name_final || p.name_ai || p.name_original}
-                  </div>
-                  <div className="text-xs text-gray-500 shrink-0">
-                    {p.sale_price ? `₩${p.sale_price.toLocaleString()}` : ''}
-                  </div>
-                </label>
-              ))}
+            <div className="max-h-[600px] overflow-y-auto">
+              <table className="w-full text-xs border-collapse">
+                <tbody>
+                  {readyRows.map(p => (
+                    <tr key={p.id} onClick={() => toggleSelect(p.id)}
+                      className={`border-b border-gray-100 last:border-0 cursor-pointer transition-colors ${selected.has(p.id) ? 'bg-teal-50' : 'hover:bg-gray-50'}`}>
+                      <td className="px-4 py-3 w-6">
+                        <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggleSelect(p.id)} onClick={e => e.stopPropagation()} />
+                      </td>
+                      <td className="px-4 py-3 text-gray-700 max-w-[400px] truncate">{p.name_final || p.name_ai || p.name_original}</td>
+                      <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{p.sale_price ? `₩${p.sale_price.toLocaleString()}` : ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
@@ -149,13 +158,9 @@ export function ExportPanel() {
                 1회 등록 한도({config.max_batch_size}개) 초과 → 워크북 내 {batchCount}개 시트로 분할됩니다.
               </div>
             )}
-            <div className="text-sm text-gray-600 mb-4">
+            <div className="text-sm text-gray-600">
               내보낼 마켓: <strong className="text-gray-800">{market === 'all' ? '전체' : configs.find(c => c.code === market)?.name}</strong>
             </div>
-            <button onClick={handleExport} disabled={downloading || readyRows.length === 0}
-              className="w-full py-3 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-              {downloading ? '생성 중...' : '📥 엑셀 다운로드'}
-            </button>
           </div>
 
           <div className="bg-gray-50 rounded-2xl border border-gray-200 p-4 text-xs text-gray-500 space-y-1">

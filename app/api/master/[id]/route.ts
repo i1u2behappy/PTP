@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 
 const ALLOWED = [
-  'name_final', 'master_category', 'brand', 'manufacturer', 'origin', 'description',
+  'name_final', 'master_category', 'brand', 'manufacturer', 'origin', 'description', 'options', 'sales_code',
   'cost_price', 'list_price', 'sale_price', 'shipping_fee', 'other_cost', 'target_margin_rate', 'status',
 ]
 
@@ -10,7 +10,10 @@ export async function GET(_: NextRequest, { params }: { params: Promise<{ id: st
   const { id } = await params
   const res = await pool.query(
     `SELECT pm.*, mp.id AS mall_product_id_ref, mp.source_url, mp.mall_product_code,
-            (SELECT storage_path FROM product_images pi WHERE pi.product_master_id = pm.id AND pi.image_type = 'thumbnail' LIMIT 1) AS thumbnail_local,
+            COALESCE(
+              (SELECT json_agg(pi.storage_path ORDER BY pi.sort_order) FROM product_images pi WHERE pi.product_master_id = pm.id AND pi.image_type = 'thumbnail'),
+              '[]'
+            ) AS thumbnail_locals,
             COALESCE(
               (SELECT json_agg(pi.storage_path ORDER BY pi.sort_order) FROM product_images pi WHERE pi.product_master_id = pm.id AND pi.image_type = 'detail'),
               '[]'
@@ -30,11 +33,18 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   const sets: string[] = []
   const vals: unknown[] = []
   for (const key of ALLOWED) {
-    if (key in body) { vals.push(body[key]); sets.push(`${key}=$${vals.length}`) }
+    if (key in body) { vals.push(key === 'options' ? JSON.stringify(body[key]) : body[key]); sets.push(`${key}=$${vals.length}`) }
   }
   if (!sets.length) return NextResponse.json({ error: 'no fields' }, { status: 400 })
   vals.push(id)
-  await pool.query(`UPDATE product_master SET ${sets.join(',')}, updated_at=NOW() WHERE id=$${vals.length}`, vals)
+  try {
+    await pool.query(`UPDATE product_master SET ${sets.join(',')}, updated_at=NOW() WHERE id=$${vals.length}`, vals)
+  } catch (e) {
+    if (e instanceof Error && 'code' in e && e.code === '23505') {
+      return NextResponse.json({ error: '이미 다른 상품에 사용 중인 값입니다 (판매관리코드 등은 상품마다 고유해야 합니다).' }, { status: 409 })
+    }
+    throw e
+  }
   return NextResponse.json({ ok: true })
 }
 

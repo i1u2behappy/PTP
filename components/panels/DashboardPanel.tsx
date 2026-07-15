@@ -43,7 +43,7 @@ export function DashboardPanel() {
     },
     {
       label: '검토 대기', value: pendingCount, accent: 'bg-amber-50 text-amber-600', Icon: ReviewIcon,
-      open: () => openTab({ id: 'staging-review', type: 'staging-review', title: '스크랩 검토', icon: '🔎', closable: true }),
+      open: () => openTab({ id: 'migration-dashboard', type: 'migration-dashboard', title: '데이터 마이그 목록', icon: '📊', closable: true }),
     },
     {
       label: '수집된 원천 상품', value: productCount, accent: 'bg-teal-50 text-teal-600', Icon: InboxIcon,

@@ -5,7 +5,10 @@ export async function GET(_: NextRequest, { params }: { params: Promise<{ id: st
   const { id } = await params
   const res = await pool.query(
     `SELECT mp.*,
-            (SELECT storage_path FROM product_images pi WHERE pi.mall_product_id = mp.id AND pi.image_type = 'thumbnail' LIMIT 1) AS thumbnail_local,
+            COALESCE(
+              (SELECT json_agg(pi.storage_path ORDER BY pi.sort_order) FROM product_images pi WHERE pi.mall_product_id = mp.id AND pi.image_type = 'thumbnail'),
+              '[]'
+            ) AS thumbnail_locals,
             COALESCE(
               (SELECT json_agg(pi.storage_path ORDER BY pi.sort_order) FROM product_images pi WHERE pi.mall_product_id = mp.id AND pi.image_type = 'detail'),
               '[]'

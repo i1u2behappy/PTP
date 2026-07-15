@@ -9,6 +9,25 @@ function normalizeName(name: string): string {
   return (name || '').replace(/\s+/g, '').toLowerCase()
 }
 
+/** 거래처 코드(prefix)가 설정돼 있으면 "코드_000001" 형태의 사내 관리코드를 순번대로 발급한다. 코드가 없으면 발급하지 않는다. */
+async function nextInternalCode(clientId: number): Promise<string | null> {
+  const client = await pool.query<{ code: string | null }>('SELECT code FROM supply_clients WHERE id=$1', [clientId])
+  const code = client.rows[0]?.code
+  if (!code) return null
+  const seq = await pool.query<{ next_internal_seq: number }>(
+    'UPDATE supply_clients SET next_internal_seq = next_internal_seq + 1 WHERE id=$1 RETURNING next_internal_seq',
+    [clientId],
+  )
+  return `${code}_${String(seq.rows[0].next_internal_seq).padStart(6, '0')}`
+}
+
+export async function assignInternalCodeIfMissing(masterId: number, clientId: number): Promise<void> {
+  const existing = await pool.query<{ internal_code: string | null }>('SELECT internal_code FROM product_master WHERE id=$1', [masterId])
+  if (existing.rows[0]?.internal_code) return
+  const code = await nextInternalCode(clientId)
+  if (code) await pool.query('UPDATE product_master SET internal_code=$1 WHERE id=$2', [code, masterId])
+}
+
 async function findReferenceFallback(siteId: number, mallProductCode: string, normalizedName: string) {
   const res = await pool.query(
     `SELECT brand, manufacturer, origin, category, description FROM reference_products
@@ -25,6 +44,8 @@ async function findReferenceFallback(siteId: number, mallProductCode: string, no
  */
 export async function migrateToMaster(mallProductIds: number[], clientId: number): Promise<MigrateResult> {
   const masterIds: number[] = []
+  const clientRow = await pool.query<{ auto_internal_code: boolean }>('SELECT auto_internal_code FROM supply_clients WHERE id=$1', [clientId])
+  const autoInternalCode = clientRow.rows[0]?.auto_internal_code ?? true
 
   for (const mallProductId of mallProductIds) {
     const mpRes = await pool.query(
@@ -68,6 +89,7 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
     )
     const masterId = upsert.rows[0].id
     masterIds.push(masterId)
+    if (autoInternalCode) await assignInternalCodeIfMissing(masterId, clientId)
 
     await pool.query(`UPDATE mall_products SET master_product_id=$1 WHERE id=$2`, [masterId, mallProductId])
     await pool.query(`UPDATE product_images SET product_master_id=$1 WHERE mall_product_id=$2`, [masterId, mallProductId])

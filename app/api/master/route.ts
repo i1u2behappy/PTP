@@ -9,8 +9,10 @@ export async function GET(req: NextRequest) {
             pm.mall_category, pm.master_category, pm.brand, pm.manufacturer, pm.origin, pm.description,
             pm.options, pm.cost_price, pm.list_price, pm.sale_price, pm.shipping_fee, pm.other_cost,
             pm.target_margin_rate, pm.stock_status, pm.stock_qty, pm.status, pm.updated_at,
-            (SELECT storage_path FROM product_images pi WHERE pi.product_master_id = pm.id AND pi.image_type = 'thumbnail' LIMIT 1) AS thumbnail_local
+            pm.internal_code, pm.sales_code, mp.mall_product_code,
+            (SELECT COALESCE(jsonb_agg(storage_path ORDER BY sort_order), '[]') FROM product_images pi WHERE pi.product_master_id = pm.id AND pi.image_type = 'thumbnail') AS thumbnail_locals
      FROM product_master pm
+     LEFT JOIN mall_products mp ON mp.id = pm.mall_product_id
      WHERE pm.client_id = $1
      ORDER BY pm.updated_at DESC`,
     [clientId],

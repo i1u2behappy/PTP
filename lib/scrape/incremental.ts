@@ -29,20 +29,20 @@ export async function upsertMallProduct(opts: UpsertOptions, result: ScrapeResul
   const upsert = await pool.query<{ id: number }>(
     `INSERT INTO mall_products
       (site_id, mall_product_code, source_url, mall_category, name_original, price, sale_price,
-       brand, manufacturer, origin, description, options, thumbnail_url, detail_image_urls,
+       brand, manufacturer, origin, description, options, thumbnail_urls, detail_image_urls,
        stock_status, stock_qty, raw_data, first_seen_session_id, last_seen_session_id, last_scraped_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$18,NOW())
      ON CONFLICT (site_id, mall_product_code) DO UPDATE SET
        source_url=$3, mall_category=$4, name_original=$5, price=$6, sale_price=$7,
        brand=$8, manufacturer=$9, origin=$10, description=$11, options=$12,
-       thumbnail_url=$13, detail_image_urls=$14, stock_status=$15, stock_qty=$16,
+       thumbnail_urls=$13, detail_image_urls=$14, stock_status=$15, stock_qty=$16,
        raw_data=$17, last_seen_session_id=$18, last_scraped_at=NOW(), updated_at=NOW()
      RETURNING id`,
     [
       opts.siteId, code, sourceUrl, product.category || null, product.name,
       product.price, product.sale_price, product.brand, product.manufacturer, product.origin,
       product.description, JSON.stringify(product.options || []),
-      product.thumbnail_url, JSON.stringify(product.detail_image_urls || []),
+      JSON.stringify(product.thumbnail_urls || []), JSON.stringify(product.detail_image_urls || []),
       product.stock_status || null, product.stock_qty,
       JSON.stringify(product), opts.sessionId,
     ],

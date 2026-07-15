@@ -7,6 +7,9 @@ const COMPARE_FIELDS = [
   ['sale_price', 'mp_sale_price'],
   ['mall_category', 'mp_mall_category'],
   ['brand', 'mp_brand'],
+  ['manufacturer', 'mp_manufacturer'],
+  ['origin', 'mp_origin'],
+  ['description', 'mp_description'],
   ['stock_status', 'mp_stock_status'],
   ['stock_qty', 'mp_stock_qty'],
 ] as const
@@ -20,6 +23,7 @@ export async function GET(req: NextRequest) {
     SELECT si.*,
            mp.name_original AS mp_name_original, mp.price AS mp_price, mp.sale_price AS mp_sale_price,
            mp.mall_category AS mp_mall_category, mp.brand AS mp_brand,
+           mp.manufacturer AS mp_manufacturer, mp.origin AS mp_origin, mp.description AS mp_description,
            mp.stock_status AS mp_stock_status, mp.stock_qty AS mp_stock_qty
     FROM scrape_staging_items si
     LEFT JOIN mall_products mp ON mp.id = si.matched_mall_product_id

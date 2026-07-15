@@ -26,7 +26,7 @@ export async function stageScrapedProduct(opts: StageOptions, result: ScrapeResu
   const inserted = await pool.query<{ id: number }>(
     `INSERT INTO scrape_staging_items
       (session_id, site_id, mall_product_code, source_url, mall_category, name_original, price, sale_price,
-       brand, manufacturer, origin, description, options, thumbnail_url, detail_image_urls,
+       brand, manufacturer, origin, description, options, thumbnail_urls, detail_image_urls,
        stock_status, stock_qty, raw_data, matched_mall_product_id, is_new, is_already_migrated)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
      RETURNING id`,
@@ -34,7 +34,7 @@ export async function stageScrapedProduct(opts: StageOptions, result: ScrapeResu
       opts.sessionId, opts.siteId, code, sourceUrl, product.category || null, product.name,
       product.price, product.sale_price, product.brand, product.manufacturer, product.origin,
       product.description, JSON.stringify(product.options || []),
-      product.thumbnail_url, JSON.stringify(product.detail_image_urls || []),
+      JSON.stringify(product.thumbnail_urls || []), JSON.stringify(product.detail_image_urls || []),
       product.stock_status || null, product.stock_qty,
       JSON.stringify(product),
       matched?.id ?? null, !matched, !!matched?.master_product_id,
@@ -58,7 +58,7 @@ interface StagingRow {
   origin: string
   description: string
   options: { name: string; values: string[] }[]
-  thumbnail_url: string
+  thumbnail_urls: string[]
   detail_image_urls: string[]
   stock_status: string | null
   stock_qty: number | null
@@ -78,7 +78,7 @@ function toScrapeResult(row: StagingRow): ScrapeResult {
     category: row.mall_category || '',
     description: row.description,
     options: row.options,
-    thumbnail_url: row.thumbnail_url,
+    thumbnail_urls: row.thumbnail_urls,
     detail_image_urls: row.detail_image_urls,
     stock_status: row.stock_status || '',
     stock_qty: row.stock_qty,
@@ -140,8 +140,8 @@ export async function mergeStagingItems(ids: number[], opts: { force?: boolean }
     }
 
     const { id: mallProductId } = await upsertMallProduct({ siteId: row.site_id, sessionId: row.session_id }, toScrapeResult(row))
-    await downloadProductImages(row.thumbnail_url, row.detail_image_urls || [], mallProductId, row.name_original)
-    await pool.query(`UPDATE scrape_staging_items SET status='merged', updated_at=NOW() WHERE id=$1`, [id])
+    await downloadProductImages(row.thumbnail_urls || [], row.detail_image_urls || [], mallProductId, row.name_original)
+    await pool.query(`UPDATE scrape_staging_items SET status='merged', matched_mall_product_id=$2, updated_at=NOW() WHERE id=$1`, [id, mallProductId])
     merged.push(id)
   }
 

@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import Image from 'next/image'
 import { useTabs } from '../shell/TabsContext'
+import { MASTER_LIST_TAB } from '../shell/menuTabs'
 
 interface MasterRow {
   id: number
@@ -23,11 +24,14 @@ interface MasterRow {
   stock_status: string | null
   stock_qty: number | null
   status: string
-  thumbnail_local: string | null
+  thumbnail_locals: string[]
 }
 
 const EDITABLE_NUMBER_KEYS = ['cost_price', 'list_price', 'sale_price', 'shipping_fee', 'other_cost'] as const
 type EditableKey = typeof EDITABLE_NUMBER_KEYS[number] | 'master_category' | 'brand' | 'manufacturer' | 'origin'
+const LIST_ID: Partial<Record<EditableKey, string>> = { brand: 'ml-brand-options', master_category: 'ml-category-options' }
+
+interface FieldValue { value: string; count: string }
 
 function marginOf(row: MasterRow): number | null {
   if (row.sale_price == null) return null
@@ -45,6 +49,12 @@ export function MasterListPanel() {
   const [editing, setEditing] = useState<{ id: number; key: EditableKey } | null>(null)
   const [editValue, setEditValue] = useState('')
   const [notReadyOnly, setNotReadyOnly] = useState(false)
+  const [brandOptions, setBrandOptions] = useState<FieldValue[]>([])
+  const [categoryOptions, setCategoryOptions] = useState<FieldValue[]>([])
+  const [renameField, setRenameField] = useState<'brand' | 'master_category'>('brand')
+  const [renameFrom, setRenameFrom] = useState('')
+  const [renameTo, setRenameTo] = useState('')
+  const [renaming, setRenaming] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -56,7 +66,31 @@ export function MasterListPanel() {
     }
   }, [])
 
-  useEffect(() => { load() }, [load, refreshSignals.master])
+  const loadFieldOptions = useCallback(() => {
+    fetch('/api/master/field-values?field=brand').then(r => r.json()).then((d: FieldValue[]) => setBrandOptions(Array.isArray(d) ? d : [])).catch(() => {})
+    fetch('/api/master/field-values?field=master_category').then(r => r.json()).then((d: FieldValue[]) => setCategoryOptions(Array.isArray(d) ? d : [])).catch(() => {})
+  }, [])
+
+  useEffect(() => { load(); loadFieldOptions() }, [load, loadFieldOptions, refreshSignals.master])
+
+  const renameOptions = renameField === 'brand' ? brandOptions : categoryOptions
+
+  async function applyRename() {
+    if (!renameFrom || !renameTo) return
+    setRenaming(true)
+    try {
+      await fetch('/api/master/field-values', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId: 1, field: renameField, from: renameFrom, to: renameTo }),
+      })
+      setRenameFrom('')
+      setRenameTo('')
+      load()
+      loadFieldOptions()
+    } finally {
+      setRenaming(false)
+    }
+  }
 
   function missing(row: MasterRow): string[] {
     const out: string[] = []
@@ -78,7 +112,7 @@ export function MasterListPanel() {
   }
 
   function openDetail(row: MasterRow) {
-    openTab({ id: `master-detail:${row.id}`, type: 'master-detail', title: (row.name_final || row.name_ai || row.name_original)?.slice(0, 14) || `마스터 #${row.id}`, icon: '🗂️', params: { masterId: row.id }, closable: true })
+    openTab({ ...MASTER_LIST_TAB, type: 'master-detail', params: { masterId: row.id } })
   }
 
   async function genAiName(id: number) {
@@ -139,7 +173,7 @@ export function MasterListPanel() {
     return (
       <td className="px-2 py-2 cursor-pointer text-xs" title={label} onClick={() => !isEditing && startEdit(row.id, k, value)}>
         {isEditing ? (
-          <input autoFocus value={editValue} onChange={e => setEditValue(e.target.value)}
+          <input autoFocus value={editValue} onChange={e => setEditValue(e.target.value)} list={LIST_ID[k]}
             onBlur={saveEdit}
             onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') setEditing(null) }}
             className="w-20 border border-teal-300 rounded px-1 py-0.5 text-xs focus:outline-none" />
@@ -149,8 +183,8 @@ export function MasterListPanel() {
   }
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-6">
+    <div className="h-full flex flex-col">
+      <div className="flex items-center justify-between mb-6 shrink-0">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">🗂️ 상품마스터</h1>
           <p className="text-xs text-gray-400 mt-1">가공된 영속 상품마스터입니다. 셀을 눌러 빠르게 수정하거나, 🔍 상세로 들어가 전체 항목을 편집합니다.</p>
@@ -167,18 +201,42 @@ export function MasterListPanel() {
         </div>
       </div>
 
+      <datalist id="ml-brand-options">{brandOptions.map(o => <option key={o.value} value={o.value} />)}</datalist>
+      <datalist id="ml-category-options">{categoryOptions.map(o => <option key={o.value} value={o.value} />)}</datalist>
+
+      <div className="bg-white rounded-2xl border border-gray-200 p-3 mb-4 flex items-center gap-2 flex-wrap shrink-0">
+        <span className="text-xs font-semibold text-gray-500 shrink-0">일괄 변경</span>
+        <select value={renameField} onChange={e => { setRenameField(e.target.value as 'brand' | 'master_category'); setRenameFrom('') }}
+          className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400">
+          <option value="brand">브랜드</option>
+          <option value="master_category">카테고리</option>
+        </select>
+        <select value={renameFrom} onChange={e => setRenameFrom(e.target.value)}
+          className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs max-w-[160px] focus:outline-none focus:ring-2 focus:ring-teal-400">
+          <option value="">기존 값 선택...</option>
+          {renameOptions.map(o => <option key={o.value} value={o.value}>{o.value} ({o.count})</option>)}
+        </select>
+        <span className="text-xs text-gray-400">→</span>
+        <input value={renameTo} onChange={e => setRenameTo(e.target.value)} placeholder="변경할 값" list={renameField === 'brand' ? 'ml-brand-options' : 'ml-category-options'}
+          className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs max-w-[160px] focus:outline-none focus:ring-2 focus:ring-teal-400" />
+        <button onClick={applyRename} disabled={!renameFrom || !renameTo || renaming}
+          className="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+          {renaming ? '변경 중...' : '일괄 변경 적용'}
+        </button>
+      </div>
+
       {loading ? (
-        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 text-sm">불러오는 중...</div>
+        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 text-sm shrink-0">불러오는 중...</div>
       ) : rows.length === 0 ? (
-        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400">
+        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 shrink-0">
           <div className="text-4xl mb-3">📭</div>
           <p className="text-sm">가공된 상품마스터가 없습니다.</p>
           <button onClick={() => openTab({ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true })}
             className="mt-2 inline-block text-teal-500 text-sm hover:underline">← 수집 확인에서 가공하기</button>
         </div>
       ) : (
-        <>
-          <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="flex-1 min-h-0 flex flex-col">
+          <div className="grid grid-cols-3 gap-3 mb-4 shrink-0">
             <div className="bg-white rounded-2xl border border-gray-200 p-4 text-center">
               <div className="text-2xl font-bold text-gray-800">{rows.length}</div>
               <div className="text-xs text-gray-400 mt-1">전체 상품마스터</div>
@@ -193,15 +251,15 @@ export function MasterListPanel() {
             </div>
           </div>
 
-          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50">
+          <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-0 flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 shrink-0">
               <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer">
                 <input type="checkbox" checked={notReadyOnly} onChange={e => setNotReadyOnly(e.target.checked)} />
                 보완 필요한 상품만 보기
               </label>
               <span className="text-xs text-gray-400">클릭해서 셀 수정 · 마진 = 판매가 - 매입가 - 기타비용</span>
             </div>
-            <div className="overflow-auto max-h-[70vh]">
+            <div className="overflow-auto flex-1 min-h-0">
               <table className="text-xs border-collapse whitespace-nowrap">
                 <thead className="sticky top-0 z-10 bg-gray-50">
                   <tr className="border-b border-gray-200 text-gray-500 font-semibold">
@@ -231,7 +289,7 @@ export function MasterListPanel() {
                         <td className="px-3 py-2"><input type="checkbox" checked={selected.has(row.id)} onChange={() => toggleSelect(row.id)} /></td>
                         <td className="px-2 py-2">
                           <div className="w-10 h-10 relative rounded overflow-hidden bg-gray-100">
-                            {row.thumbnail_local && <Image src={row.thumbnail_local} alt="" fill className="object-cover" unoptimized />}
+                            {row.thumbnail_locals?.[0] && <Image src={row.thumbnail_locals[0]} alt="" fill className="object-cover" unoptimized />}
                           </div>
                         </td>
                         <td className="px-3 py-2 sticky left-0 bg-white max-w-[220px]">
@@ -274,10 +332,10 @@ export function MasterListPanel() {
               </table>
             </div>
           </div>
-        </>
+        </div>
       )}
 
-      <div className="mt-3 flex items-center justify-between text-xs text-gray-400">
+      <div className="mt-3 flex items-center justify-between text-xs text-gray-400 shrink-0">
         <button onClick={() => openTab({ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true })}
           className="text-gray-500 hover:underline">← 수집 확인</button>
         <button onClick={() => openTab({ id: 'export', type: 'export', title: '엑셀 내보내기', icon: '📊', closable: true })}

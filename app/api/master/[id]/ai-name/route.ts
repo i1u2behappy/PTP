@@ -6,14 +6,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const { id } = await params
   const { templateId } = await req.json().catch(() => ({})) as { templateId?: number }
 
-  const res = await pool.query<{ name_original: string; thumbnail_url: string }>(
-    `SELECT pm.name_original, mp.thumbnail_url
+  const res = await pool.query<{ name_original: string; thumbnail_urls: string[] }>(
+    `SELECT pm.name_original, mp.thumbnail_urls
      FROM product_master pm LEFT JOIN mall_products mp ON mp.id = pm.mall_product_id
      WHERE pm.id=$1`,
     [id],
   )
   const p = res.rows[0]
   if (!p) return NextResponse.json({ error: 'not found' }, { status: 404 })
+  const thumbnailUrl = p.thumbnail_urls?.[0] || ''
 
   const templateRes = await pool.query<{ prompt_template: string; max_length: number }>(
     templateId
@@ -23,7 +24,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   )
   const template = templateRes.rows[0]
 
-  const name = await generateProductName(p.thumbnail_url, p.name_original || '', template?.prompt_template, template?.max_length)
+  const name = await generateProductName(thumbnailUrl, p.name_original || '', template?.prompt_template, template?.max_length)
   await pool.query('UPDATE product_master SET name_ai=$1, updated_at=NOW() WHERE id=$2', [name, id])
   return NextResponse.json({ name_ai: name })
 }

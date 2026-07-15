@@ -28,7 +28,10 @@ export async function POST(req: NextRequest) {
     cost_price: r.cost_price, list_price: r.list_price, sale_price: r.sale_price,
     shipping_fee: r.shipping_fee, other_cost: r.other_cost, target_margin_rate: r.target_margin_rate,
     stock_status: r.stock_status, stock_qty: r.stock_qty,
-    ...resolveMasterImages(r.images, baseUrl),
+    ...(() => {
+      const { thumbnail_urls, detail_image_urls } = resolveMasterImages(r.images, baseUrl)
+      return { thumbnail_url: thumbnail_urls[0] || '', detail_image_urls }
+    })(),
   }))
 
   const configs: Record<string, MarketplaceConfig> = {}

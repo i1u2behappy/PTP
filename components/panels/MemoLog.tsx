@@ -77,28 +77,47 @@ export function MemoLog({ baseUrl }: { baseUrl: string }) {
       ) : memos.length === 0 ? (
         <p className="text-xs text-gray-400">등록된 메모가 없습니다.</p>
       ) : (
-        <div className="divide-y divide-gray-100">
-          {memos.map(m => (
-            <div key={m.id} className="py-2">
-              {editingId === m.id ? (
-                <div className="flex gap-2 items-center">
-                  <input type="datetime-local" value={editAt} onChange={e => setEditAt(e.target.value)}
-                    className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
-                  <input value={editContent} onChange={e => setEditContent(e.target.value)}
-                    className="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
-                  <button onClick={() => saveEdit(m.id)} className="text-xs text-teal-600 hover:underline shrink-0">저장</button>
-                  <button onClick={() => setEditingId(null)} className="text-xs text-gray-400 hover:underline shrink-0">취소</button>
-                </div>
-              ) : (
-                <div className="flex items-start gap-3">
-                  <div className="text-xs text-gray-400 shrink-0 w-32">{formatDisplay(m.memo_at)}</div>
-                  <div className="flex-1 text-sm text-gray-700 whitespace-pre-wrap">{m.content}</div>
-                  <button onClick={() => startEdit(m)} className="text-xs text-teal-500 hover:underline shrink-0">수정</button>
-                  <button onClick={() => deleteMemo(m.id)} className="text-xs text-rose-500 hover:underline shrink-0">삭제</button>
-                </div>
-              )}
-            </div>
-          ))}
+        <div className="overflow-auto">
+          <table className="w-full text-xs border-collapse">
+            <thead>
+              <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+                <th className="px-3 py-2 text-left w-36">일시</th>
+                <th className="px-3 py-2 text-left">내용</th>
+                <th className="px-3 py-2 text-left">관리</th>
+              </tr>
+            </thead>
+            <tbody>
+              {memos.map(m => (
+                <tr key={m.id} className="border-b border-gray-100 last:border-0">
+                  {editingId === m.id ? (
+                    <>
+                      <td className="px-3 py-2">
+                        <input type="datetime-local" value={editAt} onChange={e => setEditAt(e.target.value)}
+                          className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+                      </td>
+                      <td className="px-3 py-2">
+                        <input value={editContent} onChange={e => setEditContent(e.target.value)}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        <button onClick={() => saveEdit(m.id)} className="text-teal-600 hover:underline mr-2">저장</button>
+                        <button onClick={() => setEditingId(null)} className="text-gray-400 hover:underline">취소</button>
+                      </td>
+                    </>
+                  ) : (
+                    <>
+                      <td className="px-3 py-2 text-gray-400 whitespace-nowrap">{formatDisplay(m.memo_at)}</td>
+                      <td className="px-3 py-2 text-gray-700 whitespace-pre-wrap">{m.content}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        <button onClick={() => startEdit(m)} className="text-teal-500 hover:underline mr-2">수정</button>
+                        <button onClick={() => deleteMemo(m.id)} className="text-rose-500 hover:underline">삭제</button>
+                      </td>
+                    </>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

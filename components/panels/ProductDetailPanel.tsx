@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import Image from 'next/image'
 import { useTabs } from '../shell/TabsContext'
+import { MASTER_LIST_TAB } from '../shell/menuTabs'
 
 interface MallProductDetail {
   id: number
@@ -18,7 +19,7 @@ interface MallProductDetail {
   description: string
   stock_status: string | null
   stock_qty: number | null
-  thumbnail_local: string | null
+  thumbnail_locals: string[]
   detail_image_local: string[]
   last_scraped_at: string | null
   master_product_id: number | null
@@ -35,8 +36,8 @@ const FIELDS: { key: keyof MallProductDetail; label: string; type: 'text' | 'num
   { key: 'description', label: '설명', type: 'textarea' },
 ]
 
-export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: Record<string, unknown> }) {
-  const { openTab, closeTab, bumpRefresh } = useTabs()
+export function ProductDetailPanel({ params }: { params?: Record<string, unknown> }) {
+  const { openTab, goBack, bumpRefresh } = useTabs()
   const mallProductId = params?.mallProductId as number
   const [data, setData]       = useState<MallProductDetail | null>(null)
   const [form, setForm]       = useState<Record<string, string>>({})
@@ -79,7 +80,7 @@ export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: 
       const goReview = confirm(
         `재스크랩 결과가 검토 대기 상태로 저장되었습니다${d.isAlreadyMigrated ? ' (이미 상품마스터로 가공된 상품이라 자동 반영되지 않습니다)' : ''}.\n지금 스크랩 검토 화면으로 이동할까요?`,
       )
-      if (goReview) openTab({ id: 'staging-review', type: 'staging-review', title: '스크랩 검토', icon: '🔎', closable: true })
+      if (goReview) openTab({ id: 'migration-dashboard', type: 'migration-dashboard', title: '데이터 마이그 목록', icon: '📊', closable: true })
     } finally {
       setRescraping(false)
     }
@@ -96,7 +97,7 @@ export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: 
       if (!res.ok || !d.masterIds?.length) throw new Error('가공 실패')
       bumpRefresh('products')
       bumpRefresh('master')
-      openTab({ id: `master-detail:${d.masterIds[0]}`, type: 'master-detail', title: data?.name_original?.slice(0, 12) || '상품마스터', icon: '🗂️', params: { masterId: d.masterIds[0] }, closable: true })
+      openTab({ ...MASTER_LIST_TAB, type: 'master-detail', params: { masterId: d.masterIds[0] } })
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e))
     } finally {
@@ -108,7 +109,7 @@ export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: 
     if (!confirm('이 상품을 삭제할까요?')) return
     await fetch(`/api/products/${mallProductId}`, { method: 'DELETE' })
     bumpRefresh('products')
-    closeTab(tabId)
+    goBack()
   }
 
   if (loading || !data) return <div className="text-center text-sm text-gray-400 py-12">불러오는 중...</div>
@@ -126,7 +127,7 @@ export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: 
             {rescraping ? '재스크랩 중...' : '🔄 재스크랩'}
           </button>
           {data.master_product_id ? (
-            <button onClick={() => openTab({ id: `master-detail:${data.master_product_id}`, type: 'master-detail', title: data.name_original?.slice(0, 12) || '상품마스터', icon: '🗂️', params: { masterId: data.master_product_id }, closable: true })}
+            <button onClick={() => openTab({ ...MASTER_LIST_TAB, type: 'master-detail', params: { masterId: data.master_product_id } })}
               className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors">
               🗂️ 상품마스터 보기
             </button>
@@ -139,26 +140,45 @@ export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: 
           <button onClick={handleDelete} className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-semibold rounded-full transition-colors">
             🗑 삭제
           </button>
+          <button onClick={handleSave} disabled={saving}
+            className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+            {saving ? '저장 중...' : '변경사항 저장'}
+          </button>
         </div>
       </div>
 
       <div className="grid grid-cols-[160px_1fr] gap-6">
         <div>
           <div className="w-full aspect-square relative rounded-2xl overflow-hidden bg-gray-100 border border-gray-200">
-            {data.thumbnail_local ? (
-              <Image src={data.thumbnail_local} alt={data.name_original || ''} fill className="object-cover" unoptimized />
+            {data.thumbnail_locals?.[0] ? (
+              <Image src={data.thumbnail_locals[0]} alt={data.name_original || ''} fill className="object-cover" unoptimized />
             ) : (
               <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs">No image</div>
             )}
           </div>
+          {data.thumbnail_locals?.length > 1 && (
+            <>
+              <p className="text-[11px] text-gray-400 mt-2">대표이미지 ({data.thumbnail_locals.length})</p>
+              <div className="grid grid-cols-3 gap-1 mt-1">
+                {data.thumbnail_locals.slice(1).map((src, i) => (
+                  <div key={i} className="aspect-square relative rounded overflow-hidden bg-gray-100">
+                    <Image src={src} alt="" fill className="object-cover" unoptimized />
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
           {data.detail_image_local?.length > 0 && (
-            <div className="grid grid-cols-3 gap-1 mt-2">
-              {data.detail_image_local.slice(0, 6).map((src, i) => (
-                <div key={i} className="aspect-square relative rounded overflow-hidden bg-gray-100">
-                  <Image src={src} alt="" fill className="object-cover" unoptimized />
-                </div>
-              ))}
-            </div>
+            <>
+              <p className="text-[11px] text-gray-400 mt-2">상세이미지 ({data.detail_image_local.length})</p>
+              <div className="grid grid-cols-3 gap-1 mt-1">
+                {data.detail_image_local.slice(0, 6).map((src, i) => (
+                  <div key={i} className="aspect-square relative rounded overflow-hidden bg-gray-100">
+                    <Image src={src} alt="" fill className="object-cover" unoptimized />
+                  </div>
+                ))}
+              </div>
+            </>
           )}
           <a href={data.source_url} target="_blank" rel="noreferrer" className="block mt-2 text-xs text-teal-500 hover:underline truncate">원본 페이지 열기 →</a>
           <div className="mt-2 text-xs">
@@ -184,10 +204,6 @@ export function ProductDetailPanel({ tabId, params }: { tabId: string; params?: 
               )}
             </label>
           ))}
-          <button onClick={handleSave} disabled={saving}
-            className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
-            {saving ? '저장 중...' : '변경사항 저장'}
-          </button>
         </div>
       </div>
     </div>

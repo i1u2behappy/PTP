@@ -1,242 +1,108 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
-import Image from 'next/image'
 import { useTabs } from '../shell/TabsContext'
-
-interface MallProduct {
-  id: number
-  site_id: number
-  mall_product_code: string
-  name_original: string
-  price: number | null
-  sale_price: number | null
-  brand: string
-  mall_category: string
-  thumbnail_local: string | null
-  detail_image_urls: { url: string }[]
-  stock_status: string | null
-  stock_qty: number | null
-  last_scraped_at: string
-  master_product_id: number | null
-}
+import { StagingItemsGrid } from './shared/StagingItemsGrid'
+import { ScrapeSessionGrid } from './shared/ScrapeSessionGrid'
 
 interface Session {
   id: number
+  site_id: number
   url: string
   status: string
   found_count: number
-  saved_count: number
+  staged_count: number
+  pending_count: number
+  merged_count: number
+  skipped_count: number
   created_at: string
 }
 
-function missingFields(p: MallProduct): string[] {
-  const missing: string[] = []
-  if (!p.name_original) missing.push('상품명')
-  if (p.price == null && p.sale_price == null) missing.push('가격')
-  if (!p.thumbnail_local) missing.push('대표이미지')
-  if (!p.brand) missing.push('브랜드')
-  if (!p.mall_category) missing.push('카테고리')
-  return missing
-}
-
 export function ProductsListPanel() {
-  const { openTab, refreshSignals, bumpRefresh } = useTabs()
-  const [products, setProducts]   = useState<MallProduct[]>([])
-  const [sessions, setSessions]   = useState<Session[]>([])
-  const [selected, setSelected]   = useState<Set<number>>(new Set())
-  const [migrating, setMigrating] = useState(false)
-  const [issuesOnly, setIssuesOnly] = useState(false)
+  const { openTab, refreshSignals } = useTabs()
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [sessionSearch, setSessionSearch] = useState('')
+  const [selectedSessionId, setSelectedSessionId] = useState<number | ''>('')
 
-  const load = useCallback(() => {
-    fetch('/api/products').then(r => r.json()).then((d: MallProduct[]) => { if (Array.isArray(d)) setProducts(d) }).catch(() => {})
-    fetch('/api/sessions').then(r => r.json()).then((d: Session[]) => { if (Array.isArray(d)) setSessions(d) }).catch(() => {})
+  const loadSessions = useCallback(() => {
+    fetch('/api/sessions').then(r => r.json()).then((d: Session[]) => {
+      if (!Array.isArray(d)) return
+      setSessions(d)
+      setSelectedSessionId(current => current === '' && d.length ? d[0].id : current)
+    }).catch(() => {})
   }, [])
 
-  useEffect(() => { load() }, [load, refreshSignals.products])
+  useEffect(() => { loadSessions() }, [loadSessions, refreshSignals.products, refreshSignals.staging])
 
-  const visibleProducts = issuesOnly ? products.filter(p => missingFields(p).length > 0) : products
+  const filteredSessions = sessions.filter(s => {
+    const q = sessionSearch.trim().toLowerCase()
+    if (!q) return true
+    return s.url.toLowerCase().includes(q) || s.status.toLowerCase().includes(q) || new Date(s.created_at).toLocaleString().toLowerCase().includes(q)
+  })
 
-  function toggleSelect(id: number) {
-    setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
-  }
-  function selectAll() {
-    setSelected(selected.size === visibleProducts.length ? new Set() : new Set(visibleProducts.map(p => p.id)))
-  }
+  const selectedSession = sessions.find(s => s.id === selectedSessionId)
 
-  function openDetail(p: MallProduct) {
-    openTab({ id: `product-detail:${p.id}`, type: 'product-detail', title: p.name_original?.slice(0, 14) || `상품 #${p.id}`, icon: '📦', params: { mallProductId: p.id }, closable: true })
-  }
-
-  async function migrateSelected() {
-    const ids = selected.size > 0 ? [...selected] : products.map(p => p.id)
-    if (!ids.length) return
-    setMigrating(true)
+  async function handleDeleteSession(id: number) {
+    if (!confirm('이 스크래핑 세션을 삭제할까요? 수집된 상세내역이 모두 삭제되며 되돌릴 수 없습니다. (이미 마이그레이션된 상품 데이터는 영향받지 않습니다)')) return
     try {
-      const res = await fetch('/api/master/migrate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mallProductIds: ids, clientId: 1 }),
-      })
-      if (!res.ok) throw new Error('마이그레이션 실패')
-      bumpRefresh('products')
-      bumpRefresh('master')
-      openTab({ id: 'master-list', type: 'master-list', title: '상품마스터', icon: '🗂️', closable: true })
+      const res = await fetch(`/api/sessions/${id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
+      if (selectedSessionId === id) setSelectedSessionId('')
+      loadSessions()
     } catch (e) {
-      alert(e instanceof Error ? e.message : String(e))
-    } finally {
-      setMigrating(false)
+      alert(`삭제에 실패했습니다: ${e instanceof Error ? e.message : e}`)
     }
   }
 
-  async function deleteSelected() {
-    if (!selected.size || !confirm(`${selected.size}개 상품을 삭제할까요?`)) return
-    await Promise.all([...selected].map(id => fetch(`/api/products/${id}`, { method: 'DELETE' })))
-    setSelected(new Set())
-    load()
+  function openMigration() {
+    openTab({
+      id: 'migration-dashboard', type: 'migration-dashboard', title: '데이터 마이그 목록', icon: '📊', closable: true,
+      params: selectedSession ? { siteId: selectedSession.site_id, sessionId: selectedSession.id } : undefined,
+    })
   }
 
-  const totalIssues = products.filter(p => missingFields(p).length > 0).length
-
   return (
-    <div>
-      <div className="flex items-center justify-between mb-6">
+    <div className="h-full flex flex-col">
+      <div className="flex items-center justify-between mb-6 shrink-0">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">📥 수집 확인</h1>
-          <p className="text-xs text-gray-400 mt-1">스크래핑한 원천 데이터를 조회하고, 행을 클릭하면 상세/수정/재스크랩으로 이어집니다.</p>
+          <p className="text-xs text-gray-400 mt-1">
+            사용 절차: ① 스크래핑 실행 → ② <b className="text-gray-500">여기서 수집 내용이 잘 스크랩됐는지 확인/검증</b> (확정 전=미확정) → ③ 마이그레이션으로 넘겨 병합 → ④ 상품마스터로 가공.
+            아래 표는 병합 여부와 상관없이 이 스크래핑에서 수집된 모든 항목을 보여줍니다.
+          </p>
         </div>
-        <div className="flex gap-2">
-          <button onClick={migrateSelected} disabled={migrating}
-            className="px-4 py-2 bg-teal-500 text-white text-sm font-semibold rounded-full hover:bg-teal-600 disabled:opacity-50 transition-colors">
-            {migrating ? '처리 중...' : `➜ 상품마스터로 가공 ${selected.size > 0 ? `(${selected.size}개 선택)` : '(전체)'}`}
-          </button>
-          {selected.size > 0 && (
-            <button onClick={deleteSelected}
-              className="px-4 py-2 bg-rose-50 text-rose-600 text-sm font-semibold rounded-full hover:bg-rose-100 transition-colors">
-              🗑 삭제 ({selected.size})
-            </button>
-          )}
-        </div>
+        <button onClick={openMigration}
+          className="px-4 py-2 bg-teal-500 text-white text-sm font-semibold rounded-full hover:bg-teal-600 transition-colors shrink-0">
+          확인 완료 → 마이그레이션으로 →
+        </button>
       </div>
 
-      {/* 세션별 수집 검증 */}
-      {sessions.length > 0 && (
-        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4">
-          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 text-xs font-semibold text-gray-500">
-            세션별 수집 검증 — 원 상품페이지에서 찾은 개수 대비 실제 저장 개수
-          </div>
-          <div className="divide-y divide-gray-100 max-h-52 overflow-y-auto">
-            {sessions.map(s => {
-              const matched = s.status === 'done' && Number(s.found_count) === Number(s.saved_count)
-              return (
-                <div key={s.id} className="flex items-center justify-between px-4 py-2 text-xs">
-                  <span className="text-gray-500 truncate flex-1">{s.url}</span>
-                  <span className="text-gray-400 shrink-0 mx-3">{s.status}</span>
-                  <span className={`font-medium shrink-0 ${matched ? 'text-emerald-600' : 'text-amber-600'}`}>
-                    {matched ? '✓' : '⚠'} 발견 {s.found_count}개 / 저장 {s.saved_count}개
-                  </span>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
-      {products.length === 0 ? (
-        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400">
+      {/* 상단: 검색 가능한 스크래핑 목록 (클릭 시 하단 그리드가 해당 세션으로 전환) */}
+      {sessions.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 mb-4 shrink-0">
           <div className="text-4xl mb-3">📭</div>
-          <p className="text-sm">수집된 상품이 없습니다.</p>
+          <p className="text-sm">수집된 스크래핑이 없습니다.</p>
           <button onClick={() => openTab({ id: 'scraper', type: 'scraper', title: '스크래핑', icon: '🔍', closable: true })}
             className="mt-2 inline-block text-teal-500 text-sm hover:underline">스크래핑 시작하기 →</button>
         </div>
       ) : (
-        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-2 border-b border-gray-100 bg-gray-50">
-            <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer">
-              <input type="checkbox" checked={issuesOnly} onChange={e => setIssuesOnly(e.target.checked)} />
-              누락된 데이터가 있는 상품만 보기 {totalIssues > 0 && `(${totalIssues}개)`}
-            </label>
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4 shrink-0">
+          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3">
+            <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
+            <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="URL·상태·일시 검색..."
+              className="flex-1 border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </div>
-          <div className="overflow-y-auto max-h-[70vh]">
-            <table className="w-full text-sm border-collapse">
-              <thead className="sticky top-0 z-10">
-                <tr className="bg-gray-50 border-b border-gray-200 text-xs font-semibold text-gray-500">
-                  <th className="w-10 px-4 py-3 text-left"><input type="checkbox" checked={selected.size === visibleProducts.length && visibleProducts.length > 0} onChange={selectAll} /></th>
-                  <th className="w-20 px-2 py-3 text-left">이미지</th>
-                  <th className="px-2 py-3 text-left">상품명</th>
-                  <th className="w-28 px-2 py-3 text-left">판매가</th>
-                  <th className="w-24 px-2 py-3 text-left">브랜드</th>
-                  <th className="w-40 px-2 py-3 text-left">카테고리</th>
-                  <th className="w-24 px-2 py-3 text-left">재고상태</th>
-                  <th className="px-2 py-3 text-left">누락 데이터</th>
-                  <th className="w-24 px-2 py-3 text-left">가공 상태</th>
-                  <th className="w-10 px-2 py-3 text-left">상세</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleProducts.map(p => {
-                  const missing = missingFields(p)
-                  return (
-                  <tr key={p.id} onClick={() => openDetail(p)}
-                    className={`border-b border-gray-100 hover:bg-gray-50 transition-colors cursor-pointer ${selected.has(p.id) ? 'bg-teal-50' : ''}`}>
-                    <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
-                      <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggleSelect(p.id)} />
-                    </td>
-
-                    <td className="px-2 py-3">
-                      <div className="w-16 h-16 relative rounded-xl overflow-hidden bg-gray-100">
-                        {p.thumbnail_local ? (
-                          <Image src={p.thumbnail_local} alt={p.name_original || ''} fill className="object-cover" unoptimized />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs">No img</div>
-                        )}
-                      </div>
-                    </td>
-
-                    <td className="px-2 py-3 text-gray-700 text-xs leading-relaxed line-clamp-2">{p.name_original}</td>
-
-                    <td className="px-2 py-3 text-gray-800 font-semibold text-xs">
-                      {p.sale_price ? `₩${p.sale_price.toLocaleString()}` : p.price ? `₩${p.price.toLocaleString()}` : '-'}
-                    </td>
-
-                    <td className="px-2 py-3 text-gray-500 text-xs">{p.brand || '-'}</td>
-
-                    <td className="px-2 py-3 text-gray-500 text-xs truncate max-w-[160px]" title={p.mall_category}>{p.mall_category || '-'}</td>
-
-                    <td className="px-2 py-3 text-xs">
-                      {p.stock_status === '품절' || p.stock_status?.startsWith('단종') ? (
-                        <span className="text-rose-500">{p.stock_status}</span>
-                      ) : (
-                        <span className="text-emerald-600">{p.stock_status || '-'}</span>
-                      )}
-                      {p.stock_qty != null && <span className="text-gray-400"> ({p.stock_qty})</span>}
-                    </td>
-
-                    <td className="px-2 py-3 text-xs">
-                      {missing.length === 0 ? (
-                        <span className="text-emerald-600">✓ 완전</span>
-                      ) : (
-                        <span className="text-amber-600" title={missing.join(', ')}>⚠ {missing.join(', ')}</span>
-                      )}
-                    </td>
-
-                    <td className="px-2 py-3 text-xs">
-                      {p.master_product_id ? <span className="text-teal-500">✓ 가공됨</span> : <span className="text-gray-400">미가공</span>}
-                    </td>
-                    <td className="px-2 py-3" onClick={e => e.stopPropagation()}>
-                      <button onClick={() => openDetail(p)} aria-label={`${p.name_original || '상품'} 상세 보기`} title="상세 보기" className="text-teal-500 hover:text-teal-600">🔍</button>
-                    </td>
-                  </tr>
-                )})}
-              </tbody>
-            </table>
-          </div>
+          <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId}
+            onDelete={handleDeleteSession} maxHeightClassName="max-h-80" />
         </div>
       )}
 
-      <div className="mt-3 flex items-center justify-between text-xs text-gray-400">
-        <p>전체 {products.length}개 상품 · 선택 {selected.size}개 {totalIssues > 0 && `· 누락 데이터 있음 ${totalIssues}개`}</p>
-        <button onClick={() => openTab({ id: 'master-list', type: 'master-list', title: '상품마스터', icon: '🗂️', closable: true })}
-          className="text-teal-500 hover:underline font-medium">다음: 상품마스터 →</button>
+      {/* 하단: 선택한 스크래핑의 전체 컬럼 상세 그리드 (병합 여부 무관, 확인/검증용) */}
+      <StagingItemsGrid sessionId={selectedSessionId} />
+
+      <div className="mt-3 flex items-center justify-between text-xs text-gray-400 shrink-0">
+        <p>선택한 세션: {selectedSession ? new Date(selectedSession.created_at).toLocaleString() : '-'}</p>
+        <button onClick={openMigration}
+          className="text-teal-500 hover:underline font-medium">다음 단계: 마이그레이션 →</button>
       </div>
     </div>
   )

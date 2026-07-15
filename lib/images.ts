@@ -29,14 +29,14 @@ function originalFileNameFromUrl(url: string): string {
   }
 }
 
-/** 상품명 기반 파일명 정규화 (일괄 규칙: 대표/상세N) */
-export function normalizeFileName(productName: string, type: 'thumb' | 'detail', detailIdx?: number): string {
+/** 상품명 기반 파일명 정규화 (일괄 규칙: 대표N/상세N — 대표이미지도 여러 장일 수 있어 모두 번호를 붙인다) */
+export function normalizeFileName(productName: string, type: 'thumb' | 'detail', idx?: number): string {
   const safe = (productName || '상품').replace(/[^가-힣a-zA-Z0-9]/g, '_').slice(0, 30)
-  return type === 'thumb' ? `${safe}_대표` : `${safe}_상세${detailIdx ?? 1}`
+  return type === 'thumb' ? `${safe}_대표${idx ?? 1}` : `${safe}_상세${idx ?? 1}`
 }
 
 async function downloadAndNormalize(
-  url: string, mallProductId: number, productName: string, type: 'thumb' | 'detail', detailIdx: number | undefined,
+  url: string, mallProductId: number, productName: string, type: 'thumb' | 'detail', idx: number | undefined,
 ): Promise<SavedImage> {
   const dir = path.join(SAVE_ROOT, String(mallProductId))
   ensureDir(dir)
@@ -47,7 +47,7 @@ async function downloadAndNormalize(
     headers: { 'User-Agent': 'Mozilla/5.0', Referer: url },
   })
 
-  const finalName = `${normalizeFileName(productName, type, detailIdx)}.jpg`
+  const finalName = `${normalizeFileName(productName, type, idx)}.jpg`
   const filePath = path.join(dir, finalName)
 
   // 파일 사이즈/포맷을 일괄 규칙(최대 1200px, JPEG 85% 품질)으로 정리
@@ -65,18 +65,18 @@ async function downloadAndNormalize(
   }
 }
 
-/** 대표이미지 + 상세이미지 일괄 다운로드/정규화 후 product_images에 기록 */
+/** 대표이미지(여러 장 가능) + 상세이미지 일괄 다운로드/정규화 후 product_images에 기록 */
 export async function downloadProductImages(
-  thumbnailUrl: string,
+  thumbnailUrls: string[],
   detailUrls: string[],
   mallProductId: number,
   productName: string,
-): Promise<{ thumbnail: SavedImage | null; details: SavedImage[] }> {
-  let thumbnail: SavedImage | null = null
+): Promise<{ thumbnails: SavedImage[]; details: SavedImage[] }> {
+  const thumbnails: SavedImage[] = []
   const details: SavedImage[] = []
 
-  if (thumbnailUrl) {
-    try { thumbnail = await downloadAndNormalize(thumbnailUrl, mallProductId, productName, 'thumb', undefined) } catch { /* 실패 무시 */ }
+  for (let i = 0; i < thumbnailUrls.length; i++) {
+    try { thumbnails.push(await downloadAndNormalize(thumbnailUrls[i], mallProductId, productName, 'thumb', i + 1)) } catch { /* 실패 무시 */ }
   }
   for (let i = 0; i < detailUrls.length; i++) {
     try { details.push(await downloadAndNormalize(detailUrls[i], mallProductId, productName, 'detail', i + 1)) } catch { /* 실패 무시 */ }
@@ -85,7 +85,7 @@ export async function downloadProductImages(
   // 재스크랩 시 이전 이미지 레코드를 대체한다 (파일 자체는 같은 정규화 이름으로 덮어써짐)
   await pool.query(`DELETE FROM product_images WHERE mall_product_id=$1`, [mallProductId])
   const rows = [
-    ...(thumbnail ? [{ ...thumbnail, imageType: 'thumbnail', sortOrder: 0 }] : []),
+    ...thumbnails.map((t, i) => ({ ...t, imageType: 'thumbnail', sortOrder: i })),
     ...details.map((d, i) => ({ ...d, imageType: 'detail', sortOrder: i + 1 })),
   ]
   for (const r of rows) {
@@ -97,7 +97,7 @@ export async function downloadProductImages(
     )
   }
 
-  return { thumbnail, details }
+  return { thumbnails, details }
 }
 
 /** 현재 설정된 이미지 호스팅 base URL (없으면 빈 문자열 = 상대경로 그대로 사용) */
@@ -113,11 +113,11 @@ export function resolveImageUrl(storagePath: string, baseUrl: string): string {
   return baseUrl ? `${baseUrl.replace(/\/+$/, '')}${storagePath}` : storagePath
 }
 
-export function resolveMasterImages(images: RawMasterImage[], baseUrl: string): { thumbnail_url: string; detail_image_urls: string[] } {
-  const thumb = images.find(i => i.image_type === 'thumbnail')
+export function resolveMasterImages(images: RawMasterImage[], baseUrl: string): { thumbnail_urls: string[]; detail_image_urls: string[] } {
+  const thumbs = images.filter(i => i.image_type === 'thumbnail').sort((a, b) => a.sort_order - b.sort_order)
   const details = images.filter(i => i.image_type === 'detail').sort((a, b) => a.sort_order - b.sort_order)
   return {
-    thumbnail_url: thumb ? resolveImageUrl(thumb.storage_path, baseUrl) : '',
+    thumbnail_urls: thumbs.map(t => resolveImageUrl(t.storage_path, baseUrl)),
     detail_image_urls: details.map(d => resolveImageUrl(d.storage_path, baseUrl)),
   }
 }

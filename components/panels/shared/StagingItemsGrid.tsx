@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { useTabs } from '../../shell/TabsContext'
 
 interface RawExtra {
@@ -42,6 +42,21 @@ const STATUS_LABELS: Record<string, { text: string; cls: string }> = {
   skipped: { text: '무시됨', cls: 'text-gray-400' },
 }
 
+/** 이미지 링크가 여러 개면 한 줄씩 세로로 나열한다 (대표이미지/상세이미지 컬럼 공용). */
+function ImageLinkList({ urls }: { urls: string[] }) {
+  if (!urls.length) return <>-</>
+  return (
+    <div className="flex flex-col gap-0.5">
+      {urls.map((url, i) => (
+        <a key={i} href={url} target="_blank" rel="noreferrer" title={url}
+          className="block truncate text-teal-500 hover:underline" onClick={e => e.stopPropagation()}>
+          {url}
+        </a>
+      ))}
+    </div>
+  )
+}
+
 function missingFields(p: StagingRow): string[] {
   const missing: string[] = []
   if (!p.name_original) missing.push('상품명')
@@ -58,21 +73,24 @@ interface ColumnDef {
   getValue: (p: StagingRow) => string | number | null
 }
 
-const COLUMNS: ColumnDef[] = [
+/** 옵션(옵션1/옵션2/...)은 상품마다 개수가 달라 고정 컬럼이 아니라, 로드된 데이터의 최대 옵션 개수만큼
+ *  이 배열의 앞/뒤 사이에 동적으로 끼워 넣는다 (컴포넌트 내부의 `columns` 계산 참고). */
+const COLUMNS_BEFORE_OPTIONS: ColumnDef[] = [
   { key: 'created_at', label: '스크래핑 일시', getValue: p => p.created_at },
   { key: 'thumbnail_img', label: '이미지', getValue: p => p.thumbnail_urls?.length ?? 0 },
   { key: 'mall_product_code', label: '상품코드', getValue: p => p.mall_product_code },
   { key: 'name_original', label: '상품명', getValue: p => p.name_original },
-  { key: 'price', label: '정상가', getValue: p => p.price },
-  { key: 'sale_price', label: '판매가', getValue: p => p.sale_price },
+  { key: 'price', label: '소비자판가', getValue: p => p.price },
+  { key: 'sale_price', label: '공급가', getValue: p => p.sale_price },
   { key: 'brand', label: '브랜드', getValue: p => p.brand },
   { key: 'manufacturer', label: '제조사', getValue: p => p.manufacturer },
   { key: 'origin', label: '원산지', getValue: p => p.origin },
   { key: 'mall_category', label: '카테고리', getValue: p => p.mall_category },
   { key: 'description', label: '설명', getValue: p => p.description },
-  { key: 'options', label: '옵션', getValue: p => (p.options || []).map(o => `${o.name}: ${o.values.join('/')}`).join('; ') },
-  { key: 'thumbnail_names', label: '대표이미지', getValue: p => (p.raw_data?.thumbnail_names || []).join(', ') },
-  { key: 'detail_image_urls', label: '상세이미지', getValue: p => (p.raw_data?.detail_image_names || []).join(', ') },
+]
+const COLUMNS_AFTER_OPTIONS: ColumnDef[] = [
+  { key: 'thumbnail_names', label: '대표이미지', getValue: p => (p.thumbnail_urls || []).join(', ') },
+  { key: 'detail_image_urls', label: '상세이미지', getValue: p => (p.detail_image_urls || []).join(', ') },
   { key: 'stock_status', label: '재고상태', getValue: p => p.stock_status },
   { key: 'stock_qty', label: '재고수량', getValue: p => p.stock_qty },
   { key: 'stock_by_option', label: '옵션별 재고', getValue: p => (p.raw_data?.stock_by_option || []).map(r => `${r.option}: ${r.qty}개`).join(', ') },
@@ -99,15 +117,18 @@ interface SortKey { key: string; dir: SortDir }
 const DEFAULT_COL_WIDTH: Record<string, number> = {
   created_at: 140, thumbnail_img: 64,
   mall_product_code: 100, name_original: 190, price: 100, sale_price: 100, brand: 90,
-  manufacturer: 90, origin: 90, mall_category: 150, description: 180, options: 200,
-  thumbnail_names: 180, detail_image_urls: 180, stock_status: 90, stock_qty: 90, stock_by_option: 200,
+  manufacturer: 90, origin: 90, mall_category: 150, description: 180,
+  thumbnail_names: 260, detail_image_urls: 260, stock_status: 90, stock_qty: 90, stock_by_option: 200,
   summary_info: 160, english_name: 130, detail_text: 220, extra_info: 220,
   source_url: 100, missing: 150, migration_status: 120,
 }
 const MIN_COL_WIDTH = 50
+function widthFor(key: string): number {
+  return DEFAULT_COL_WIDTH[key] ?? (key.startsWith('option_') ? 180 : 120)
+}
 
-const COL_ORDER_KEY = 'stagingGrid.colOrder.v2'
-const DEFAULT_COL_ORDER = COLUMNS.map(c => c.key)
+const COL_ORDER_KEY = 'stagingGrid.colOrder.v3'
+const DEFAULT_COL_ORDER = [...COLUMNS_BEFORE_OPTIONS, ...COLUMNS_AFTER_OPTIONS].map(c => c.key)
 
 function loadColOrder(): string[] {
   if (typeof window === 'undefined') return DEFAULT_COL_ORDER
@@ -136,9 +157,31 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
   const [colOrder, setColOrder] = useState<string[]>(loadColOrder)
   const [dragKey, setDragKey] = useState<string | null>(null)
 
+  // 옵션1/옵션2/... 컬럼은 로드된 상품들 중 최대 옵션 개수만큼만 동적으로 생성한다.
+  const maxOptionCount = items.reduce((max, p) => Math.max(max, (p.options || []).length), 0)
+  const columns = useMemo<ColumnDef[]>(() => {
+    const optionColumns: ColumnDef[] = Array.from({ length: maxOptionCount }, (_, i) => ({
+      key: `option_${i}`,
+      label: `옵션${i + 1}`,
+      getValue: p => { const o = p.options?.[i]; return o ? `${o.name}: ${o.values.join('/')}` : '' },
+    }))
+    return [...COLUMNS_BEFORE_OPTIONS, ...optionColumns, ...COLUMNS_AFTER_OPTIONS]
+  }, [maxOptionCount])
+
   useEffect(() => {
     try { localStorage.setItem(COL_ORDER_KEY, JSON.stringify(colOrder)) } catch {}
   }, [colOrder])
+
+  // 옵션 개수가 늘어나 새 옵션 컬럼이 생기면(또는 컬럼 구성이 바뀌면) colOrder에 없는 키를 뒤에 추가한다.
+  useEffect(() => {
+    const allKeys = columns.map(c => c.key)
+    setColOrder(prev => {
+      const kept = prev.filter(k => allKeys.includes(k))
+      const added = allKeys.filter(k => !kept.includes(k))
+      if (!added.length && kept.length === prev.length) return prev
+      return [...kept, ...added]
+    })
+  }, [columns])
 
   function handleColDrop(targetKey: string) {
     if (!dragKey || dragKey === targetKey) return
@@ -150,12 +193,12 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
     setDragKey(null)
   }
 
-  const orderedColumns = colOrder.map(k => COLUMNS.find(c => c.key === k)).filter((c): c is ColumnDef => !!c)
+  const orderedColumns = colOrder.map(k => columns.find(c => c.key === k)).filter((c): c is ColumnDef => !!c)
 
   function startResize(key: string, e: { clientX: number; preventDefault: () => void }) {
     e.preventDefault()
     const startX = e.clientX
-    const startWidth = colWidths[key] ?? DEFAULT_COL_WIDTH[key] ?? 120
+    const startWidth = colWidths[key] ?? widthFor(key)
     function onMove(ev: MouseEvent) {
       setColWidths(w => ({ ...w, [key]: Math.max(MIN_COL_WIDTH, startWidth + (ev.clientX - startX)) }))
     }
@@ -179,7 +222,7 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const issuesFiltered = issuesOnly ? items.filter(p => missingFields(p).length > 0) : items
-  const filteredItems = issuesFiltered.filter(p => COLUMNS.every(col => {
+  const filteredItems = issuesFiltered.filter(p => columns.every(col => {
     const f = filters[col.key]
     if (!f) return true
     return String(col.getValue(p) ?? '').toLowerCase().includes(f.toLowerCase())
@@ -187,7 +230,7 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
   const visibleItems = sortKeys.length
     ? [...filteredItems].sort((a, b) => {
         for (const { key, dir } of sortKeys) {
-          const col = COLUMNS.find(c => c.key === key)
+          const col = columns.find(c => c.key === key)
           if (!col) continue
           const cmp = compareValues(col.getValue(a), col.getValue(b))
           if (cmp !== 0) return dir === 'asc' ? cmp : -cmp
@@ -218,7 +261,7 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
     setSortKeys([])
   }
 
-  const tableWidth = 40 + orderedColumns.reduce((sum, col) => sum + (colWidths[col.key] ?? DEFAULT_COL_WIDTH[col.key] ?? 120), 0) + 40
+  const tableWidth = 40 + orderedColumns.reduce((sum, col) => sum + (colWidths[col.key] ?? widthFor(col.key)), 0) + 40
 
   function isSelectable(p: StagingRow) {
     if (p.status !== 'pending') return false
@@ -351,7 +394,7 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
         <table className="text-sm border-collapse" style={{ tableLayout: 'fixed', width: tableWidth }}>
           <colgroup>
             <col style={{ width: 40 }} />
-            {orderedColumns.map(col => <col key={col.key} style={{ width: colWidths[col.key] ?? DEFAULT_COL_WIDTH[col.key] ?? 120 }} />)}
+            {orderedColumns.map(col => <col key={col.key} style={{ width: colWidths[col.key] ?? widthFor(col.key) }} />)}
             <col style={{ width: 40 }} />
           </colgroup>
           <thead className="sticky top-0 z-10 bg-gray-50">
@@ -398,10 +441,6 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
           <tbody>
             {visibleItems.map(p => {
               const missing = missingFields(p)
-              const optionsText = (p.options || []).map(o => `${o.name}: ${o.values.join('/')}`).join('; ')
-              const thumbnailNames = p.raw_data?.thumbnail_names || []
-              const detailImages = p.detail_image_urls || []
-              const detailImageNames = p.raw_data?.detail_image_names || []
               const stockByOptionText = (p.raw_data?.stock_by_option || []).map(r => `${r.option}: ${r.qty}개`).join(', ')
               const extraInfoText = (p.raw_data?.extra_info || []).map(e => `${e.label}: ${e.value}`).join(' / ')
               const canOpen = !!p.matched_mall_product_id
@@ -435,14 +474,18 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
                 origin: { node: p.origin || '-' },
                 mall_category: { node: p.mall_category || '-', title: p.mall_category || '' },
                 description: { node: p.description || '-', title: p.description || '' },
-                options: { node: optionsText || '-', title: optionsText },
+                ...Object.fromEntries(Array.from({ length: maxOptionCount }, (_, i) => {
+                  const o = p.options?.[i]
+                  const text = o ? `${o.name}: ${o.values.join('/')}` : ''
+                  return [`option_${i}`, { node: text || '-', title: text }]
+                })),
                 thumbnail_names: {
-                  node: <>{p.thumbnail_urls?.length ? `${p.thumbnail_urls.length}장` : '-'}{thumbnailNames.length ? ` — ${thumbnailNames.join(', ')}` : ''}</>,
-                  title: thumbnailNames.join(', '),
+                  node: <ImageLinkList urls={p.thumbnail_urls || []} />,
+                  className: 'px-2 py-2 text-xs text-gray-500', stop: true,
                 },
                 detail_image_urls: {
-                  node: <>{detailImages.length ? `${detailImages.length}장` : '-'}{detailImageNames.length ? ` — ${detailImageNames.join(', ')}` : ''}</>,
-                  title: detailImageNames.join(', '),
+                  node: <ImageLinkList urls={p.detail_image_urls || []} />,
+                  className: 'px-2 py-2 text-xs text-gray-500', stop: true,
                 },
                 stock_status: {
                   node: p.stock_status === '품절' || p.stock_status?.startsWith('단종')

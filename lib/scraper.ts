@@ -403,6 +403,68 @@ async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
   return [...merged.entries()].map(([name, values]) => ({ name, values: [...values] }))
 }
 
+export interface MallProfileSignals {
+  sampleCount: number
+  hasMainImages: boolean
+  hasDetailImages: boolean
+  optionUiTypes: ('select' | 'swatch' | 'none')[]
+  hasStockQty: boolean
+  hasStockStatusText: boolean
+  hasDetailText: boolean
+}
+
+const MALL_PROFILE_SAMPLE_SIZE = 6
+
+/**
+ * 로그인 확인 시점에 몰 내 여러 상품을 훑어 이 몰의 상품페이지 구조적 특성(대표/상세이미지 유무, 옵션 UI
+ * 형태, 재고 표기 방식, 상세페이지 텍스트 유무)을 파악한다. 로그인 창이 열려있어야 하며(로그인 확인 직후
+ * 호출), 현재 보고 있는 페이지를 목록으로 간주해 상품 몇 개를 샘플링하고, 목록이 아니면 그 페이지 자체를
+ * 상품 1건으로 취급한다. 실패해도 전체 로그인 확인 흐름을 막지 않도록 호출부에서 백그라운드로 실행한다.
+ */
+export async function profileMallStructure(siteId: number): Promise<MallProfileSignals | null> {
+  const context = openSessions.get(siteId)
+  if (!context) return null
+  const pages = context.pages()
+  const page = pages.length ? pages[pages.length - 1] : await context.newPage()
+  const startUrl = page.url()
+  if (!startUrl || startUrl === 'about:blank') return null
+
+  let sampleUrls: string[] = []
+  try {
+    const { urls } = await collectProductUrls(page, { maxPages: 1 })
+    sampleUrls = urls.slice(0, MALL_PROFILE_SAMPLE_SIZE)
+  } catch { /* 카탈로그로 인식되지 않으면 아래에서 현재 페이지를 상품 페이지 1건으로 취급 */ }
+  if (!sampleUrls.length) sampleUrls = [startUrl]
+
+  const signals: MallProfileSignals = {
+    sampleCount: 0, hasMainImages: false, hasDetailImages: false,
+    optionUiTypes: [], hasStockQty: false, hasStockStatusText: false, hasDetailText: false,
+  }
+  const optionTypes = new Set<'select' | 'swatch' | 'none'>()
+
+  for (const url of sampleUrls) {
+    try {
+      await page.goto(url, { waitUntil: 'load', timeout: 20_000 })
+      await waitForExtractableContent(page)
+      const product = await extractProductRuleBased(page, url)
+      const selectOptions = await scanSelectOptions(page)
+      const swatchOptions = selectOptions.length ? [] : await scanSwatchOptions(page)
+      optionTypes.add(selectOptions.length ? 'select' : swatchOptions.length ? 'swatch' : 'none')
+
+      signals.sampleCount++
+      if (product.thumbnail_urls.length > 0) signals.hasMainImages = true
+      if (product.detail_image_urls.length > 0) signals.hasDetailImages = true
+      if (product.detail_text) signals.hasDetailText = true
+      if (product.stock_qty != null) signals.hasStockQty = true
+      if (product.stock_status && product.stock_status !== '판매중') signals.hasStockStatusText = true
+    } catch { /* 개별 샘플 실패는 건너뛰고 다음 샘플로 */ }
+  }
+  signals.optionUiTypes = [...optionTypes]
+
+  await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+  return signals.sampleCount > 0 ? signals : null
+}
+
 /** 단일 상품 페이지 스크랩 (url 생략 시 현재 열려있는 페이지를 그대로 사용) */
 export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeResult> {
   return withContext(opts, async page => {

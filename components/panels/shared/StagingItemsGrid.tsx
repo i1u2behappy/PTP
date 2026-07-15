@@ -73,8 +73,8 @@ interface ColumnDef {
   getValue: (p: StagingRow) => string | number | null
 }
 
-/** 옵션(옵션1/옵션2/...)은 상품마다 개수가 달라 고정 컬럼이 아니라, 로드된 데이터의 최대 옵션 개수만큼
- *  이 배열의 앞/뒤 사이에 동적으로 끼워 넣는다 (컴포넌트 내부의 `columns` 계산 참고). */
+/** 옵션(옵션1/옵션2/...)은 상품마다 개수가 달라 고정 컬럼이 아니라, 로드된 데이터 중 실제 값이 있는 최대
+ *  옵션 개수만큼만 상세이미지 뒤에 동적으로 끼워 넣는다 (컴포넌트 내부의 `columns` 계산 참고). */
 const COLUMNS_BEFORE_OPTIONS: ColumnDef[] = [
   { key: 'created_at', label: '스크래핑 일시', getValue: p => p.created_at },
   { key: 'thumbnail_img', label: '이미지', getValue: p => p.thumbnail_urls?.length ?? 0 },
@@ -87,10 +87,10 @@ const COLUMNS_BEFORE_OPTIONS: ColumnDef[] = [
   { key: 'origin', label: '원산지', getValue: p => p.origin },
   { key: 'mall_category', label: '카테고리', getValue: p => p.mall_category },
   { key: 'description', label: '설명', getValue: p => p.description },
-]
-const COLUMNS_AFTER_OPTIONS: ColumnDef[] = [
   { key: 'thumbnail_names', label: '대표이미지', getValue: p => (p.thumbnail_urls || []).join(', ') },
   { key: 'detail_image_urls', label: '상세이미지', getValue: p => (p.detail_image_urls || []).join(', ') },
+]
+const COLUMNS_AFTER_OPTIONS: ColumnDef[] = [
   { key: 'stock_status', label: '재고상태', getValue: p => p.stock_status },
   { key: 'stock_qty', label: '재고수량', getValue: p => p.stock_qty },
   { key: 'stock_by_option', label: '옵션별 재고', getValue: p => (p.raw_data?.stock_by_option || []).map(r => `${r.option}: ${r.qty}개`).join(', ') },
@@ -127,7 +127,7 @@ function widthFor(key: string): number {
   return DEFAULT_COL_WIDTH[key] ?? (key.startsWith('option_') ? 180 : 120)
 }
 
-const COL_ORDER_KEY = 'stagingGrid.colOrder.v3'
+const COL_ORDER_KEY = 'stagingGrid.colOrder.v4'
 const DEFAULT_COL_ORDER = [...COLUMNS_BEFORE_OPTIONS, ...COLUMNS_AFTER_OPTIONS].map(c => c.key)
 
 function loadColOrder(): string[] {
@@ -157,13 +157,18 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
   const [colOrder, setColOrder] = useState<string[]>(loadColOrder)
   const [dragKey, setDragKey] = useState<string | null>(null)
 
-  // 옵션1/옵션2/... 컬럼은 로드된 상품들 중 최대 옵션 개수만큼만 동적으로 생성한다.
-  const maxOptionCount = items.reduce((max, p) => Math.max(max, (p.options || []).length), 0)
+  // 옵션1/옵션2/... 컬럼은 실제 값(values)이 있는 항목만 세고, 빈 옵션 슬롯만으로는 컬럼을 만들지 않는다.
+  const maxOptionCount = items.reduce((max, p) => {
+    const opts = p.options || []
+    let last = 0
+    opts.forEach((o, i) => { if (o?.values?.length) last = i + 1 })
+    return Math.max(max, last)
+  }, 0)
   const columns = useMemo<ColumnDef[]>(() => {
     const optionColumns: ColumnDef[] = Array.from({ length: maxOptionCount }, (_, i) => ({
       key: `option_${i}`,
       label: `옵션${i + 1}`,
-      getValue: p => { const o = p.options?.[i]; return o ? `${o.name}: ${o.values.join('/')}` : '' },
+      getValue: p => { const o = p.options?.[i]; return o?.values?.length ? `${o.name}: ${o.values.join('/')}` : '' },
     }))
     return [...COLUMNS_BEFORE_OPTIONS, ...optionColumns, ...COLUMNS_AFTER_OPTIONS]
   }, [maxOptionCount])
@@ -476,7 +481,7 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
                 description: { node: p.description || '-', title: p.description || '' },
                 ...Object.fromEntries(Array.from({ length: maxOptionCount }, (_, i) => {
                   const o = p.options?.[i]
-                  const text = o ? `${o.name}: ${o.values.join('/')}` : ''
+                  const text = o?.values?.length ? `${o.name}: ${o.values.join('/')}` : ''
                   return [`option_${i}`, { node: text || '-', title: text }]
                 })),
                 thumbnail_names: {

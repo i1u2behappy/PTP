@@ -133,6 +133,21 @@ export function getOpenPageUrl(siteId: number): string | null {
   return pages.length ? pages[pages.length - 1].url() : null
 }
 
+/**
+ * 미리보기 화면의 "열기" 링크처럼, 로그인된 상태로 특정 상품 페이지를 확인하고 싶을 때 쓴다. 이미 열려있는
+ * 로그인 창(세션 쿠키를 가진 그 브라우저)에 새 탭을 띄워 이동시킨다 — 사용자의 일반 브라우저로 그냥 열면
+ * 로그인 쿠키가 없어 로그아웃 상태로 보인다. 열려있는 로그인 창이 없으면 false를 반환해 호출부가
+ * 폴백(일반 브라우저 새 탭)하도록 한다.
+ */
+export async function openUrlInLoginWindow(siteId: number, url: string): Promise<boolean> {
+  const context = openSessions.get(siteId)
+  if (!context) return false
+  const page = await context.newPage()
+  await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+  await page.bringToFront().catch(() => {})
+  return true
+}
+
 /** 사용자가 명시적으로 닫을 때만 호출 — 로그인 확인 시에는 창을 닫지 않는다 */
 export async function closeLoginWindow(siteId: number) {
   const context = openSessions.get(siteId)

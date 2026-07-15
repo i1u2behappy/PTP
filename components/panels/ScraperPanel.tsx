@@ -203,6 +203,21 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (d.url) { setTargetUrl(d.url); setCategoryUrlsText('') }
   }
 
+  /** 로그인 창이 열려있으면 그 안에 새 탭으로 열어 로그인된 상태로 보여준다. 없으면 일반 새 탭으로 폴백. */
+  async function handleOpenItem(url: string) {
+    if (selectedSite) {
+      try {
+        const res = await fetch('/api/scrape/open-url', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ siteId: selectedSite.id, url }),
+        })
+        const d = await res.json() as { opened: boolean }
+        if (d.opened) return
+      } catch { /* 폴백으로 진행 */ }
+    }
+    window.open(url, '_blank', 'noreferrer')
+  }
+
   async function handleLoadCategories() {
     if (!selectedSite || !targetUrl) return
     setCategoriesLoading(true)
@@ -741,7 +756,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                         </td>
                         <td className="px-2 py-1.5 text-gray-700 truncate max-w-[320px]" title={item.name}>{item.name || '-'}</td>
                         <td className="px-2 py-1.5">
-                          <a href={item.url} target="_blank" rel="noreferrer" className="text-teal-500 hover:underline">열기 ↗</a>
+                          <button type="button" onClick={() => handleOpenItem(item.url)} className="text-teal-500 hover:underline">열기 ↗</button>
                         </td>
                       </tr>
                     ))}

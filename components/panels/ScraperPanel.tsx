@@ -653,10 +653,15 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
               <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500 flex items-center justify-between gap-2">
                 <span className="truncate">{previewResult.sourceUrl}</span>
-                <button type="button" onClick={handlePreview} disabled={previewLoading || !canPreview}
-                  title="다시 미리보기" className="text-teal-500 hover:underline disabled:opacity-50 disabled:cursor-not-allowed shrink-0">
-                  {previewLoading ? '확인 중...' : '🔄 새로고침'}
-                </button>
+                <div className="flex items-center gap-3 shrink-0">
+                  <button type="button" onClick={() => handleOpenItem(previewResult.sourceUrl)} className="text-teal-500 hover:underline">
+                    열기 ↗
+                  </button>
+                  <button type="button" onClick={handlePreview} disabled={previewLoading || !canPreview}
+                    title="다시 미리보기" className="text-teal-500 hover:underline disabled:opacity-50 disabled:cursor-not-allowed">
+                    {previewLoading ? '확인 중...' : '🔄 새로고침'}
+                  </button>
+                </div>
               </div>
               <div className="p-3 flex gap-3 border-b border-gray-100">
                 {previewResult.product.thumbnail_urls.length > 0 && (

@@ -1,20 +1,24 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useTabs, type Tab } from './TabsContext'
-import { BoltIcon, DashboardIcon, ClientIcon, StoreIcon, PlusIcon, ListIcon, SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ExportIcon, SettingsIcon } from './icons'
+import { BoltIcon, DashboardIcon, ClientIcon, StoreIcon, ListIcon, SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ImageEditIcon, ExportIcon, SettingsIcon, TagIcon, MapIcon, CoinIcon } from './icons'
+import { CLIENTS_LIST_TAB, SITES_LIST_TAB, MASTER_LIST_TAB } from './menuTabs'
 
-interface Client { id: number; name: string }
 type IconComponent = (props: { active?: boolean }) => React.ReactNode
 
-function NavGroup({ label, icon: Icon, defaultOpen, children }: { label: string; icon: IconComponent; defaultOpen?: boolean; children: React.ReactNode }) {
+function NavGroup({ label, icon: Icon, defaultOpen, tab, children }: { label: string; icon: IconComponent; defaultOpen?: boolean; tab?: Tab; children: React.ReactNode }) {
+  const { activeTabId, openTab } = useTabs()
   const [open, setOpen] = useState(!!defaultOpen)
+  const isActive = !!tab && activeTabId === tab.id
   return (
     <div>
-      <button onClick={() => setOpen(o => !o)} aria-expanded={open}
-        className="group w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-slate-400 hover:text-slate-600 transition-colors">
-        <Icon />
+      <button onClick={() => { if (tab) openTab(tab); setOpen(true) }} aria-expanded={open}
+        className={`group w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold transition-colors
+          ${isActive ? 'text-teal-700' : 'text-slate-400 hover:text-slate-600'}`}>
+        <Icon active={isActive} />
         <span className="flex-1 text-left">{label}</span>
-        <span className={`transition-transform duration-150 ${open ? 'rotate-90' : ''}`} aria-hidden="true">›</span>
+        <span onClick={e => { e.stopPropagation(); setOpen(o => !o) }} role="button" tabIndex={-1} aria-label={open ? '접기' : '펼치기'}
+          className={`transition-transform duration-150 ${open ? 'rotate-90' : ''}`} aria-hidden="true">›</span>
       </button>
       {open && <div className="space-y-0.5 pb-1">{children}</div>}
     </div>
@@ -36,13 +40,6 @@ function NavLeaf({ tab, icon: Icon, nested }: { tab: Tab; icon: IconComponent; n
 }
 
 export function Sidebar() {
-  const { openTab, refreshSignals } = useTabs()
-  const [clients, setClients] = useState<Client[]>([])
-
-  useEffect(() => {
-    fetch('/api/clients').then(r => r.json()).then((d: Client[]) => { if (Array.isArray(d)) setClients(d) }).catch(() => {})
-  }, [refreshSignals.clients])
-
   return (
     <aside className="w-64 shrink-0 bg-white border-r border-slate-100 flex flex-col h-full overflow-y-auto">
       <div className="px-5 h-16 flex items-center gap-2 shrink-0">
@@ -55,29 +52,30 @@ export function Sidebar() {
       <nav className="flex-1 px-2 pb-3 space-y-1" aria-label="주 메뉴">
         <NavLeaf tab={{ id: 'dashboard', type: 'dashboard', title: '대시보드', icon: '📊', closable: false }} icon={DashboardIcon} />
 
-        <NavGroup label="거래처 관리" icon={ClientIcon}>
-          <button onClick={() => openTab({ id: 'client-detail:new', type: 'client-detail', title: '새 거래처 등록', icon: '➕', closable: true })}
-            className="group w-full flex items-center gap-2 pl-6 pr-3 py-1.5 text-sm rounded-full text-teal-600 hover:bg-teal-50 transition-colors text-left">
-            <PlusIcon />
-            <span>새 거래처 등록</span>
-          </button>
-          <NavLeaf tab={{ id: 'clients-list', type: 'clients-list', title: '거래처 목록', icon: '📋', closable: true }} icon={ListIcon} nested />
-          {clients.map(c => (
-            <button key={c.id}
-              onClick={() => openTab({ id: `client-detail:${c.id}`, type: 'client-detail', title: c.name, icon: '🏢', params: { clientId: c.id }, closable: true })}
-              className="w-full flex items-center gap-2 pl-9 pr-3 py-1.5 text-xs rounded-full text-slate-400 hover:bg-slate-50 hover:text-slate-600 transition-colors text-left truncate">
-              <span className="truncate">{c.name}</span>
-            </button>
-          ))}
+        <NavLeaf tab={CLIENTS_LIST_TAB} icon={ClientIcon} />
+
+        <NavLeaf tab={SITES_LIST_TAB} icon={StoreIcon} />
+
+        {/* 대시보드 작업 플로우 순서(스크래핑 → 수집확인 → 마이그레이션 → 상품마스터 → 엑셀 내보내기)와 동일하게 배치 */}
+        <NavLeaf tab={{ id: 'scraper', type: 'scraper', title: '스크래핑', icon: '🔍', closable: true }} icon={SearchIcon} />
+        <NavLeaf tab={{ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true }} icon={InboxIcon} />
+
+        {/* 컬럼별 전처리/변환 작업을 단계별 하위 메뉴로 구분. 그룹명 클릭 시 하위 작업 진행현황 대시보드가 열린다 */}
+        <NavGroup label="마이그레이션" icon={ReviewIcon} defaultOpen
+          tab={{ id: 'migration-dashboard', type: 'migration-dashboard', title: '데이터 마이그 목록', icon: '📊', closable: true }}>
+          <NavLeaf tab={{ id: 'sales-code', type: 'sales-code', title: '판매관리코드 관리', icon: '💳', closable: true }} icon={TagIcon} nested />
+          <NavLeaf tab={{ id: 'category-mapping', type: 'category-mapping', title: '카테고리 관리', icon: '🗺️', closable: true }} icon={MapIcon} nested />
+          <NavLeaf tab={{ id: 'internal-codes', type: 'internal-codes', title: '업체코드-상품내부코드 생성', icon: '🏷️', closable: true }} icon={TagIcon} nested />
+          <NavLeaf tab={{ id: 'name-management', type: 'name-management', title: '상품명 관리', icon: '✏️', closable: true }} icon={ListIcon} nested />
+          <NavLeaf tab={{ id: 'option-management', type: 'option-management', title: '옵션 관리', icon: '🎛️', closable: true }} icon={SettingsIcon} nested />
+          <NavLeaf tab={{ id: 'brand-origin-management', type: 'brand-origin-management', title: '브랜드,제조사,원산지 관리', icon: '🏭', closable: true }} icon={StoreIcon} nested />
+          <NavLeaf tab={{ id: 'image-edit', type: 'image-edit', title: '이미지 관리', icon: '🖼️', closable: true }} icon={ImageEditIcon} nested />
+          <NavLeaf tab={{ id: 'image-host', type: 'image-host', title: '이미지 호스팅관리', icon: '🌐', closable: true }} icon={ImageEditIcon} nested />
+          <NavLeaf tab={{ id: 'pricing-management', type: 'pricing-management', title: '가격및이익관리', icon: '💰', closable: true }} icon={CoinIcon} nested />
         </NavGroup>
 
-        <NavLeaf tab={{ id: 'sites-list', type: 'sites-list', title: 'Mall 상세관리', icon: '📋', closable: true }} icon={StoreIcon} />
-
-        {/* 대시보드 작업 플로우 순서(스크래핑 → 스크랩 검토 → 수집확인 → 상품마스터 → 엑셀 내보내기)와 동일하게 배치 */}
-        <NavLeaf tab={{ id: 'scraper', type: 'scraper', title: '스크래핑', icon: '🔍', closable: true }} icon={SearchIcon} />
-        <NavLeaf tab={{ id: 'staging-review', type: 'staging-review', title: '스크랩 검토', icon: '🔎', closable: true }} icon={ReviewIcon} />
-        <NavLeaf tab={{ id: 'products-list', type: 'products-list', title: '수집 확인', icon: '📥', closable: true }} icon={InboxIcon} />
-        <NavLeaf tab={{ id: 'master-list', type: 'master-list', title: '상품마스터', icon: '🗂️', closable: true }} icon={ArchiveIcon} />
+        <NavLeaf tab={MASTER_LIST_TAB} icon={ArchiveIcon} />
+        <NavLeaf tab={{ id: 'transform', type: 'transform', title: '마이그레이션2_Transform', icon: '🧬', closable: true }} icon={ReviewIcon} />
         <NavLeaf tab={{ id: 'export', type: 'export', title: '엑셀 내보내기', icon: '📊', closable: true }} icon={ExportIcon} />
         <NavLeaf tab={{ id: 'settings', type: 'settings', title: '설정', icon: '⚙️', closable: true }} icon={SettingsIcon} />
       </nav>

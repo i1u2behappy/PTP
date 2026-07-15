@@ -231,6 +231,81 @@ export function ReviewIcon({ active }: IconProps) {
   )
 }
 
+export function ImageEditIcon({ active }: IconProps) {
+  return (
+    <Toggle active={active}
+      outline={
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-full h-full">
+          <rect x="3.5" y="4.5" width="17" height="15" rx="1.5" />
+          <circle cx="8.5" cy="9.5" r="1.5" />
+          <path d="M4 17l5-5 3 3 4-4.5 4 4" />
+        </svg>
+      }
+      solid={
+        <svg viewBox="0 0 24 24" className="w-full h-full">
+          <rect fill="currentColor" fillOpacity="0.22" stroke="none" x="3.5" y="4.5" width="17" height="15" rx="1.5" />
+          <path fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" d="M3.5 4.5h17v15h-17z" />
+          <circle fill="currentColor" stroke="none" cx="8.5" cy="9.5" r="1.5" />
+          <path fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" d="M4 17l5-5 3 3 4-4.5 4 4" />
+        </svg>
+      } />
+  )
+}
+
+export function TagIcon({ active }: IconProps) {
+  return (
+    <Toggle active={active}
+      outline={
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-full h-full">
+          <path d="M12.5 3.5h5a2 2 0 012 2v5l-9.5 9.5a1.5 1.5 0 01-2.12 0l-4.88-4.88a1.5 1.5 0 010-2.12L12.5 3.5z" />
+          <circle cx="16" cy="7" r="1.4" />
+        </svg>
+      }
+      solid={
+        <svg viewBox="0 0 24 24" className="w-full h-full">
+          <path fill="currentColor" fillOpacity="0.22" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" d="M12.5 3.5h5a2 2 0 012 2v5l-9.5 9.5a1.5 1.5 0 01-2.12 0l-4.88-4.88a1.5 1.5 0 010-2.12L12.5 3.5z" />
+          <circle fill="currentColor" stroke="none" cx="16" cy="7" r="1.4" />
+        </svg>
+      } />
+  )
+}
+
+export function MapIcon({ active }: IconProps) {
+  return (
+    <Toggle active={active}
+      outline={
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-full h-full">
+          <path d="M9 4.5L4 6.5v13l5-2 6 2 5-2v-13l-5 2-6-2z" />
+          <path d="M9 4.5v13M15 6.5v13" />
+        </svg>
+      }
+      solid={
+        <svg viewBox="0 0 24 24" className="w-full h-full">
+          <path fill="currentColor" fillOpacity="0.22" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" d="M9 4.5L4 6.5v13l5-2 6 2 5-2v-13l-5 2-6-2z" />
+          <path fill="none" stroke="currentColor" strokeWidth="1.5" d="M9 4.5v13M15 6.5v13" />
+        </svg>
+      } />
+  )
+}
+
+export function CoinIcon({ active }: IconProps) {
+  return (
+    <Toggle active={active}
+      outline={
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" className="w-full h-full">
+          <circle cx="12" cy="12" r="8.5" />
+          <path strokeLinecap="round" d="M12 7.5v9M9.5 9.5h4a1.75 1.75 0 010 3.5h-3a1.75 1.75 0 000 3.5h4.5" />
+        </svg>
+      }
+      solid={
+        <svg viewBox="0 0 24 24" className="w-full h-full">
+          <circle fill="currentColor" fillOpacity="0.22" stroke="currentColor" strokeWidth="1.75" cx="12" cy="12" r="8.5" />
+          <path fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" d="M12 7.5v9M9.5 9.5h4a1.75 1.75 0 010 3.5h-3a1.75 1.75 0 000 3.5h4.5" />
+        </svg>
+      } />
+  )
+}
+
 export function BoltIcon({ className }: IconProps) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" className={className}>

@@ -365,13 +365,18 @@ const OPTION_PLACEHOLDER_RE = /선택.*(주세요|하세요)|필수|choose|pleas
 const OPTION_SELECT_NAV_ONCHANGE_RE = /location|window\.open|\.href/i
 // 위 정규식과 같은 기준으로 실제 상호작용(selectOption) 대상을 고를 때 쓰는 CSS 셀렉터
 const PRODUCT_SELECT_LOCATOR = 'select:not([onchange*="location" i]):not([onchange*="window.open" i]):not([onchange*=".href" i])'
+// 카페24 실제 상품 옵션(색상/사이즈 등)은 이 컨테이너 안에만 있다. 스코프 없이 document 전체에서 select를
+// 찾으면 "함께 구매하면 좋은 상품" 등 같은 페이지의 무관한 위젯(다른 상품의 옵션 select)까지 잡혀
+// 존재하지 않는 옵션 컬럼(예: option_26852[])이 생기는 문제가 있었다.
+const OPTION_CONTAINER_SELECTOR = '.xans-product-option'
 
-async function scanSelectOptions(page: Page): Promise<DomOption[]> {
-  return page.evaluate(({ excludeSrc, placeholderSrc, navOnchangeSrc }) => {
+async function scanSelectOptions(page: Page, rootSelector?: string): Promise<DomOption[]> {
+  return page.evaluate(({ excludeSrc, placeholderSrc, navOnchangeSrc, rootSelector }) => {
     const excludeRe = new RegExp(excludeSrc, 'i')
     const placeholderRe = new RegExp(placeholderSrc, 'i')
     const navOnchangeRe = new RegExp(navOnchangeSrc, 'i')
-    return Array.from(document.querySelectorAll('select'))
+    const root = (rootSelector && document.querySelector(rootSelector)) || document
+    return Array.from(root.querySelectorAll('select'))
       .filter(sel => !navOnchangeRe.test(sel.getAttribute('onchange') || ''))
       .map(sel => {
         const name = sel.getAttribute('title') || sel.name || sel.id || ''
@@ -381,7 +386,7 @@ async function scanSelectOptions(page: Page): Promise<DomOption[]> {
         return { name, values }
       })
       .filter(o => o.values.length > 0 && !excludeRe.test(o.name))
-  }, { excludeSrc: OPTION_SELECT_EXCLUDE_RE.source, placeholderSrc: OPTION_PLACEHOLDER_RE.source, navOnchangeSrc: OPTION_SELECT_NAV_ONCHANGE_RE.source })
+  }, { excludeSrc: OPTION_SELECT_EXCLUDE_RE.source, placeholderSrc: OPTION_PLACEHOLDER_RE.source, navOnchangeSrc: OPTION_SELECT_NAV_ONCHANGE_RE.source, rootSelector: rootSelector || '' })
 }
 
 /** <select>가 아니라 라디오/체크박스 또는 색상·옵션 스와치(li/button/a)로 렌더되는 옵션 UI를 읽는다. */
@@ -437,14 +442,18 @@ async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
     })
   }
 
-  const initial = await scanSelectOptions(page)
+  const hasOptionContainer = await page.evaluate(sel => !!document.querySelector(sel), OPTION_CONTAINER_SELECTOR)
+  const rootSelector = hasOptionContainer ? OPTION_CONTAINER_SELECTOR : undefined
+  const selectLocatorStr = hasOptionContainer ? `${OPTION_CONTAINER_SELECTOR} ${PRODUCT_SELECT_LOCATOR}` : PRODUCT_SELECT_LOCATOR
+
+  const initial = await scanSelectOptions(page, rootSelector)
   mergeIn(initial)
 
   if (initial.length > 0) {
     const values = initial[0].values.slice(0, 20)
     for (const value of values) {
       try {
-        const firstSelect = page.locator(PRODUCT_SELECT_LOCATOR).first()
+        const firstSelect = page.locator(selectLocatorStr).first()
         if (await firstSelect.count() === 0) break
         // index가 아니라 label(실제 값)로 선택한다 — index는 안내문/구분선까지 포함한 원래 <option> 순서
         // 기준이라, 필터링된 값 목록의 인덱스로 selectOption({index})를 호출하면 엉뚱한(안내문 등) 옵션이
@@ -452,7 +461,7 @@ async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
         // 기본 30초 대기 없이 짧게 시도하고 넘어간다 — 비활성화된(품절 등) option 하나가 스크랩 전체를 30초씩 붙잡는 것을 방지
         await firstSelect.selectOption({ label: value }, { timeout: 3_000 })
         await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {})
-        mergeIn(await scanSelectOptions(page))
+        mergeIn(await scanSelectOptions(page, rootSelector))
       } catch { /* 개별 실패는 skip */ }
     }
   }

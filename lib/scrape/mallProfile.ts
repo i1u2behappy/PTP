@@ -6,9 +6,11 @@ function summarizeProfile(p: MallProfileSignals): string {
     p.hasMainImages ? '대표이미지 있음' : '대표이미지 없음',
     p.hasDetailImages ? '상세이미지 있음' : '상세이미지 없음',
     p.hasDetailText ? '상세텍스트 있음' : '상세텍스트 없음',
-    `옵션: ${p.optionUiTypes.join('/') || '없음'}`,
+    `옵션: ${p.optionUiTypes.join('/') || '없음'}${p.hasCascadingOptions ? ' (연쇄옵션 있음)' : ''}`,
     p.hasStockQty ? '재고수량 표시' : '재고수량 미표시',
     p.hasStockStatusText ? '재고상태 문구 표시' : '재고상태 문구 미표시',
+    p.hasStockByOption ? '옵션별 재고 위젯 있음' : '옵션별 재고 위젯 없음',
+    `상품정보 항목: ${p.infoLabels.join(', ') || '없음'}`,
   ].join(', ')
 }
 
@@ -19,11 +21,19 @@ function describeDiff(prev: MallProfileSignals, next: MallProfileSignals): strin
   if (prev.hasDetailText !== next.hasDetailText) diffs.push(`상세페이지 텍스트: ${prev.hasDetailText ? '있었음' : '없었음'} → ${next.hasDetailText ? '있음' : '없음'}`)
   if (prev.hasStockQty !== next.hasStockQty) diffs.push(`재고수량 표시: ${prev.hasStockQty ? '있었음' : '없었음'} → ${next.hasStockQty ? '있음' : '없음'}`)
   if (prev.hasStockStatusText !== next.hasStockStatusText) diffs.push(`재고상태 문구: ${prev.hasStockStatusText ? '있었음' : '없었음'} → ${next.hasStockStatusText ? '있음' : '없음'}`)
+  if (prev.hasStockByOption !== next.hasStockByOption) diffs.push(`옵션별 재고 위젯: ${prev.hasStockByOption ? '있었음' : '없었음'} → ${next.hasStockByOption ? '있음' : '없음'}`)
+  if (prev.hasCascadingOptions !== next.hasCascadingOptions) diffs.push(`연쇄옵션(색상→사이즈 등): ${prev.hasCascadingOptions ? '있었음' : '없었음'} → ${next.hasCascadingOptions ? '있음' : '없음'}`)
   const prevOpt = new Set(prev.optionUiTypes)
   const nextOpt = new Set(next.optionUiTypes)
   if (prevOpt.size !== nextOpt.size || [...prevOpt].some(t => !nextOpt.has(t))) {
     diffs.push(`옵션 UI 형태: [${prev.optionUiTypes.join('/') || '없음'}] → [${next.optionUiTypes.join('/') || '없음'}]`)
   }
+  const prevLabels = new Set(prev.infoLabels)
+  const nextLabels = new Set(next.infoLabels)
+  const newLabels = next.infoLabels.filter(l => !prevLabels.has(l))
+  const droppedLabels = prev.infoLabels.filter(l => !nextLabels.has(l))
+  if (newLabels.length) diffs.push(`상품정보 항목 추가됨: ${newLabels.join(', ')}`)
+  if (droppedLabels.length) diffs.push(`상품정보 항목 사라짐: ${droppedLabels.join(', ')}`)
   return diffs
 }
 

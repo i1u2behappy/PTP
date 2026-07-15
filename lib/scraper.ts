@@ -423,7 +423,8 @@ async function scanSwatchOptions(page: Page): Promise<DomOption[]> {
 /**
  * 상품 옵션이 AJAX로 갱신되는 경우(예: 색상 선택 시 사이즈 목록이 뒤늦게 채워짐)를 대비해
  * 첫 번째 옵션 셀렉트의 각 값을 순서대로 선택하며 그때마다 나타나는 옵션까지 모아 병합한다.
- * 라디오/체크박스·클릭형 스와치 옵션은 보통 처음부터 전부 렌더되어 있어 클릭 없이 바로 읽는다.
+ * 색상이 1개뿐인 상품도 그 색상을 선택해야 사이즈 목록이 채워지는 몰이 있어, 값이 1개여도 최소 1회는
+ * 선택을 시도한다. 라디오/체크박스·클릭형 스와치 옵션은 보통 처음부터 전부 렌더되어 있어 클릭 없이 바로 읽는다.
  * ponytail: select는 1단계 캐스케이딩·최대 20개 값까지만 순회 — 3단계 이상 중첩 select는 지원하지 않음.
  */
 async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
@@ -439,14 +440,17 @@ async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
   const initial = await scanSelectOptions(page)
   mergeIn(initial)
 
-  if (initial.length > 0 && initial[0].values.length > 1) {
-    const optionCount = Math.min(initial[0].values.length, 20)
-    for (let i = 0; i < optionCount; i++) {
+  if (initial.length > 0) {
+    const values = initial[0].values.slice(0, 20)
+    for (const value of values) {
       try {
         const firstSelect = page.locator(PRODUCT_SELECT_LOCATOR).first()
         if (await firstSelect.count() === 0) break
+        // index가 아니라 label(실제 값)로 선택한다 — index는 안내문/구분선까지 포함한 원래 <option> 순서
+        // 기준이라, 필터링된 값 목록의 인덱스로 selectOption({index})를 호출하면 엉뚱한(안내문 등) 옵션이
+        // 선택되어 사이즈 등 하위 옵션이 채워지는 onchange가 아예 발생하지 않는 문제가 있었다.
         // 기본 30초 대기 없이 짧게 시도하고 넘어간다 — 비활성화된(품절 등) option 하나가 스크랩 전체를 30초씩 붙잡는 것을 방지
-        await firstSelect.selectOption({ index: i }, { timeout: 3_000 })
+        await firstSelect.selectOption({ label: value }, { timeout: 3_000 })
         await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {})
         mergeIn(await scanSelectOptions(page))
       } catch { /* 개별 실패는 skip */ }
@@ -460,23 +464,65 @@ async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
   return [...merged.entries()].map(([name, values]) => ({ name, values: [...values] }))
 }
 
+/**
+ * 카페24는 상품정보고시 표의 "재고 수량" 칸에 실제 숫자 대신 "자세히"(.EC-stockdesign) 버튼만 두고,
+ * 클릭해야 옵션 조합별(색상/사이즈 등) 재고수량 표(.EC-stockLayer)를 레이어로 띄워준다. 이 정보는 상품마다
+ * 값이 다 다르고 옵션 조합 수만큼 늘어나므로, 버튼이 있으면 클릭해서 표를 읽는다. 없으면(다른 플랫폼/스킨
+ * 등) 빈 배열.
+ */
+async function extractStockByOption(page: Page): Promise<{ option: string; qty: number }[]> {
+  const stockLink = page.locator('.EC-stockdesign').first()
+  if (await stockLink.count() === 0) return []
+  try {
+    await stockLink.click({ timeout: 3_000 })
+    await page.waitForSelector('.EC-stockLayer table tbody tr', { timeout: 5_000 })
+    const rows = await page.evaluate(() => {
+      const layer = document.querySelector('.EC-stockLayer')
+      if (!layer) return []
+      return Array.from(layer.querySelectorAll('table tbody tr')).map(tr => {
+        const cells = Array.from(tr.querySelectorAll('td')).map(td => (td.textContent || '').trim())
+        return { option: cells[0] || '', qtyText: cells[1] || '' }
+      })
+    })
+    return rows.filter(r => r.option).map(r => ({ option: r.option, qty: Number((r.qtyText.match(/-?\d+/) || ['0'])[0]) }))
+  } catch {
+    return []
+  }
+}
+
+/** extractStockByOption 결과를 product에 반영한다 — 조합별 재고가 잡히면 전체 재고수량도 그 합으로 갱신한다. */
+async function applyStockByOption(page: Page, product: ExtractedProduct): Promise<void> {
+  const stockByOption = await extractStockByOption(page)
+  if (stockByOption.length) {
+    product.stock_by_option = stockByOption
+    product.stock_qty = stockByOption.reduce((sum, r) => sum + r.qty, 0)
+  }
+}
+
 export interface MallProfileSignals {
   sampleCount: number
   hasMainImages: boolean
   hasDetailImages: boolean
   optionUiTypes: ('select' | 'swatch' | 'none')[]
+  hasCascadingOptions: boolean
   hasStockQty: boolean
   hasStockStatusText: boolean
+  hasStockByOption: boolean
   hasDetailText: boolean
+  infoLabels: string[]
 }
 
 const MALL_PROFILE_SAMPLE_SIZE = 6
 
 /**
- * 로그인 확인 시점에 몰 내 여러 상품을 훑어 이 몰의 상품페이지 구조적 특성(대표/상세이미지 유무, 옵션 UI
- * 형태, 재고 표기 방식, 상세페이지 텍스트 유무)을 파악한다. 로그인 창이 열려있어야 하며(로그인 확인 직후
- * 호출), 현재 보고 있는 페이지를 목록으로 간주해 상품 몇 개를 샘플링하고, 목록이 아니면 그 페이지 자체를
- * 상품 1건으로 취급한다. 실패해도 전체 로그인 확인 흐름을 막지 않도록 호출부에서 백그라운드로 실행한다.
+ * 로그인 확인 시점에 몰 내 여러 상품을 훑어 이 몰의 상품페이지 구조적 특성을 파악한다 — 대표/상세이미지
+ * 유무, 옵션 UI 형태(select/swatch)와 색상→사이즈 같은 연쇄옵션 여부, 재고 표기 방식(전체 수량/상태문구/
+ * "자세히" 클릭형 옵션별 재고), 상세페이지 텍스트 유무, 상품정보고시 표에 실제로 어떤 라벨들이 있는지까지.
+ * 새 몰을 처음 스크랩하기 전에 그 몰 상품마다 달라질 수 있는 부분을 미리 다 찾아두기 위한 것으로, 이후
+ * 실제 스크랩 코드가 무엇을 놓치고 있는지 새 라벨/구조가 나올 때마다 알 수 있게 한다(사용자 보고에 의존하지
+ * 않고 매번 스스로 다시 점검). 로그인 창이 열려있어야 하며(로그인 확인 직후 호출), 현재 보고 있는 페이지를
+ * 목록으로 간주해 상품 몇 개를 샘플링하고, 목록이 아니면 그 페이지 자체를 상품 1건으로 취급한다. 실패해도
+ * 전체 로그인 확인 흐름을 막지 않도록 호출부에서 백그라운드로 실행한다.
  */
 export async function profileMallStructure(siteId: number): Promise<MallProfileSignals | null> {
   const context = openSessions.get(siteId)
@@ -495,9 +541,11 @@ export async function profileMallStructure(siteId: number): Promise<MallProfileS
 
   const signals: MallProfileSignals = {
     sampleCount: 0, hasMainImages: false, hasDetailImages: false,
-    optionUiTypes: [], hasStockQty: false, hasStockStatusText: false, hasDetailText: false,
+    optionUiTypes: [], hasCascadingOptions: false, hasStockQty: false, hasStockStatusText: false,
+    hasStockByOption: false, hasDetailText: false, infoLabels: [],
   }
   const optionTypes = new Set<'select' | 'swatch' | 'none'>()
+  const infoLabelSet = new Set<string>()
 
   for (const url of sampleUrls) {
     try {
@@ -508,15 +556,23 @@ export async function profileMallStructure(siteId: number): Promise<MallProfileS
       const swatchOptions = selectOptions.length ? [] : await scanSwatchOptions(page)
       optionTypes.add(selectOptions.length ? 'select' : swatchOptions.length ? 'swatch' : 'none')
 
+      const domOptions = await extractOptionsFromDom(page)
+      if (domOptions.length) product.options = domOptions
+      await applyStockByOption(page, product)
+
       signals.sampleCount++
       if (product.thumbnail_urls.length > 0) signals.hasMainImages = true
       if (product.detail_image_urls.length > 0) signals.hasDetailImages = true
       if (product.detail_text) signals.hasDetailText = true
       if (product.stock_qty != null) signals.hasStockQty = true
       if (product.stock_status && product.stock_status !== '판매중') signals.hasStockStatusText = true
+      if (product.stock_by_option.length > 0) signals.hasStockByOption = true
+      if (product.options.length > 1) signals.hasCascadingOptions = true
+      product.extra_info.forEach(({ label }) => infoLabelSet.add(label))
     } catch { /* 개별 샘플 실패는 건너뛰고 다음 샘플로 */ }
   }
   signals.optionUiTypes = [...optionTypes]
+  signals.infoLabels = [...infoLabelSet].sort()
 
   await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
   return signals.sampleCount > 0 ? signals : null
@@ -543,6 +599,7 @@ export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeRe
         const product = await extractProductRuleBased(page, sourceUrl, selectorOverrides(opts))
         const domOptions = await extractOptionsFromDom(page)
         if (domOptions.length) product.options = domOptions
+        await applyStockByOption(page, product)
         lastProduct = product
         // 가격과 이미지가 둘 다 없으면 실제 상품 페이지가 아니라 봇 차단/오류 안내 페이지를 받았을 가능성이
         // 높다 (빠른 연속 요청을 감지해 안내 페이지로 대신 응답하는 몰이 있음) — 그대로 반환하지 않고 재시도한다.
@@ -816,6 +873,7 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
     const product = await extractProductRuleBased(page, firstUrl, selectorOverrides(opts))
     const domOptions = await extractOptionsFromDom(page)
     if (domOptions.length) product.options = domOptions
+    await applyStockByOption(page, product)
 
     return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product }, items }
   })
@@ -851,6 +909,7 @@ export async function scrapeCatalogPage(
       const product = await extractProductRuleBased(page, singleUrl, selectorOverrides(opts))
       const domOptions = await extractOptionsFromDom(page)
       if (domOptions.length) product.options = domOptions
+      await applyStockByOption(page, product)
       if (product.price == null && !product.thumbnail_urls.length) {
         await onItem({ done: 0, total: 0, url: singleUrl, result: null, error: '상품 링크를 찾지 못함 (카테고리도 개별 상품도 아닌 것으로 추정)' })
         return { total: 0, saved: 0, stopped: false }
@@ -882,6 +941,7 @@ export async function scrapeCatalogPage(
           const product = await extractProductRuleBased(workerPage, pUrl, selectorOverrides(opts))
           const domOptions = await extractOptionsFromDom(workerPage)
           if (domOptions.length) product.options = domOptions
+          await applyStockByOption(workerPage, product)
           lastProduct = product
           // 가격과 이미지가 둘 다 없으면 실제 상품 페이지가 아니라 봇 차단/오류 안내 페이지를 받았을 가능성이
           // 높다 (빠른 연속 요청을 감지해 안내 페이지로 대신 응답하는 몰이 있음) — 그대로 저장하지 않고 재시도한다.

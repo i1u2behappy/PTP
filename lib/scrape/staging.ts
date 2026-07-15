@@ -87,8 +87,12 @@ function toScrapeResult(row: StagingRow): ScrapeResult {
     detail_image_urls: row.detail_image_urls,
     detail_image_names: extra.detail_image_names || [],
     detail_text: extra.detail_text || '',
+    summary_info: extra.summary_info || '',
+    english_name: extra.english_name || '',
+    extra_info: extra.extra_info || [],
     stock_status: row.stock_status || '',
     stock_qty: row.stock_qty,
+    stock_by_option: extra.stock_by_option || [],
     mall_product_code: row.mall_product_code,
   }
   return { sourceUrl: row.source_url, product }

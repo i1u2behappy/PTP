@@ -42,8 +42,12 @@ interface PreviewProduct {
   detail_image_urls: string[]
   detail_image_names: string[]
   detail_text: string
+  summary_info: string
+  english_name: string
   stock_status: string
   stock_qty: number | null
+  stock_by_option: { option: string; qty: number }[]
+  extra_info: { label: string; value: string }[]
 }
 
 interface PreviewItem {
@@ -691,6 +695,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       <th className="px-3 py-2 text-left">제조사</th>
                       <th className="px-3 py-2 text-left">원산지</th>
                       <th className="px-3 py-2 text-left">재고</th>
+                      <th className="px-3 py-2 text-left">옵션별 재고</th>
+                      <th className="px-3 py-2 text-left">상품요약정보</th>
+                      <th className="px-3 py-2 text-left">영문상품명</th>
                       <th className="px-3 py-2 text-left">대표이미지</th>
                       <th className="px-3 py-2 text-left">상세이미지</th>
                       {previewResult.product.options.map(o => (
@@ -708,6 +715,18 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       <td className="px-3 py-2 text-gray-700">{previewResult.product.origin || '-'}</td>
                       <td className="px-3 py-2 text-gray-700">
                         {previewResult.product.stock_status || '-'}{previewResult.product.stock_qty != null && ` (${previewResult.product.stock_qty}개)`}
+                      </td>
+                      <td className="px-3 py-2 text-gray-700 max-w-[280px] truncate"
+                        title={previewResult.product.stock_by_option.map(r => `${r.option}: ${r.qty}개`).join(', ')}>
+                        {previewResult.product.stock_by_option.length > 0
+                          ? previewResult.product.stock_by_option.map(r => `${r.option}: ${r.qty}개`).join(', ')
+                          : '-'}
+                      </td>
+                      <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate" title={previewResult.product.summary_info}>
+                        {previewResult.product.summary_info || '-'}
+                      </td>
+                      <td className="px-3 py-2 text-gray-700 max-w-[160px] truncate" title={previewResult.product.english_name}>
+                        {previewResult.product.english_name || '-'}
                       </td>
                       <td className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={previewResult.product.thumbnail_names.join(', ')}>
                         {previewResult.product.thumbnail_urls.length}장 — {previewResult.product.thumbnail_names.join(', ') || '-'}
@@ -728,6 +747,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-500">
                   <span className="text-gray-400">상세페이지 텍스트: </span>
                   <span className="line-clamp-3">{previewResult.product.detail_text}</span>
+                </div>
+              )}
+              {previewResult.product.extra_info.length > 0 && (
+                <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-500">
+                  <span className="text-gray-400">상품정보고시 전체: </span>
+                  {previewResult.product.extra_info.map(({ label, value }) => `${label}: ${value}`).join(' / ')}
                 </div>
               )}
             </div>

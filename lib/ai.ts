@@ -21,8 +21,12 @@ export interface ExtractedProduct {
   detail_image_urls: string[]
   detail_image_names: string[]
   detail_text: string
+  summary_info: string
+  english_name: string
+  extra_info: { label: string; value: string }[]
   stock_status: string
   stock_qty: number | null
+  stock_by_option: { option: string; qty: number }[]
   mall_product_code: string
 }
 

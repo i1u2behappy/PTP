@@ -198,8 +198,15 @@ export async function extractProductRuleBased(page: Page, url: string, overrides
     detail_image_urls: raw.detailImages,
     detail_image_names: raw.detailImageNames,
     detail_text: raw.detailText,
+    summary_info: findInfoValue(raw.infoRows, /상품요약정보/i),
+    english_name: findInfoValue(raw.infoRows, /영문상품명/i),
+    // 몰마다, 카테고리마다 상품정보고시 표에 다른 라벨(세탁방법/소재/취급주의 등)이 들어갈 수 있어 미리 다
+    // 알 수 없다 — 알려진 라벨(브랜드/제조사/원산지/상품요약정보/영문상품명)로 못 옮긴 값까지 포함해 표
+    // 전체를 그대로 들고 있어야 어떤 몰이든 나중에 필요한 값을 놓치지 않는다.
+    extra_info: raw.infoRows.filter(([, value]) => value).map(([label, value]) => ({ label, value })),
     stock_status: extractStockStatus(raw.availability, raw.stockText),
     stock_qty: resolveStockQty(raw.infoRows, raw.stockQtyText),
+    stock_by_option: [], // scraper.ts의 extractStockByOption이 별도로 채운다 (클릭이 필요한 위젯이라 이 함수 범위 밖)
     mall_product_code: extractMallProductCode(url, raw.sku),
   }
 

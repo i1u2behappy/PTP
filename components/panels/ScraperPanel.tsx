@@ -67,7 +67,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [targetUrl, setTargetUrl]           = useState('')
   const [categoryUrlsText, setCategoryUrlsText] = useState('')
   const [nextPageSelector, setNextPageSelector] = useState('')
-  const [maxPages, setMaxPages]             = useState(1)
+  const [maxPages, setMaxPages]             = useState<number | ''>('')
   const [delayMs, setDelayMs]               = useState(1000)
   const [concurrency, setConcurrency]       = useState(1)
 
@@ -330,7 +330,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         url: categoryUrls.length ? undefined : (targetUrl || undefined),
         categoryUrls: categoryUrls.length ? categoryUrls : undefined,
         nextPageSelector: mode === 'catalog' ? (nextPageSelector || undefined) : undefined,
-        maxPages: mode === 'catalog' ? maxPages : undefined,
+        maxPages: mode === 'catalog' && maxPages !== '' ? maxPages : undefined,
         delayMs: mode === 'catalog' ? delayMs : undefined,
         concurrency: mode === 'catalog' ? concurrency : undefined,
         loginId: loginId || undefined, loginPw: loginPw || undefined,
@@ -585,8 +585,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                     className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
                 </label>
                 <label className="block">
-                  <span className="block text-xs text-gray-500 mb-1">최대 페이지 수</span>
-                  <input type="number" min={1} value={maxPages} onChange={e => setMaxPages(Math.max(1, Number(e.target.value) || 1))}
+                  <span className="block text-xs text-gray-500 mb-1">최대 페이지 수 (비워두면 끝까지 자동)</span>
+                  <input type="number" min={1} placeholder="자동" value={maxPages}
+                    onChange={e => setMaxPages(e.target.value === '' ? '' : Math.max(1, Number(e.target.value) || 1))}
                     className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
                 </label>
                 <label className="block">

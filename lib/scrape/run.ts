@@ -1,5 +1,5 @@
 import pool from '../db'
-import { scrapeSingleProduct, scrapeCatalogPage, closeLoginWindow } from '../scraper'
+import { scrapeSingleProduct, scrapeCatalogPage, closeLoginWindow, detectIsListingPage } from '../scraper'
 import { stageScrapedProduct } from './staging'
 import type { ScrapeResult } from '../scraper'
 
@@ -57,7 +57,16 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
     thumbnailSelector: site?.custom_thumbnail_selector || undefined,
   }
 
-  if (opts.mode === 'single') {
+  // '단일 상품' 모드로 시작했어도 실제로는 상품이 여럿인 카테고리 URL을 넣는 실수가 흔하다 — 링크가
+  // 여럿 발견되면 자동으로 카탈로그(전체 순회) 모드로 전환한다. (반대 방향: 카탈로그 모드인데 상품 링크가
+  // 0개면 scrapeCatalogPage가 그 페이지 자체를 상품 1건으로 보고 스크랩한다.)
+  let effectiveMode = opts.mode
+  if (effectiveMode === 'single' && !opts.productUrls?.length) {
+    const isListing = await detectIsListingPage(scrapeOpts).catch(() => false)
+    if (isListing) effectiveMode = 'catalog'
+  }
+
+  if (effectiveMode === 'single') {
     const result = await scrapeSingleProduct(scrapeOpts)
     await saveProduct(siteId, sessionId, result)
     await pool.query(`UPDATE scrape_sessions SET status='done', product_count=1 WHERE id=$1`, [sessionId])

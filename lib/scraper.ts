@@ -597,6 +597,12 @@ interface CollectedLinks {
   linkInfo: Map<string, { name: string; thumbnail: string }>
 }
 
+// 사용자가 최대 페이지 수를 지정하지 않으면 "다음 페이지" 링크가 더 이상 없을 때까지 끝까지 따라간다 —
+// 카테고리가 몇 페이지인지 미리 알 수 없는 게 보통이라 매번 페이지 수를 추측해 입력하게 하지 않는다.
+// 이 숫자는 페이지네이션이 무한 루프에 빠지는 몰을 대비한 안전장치용 상한일 뿐, 실제로는 다음 페이지
+// 링크가 사라지는 순간(아래 반복문의 break) 그보다 훨씬 먼저 끝난다.
+const AUTO_PAGINATION_CAP = 50
+
 /** 목록 페이지(들)을 순회하며 제품 URL 후보를 모은다. 실제 상품 추출은 하지 않는다(테스트/실행 공용 로직). */
 async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<CollectedLinks> {
   if (opts.productUrls?.length) {
@@ -604,7 +610,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
   }
 
   const listingUrls = opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])
-  const maxPages = Math.max(1, opts.maxPages || 1)
+  const maxPages = Math.max(1, opts.maxPages || AUTO_PAGINATION_CAP)
 
   if (opts.url || opts.categoryUrls?.length) {
     await page.goto(listingUrls[0], { waitUntil: 'load', timeout: 30_000 })
@@ -679,6 +685,19 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
   return { urls, platform, categoryByUrl, linkInfo }
 }
 
+/**
+ * '단일 상품 페이지' 모드로 스크랩을 시작해도, 실제로는 상품이 여럿 있는 카테고리(목록) URL을 넣는
+ * 실수가 흔하다. 시작 URL에서 자기 자신이 아닌 다른 상품 링크가 여럿 발견되면 목록으로 판단해, 실제
+ * 스크랩을 개별 상품 추출이 아니라 카탈로그(전체 순회) 방식으로 자동 전환할 수 있게 한다.
+ */
+export async function detectIsListingPage(opts: ScrapeOptions): Promise<boolean> {
+  return withContext(opts, async page => {
+    const { urls } = await collectProductUrls(page, opts)
+    const currentUrl = opts.url || page.url()
+    return urls.filter(u => u !== currentUrl).length > 1
+  })
+}
+
 export interface CatalogPreviewItem {
   url: string
   name: string
@@ -695,19 +714,16 @@ export interface CatalogPreviewResult {
   items: CatalogPreviewItem[]
 }
 
-// 미리보기는 실제 스크랩(maxPages 설정)과 무관하게 페이징 끝까지 따라가 정확한 총 개수를 보여준다.
-// 페이지네이션이 무한 루프에 빠지는 몰을 대비한 안전장치용 상한일 뿐, 일반적인 카테고리는 이 안에서 다 끝난다.
-const PREVIEW_MAX_PAGES = 50
-
 /**
  * 카탈로그(목록) 모드 전용 — 목록에서 상품 링크를 모아 개수를 확인하고, 첫 번째 상품을 곧바로 열어
  * 미리보기까지 한 번의 브라우저 세션으로 처리한다. 목록 수집과 미리보기를 별도 요청으로 나누면
  * 매번 새 세션을 여느라 느려지므로, 하나로 합쳐 빠르게 확인할 수 있게 한다.
+ * 미리보기는 정확한 총 개수를 보여줘야 하므로 maxPages를 지정해도 무시하고 항상 끝까지 페이징을 따라간다.
  * ponytail: 미리보기 전용이라 재시도/AI폴백 없이 1회만 시도한다 — 실패하면 버튼을 다시 누르면 됨.
  */
 export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPreviewResult> {
   return withContext(opts, async page => {
-    const { urls, platform, linkInfo } = await collectProductUrls(page, { ...opts, maxPages: PREVIEW_MAX_PAGES })
+    const { urls, platform, linkInfo } = await collectProductUrls(page, { ...opts, maxPages: undefined })
     const items: CatalogPreviewItem[] = urls.map(url => ({
       url, name: linkInfo.get(url)?.name || '', thumbnail: linkInfo.get(url)?.thumbnail || '',
     }))
@@ -749,6 +765,23 @@ export async function scrapeCatalogPage(
 ): Promise<CatalogScrapeSummary> {
   return withContext(opts, async (page, context) => {
     const { urls: productUrls, categoryByUrl } = await collectProductUrls(page, opts)
+
+    // 목록에서 상품 링크를 하나도 찾지 못했다 — 카테고리가 아니라 개별 상품 URL을 잘못 카탈로그 모드로
+    // 넣었을 수 있으니, 이미 열려있는 이 페이지 자체를 상품 1건으로 보고 스크랩한다.
+    if (productUrls.length === 0) {
+      const singleUrl = opts.url || page.url()
+      await waitForExtractableContent(page)
+      const product = await extractProductRuleBased(page, singleUrl, selectorOverrides(opts))
+      const domOptions = await extractOptionsFromDom(page)
+      if (domOptions.length) product.options = domOptions
+      if (product.price == null && !product.thumbnail_urls.length) {
+        await onItem({ done: 0, total: 0, url: singleUrl, result: null, error: '상품 링크를 찾지 못함 (카테고리도 개별 상품도 아닌 것으로 추정)' })
+        return { total: 0, saved: 0, stopped: false }
+      }
+      const result: ScrapeResult = { sourceUrl: singleUrl, product }
+      await onItem({ done: 1, total: 1, url: singleUrl, result })
+      return { total: 1, saved: 1, stopped: false }
+    }
 
     let saved = 0
     let done = 0

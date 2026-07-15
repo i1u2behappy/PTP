@@ -97,7 +97,7 @@ export function SiteDetailPanel({ params }: Props) {
   if (loading) return <div className="text-center text-sm text-gray-400 py-12">불러오는 중...</div>
 
   return (
-    <div className="max-w-2xl">
+    <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-800">{isNew ? '➕ 새 Mall 등록' : `🏬 ${name || url} 수정`}</h1>
         <div className="flex items-center gap-2 shrink-0">

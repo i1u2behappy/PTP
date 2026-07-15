@@ -4,7 +4,7 @@ import crypto from 'crypto'
 const pool = new Pool({
   host:     process.env.DB_HOST     || 'localhost',
   port:     Number(process.env.DB_PORT) || 5432,
-  database: process.env.DB_NAME     || 'scrap',
+  database: process.env.DB_NAME     || 'scrape',
   user:     process.env.DB_USER     || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
 })
@@ -96,6 +96,7 @@ export async function initDb() {
       id                         SERIAL PRIMARY KEY,
       name                       TEXT,
       url                        TEXT NOT NULL,
+      login_url                  TEXT,
       login_id                   TEXT,
       login_pw_encrypted         TEXT,
       login_pw_iv                TEXT,
@@ -115,6 +116,7 @@ export async function initDb() {
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS auto_scrape_hour INT;
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS last_auto_scrape_date DATE;
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS last_scrape_config JSONB;
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS login_url TEXT;
 
     CREATE TABLE IF NOT EXISTS supply_clients (
       id                   SERIAL PRIMARY KEY,
@@ -130,6 +132,11 @@ export async function initDb() {
       contact_email        TEXT,
       created_at           TIMESTAMPTZ DEFAULT NOW()
     );
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS code TEXT;
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS business_reg_doc_path TEXT;
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS business_reg_doc_name TEXT;
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS next_internal_seq INT DEFAULT 0;
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS auto_internal_code BOOLEAN DEFAULT true;
     ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS business_reg_no TEXT;
     ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS representative_name TEXT;
     ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS business_address TEXT;
@@ -215,7 +222,7 @@ export async function initDb() {
       origin                 TEXT,
       description            TEXT,
       options                JSONB DEFAULT '[]',
-      thumbnail_url          TEXT,
+      thumbnail_urls         JSONB DEFAULT '[]',
       detail_image_urls      JSONB DEFAULT '[]',
       stock_status           TEXT,
       stock_qty              INT,
@@ -246,7 +253,7 @@ export async function initDb() {
       origin                   TEXT,
       description              TEXT,
       options                  JSONB DEFAULT '[]',
-      thumbnail_url            TEXT,
+      thumbnail_urls           JSONB DEFAULT '[]',
       detail_image_urls        JSONB DEFAULT '[]',
       stock_status             TEXT,
       stock_qty                INT,
@@ -315,6 +322,11 @@ export async function initDb() {
       updated_at          TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE (mall_product_id, client_id)
     );
+    ALTER TABLE product_master ADD COLUMN IF NOT EXISTS internal_code TEXT;
+    ALTER TABLE product_master ADD COLUMN IF NOT EXISTS sales_code TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS product_master_internal_code_idx ON product_master(internal_code) WHERE internal_code IS NOT NULL;
+    -- 판매관리코드 = 이 시스템에서 상품을 관리하는 키값이므로 상품마다 고유해야 한다
+    CREATE UNIQUE INDEX IF NOT EXISTS product_master_sales_code_idx ON product_master(sales_code) WHERE sales_code IS NOT NULL;
 
     -- 이미지 레코드 (원본명/정규화명/저장위치)
     CREATE TABLE IF NOT EXISTS product_images (
@@ -330,6 +342,22 @@ export async function initDb() {
       file_size_bytes        INT,
       created_at             TIMESTAMPTZ DEFAULT NOW()
     );
+
+    -- 대표이미지가 여러 장일 수 있도록 단일 thumbnail_url(TEXT)을 배열 thumbnail_urls(JSONB)로 이전.
+    -- 기존 값이 있는 행만 1회 백필하고, 이관이 끝나면 옛 컬럼은 지운다 (컬럼이 없으면 이미 이관된 것으로 보고 건너뜀).
+    ALTER TABLE mall_products ADD COLUMN IF NOT EXISTS thumbnail_urls JSONB DEFAULT '[]';
+    ALTER TABLE scrape_staging_items ADD COLUMN IF NOT EXISTS thumbnail_urls JSONB DEFAULT '[]';
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='mall_products' AND column_name='thumbnail_url') THEN
+        UPDATE mall_products SET thumbnail_urls = jsonb_build_array(thumbnail_url) WHERE thumbnail_url IS NOT NULL AND thumbnail_url <> '' AND thumbnail_urls = '[]';
+        ALTER TABLE mall_products DROP COLUMN thumbnail_url;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='scrape_staging_items' AND column_name='thumbnail_url') THEN
+        UPDATE scrape_staging_items SET thumbnail_urls = jsonb_build_array(thumbnail_url) WHERE thumbnail_url IS NOT NULL AND thumbnail_url <> '' AND thumbnail_urls = '[]';
+        ALTER TABLE scrape_staging_items DROP COLUMN thumbnail_url;
+      END IF;
+    END $$;
 
     -- 이미지 호스팅 base-URL 설정. 이 한 줄이 "URL 일괄 편집" 요구사항의 구현 방식
     CREATE TABLE IF NOT EXISTS image_host_config (
@@ -358,6 +386,27 @@ export async function initDb() {
       default_shipping_fee      INT DEFAULT 3000,
       template_mapping          JSONB DEFAULT '{}',
       updated_at                TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- 내부 카테고리(master_category) ↔ 채널별(마켓별) 카테고리 값 매핑
+    CREATE TABLE IF NOT EXISTS category_channel_mappings (
+      id                       SERIAL PRIMARY KEY,
+      master_category          TEXT NOT NULL,
+      marketplace_code         TEXT NOT NULL REFERENCES marketplace_configs(code),
+      channel_category_value   TEXT,
+      updated_at               TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (master_category, marketplace_code)
+    );
+
+    -- 채널(마켓)별 등록용 상품명/URL — 엑셀 생성 시점에만 임시로 만들어지던 것을 미리보기/수정 가능하게 저장
+    CREATE TABLE IF NOT EXISTS product_channel_listings (
+      id                  SERIAL PRIMARY KEY,
+      product_master_id   INT NOT NULL REFERENCES product_master(id) ON DELETE CASCADE,
+      marketplace_code    TEXT NOT NULL REFERENCES marketplace_configs(code),
+      channel_name        TEXT,
+      channel_url         TEXT,
+      updated_at          TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (product_master_id, marketplace_code)
     );
 
     CREATE TABLE IF NOT EXISTS exports (
@@ -395,6 +444,62 @@ export async function initDb() {
     ALTER TABLE mall_products DROP CONSTRAINT IF EXISTS mall_products_master_product_id_fkey;
     ALTER TABLE mall_products ADD CONSTRAINT mall_products_master_product_id_fkey
       FOREIGN KEY (master_product_id) REFERENCES product_master(id) ON DELETE SET NULL;
+
+    -- 마이그레이션2_Transform: 몰별 "기존 작업내역 완성본" 업로드 (헤더/컬럼 구성이 몰마다 달라 JSONB로 보관)
+    CREATE TABLE IF NOT EXISTS transform_reference_uploads (
+      id              SERIAL PRIMARY KEY,
+      site_id         INT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+      file_name       TEXT,
+      column_headers  JSONB NOT NULL DEFAULT '[]',
+      code_column     TEXT,
+      created_at      TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- 완성본 원본 행. mall_product_code로 mall_products와 매칭해 few-shot 예시(원본→완성값 쌍)를 만든다
+    CREATE TABLE IF NOT EXISTS transform_reference_rows (
+      id                       SERIAL PRIMARY KEY,
+      upload_id                INT NOT NULL REFERENCES transform_reference_uploads(id) ON DELETE CASCADE,
+      mall_product_code        TEXT,
+      row_values               JSONB NOT NULL DEFAULT '{}',
+      matched_mall_product_id  INT REFERENCES mall_products(id) ON DELETE SET NULL
+    );
+
+    -- 컬럼별 생성 규칙 (몰 단위). target_field는 이 값이 최종 반영될 product_master 컬럼명
+    CREATE TABLE IF NOT EXISTS transform_column_rules (
+      id                  SERIAL PRIMARY KEY,
+      site_id             INT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+      column_name         TEXT NOT NULL,
+      sort_order          INT DEFAULT 0,
+      target_field        TEXT,
+      mode                TEXT NOT NULL DEFAULT 'ai',
+      ai_instruction      TEXT,
+      source_field        TEXT,
+      composite_config    JSONB DEFAULT '{}',
+      UNIQUE (site_id, column_name)
+    );
+
+    -- mode='lookup' 규칙의 원본값→완성값 조회표 (카테고리매핑 그리드와 동일한 편집 UI 재사용)
+    CREATE TABLE IF NOT EXISTS transform_lookup_entries (
+      id             SERIAL PRIMARY KEY,
+      rule_id        INT NOT NULL REFERENCES transform_column_rules(id) ON DELETE CASCADE,
+      source_field   TEXT NOT NULL,
+      source_value   TEXT NOT NULL,
+      target_value   TEXT,
+      UNIQUE (rule_id, source_field, source_value)
+    );
+
+    -- 신규 스크래핑 상품에 대해 생성한 값의 검토/확정 스냅샷
+    CREATE TABLE IF NOT EXISTS transform_generated_rows (
+      id                  SERIAL PRIMARY KEY,
+      site_id             INT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+      mall_product_id     INT NOT NULL REFERENCES mall_products(id) ON DELETE CASCADE,
+      product_master_id   INT REFERENCES product_master(id) ON DELETE SET NULL,
+      generated_values    JSONB NOT NULL DEFAULT '{}',
+      status              TEXT DEFAULT 'draft',
+      created_at          TIMESTAMPTZ DEFAULT NOW(),
+      updated_at          TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (site_id, mall_product_id)
+    );
   `)
 
   await pool.query(`

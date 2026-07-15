@@ -3,6 +3,8 @@ import pool from '@/lib/db'
 
 interface ClientBody {
   name: string
+  code?: string
+  autoInternalCode?: boolean
   memo?: string
   businessRegNo?: string
   representativeName?: string
@@ -17,7 +19,8 @@ interface ClientBody {
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const clientRes = await pool.query(
-    `SELECT id, name, memo, business_reg_no, representative_name, business_address, business_type, business_item,
+    `SELECT id, name, code, auto_internal_code, memo, business_reg_no, business_reg_doc_path, business_reg_doc_name,
+            representative_name, business_address, business_type, business_item,
             contact_name, contact_phone, contact_email
      FROM supply_clients WHERE id = $1`,
     [id],
@@ -38,9 +41,9 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   if (!b.name) return NextResponse.json({ error: 'name required' }, { status: 400 })
 
   await pool.query(
-    `UPDATE supply_clients SET name=$1, memo=$2, business_reg_no=$3, representative_name=$4, business_address=$5,
-       business_type=$6, business_item=$7, contact_name=$8, contact_phone=$9, contact_email=$10 WHERE id=$11`,
-    [b.name, b.memo || null, b.businessRegNo || null, b.representativeName || null, b.businessAddress || null,
+    `UPDATE supply_clients SET name=$1, code=$2, auto_internal_code=$3, memo=$4, business_reg_no=$5, representative_name=$6, business_address=$7,
+       business_type=$8, business_item=$9, contact_name=$10, contact_phone=$11, contact_email=$12 WHERE id=$13`,
+    [b.name, b.code || null, b.autoInternalCode ?? true, b.memo || null, b.businessRegNo || null, b.representativeName || null, b.businessAddress || null,
       b.businessType || null, b.businessItem || null, b.contactName || null, b.contactPhone || null, b.contactEmail || null, id],
   )
   return NextResponse.json({ ok: true })

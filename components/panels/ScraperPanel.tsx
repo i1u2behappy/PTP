@@ -142,6 +142,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   async function selectSite(siteId: number) {
     const res = await fetch(`/api/sites/${siteId}`)
+    if (!res.ok) { alert(`Mall 정보를 불러오지 못했습니다 (${res.status})`); return }
     const full = await res.json() as Site & { login_pw: string | null }
     setSelectedSite({ id: full.id, name: full.name, url: full.url, login_url: full.login_url, login_id: full.login_id })
     setLoginId(full.login_id || '')

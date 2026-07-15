@@ -603,13 +603,29 @@ interface CollectedLinks {
 // 링크가 사라지는 순간(아래 반복문의 break) 그보다 훨씬 먼저 끝난다.
 const AUTO_PAGINATION_CAP = 50
 
+/**
+ * 카테고리 URL을 그 카테고리의 중간 페이지(예: "...?cate_no=67&page=5")로 입력해도, 페이지네이션은
+ * 항상 1페이지부터 끝까지 훑어야 그 페이지 이전에 있던 상품들을 놓치지 않는다 — "다음 페이지" 링크를
+ * 따라가는 방식만으로는 중간 페이지에서 시작하면 그 이전 페이지들을 영영 못 본다.
+ */
+function resetToFirstPage(url: string): string {
+  try {
+    const u = new URL(url)
+    if (u.searchParams.has('page')) {
+      u.searchParams.delete('page')
+      return u.toString()
+    }
+    return url
+  } catch { return url }
+}
+
 /** 목록 페이지(들)을 순회하며 제품 URL 후보를 모은다. 실제 상품 추출은 하지 않는다(테스트/실행 공용 로직). */
 async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<CollectedLinks> {
   if (opts.productUrls?.length) {
     return { urls: opts.productUrls, platform: 'unknown', categoryByUrl: new Map(), linkInfo: new Map() }
   }
 
-  const listingUrls = opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])
+  const listingUrls = (opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])).map(resetToFirstPage)
   const maxPages = Math.max(1, opts.maxPages || AUTO_PAGINATION_CAP)
 
   if (opts.url || opts.categoryUrls?.length) {

@@ -1,7 +1,21 @@
 'use client'
 import { useCallback, useEffect, useState } from 'react'
+import { ScrapeSessionGrid } from './shared/ScrapeSessionGrid'
 
+interface Client { id: number; name: string }
 interface Site { id: number; name: string | null; url: string; client_id: number | null }
+interface Session {
+  id: number
+  site_id: number
+  url: string
+  status: string
+  found_count: number
+  staged_count: number
+  pending_count: number
+  merged_count: number
+  skipped_count: number
+  created_at: string
+}
 interface Upload { id: number; file_name: string; column_headers: string[]; code_column: string | null; row_count: number; matched_count: number }
 type RuleMode = 'ai' | 'lookup' | 'copy' | 'composite'
 interface ColumnRule {
@@ -33,8 +47,16 @@ const SOURCE_FIELDS: { value: string; label: string }[] = [
 ]
 
 export function TransformPanel() {
+  const [clients, setClients] = useState<Client[]>([])
+  const [clientId, setClientId] = useState<number | ''>('')
   const [sites, setSites] = useState<Site[]>([])
-  const [siteQuery, setSiteQuery] = useState('')
+  const [siteFilterId, setSiteFilterId] = useState<number | ''>('')
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [sessionSearch, setSessionSearch] = useState('')
+  const [selectedSessionId, setSelectedSessionId] = useState<number | ''>('')
+  const [queryClientId, setQueryClientId] = useState<number | ''>('')
+  const [querySiteId, setQuerySiteId] = useState<number | ''>('')
+  const [searched, setSearched] = useState(false)
   const [selectedSite, setSelectedSite] = useState<Site | null>(null)
 
   const [uploads, setUploads] = useState<Upload[]>([])
@@ -69,18 +91,52 @@ export function TransformPanel() {
   }, [])
 
   useEffect(() => {
+    fetch('/api/clients').then(r => r.json()).then((d: Client[]) => { if (Array.isArray(d)) setClients(d) }).catch(() => {})
     fetch('/api/sites').then(r => r.json()).then((d: Site[]) => { if (Array.isArray(d)) setSites(d) }).catch(() => {})
+    fetch('/api/sessions').then(r => r.json()).then((d: Session[]) => { if (Array.isArray(d)) setSessions(d) }).catch(() => {})
   }, [])
 
   function selectSite(site: Site) {
     setSelectedSite(site)
-    setSiteQuery('')
     setPendingUpload(null)
     setSelectedProductIds(new Set())
     loadUploads(site.id)
     loadRules(site.id)
     loadProducts(site.id)
     loadGeneratedRows(site.id)
+  }
+
+  // 스크래핑 목록에서 세션을 고르면(마이그레이션 화면과 동일한 검색·선택 방식), 그 세션이 속한 몰을 선택한다.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (selectedSessionId === '') return
+    const session = sessions.find(s => s.id === selectedSessionId)
+    const site = session && sites.find(s => s.id === session.site_id)
+    if (site) selectSite(site)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSessionId])
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const siteClientMap = new Map(sites.map(s => [s.id, s.client_id]))
+  const filteredSitesForSelect = clientId === '' ? sites : sites.filter(s => s.client_id === clientId)
+  const filteredSessions = sessions.filter(s => {
+    if (querySiteId !== '' && s.site_id !== querySiteId) return false
+    if (querySiteId === '' && queryClientId !== '' && siteClientMap.get(s.site_id) !== queryClientId) return false
+    const q = sessionSearch.trim().toLowerCase()
+    if (!q) return true
+    return s.url.toLowerCase().includes(q) || s.status.toLowerCase().includes(q) || new Date(s.created_at).toLocaleString().toLowerCase().includes(q)
+  })
+
+  function selectClient(id: number | '') {
+    setClientId(id)
+    setSiteFilterId('')
+  }
+
+  function handleSearch() {
+    if (clientId === '' && siteFilterId === '') { alert('거래처 또는 몰을 하나 이상 선택해주세요.'); return }
+    setQueryClientId(clientId)
+    setQuerySiteId(siteFilterId)
+    setSearched(true)
   }
 
   async function handleUpload() {
@@ -182,42 +238,66 @@ export function TransformPanel() {
     }
   }
 
-  const filteredSites = siteQuery.trim()
-    ? sites.filter(s => (s.name || '').toLowerCase().includes(siteQuery.toLowerCase()) || s.url.toLowerCase().includes(siteQuery.toLowerCase()))
-    : sites
   const columnHeaders = uploads[0]?.column_headers || []
 
   return (
     <div className="max-w-4xl">
-      <h1 className="text-2xl font-bold text-gray-800 mb-6">🧬 마이그레이션2_Transform</h1>
-
-      {/* Mall 선택 */}
-      <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-        <div className="text-sm font-semibold text-gray-700 mb-2">Mall 선택 *</div>
-        {selectedSite ? (
-          <div className="flex items-center justify-between bg-teal-50 rounded-xl px-3 py-2">
-            <div>
-              <div className="text-sm font-medium text-gray-800">{selectedSite.name || selectedSite.url}</div>
-              <div className="text-xs text-gray-500">{selectedSite.url}</div>
-            </div>
-            <button onClick={() => setSelectedSite(null)} className="text-xs text-gray-500 hover:underline">변경</button>
-          </div>
-        ) : (
-          <div>
-            <input value={siteQuery} onChange={e => setSiteQuery(e.target.value)} placeholder="이름 또는 URL 검색..."
-              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-            <div className="mt-2 border border-gray-100 rounded-xl max-h-52 overflow-y-auto">
-              {filteredSites.map(s => (
-                <div key={s.id} onClick={() => selectSite(s)}
-                  className="px-3 py-2 text-sm border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer">
-                  <span className="font-medium text-gray-800">{s.name || '(이름 없음)'}</span>{' '}
-                  <span className="text-xs text-gray-400">{s.url}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-gray-800">🧬 마이그레이션2_Transform</h1>
+        <p className="text-xs text-gray-400 mt-1">스크래핑 목록에서 세션을 검색·선택하면, 그 세션이 속한 몰 기준으로 완성본 업로드·컬럼 규칙·생성을 진행할 수 있습니다.</p>
       </div>
+
+      {/* 상단: 거래처/몰/일시로 검색하는 스크래핑 목록 (마이그레이션 화면과 동일한 검색·선택 방식) */}
+      <div className="bg-white rounded-2xl border border-gray-200 p-4 mb-4 flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-sm text-gray-600">
+          거래처
+          <select value={clientId} onChange={e => selectClient(e.target.value ? Number(e.target.value) : '')}
+            className="border border-gray-300 rounded-xl px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
+            <option value="">전체</option>
+            {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </label>
+        <label className="flex items-center gap-2 text-sm text-gray-600">
+          몰
+          <select value={siteFilterId} onChange={e => setSiteFilterId(e.target.value ? Number(e.target.value) : '')}
+            className="border border-gray-300 rounded-xl px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
+            <option value="">전체</option>
+            {filteredSitesForSelect.map(s => <option key={s.id} value={s.id}>{s.name || s.url}</option>)}
+          </select>
+        </label>
+        <button onClick={handleSearch} disabled={clientId === '' && siteFilterId === ''}
+          className="px-4 py-1.5 bg-teal-500 text-white text-sm font-semibold rounded-full hover:bg-teal-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+          🔍 조회
+        </button>
+      </div>
+
+      {!searched ? (
+        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 mb-4">
+          <div className="text-4xl mb-3">🔍</div>
+          <p className="text-sm">거래처 또는 몰을 하나 이상 선택하고 조회 버튼을 눌러주세요.</p>
+        </div>
+      ) : filteredSessions.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 mb-4">
+          <div className="text-4xl mb-3">📭</div>
+          <p className="text-sm">수집된 스크래핑이 없습니다.</p>
+        </div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4">
+          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3">
+            <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
+            <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="URL·상태·일시 검색..."
+              className="flex-1 border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          </div>
+          <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId} />
+        </div>
+      )}
+
+      {selectedSite && (
+        <div className="flex items-center justify-between bg-teal-50 rounded-xl px-4 py-2 mb-4 text-sm">
+          <span>선택된 Mall: <strong className="text-gray-800">{selectedSite.name || selectedSite.url}</strong></span>
+          <button onClick={() => { setSelectedSite(null); setSelectedSessionId('') }} className="text-xs text-gray-500 hover:underline">선택 해제</button>
+        </div>
+      )}
 
       {selectedSite && (
         <>

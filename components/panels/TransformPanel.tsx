@@ -48,14 +48,24 @@ const SOURCE_FIELDS: { value: string; label: string }[] = [
   { value: 'stock_status', label: '재고상태(원본)' }, { value: 'stock_qty', label: '재고수량(원본)' },
 ]
 
-/** 지금 몇 단계인지, 이전 단계가 끝났는지 한눈에 보이도록 하는 번호 배지. */
-function StepHeader({ n, title, done }: { n: number; title: string; done: boolean }) {
+/** 지금 몇 단계인지, 이전 단계가 끝났는지, 아직 진행할 수 없는 단계인지 한눈에 보이도록 하는 번호 배지. */
+function StepHeader({ n, title, done, locked }: { n: number; title: string; done: boolean; locked?: boolean }) {
   return (
     <div className="flex items-center gap-2 mb-2">
-      <div className={`w-6 h-6 shrink-0 rounded-full flex items-center justify-center text-xs font-bold ${done ? 'bg-emerald-500 text-white' : 'bg-teal-500 text-white'}`}>
+      <div className={`w-6 h-6 shrink-0 rounded-full flex items-center justify-center text-xs font-bold ${
+        done ? 'bg-emerald-500 text-white' : locked ? 'bg-gray-200 text-gray-400' : 'bg-teal-500 text-white'}`}>
         {done ? '✓' : n}
       </div>
-      <span className="text-sm font-semibold text-gray-700">{title}</span>
+      <span className={`text-sm font-semibold ${locked ? 'text-gray-400' : 'text-gray-700'}`}>{title}</span>
+    </div>
+  )
+}
+
+/** 아직 진행할 수 없는 단계 자리에 보여주는 잠금 안내 — 단계 전체가 뭔지 미리 보이도록 항상 렌더링한다. */
+function LockedNotice({ text }: { text: string }) {
+  return (
+    <div className="bg-gray-50 rounded-2xl border border-dashed border-gray-200 p-8 text-center text-gray-400 text-xs mb-8">
+      🔒 {text}
     </div>
   )
 }
@@ -187,6 +197,13 @@ export function TransformPanel() {
     loadRules(site.id)
     loadProducts(site.id, sessionId)
     loadGeneratedRows(site.id)
+  }
+
+  // 2번(AS-IS/TO-BE 샘플 가이드)은 1번의 세션 선택과 무관하게 몰 단위로 미리 등록/관리할 수 있어야 하므로,
+  // 여기서 직접 몰을 골라도 selectedSite가 잡히도록 별도 진입점을 둔다. 세션 스코프는 없으니 초기화한다.
+  function selectSiteDirect(site: Site) {
+    setSelectedSessionId('')
+    selectSite(site, '')
   }
 
   // 스크래핑 목록에서 세션을 고르면(마이그레이션 화면과 동일한 검색·선택 방식), 그 세션이 속한 몰을 선택하고
@@ -390,11 +407,19 @@ export function TransformPanel() {
         </div>
       )}
 
-      {selectedSite && (
+      {/* 2. AS-IS / TO-BE 샘플 가이드 — 몰 단위 등록·관리 기능이라 1번(세션 선택)과 무관하게 바로 작업할 수 있다 */}
+      <StepHeader n={2} title="AS-IS / TO-BE 샘플 가이드" done={!!toBeUpload} />
+      {!selectedSite ? (
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-8">
+          <div className="text-xs font-semibold text-gray-500 mb-3">관리할 몰을 선택하세요 (1번의 세션 선택과 별개로, 가이드만 먼저 등록·관리할 수 있습니다)</div>
+          <select defaultValue="" onChange={e => { const s = sites.find(x => x.id === Number(e.target.value)); if (s) selectSiteDirect(s) }}
+            className="border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
+            <option value="" disabled>몰 선택...</option>
+            {sites.map(s => <option key={s.id} value={s.id}>{s.name || s.url}</option>)}
+          </select>
+        </div>
+      ) : (
         <>
-          {/* 2. AS-IS / TO-BE 샘플 가이드 */}
-          <StepHeader n={2} title="AS-IS / TO-BE 샘플 가이드" done={!!toBeUpload} />
-
           <div className="grid grid-cols-2 gap-4 mb-4">
             <UploadCard label="AS-IS (기존/원본) 엑셀" upload={asIsUpload} file={asIsFile} onFileChange={setAsIsFile}
               uploading={uploadingKind === 'as_is'} onUpload={() => handleUpload('as_is')}
@@ -551,13 +576,19 @@ export function TransformPanel() {
               </div>
             </div>
           )}
+        </>
+      )}
 
-          {/* 3. 마이그레이션 진행 */}
-          {columnHeaders.length > 0 && (
-            <>
-              <StepHeader n={3} title="마이그레이션 진행"
-                done={generatedRows.length > 0 && generatedRows.every(r => r.status === 'committed')} />
-
+      {/* 3. 마이그레이션 진행 */}
+      <StepHeader n={3} title="마이그레이션 진행"
+        done={generatedRows.length > 0 && generatedRows.every(r => r.status === 'committed')}
+        locked={!selectedSite || columnHeaders.length === 0} />
+      {!selectedSite ? (
+        <LockedNotice text="1번에서 스크랩 세션을 선택하면 진행할 수 있습니다." />
+      ) : columnHeaders.length === 0 ? (
+        <LockedNotice text="2번에서 TO-BE 샘플을 업로드하면 진행할 수 있습니다." />
+      ) : (
+        <>
               <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
                 <div className="flex items-center justify-between mb-3">
                   <div className="text-xs font-semibold text-gray-500">대상 상품 (선택한 세션 · 아직 상품마스터에 없는 상품)</div>
@@ -632,8 +663,6 @@ export function TransformPanel() {
               )}
             </>
           )}
-        </>
-      )}
     </div>
   )
 }

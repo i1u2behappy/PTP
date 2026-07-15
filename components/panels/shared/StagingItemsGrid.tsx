@@ -59,9 +59,10 @@ interface ColumnDef {
 }
 
 const COLUMNS: ColumnDef[] = [
+  { key: 'created_at', label: '스크래핑 일시', getValue: p => p.created_at },
+  { key: 'thumbnail_img', label: '이미지', getValue: p => p.thumbnail_urls?.length ?? 0 },
   { key: 'mall_product_code', label: '상품코드', getValue: p => p.mall_product_code },
   { key: 'name_original', label: '상품명', getValue: p => p.name_original },
-  { key: 'created_at', label: '스크래핑 일시', getValue: p => p.created_at },
   { key: 'price', label: '정상가', getValue: p => p.price },
   { key: 'sale_price', label: '판매가', getValue: p => p.sale_price },
   { key: 'brand', label: '브랜드', getValue: p => p.brand },
@@ -96,7 +97,8 @@ type SortDir = 'asc' | 'desc'
 interface SortKey { key: string; dir: SortDir }
 
 const DEFAULT_COL_WIDTH: Record<string, number> = {
-  mall_product_code: 100, name_original: 190, created_at: 140, price: 100, sale_price: 100, brand: 90,
+  created_at: 140, thumbnail_img: 64,
+  mall_product_code: 100, name_original: 190, price: 100, sale_price: 100, brand: 90,
   manufacturer: 90, origin: 90, mall_category: 150, description: 180, options: 200,
   thumbnail_names: 180, detail_image_urls: 180, stock_status: 90, stock_qty: 90, stock_by_option: 200,
   summary_info: 160, english_name: 130, detail_text: 220, extra_info: 220,
@@ -104,7 +106,7 @@ const DEFAULT_COL_WIDTH: Record<string, number> = {
 }
 const MIN_COL_WIDTH = 50
 
-const COL_ORDER_KEY = 'stagingGrid.colOrder'
+const COL_ORDER_KEY = 'stagingGrid.colOrder.v2'
 const DEFAULT_COL_ORDER = COLUMNS.map(c => c.key)
 
 function loadColOrder(): string[] {
@@ -216,7 +218,7 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
     setSortKeys([])
   }
 
-  const tableWidth = 40 + 64 + orderedColumns.reduce((sum, col) => sum + (colWidths[col.key] ?? DEFAULT_COL_WIDTH[col.key] ?? 120), 0) + 40
+  const tableWidth = 40 + orderedColumns.reduce((sum, col) => sum + (colWidths[col.key] ?? DEFAULT_COL_WIDTH[col.key] ?? 120), 0) + 40
 
   function isSelectable(p: StagingRow) {
     if (p.status !== 'pending') return false
@@ -349,14 +351,12 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
         <table className="text-sm border-collapse" style={{ tableLayout: 'fixed', width: tableWidth }}>
           <colgroup>
             <col style={{ width: 40 }} />
-            <col style={{ width: 64 }} />
             {orderedColumns.map(col => <col key={col.key} style={{ width: colWidths[col.key] ?? DEFAULT_COL_WIDTH[col.key] ?? 120 }} />)}
             <col style={{ width: 40 }} />
           </colgroup>
           <thead className="sticky top-0 z-10 bg-gray-50">
             <tr className="border-b border-gray-200 text-xs font-semibold text-gray-500 whitespace-nowrap">
               <th className="px-4 py-3"></th>
-              <th className="px-2 py-3 text-left">이미지</th>
               {orderedColumns.map(col => {
                 const idx = sortKeys.findIndex(s => s.key === col.key)
                 const active = idx !== -1
@@ -384,7 +384,6 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
             {showFilters && (
               <tr className="border-b border-gray-200 bg-white">
                 <th className="px-4 py-1.5"></th>
-                <th className="px-2 py-1.5"></th>
                 {orderedColumns.map(col => (
                   <th key={col.key} className="px-2 py-1.5 font-normal">
                     <input value={filters[col.key] || ''} onChange={e => setFilters(f => ({ ...f, [col.key]: e.target.value }))}
@@ -410,9 +409,25 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
               const selectable = isSelectable(p)
 
               const cells: Record<string, { node: React.ReactNode; title?: string; className?: string; stop?: boolean }> = {
+                created_at: { node: new Date(p.created_at).toLocaleString() },
+                thumbnail_img: {
+                  node: (
+                    <div className="relative w-10 h-10 rounded-lg overflow-hidden bg-gray-100">
+                      {p.thumbnail_urls?.[0] ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={p.thumbnail_urls[0]} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs">-</div>
+                      )}
+                      {p.thumbnail_urls?.length > 1 && (
+                        <span className="absolute bottom-0 right-0 bg-black/60 text-white text-[9px] leading-none px-1 rounded-tl">+{p.thumbnail_urls.length - 1}</span>
+                      )}
+                    </div>
+                  ),
+                  className: 'px-2 py-2',
+                },
                 mall_product_code: { node: p.mall_product_code },
                 name_original: { node: p.name_original, title: p.name_original, className: 'px-2 py-2 text-xs text-gray-700 truncate' },
-                created_at: { node: new Date(p.created_at).toLocaleString() },
                 price: { node: p.price ? `₩${p.price.toLocaleString()}` : '-', className: 'px-2 py-2 text-xs text-gray-700 truncate' },
                 sale_price: { node: p.sale_price ? `₩${p.sale_price.toLocaleString()}` : '-', className: 'px-2 py-2 text-xs text-gray-800 font-semibold truncate' },
                 brand: { node: p.brand || '-' },
@@ -462,20 +477,6 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
                 className={`border-b border-gray-100 hover:bg-gray-50 transition-colors ${canOpen ? 'cursor-pointer' : ''} ${selected.has(p.id) ? 'bg-teal-50' : ''} ${!selectable ? 'opacity-60' : ''}`}>
                 <td className="px-4 py-2" onClick={e => e.stopPropagation()}>
                   <input type="checkbox" checked={selected.has(p.id)} disabled={!selectable} onChange={() => selectable && toggleSelect(p.id)} />
-                </td>
-
-                <td className="px-2 py-2">
-                  <div className="relative w-10 h-10 rounded-lg overflow-hidden bg-gray-100">
-                    {p.thumbnail_urls?.[0] ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={p.thumbnail_urls[0]} alt="" className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs">-</div>
-                    )}
-                    {p.thumbnail_urls?.length > 1 && (
-                      <span className="absolute bottom-0 right-0 bg-black/60 text-white text-[9px] leading-none px-1 rounded-tl">+{p.thumbnail_urls.length - 1}</span>
-                    )}
-                  </div>
                 </td>
 
                 {orderedColumns.map(col => {

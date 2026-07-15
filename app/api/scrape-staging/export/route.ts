@@ -38,6 +38,10 @@ export async function GET(req: NextRequest) {
   query += ' ORDER BY id'
 
   const res = await pool.query<StagingRow>(query, params)
+  const siteRes = await pool.query<{ name: string | null }>(
+    `SELECT s.name FROM scrape_sessions ss JOIN sites s ON s.id = ss.site_id WHERE ss.id=$1`, [sessionId],
+  )
+  const mallName = (siteRes.rows[0]?.name || 'Mall').replace(/[\\/:*?"<>|]/g, '')
 
   const wb = new ExcelJS.Workbook()
   wb.creator = 'Products Transformation Platform (PTP)'
@@ -65,7 +69,9 @@ export async function GET(req: NextRequest) {
   sheet.getColumn(12).width = 40
 
   const buf = await wb.xlsx.writeBuffer()
-  const fileName = `스크랩결과_session${sessionId}_${Date.now()}.xlsx`
+  const now = new Date()
+  const ymd = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+  const fileName = `${mallName}_Raw_${ymd}.xlsx`
 
   return new NextResponse(Buffer.from(buf) as BodyInit, {
     headers: {

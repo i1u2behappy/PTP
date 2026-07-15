@@ -2,7 +2,7 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Database
 
-PostgreSQL runs in its own Docker container dedicated to this project: `scrap-postgres`
+PostgreSQL runs in its own Docker container dedicated to this project: `scrape-postgres`
 (started via `docker compose up -d`, see `docker-compose.yml`), separate from other projects'
 containers so it's not sharing a database instance with unrelated apps. Connection settings are
 in `.env.local` (`devuser`/`devpass`, port `5433` on the host to avoid clashing with other local
@@ -12,7 +12,7 @@ The container has `restart: unless-stopped`, so it comes back on its own — but
 **Docker Desktop itself is running** (Docker Desktop → Settings → General → "Start Docker
 Desktop when you sign in" is enabled, so it should start automatically after login/reboot). If
 pages show empty lists or API routes 500 with a DB connection error, check `docker ps` lists
-`scrap-postgres` as `Up` before assuming it's a code bug.
+`scrape-postgres` as `Up` before assuming it's a code bug.
 
 `lib/db.ts` builds its Postgres pool once at module load using `.env.local` values, so after
 changing DB connection settings you need to fully restart `npm run dev` — Next.js reloading

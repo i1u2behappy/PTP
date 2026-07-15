@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(break)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3001/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3001/products)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3001/scraper)",
+      "Bash(powershell -NoProfile -Command \"Get-Process -Id 3808 -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path\")",
+      "Bash(npx tsc *)",
+      "Bash(git stash *)",
+      "Bash(cat /tmp/devserver.log)",
+      "Read(//tmp/**)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3001/export)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3002/export)",
+      "Bash(curl -s http://localhost:3001/export)",
+      "Bash(curl -s http://localhost:3001/api/products)",
+      "Bash(curl -s -w \"\\\\nSTATUS:%{http_code}\\\\n\" http://localhost:3001/api/products)"
+    ]
+  }
+}

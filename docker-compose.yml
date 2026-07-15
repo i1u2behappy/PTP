@@ -1,18 +1,18 @@
-name: scrap
+name: scrape
 
 services:
   postgres:
     image: postgres:17
-    container_name: scrap-postgres
+    container_name: scrape-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: scrap
+      POSTGRES_DB: scrape
       POSTGRES_USER: devuser
       POSTGRES_PASSWORD: devpass
     ports:
       - '5433:5432'
     volumes:
-      - scrap-db-data:/var/lib/postgresql/data
+      - scrape-db-data:/var/lib/postgresql/data
 
 volumes:
-  scrap-db-data:
+  scrape-db-data:

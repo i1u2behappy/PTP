@@ -252,10 +252,13 @@ export function TransformPanel() {
       fd.append('kind', kind)
       const res = await fetch('/api/transform/uploads', { method: 'POST', body: fd })
       if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`업로드 실패: ${e.error || res.status}`); return }
-      const d = await res.json() as { id: number; headers: string[]; guessedCodeColumn: string | null }
+      const d = await res.json() as { id: number; headers: string[]; guessedCodeColumn: string | null; orphanedRules?: string[] }
       setPendingUpload({ id: d.id, kind, headers: d.headers, guessedCodeColumn: d.guessedCodeColumn })
       setCodeColumn(d.guessedCodeColumn || d.headers[0] || '')
       if (kind === 'as_is') setAsIsFile(null); else setToBeFile(null)
+      if (d.orphanedRules?.length) {
+        alert(`⚠ 새 TO-BE 헤더에 없는 기존 매핑 규칙이 ${d.orphanedRules.length}개 있습니다: ${d.orphanedRules.join(', ')}\n컬럼별 생성 규칙에서 다시 확인해주세요.`)
+      }
     } finally {
       setUploadingKind(null)
     }
@@ -297,6 +300,15 @@ export function TransformPanel() {
     await fetch(`/api/transform/columns/${ruleId}/lookup`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceValue, targetValue }),
     })
+    loadLookupEntries(ruleId)
+  }
+
+  /** 2번의 AS-IS/TO-BE 가이드 쌍에서 조회표 초안을 자동으로 채운다 — 이미 있는 항목은 덮어쓰지 않는다. */
+  async function autoFillLookup(ruleId: number) {
+    const res = await fetch(`/api/transform/columns/${ruleId}/lookup`, { method: 'POST' })
+    if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`자동 채우기 실패: ${e.error || res.status}`); return }
+    const d = await res.json() as { filled: number; total: number }
+    alert(`가이드 ${d.total}쌍 중 ${d.filled}개를 새로 채웠습니다 (이미 있던 항목은 그대로 둠).`)
     loadLookupEntries(ruleId)
   }
 
@@ -556,6 +568,10 @@ export function TransformPanel() {
                                 {SOURCE_FIELDS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
                               </select>
                               <button onClick={() => loadLookupEntries(rule.id!)} className="ml-2 text-teal-600 hover:underline">조회표 편집</button>
+                              <button onClick={() => autoFillLookup(rule.id!)} disabled={!rule.source_field}
+                                className="ml-2 text-teal-600 hover:underline disabled:text-gray-300 disabled:no-underline" title="2번의 AS-IS/TO-BE 가이드 쌍에서 자동으로 채웁니다">
+                                가이드에서 자동 채우기
+                              </button>
                               {lookupEntries[rule.id] && (
                                 <div className="mt-1 border border-gray-200 rounded-lg p-2 space-y-1 max-h-40 overflow-y-auto">
                                   {[...lookupEntries[rule.id], { id: -1, source_value: '', target_value: '' }].map((e, i) => (
@@ -678,9 +694,14 @@ export function TransformPanel() {
                             </td>
                             {columnHeaders.map(h => (
                               <td key={h} className="px-2 py-2">
-                                <input defaultValue={row.generated_values[h] ?? ''} onBlur={e => saveGeneratedCell(row.id, h, e.target.value)}
-                                  disabled={row.status === 'committed'}
-                                  className="w-28 border border-gray-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-teal-300 disabled:bg-gray-50 disabled:text-gray-400" />
+                                <div className="relative inline-block">
+                                  {rulesByColumn.get(h)?.mode === 'ai' && (
+                                    <span className="absolute -top-1.5 -right-1.5 text-[10px] leading-none" title="AI 생성 — 2차 검증 시 더 꼼꼼히 확인하세요">✨</span>
+                                  )}
+                                  <input defaultValue={row.generated_values[h] ?? ''} onBlur={e => saveGeneratedCell(row.id, h, e.target.value)}
+                                    disabled={row.status === 'committed'}
+                                    className="w-28 border border-gray-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-teal-300 disabled:bg-gray-50 disabled:text-gray-400" />
+                                </div>
                               </td>
                             ))}
                             <td className="px-2 py-2">

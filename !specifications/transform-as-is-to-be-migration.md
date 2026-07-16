@@ -87,10 +87,31 @@
   `ruleSummary` + 메인 3단계 플로우
 - `components/shell/TabsContext.tsx`(`'transform'` TabType), `Sidebar.tsx`, `Workspace.tsx`(라우팅)
 
+## 추가 개선 (2026-07-16, 유사 사례 리서치 기반)
+
+사용자 요청으로 CRM/ETL 임포트 마법사(Salesforce/HubSpot), OpenRefine, dbt(transformation-as-code),
+HITL 승인/거부 패턴, AI-ETL 드리프트 감지 사례를 조사해 아래 4가지를 반영(사용자가 4개 모두 선택):
+
+- **값 매핑 자동 채움**: `lookup` 모드 규칙에 "가이드에서 자동 채우기" 버튼 — 2번의 AS-IS/TO-BE 가이드 쌍에서
+  `(source_field 값 → 이 컬럼의 완성값)`을 뽑아 `transform_lookup_entries` 초안을 채운다. 이미 있는
+  `(rule_id, source_field, source_value)` 조합은 덮어쓰지 않음(`ON CONFLICT DO NOTHING`) — 사람이 고친 값 보호.
+  OpenRefine의 reconciliation과 같은 원리. `app/api/transform/columns/[id]/lookup/route.ts`의 신규 `POST`.
+- **TO-BE 헤더 변경 드리프트 경고**: 새 TO-BE 엑셀을 업로드하는 시점에, 기존에 `target_field`가 매핑된 규칙 중
+  새 헤더에 없는 컬럼명을 즉시 알려준다(`app/api/transform/uploads/route.ts` POST 응답의 `orphanedRules`).
+  몰 구조 드리프트 알림(mall-profile-baseline)과 같은 "조용히 깨지지 않게 미리 알린다" 원칙.
+- **AI 생성 셀 배지**: 2차 검증 그리드에서 `mode==='ai'`인 컬럼의 셀에 ✨ 표시 — 규칙 기반(복사/매핑/합성)
+  셀과 구분해 검증 우선순위를 알 수 있게.
+- **코드값 정규화 매칭**: `lib/transform/matching.ts`의 `normalizeCode()`(trim/대문자화/앞자리 0 제거)를
+  AS-IS·TO-BE·`mall_products` 매칭 전 항상 적용 — 공백/대소문자/앞자리0 차이로 매칭이 조용히 실패하는 것을 방지.
+  `matchReferenceRows`도 상품마다 개별 쿼리하던 것을 `mall_products` 1회 조회 + Map 매칭으로 바꿔 N+1 제거.
+
+(export/import(JSON)로 규칙을 git 버전관리·몰 간 복사하는 안은 별도 규모라 이번엔 보류 — 필요해지면 착수)
+
 ## 상태
 
 **구현 완료 (2026-07-16).** 커밋: `30aaeda`(1번 세션검색 UI), `ac4ec63`(AS-IS/TO-BE 3단계 재설계),
-`4bb6505`(단계 상시노출 + 2번 독립화), `4ddabad`(2차검증 컬럼가이드 + 반영/취소).
+`4bb6505`(단계 상시노출 + 2번 독립화), `4ddabad`(2차검증 컬럼가이드 + 반영/취소), 리서치 기반 4개 개선(값매핑
+자동채움/드리프트경고/AI배지/코드정규화, 커밋 예정).
 
 미검증: 실제 AS-IS/TO-BE 엑셀 쌍을 업로드해 매칭·생성·반영까지 end-to-end로 손으로 확인한 적은 없음
 (타입체크와 dev 서버 라우트 응답만 확인). 실 데이터로 한 번 돌려보는 것을 권장.

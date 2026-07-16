@@ -48,10 +48,21 @@ export async function POST(req: NextRequest) {
     )
   }
 
+  // TO-BE를 새로 올리면 헤더 구성이 바뀔 수 있어, 이미 매핑해둔 규칙 중 새 헤더에 없는 컬럼을 미리 알려준다
+  // (그대로 두면 /api/transform/columns가 조용히 그 규칙들을 무시하게 된다).
+  let orphanedRules: string[] = []
+  if (kind === 'to_be') {
+    const rulesRes = await pool.query<{ column_name: string }>(
+      `SELECT column_name FROM transform_column_rules WHERE site_id = $1 AND target_field IS NOT NULL`, [siteId],
+    )
+    orphanedRules = rulesRes.rows.map(r => r.column_name).filter(name => !headers.includes(name))
+  }
+
   return NextResponse.json({
     id: uploadId,
     headers,
     rowCount: rows.length,
     guessedCodeColumn: guessCodeColumn(headers),
+    orphanedRules,
   })
 }

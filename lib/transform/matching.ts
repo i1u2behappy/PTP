@@ -45,6 +45,11 @@ export function guessCodeColumn(headers: string[]): string | null {
   return headers.find(h => CODE_HEADER_RE.test(h)) || null
 }
 
+/** 공백/대소문자/앞자리 0 차이로 같은 상품코드가 다르게 취급되는 것을 막는다 — AS-IS/TO-BE·mall_products 매칭 전 항상 거친다. */
+export function normalizeCode(v: string): string {
+  return v.trim().toUpperCase().replace(/^0+(?=\d)/, '')
+}
+
 export type UploadKind = 'as_is' | 'to_be'
 
 export interface UploadSummary {
@@ -99,7 +104,7 @@ export async function getGuidePairs(siteId: number): Promise<GuidePair[]> {
 }
 
 /**
- * upload의 code_column을 기준으로 각 참조 행의 mall_product_code를 다시 뽑고,
+ * upload의 code_column을 기준으로 각 참조 행의 mall_product_code를 정규화해서 다시 뽑고,
  * 같은 site의 mall_products와 코드로 매칭한다. { total, matched }를 반환한다.
  */
 export async function matchReferenceRows(uploadId: number): Promise<{ total: number; matched: number }> {
@@ -110,21 +115,18 @@ export async function matchReferenceRows(uploadId: number): Promise<{ total: num
   const upload = uploadRes.rows[0]
   if (!upload?.code_column) return { total: 0, matched: 0 }
 
-  const rowsRes = await pool.query<{ id: number; row_values: Record<string, string> }>(
-    'SELECT id, row_values FROM transform_reference_rows WHERE upload_id = $1',
-    [uploadId],
-  )
+  const [rowsRes, mpRes] = await Promise.all([
+    pool.query<{ id: number; row_values: Record<string, string> }>(
+      'SELECT id, row_values FROM transform_reference_rows WHERE upload_id = $1', [uploadId]),
+    pool.query<{ id: number; mall_product_code: string }>(
+      'SELECT id, mall_product_code FROM mall_products WHERE site_id = $1', [upload.site_id]),
+  ])
+  const mpIdByCode = new Map(mpRes.rows.map(r => [normalizeCode(r.mall_product_code), r.id]))
 
   let matched = 0
   for (const row of rowsRes.rows) {
-    const code = (row.row_values[upload.code_column] || '').trim()
-    const mpRes = code
-      ? await pool.query<{ id: number }>(
-          'SELECT id FROM mall_products WHERE site_id = $1 AND mall_product_code = $2 LIMIT 1',
-          [upload.site_id, code],
-        )
-      : { rows: [] }
-    const matchedId = mpRes.rows[0]?.id ?? null
+    const code = normalizeCode(row.row_values[upload.code_column] || '')
+    const matchedId = code ? mpIdByCode.get(code) ?? null : null
     if (matchedId) matched++
     await pool.query(
       'UPDATE transform_reference_rows SET mall_product_code = $1, matched_mall_product_id = $2 WHERE id = $3',

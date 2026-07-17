@@ -47,19 +47,19 @@ export function Workspace() {
           case 'site-detail':    return <SiteDetailPanel key={tab.id} params={tab.params} />
           case 'scraper':        return <ScraperPanel key={tab.id} params={tab.params} />
           case 'migration-dashboard': return <MigrationDashboardPanel key={tab.id} params={tab.params} />
-          case 'internal-codes': return <InternalCodePanel key={tab.id} />
-          case 'category-mapping': return <CategoryMappingPanel key={tab.id} />
-          case 'sales-code':      return <SalesCodePanel key={tab.id} />
-          case 'name-management': return <ProductNamePanel key={tab.id} />
-          case 'option-management': return <OptionManagementPanel key={tab.id} />
-          case 'brand-origin-management': return <BrandOriginPanel key={tab.id} />
-          case 'pricing-management': return <PricingManagementPanel key={tab.id} />
+          case 'internal-codes': return <InternalCodePanel key={tab.id} params={tab.params} />
+          case 'category-mapping': return <CategoryMappingPanel key={tab.id} params={tab.params} />
+          case 'sales-code':      return <SalesCodePanel key={tab.id} params={tab.params} />
+          case 'name-management': return <ProductNamePanel key={tab.id} params={tab.params} />
+          case 'option-management': return <OptionManagementPanel key={tab.id} params={tab.params} />
+          case 'brand-origin-management': return <BrandOriginPanel key={tab.id} params={tab.params} />
+          case 'pricing-management': return <PricingManagementPanel key={tab.id} params={tab.params} />
           case 'image-host':      return <ImageHostPanel key={tab.id} />
           case 'products-list':  return <ProductsListPanel key={tab.id} />
           case 'product-detail': return <ProductDetailPanel key={tab.id} params={tab.params} />
           case 'master-list':    return <MasterListPanel key={tab.id} />
           case 'master-detail':  return <MasterDetailPanel key={tab.id} params={tab.params} />
-          case 'image-edit':     return <ImageEditPanel key={tab.id} />
+          case 'image-edit':     return <ImageEditPanel key={tab.id} params={tab.params} />
           case 'export':         return <ExportPanel key={tab.id} />
           case 'settings':       return <SettingsPanel key={tab.id} />
           case 'transform':      return <TransformPanel key={tab.id} />

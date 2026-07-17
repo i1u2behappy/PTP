@@ -1,5 +1,6 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
+import { ScrapeScopePicker, type ScrapeScope } from './shared/ScrapeScopePicker'
 
 interface MasterRow {
   id: number; name_original: string; name_ai: string | null; name_final: string | null
@@ -18,15 +19,17 @@ function marginOf(row: MasterRow): number | null {
   return row.sale_price - (row.cost_price ?? 0) - (row.other_cost ?? 0)
 }
 
-export function PricingManagementPanel() {
+export function PricingManagementPanel({ params }: { params?: Record<string, unknown> }) {
+  const [scope, setScope] = useState<ScrapeScope>({ clientId: '', siteId: '', sessionId: '' })
   const [rows, setRows] = useState<MasterRow[]>([])
   const [search, setSearch] = useState('')
   const [editing, setEditing] = useState<{ id: number; key: NumberKey | 'target_margin_rate' } | null>(null)
   const [editValue, setEditValue] = useState('')
 
   const load = useCallback(() => {
-    fetch('/api/master?clientId=1').then(r => r.json()).then((d: MasterRow[]) => setRows(Array.isArray(d) ? d : [])).catch(() => {})
-  }, [])
+    if (scope.sessionId === '') { setRows([]); return }
+    fetch(`/api/master?sessionId=${scope.sessionId}`).then(r => r.json()).then((d: MasterRow[]) => setRows(Array.isArray(d) ? d : [])).catch(() => {})
+  }, [scope.sessionId])
 
   useEffect(() => { load() }, [load])
 
@@ -70,46 +73,52 @@ export function PricingManagementPanel() {
         <p className="text-xs text-gray-400 mt-1">셀을 눌러 매입가·판매가·목표 마진율을 빠르게 수정합니다. 마켓별 상세 마진은 상품마스터 상세에서 확인하세요.</p>
       </div>
 
-      <div className="mb-4 shrink-0">
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="상품명 검색..."
-          className="w-full max-w-sm border border-gray-300 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-      </div>
+      <ScrapeScopePicker initialSiteId={params?.siteId as number | undefined} initialSessionId={params?.sessionId as number | undefined} onScopeChange={setScope} />
 
-      {rows.length === 0 ? (
-        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400">
-          <div className="text-4xl mb-3">💰</div>
-          <p className="text-sm">상품마스터가 없습니다.</p>
-        </div>
-      ) : (
-        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-0 flex flex-col">
-          <div className="overflow-auto flex-1 min-h-0">
-            <table className="text-xs border-collapse whitespace-nowrap">
-              <thead className="sticky top-0 z-10 bg-gray-50">
-                <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                  <th className="px-3 py-2 text-left sticky left-0 bg-gray-50 z-20">상품명</th>
-                  {NUMBER_KEYS.map(k => <th key={k} className="px-3 py-2 text-left">{COLUMN_LABELS[k]}</th>)}
-                  <th className="px-3 py-2 text-left">목표 마진율</th>
-                  <th className="px-3 py-2 text-left">예상 마진</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleRows.map(row => {
-                  const margin = marginOf(row)
-                  return (
-                    <tr key={row.id} className="border-b border-gray-100 hover:bg-gray-50">
-                      <td className="px-3 py-2 text-xs text-gray-700 sticky left-0 bg-white max-w-[220px] truncate">{row.name_final || row.name_ai || row.name_original}</td>
-                      {NUMBER_KEYS.map(k => <Cell key={k} row={row} k={k} />)}
-                      <Cell row={row} k="target_margin_rate" />
-                      <td className="px-3 py-2 text-xs font-medium">
-                        {margin == null ? '-' : <span className={margin >= 0 ? 'text-emerald-600' : 'text-rose-500'}>₩{margin.toLocaleString()}</span>}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+      {scope.sessionId === '' ? null : (
+        <>
+          <div className="mb-4 shrink-0">
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="상품명 검색..."
+              className="w-full max-w-sm border border-gray-300 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </div>
-        </div>
+
+          {rows.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400">
+              <div className="text-4xl mb-3">💰</div>
+              <p className="text-sm">이 세션에 병합된 상품마스터가 없습니다.</p>
+            </div>
+          ) : (
+            <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-0 flex flex-col">
+              <div className="overflow-auto flex-1 min-h-0">
+                <table className="text-xs border-collapse whitespace-nowrap">
+                  <thead className="sticky top-0 z-10 bg-gray-50">
+                    <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+                      <th className="px-3 py-2 text-left sticky left-0 bg-gray-50 z-20">상품명</th>
+                      {NUMBER_KEYS.map(k => <th key={k} className="px-3 py-2 text-left">{COLUMN_LABELS[k]}</th>)}
+                      <th className="px-3 py-2 text-left">목표 마진율</th>
+                      <th className="px-3 py-2 text-left">예상 마진</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleRows.map(row => {
+                      const margin = marginOf(row)
+                      return (
+                        <tr key={row.id} className="border-b border-gray-100 hover:bg-gray-50">
+                          <td className="px-3 py-2 text-xs text-gray-700 sticky left-0 bg-white max-w-[220px] truncate">{row.name_final || row.name_ai || row.name_original}</td>
+                          {NUMBER_KEYS.map(k => <Cell key={k} row={row} k={k} />)}
+                          <Cell row={row} k="target_margin_rate" />
+                          <td className="px-3 py-2 text-xs font-medium">
+                            {margin == null ? '-' : <span className={margin >= 0 ? 'text-emerald-600' : 'text-rose-500'}>₩{margin.toLocaleString()}</span>}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   )

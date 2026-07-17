@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import Image from 'next/image'
 import { useTabs } from '../shell/TabsContext'
+import { ScrapeScopePicker, type ScrapeScope } from './shared/ScrapeScopePicker'
 
 interface ImageRow { id: number; image_type: 'thumbnail' | 'detail'; sort_order: number; storage_path: string }
 interface MasterWithImages { id: number; name_original: string; name_final: string | null; images: ImageRow[] }
@@ -22,16 +23,18 @@ function ImageTile({ img, selected, onToggle, moveLabel, onMove }: { img: ImageR
   )
 }
 
-export function ImageEditPanel() {
+export function ImageEditPanel({ params }: { params?: Record<string, unknown> }) {
   const { refreshSignals, bumpRefresh } = useTabs()
+  const [scope, setScope] = useState<ScrapeScope>({ clientId: '', siteId: '', sessionId: '' })
   const [products, setProducts] = useState<MasterWithImages[]>([])
   const [search, setSearch] = useState('')
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(() => {
-    fetch('/api/master/images').then(r => r.json()).then((d: MasterWithImages[]) => { if (Array.isArray(d)) setProducts(d) }).catch(() => {})
-  }, [])
+    if (scope.sessionId === '') { setProducts([]); return }
+    fetch(`/api/master/images?sessionId=${scope.sessionId}`).then(r => r.json()).then((d: MasterWithImages[]) => { if (Array.isArray(d)) setProducts(d) }).catch(() => {})
+  }, [scope.sessionId])
 
   useEffect(() => { load() }, [load, refreshSignals.master])
 
@@ -80,6 +83,10 @@ export function ImageEditPanel() {
         )}
       </div>
 
+      <ScrapeScopePicker initialSiteId={params?.siteId as number | undefined} initialSessionId={params?.sessionId as number | undefined} onScopeChange={setScope} />
+
+      {scope.sessionId === '' ? null : (
+      <>
       <div className="mb-4">
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="상품명 검색..."
           className="w-full max-w-sm border border-gray-300 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
@@ -88,7 +95,7 @@ export function ImageEditPanel() {
       {filteredProducts.length === 0 ? (
         <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400">
           <div className="text-4xl mb-3">🖼️</div>
-          <p className="text-sm">표시할 상품이 없습니다.</p>
+          <p className="text-sm">이 세션에 병합된 상품마스터가 없습니다.</p>
         </div>
       ) : (
         <div className="space-y-4">
@@ -132,6 +139,8 @@ export function ImageEditPanel() {
             )
           })}
         </div>
+      )}
+      </>
       )}
     </div>
   )

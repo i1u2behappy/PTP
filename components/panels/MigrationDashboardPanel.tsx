@@ -118,7 +118,7 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
 
   const loadMasterRows = useCallback(() => {
     if (selectedSessionId === '') return
-    fetch(`/api/master/by-session?sessionId=${selectedSessionId}`).then(r => r.json()).then((d: MasterRow[]) => setMasterRows(Array.isArray(d) ? d : [])).catch(() => {})
+    fetch(`/api/master?sessionId=${selectedSessionId}`).then(r => r.json()).then((d: MasterRow[]) => setMasterRows(Array.isArray(d) ? d : [])).catch(() => {})
   }, [selectedSessionId])
 
   useEffect(() => { loadMasterRows() }, [loadMasterRows])
@@ -219,8 +219,10 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
               {TASKS.map(task => {
                 const c = counts(task)
                 const total = masterRows.length || 1
+                const siteId = sessions.find(s => s.id === selectedSessionId)?.site_id
                 return (
-                  <button key={task.key} onClick={() => openTab(task.tab)}
+                  <button key={task.key}
+                    onClick={() => openTab({ ...task.tab, params: { siteId, sessionId: selectedSessionId } })}
                     className="bg-white rounded-2xl border border-gray-200 p-4 text-left hover:border-teal-300 transition-colors">
                     <p className="text-xs font-semibold text-gray-600 mb-2">{task.label}</p>
                     <div className="flex h-2 rounded-full overflow-hidden bg-gray-100 mb-2">

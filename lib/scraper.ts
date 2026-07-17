@@ -50,7 +50,7 @@ export interface ScrapeOptions {
   thumbnailSelector?: string
 }
 
-function profileDir(siteId: number) {
+export function profileDir(siteId: number) {
   return path.join(process.cwd(), '.playwright-profiles', String(siteId))
 }
 
@@ -111,9 +111,20 @@ async function killOrphanedProfileProcess(siteId: number): Promise<void> {
 async function launchVisibleWindow(siteId: number): Promise<BrowserContext> {
   await closeLoginWindow(siteId)
   await killOrphanedProfileProcess(siteId)
+  // Playwright 번들 Chromium이 아니라 실제 설치된 크롬(사용자가 평소 로그인 테스트하는 그 브라우저)을
+  // 그대로 띄운다 — Windows Hello/WebAuthn 같은 OS 통합 기능은 번들 Chromium엔 없을 수 있다.
+  // userAgent도 따로 지정하지 않아 그 크롬이 실제로 쓰는 값과 100% 일치한다 (예전엔 Chrome 버전이
+  // 빠진 잘린 UA 문자열을 강제로 넣고 있었는데, 이게 브라우저의 Client Hints 헤더와 안 맞아 몰 쪽
+  // 봇 탐지에 자동화로 잡히기 쉬웠다).
+  // chromiumSandbox: true를 안 주면 Playwright가 기본으로 --no-sandbox를 붙여, 실제 크롬을 띄워도
+  // "지원되지 않는 명령줄 플래그" 경고 배너가 뜨고 일반 크롬과 다르게 보인다.
   const context = await chromium.launchPersistentContext(profileDir(siteId), {
-    headless: false,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    headless: false, channel: 'chrome', chromiumSandbox: true,
+  })
+  // navigator.webdriver=true는 Playwright로 띄운 크롬임을 드러내는 가장 흔한 신호라, 로그인 시 본인인증
+  // 단계를 건너뛰고 차단하는 몰(예: 카페24 PC인증 연동)에서 이 창만 로그인이 안 되는 원인이 될 수 있다.
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
   openSessions.set(siteId, context)
   // 사용자가 창을 직접 닫거나 브라우저가 죽었을 때도 반영되도록 추적

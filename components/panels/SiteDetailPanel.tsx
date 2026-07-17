@@ -29,6 +29,7 @@ export function SiteDetailPanel({ params }: Props) {
   const [thumbnailSelector, setThumbnailSelector] = useState('')
   const [autoScrapeEnabled, setAutoScrapeEnabled] = useState(false)
   const [autoScrapeHour, setAutoScrapeHour] = useState(3)
+  const [manualLoginRequired, setManualLoginRequired] = useState(false)
   const [loading, setLoading] = useState(!isNew)
   const [saving, setSaving] = useState(false)
   const [justSaved, setJustSaved] = useState(false)
@@ -42,13 +43,14 @@ export function SiteDetailPanel({ params }: Props) {
     fetch(`/api/sites/${siteId}`).then(r => r.json()).then((d: {
       name: string | null; url: string; login_url: string | null; login_id: string | null; login_pw: string | null; client_id: number | null
       custom_name_selector: string | null; custom_price_selector: string | null; custom_thumbnail_selector: string | null
-      auto_scrape_enabled: boolean; auto_scrape_hour: number | null
+      auto_scrape_enabled: boolean; auto_scrape_hour: number | null; manual_login_required: boolean
     }) => {
       setName(d.name || ''); setUrl(d.url); setLoginUrl(d.login_url || ''); setLoginId(d.login_id || ''); setLoginPw(d.login_pw || '')
       setClientId(d.client_id ?? '')
       setNameSelector(d.custom_name_selector || ''); setPriceSelector(d.custom_price_selector || '')
       setThumbnailSelector(d.custom_thumbnail_selector || '')
       setAutoScrapeEnabled(!!d.auto_scrape_enabled); setAutoScrapeHour(d.auto_scrape_hour ?? 3)
+      setManualLoginRequired(!!d.manual_login_required)
     }).finally(() => setLoading(false))
   }, [siteId, isNew])
 
@@ -60,6 +62,7 @@ export function SiteDetailPanel({ params }: Props) {
       customNameSelector: nameSelector || undefined, customPriceSelector: priceSelector || undefined,
       customThumbnailSelector: thumbnailSelector || undefined,
       autoScrapeEnabled, autoScrapeHour: autoScrapeEnabled ? autoScrapeHour : null,
+      manualLoginRequired,
     })
     try {
       const res = isNew
@@ -150,6 +153,17 @@ export function SiteDetailPanel({ params }: Props) {
               className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </label>
         </div>
+
+        <label className="flex items-start gap-2 text-sm text-gray-600 mb-3">
+          <input type="checkbox" checked={manualLoginRequired} onChange={e => setManualLoginRequired(e.target.checked)} className="mt-0.5" />
+          <span>
+            🔒 직접로그인 필수
+            <span className="block text-xs text-gray-400 mt-0.5">
+              Windows Hello/WebAuthn(PC인증) 등 자동화 브라우저로는 통과할 수 없는 로그인 보안이 걸린 몰입니다.
+              체크하면 스크래핑 화면에서 자동 로그인 대신, 직접 발급받은 브라우저 프로필로 수동 로그인하는 방법을 안내합니다.
+            </span>
+          </span>
+        </label>
 
         <details className="mb-3">
           <summary className="text-xs text-gray-500 cursor-pointer select-none mb-2">고급 설정: 수동 추출 셀렉터 · 자동 재스크랩</summary>

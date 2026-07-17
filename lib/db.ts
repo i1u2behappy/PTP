@@ -120,6 +120,8 @@ export async function initDb() {
     -- 로그인 확인 시점에 몰 상품페이지 구조를 샘플링해 저장하는 기준정보 (이미지/옵션/재고/상세텍스트 구성) — 변경 감지용
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS scrape_profile JSONB;
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS scrape_profile_updated_at TIMESTAMPTZ;
+    -- Windows Hello/WebAuthn 등 자동화 브라우저로는 통과할 수 없는 로그인 보안을 쓰는 몰 표시용
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS manual_login_required BOOLEAN DEFAULT false;
 
     CREATE TABLE IF NOT EXISTS supply_clients (
       id                   SERIAL PRIMARY KEY,

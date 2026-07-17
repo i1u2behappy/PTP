@@ -12,6 +12,8 @@ interface Site {
   url: string
   login_url: string | null
   login_id: string | null
+  manual_login_required?: boolean
+  profile_dir?: string
 }
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -55,6 +57,45 @@ interface PreviewItem {
   url: string
   name: string
   thumbnail: string
+}
+
+const CHROME_EXE = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+
+/** Windows Hello/WebAuthn(PC인증)처럼 자동화 브라우저로는 통과 못 하는 로그인 보안이 걸린 몰용 안내.
+ * PTP의 로그인 창 대신, 이 몰이 쓰는 프로필 폴더를 그대로 가리켜 완전히 수동으로 크롬을 띄우게 하고 —
+ * 그 크롬에서 로그인을 마치고 나면 쿠키가 디스크에 남아, 이후 스크래핑이 그 프로필을 그대로 재사용한다. */
+function ManualLoginNotice({ site }: { site: Site }) {
+  const [copied, setCopied] = useState(false)
+  if (!site.profile_dir) return null
+  const command = `"${CHROME_EXE}" --user-data-dir="${site.profile_dir}" ${site.login_url || site.url}`
+
+  function copy() {
+    navigator.clipboard.writeText(command).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    }).catch(() => {})
+  }
+
+  return (
+    <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+      <p className="text-sm text-amber-800 font-semibold mb-1">🔒 직접로그인 필수 몰입니다</p>
+      <p className="text-xs text-amber-700 mb-3">
+        이 몰은 Windows Hello/PC인증처럼 자동화 브라우저로 통과할 수 없는 로그인 보안을 씁니다. 아래 명령으로 완전히
+        일반적인 크롬을 직접 띄워 로그인(PC인증 포함)까지 마친 뒤 창을 닫아주세요. 로그인 쿠키가 남아 이후 스크래핑이
+        자동으로 이어받습니다.
+      </p>
+      <div className="flex items-start gap-2">
+        <code className="flex-1 block bg-white border border-amber-200 rounded-lg px-3 py-2 text-[11px] text-gray-700 break-all">
+          {command}
+        </code>
+        <button onClick={copy}
+          className="shrink-0 px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg transition-colors">
+          {copied ? '✓ 복사됨' : '복사'}
+        </button>
+      </div>
+      <p className="text-xs text-amber-600 mt-2">PTP에서 이 몰의 로그인 창이 열려있다면 먼저 닫은 뒤 실행해주세요(같은 프로필 폴더를 동시에 쓸 수 없습니다).</p>
+    </div>
+  )
 }
 
 export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
@@ -114,6 +155,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         setStatus(d.status as Status)
         setProgress({ saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error })
       }).catch(() => {})
+      // 진행 로그(URL별 성공/실패)는 탭 전환으로 언마운트됐다 돌아와도 그대로 보여야 하므로 같이 복원한다.
+      fetch(`/api/scrape/log?sessionId=${saved.sessionId}`).then(r => r.json()).then((rows: ItemLogRow[]) => {
+        if (Array.isArray(rows)) setItemLog(rows)
+      }).catch(() => {})
     } catch { /* 손상된 저장값은 무시 */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 마운트 시 1회만: initialSiteId는 탭 생성 시 고정되는 값
   }, [])
@@ -149,7 +194,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const res = await fetch(`/api/sites/${siteId}`)
     if (!res.ok) { alert(`Mall 정보를 불러오지 못했습니다 (${res.status})`); return }
     const full = await res.json() as Site & { login_pw: string | null }
-    setSelectedSite({ id: full.id, name: full.name, url: full.url, login_url: full.login_url, login_id: full.login_id })
+    setSelectedSite({
+      id: full.id, name: full.name, url: full.url, login_url: full.login_url, login_id: full.login_id,
+      manual_login_required: full.manual_login_required, profile_dir: full.profile_dir,
+    })
     setLoginId(full.login_id || '')
     setLoginPw(full.login_pw || '')
     setLoginStep('none')
@@ -466,7 +514,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </label>
           </div>
 
-          {needsLogin ? (
+          {selectedSite.manual_login_required ? (
+            <ManualLoginNotice site={selectedSite} />
+          ) : needsLogin ? (
             <div className="flex items-center gap-3 flex-wrap">
               <button onClick={handleOpenLogin} disabled={loginBusy}
                 className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">

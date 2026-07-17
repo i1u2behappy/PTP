@@ -11,6 +11,7 @@ export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams.get('q') || ''
   const res = await pool.query(
     `SELECT s.id, s.name, s.url, s.login_id, s.login_pw_encrypted, s.login_pw_iv, s.client_id, c.name AS client_name, s.created_at,
+            s.manual_login_required,
             COALESCE(latest.status = 'error' AND latest.error ILIKE '%차단%', false) AS blocked,
             memo.content AS latest_memo
      FROM sites s
@@ -44,6 +45,7 @@ interface SiteBody {
   customThumbnailSelector?: string
   autoScrapeEnabled?: boolean
   autoScrapeHour?: number | null
+  manualLoginRequired?: boolean
 }
 
 export async function POST(req: NextRequest) {
@@ -54,11 +56,12 @@ export async function POST(req: NextRequest) {
   const { encrypted, iv } = b.loginPw ? encryptSecret(b.loginPw) : { encrypted: null, iv: null }
   const res = await pool.query<{ id: number }>(
     `INSERT INTO sites (name, url, login_url, login_id, login_pw_encrypted, login_pw_iv, client_id,
-       custom_name_selector, custom_price_selector, custom_thumbnail_selector, auto_scrape_enabled, auto_scrape_hour)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+       custom_name_selector, custom_price_selector, custom_thumbnail_selector, auto_scrape_enabled, auto_scrape_hour,
+       manual_login_required)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
     [b.name || null, b.url, b.loginUrl || null, b.loginId || null, encrypted, iv, b.clientId || null,
       b.customNameSelector || null, b.customPriceSelector || null, b.customThumbnailSelector || null,
-      !!b.autoScrapeEnabled, b.autoScrapeHour ?? null],
+      !!b.autoScrapeEnabled, b.autoScrapeHour ?? null, !!b.manualLoginRequired],
   )
   return NextResponse.json({ id: res.rows[0].id })
 }

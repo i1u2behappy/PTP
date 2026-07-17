@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool, { encryptSecret, decryptSecret } from '@/lib/db'
+import { profileDir } from '@/lib/scraper'
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const res = await pool.query(
     `SELECT id, name, url, login_url, login_id, login_pw_encrypted, login_pw_iv, client_id,
             custom_name_selector, custom_price_selector, custom_thumbnail_selector,
-            auto_scrape_enabled, auto_scrape_hour
+            auto_scrape_enabled, auto_scrape_hour, manual_login_required
      FROM sites WHERE id = $1`,
     [id],
   )
@@ -21,6 +22,8 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     custom_thumbnail_selector: site.custom_thumbnail_selector,
     auto_scrape_enabled: site.auto_scrape_enabled,
     auto_scrape_hour: site.auto_scrape_hour,
+    manual_login_required: site.manual_login_required,
+    profile_dir: profileDir(site.id),
   })
 }
 
@@ -36,6 +39,7 @@ interface SiteBody {
   customThumbnailSelector?: string
   autoScrapeEnabled?: boolean
   autoScrapeHour?: number | null
+  manualLoginRequired?: boolean
 }
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -47,11 +51,11 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   await pool.query(
     `UPDATE sites SET name=$1, url=$2, login_url=$3, login_id=$4, login_pw_encrypted=$5, login_pw_iv=$6, client_id=$7,
        custom_name_selector=$8, custom_price_selector=$9, custom_thumbnail_selector=$10,
-       auto_scrape_enabled=$11, auto_scrape_hour=$12
-     WHERE id=$13`,
+       auto_scrape_enabled=$11, auto_scrape_hour=$12, manual_login_required=$13
+     WHERE id=$14`,
     [b.name || null, b.url, b.loginUrl || null, b.loginId || null, encrypted, iv, b.clientId || null,
       b.customNameSelector || null, b.customPriceSelector || null, b.customThumbnailSelector || null,
-      !!b.autoScrapeEnabled, b.autoScrapeHour ?? null, id],
+      !!b.autoScrapeEnabled, b.autoScrapeHour ?? null, !!b.manualLoginRequired, id],
   )
   return NextResponse.json({ ok: true })
 }

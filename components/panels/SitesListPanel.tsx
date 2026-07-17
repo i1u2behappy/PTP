@@ -11,6 +11,7 @@ interface Site {
   login_pw_masked: string | null
   client_name: string | null
   blocked: boolean
+  manual_login_required: boolean
   latest_memo: string | null
   created_at: string
 }
@@ -112,7 +113,14 @@ export function SitesListPanel() {
               <tbody>
                 {sites.map(s => (
                   <tr key={s.id} onClick={() => openScraper(s)} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
-                    <td className="px-3 py-2 text-gray-800 font-medium sticky left-0 bg-white">{s.name || '(이름 없음)'}</td>
+                    <td className="px-3 py-2 text-gray-800 font-medium sticky left-0 bg-white">
+                      {s.name || '(이름 없음)'}
+                      {s.manual_login_required && (
+                        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold whitespace-nowrap" title="Windows Hello/WebAuthn 등으로 자동 로그인이 안 되는 몰 — 직접 로그인 필요">
+                          🔒 직접로그인 필수
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2 text-gray-500 max-w-[280px] truncate" title={s.url}>{s.url}</td>
                     <td className="px-3 py-2 text-gray-500">{s.login_id || '-'}</td>
                     <td className="px-3 py-2 text-gray-500 font-mono">{s.login_pw_masked || '-'}</td>

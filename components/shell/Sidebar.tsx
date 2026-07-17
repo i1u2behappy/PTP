@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import Image from 'next/image'
 import { useTabs, type Tab } from './TabsContext'
-import { DashboardIcon, ClientIcon, StoreIcon, ListIcon, SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ImageEditIcon, ExportIcon, SettingsIcon, TagIcon, MapIcon, CoinIcon } from './icons'
+import { DashboardIcon, ClientIcon, StoreIcon, ListIcon, SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ImageEditIcon, ExportIcon, SettingsIcon, TagIcon, MapIcon, CoinIcon, RefreshIcon } from './icons'
 import { CLIENTS_LIST_TAB, SITES_LIST_TAB, MASTER_LIST_TAB, PRODUCTS_LIST_TAB } from './menuTabs'
 
 type IconComponent = (props: { active?: boolean }) => React.ReactNode
@@ -74,7 +74,7 @@ export function Sidebar() {
 
         <NavLeaf tab={MASTER_LIST_TAB} icon={ArchiveIcon} />
         <NavLeaf tab={{ id: 'transform', type: 'transform', title: '마이그레이션2_Transform', icon: '🧬', closable: true }} icon={ReviewIcon} />
-        <NavLeaf tab={{ id: 'continuous-migration', type: 'continuous-migration', title: '마이그레이션3_연속관리', icon: '🔁', closable: true }} icon={ReviewIcon} />
+        <NavLeaf tab={{ id: 'continuous-migration', type: 'continuous-migration', title: '마이그레이션3_연속관리', icon: '🔁', closable: true }} icon={RefreshIcon} />
         <NavLeaf tab={{ id: 'export', type: 'export', title: '엑셀 내보내기', icon: '📊', closable: true }} icon={ExportIcon} />
         <NavLeaf tab={{ id: 'settings', type: 'settings', title: '설정', icon: '⚙️', closable: true }} icon={SettingsIcon} />
       </nav>

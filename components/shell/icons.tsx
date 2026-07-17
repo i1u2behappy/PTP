@@ -306,6 +306,24 @@ export function CoinIcon({ active }: IconProps) {
   )
 }
 
+export function RefreshIcon({ active }: IconProps) {
+  return (
+    <Toggle active={active}
+      outline={
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="w-full h-full">
+          <path d="M4.5 12a7.5 7.5 0 0112.6-5.5M19.5 12a7.5 7.5 0 01-12.6 5.5" />
+          <path d="M17 3.5v3.5h-3.5M7 20.5V17h3.5" />
+        </svg>
+      }
+      solid={
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="w-full h-full">
+          <path d="M4.5 12a7.5 7.5 0 0112.6-5.5M19.5 12a7.5 7.5 0 01-12.6 5.5" />
+          <path d="M17 3.5v3.5h-3.5M7 20.5V17h3.5" />
+        </svg>
+      } />
+  )
+}
+
 export function BoltIcon({ className }: IconProps) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" className={className}>

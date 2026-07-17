@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useTabs } from '../shell/TabsContext'
-import { SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ExportIcon } from '../shell/icons'
+import { SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ExportIcon, RefreshIcon } from '../shell/icons'
 import { PRODUCTS_LIST_TAB } from '../shell/menuTabs'
 
 const MARKETS = [
@@ -15,8 +15,9 @@ const MARKETS = [
 ]
 
 const STEPS = [
-  '몰 로그인 유지 스크랩', '스크랩 결과 검토·병합', '재고/카테고리/코드 추출', '상품마스터로 가공',
-  '이미지 정규화 + 호스팅URL', 'AI 상품명 생성', '가격/마진 관리', '마켓별 시트 분할 다운로드',
+  '몰 로그인 유지 스크랩', '스크랩 결과 검토·확정', '재고/카테고리/코드 추출', '상품마스터로 가공',
+  '완성본 참고 AI 컬럼 생성', '이미지 정규화 + 호스팅URL', 'AI 상품명 생성', '가격/마진 관리',
+  '마켓별 시트 분할 다운로드', '변동 감지 & 지속 관리',
 ]
 
 export function DashboardPanel() {
@@ -58,14 +59,18 @@ export function DashboardPanel() {
       label: '엑셀 내보내기', value: '→', accent: 'bg-violet-50 text-violet-600', Icon: ExportIcon,
       open: () => openTab({ id: 'export', type: 'export', title: '엑셀 내보내기', icon: '📊', closable: true }),
     },
+    {
+      label: '연속관리 (변동 감지)', value: '↻', accent: 'bg-cyan-50 text-cyan-600', Icon: RefreshIcon,
+      open: () => openTab({ id: 'continuous-migration', type: 'continuous-migration', title: '마이그레이션3_연속관리', icon: '🔁', closable: true }),
+    },
   ]
 
   return (
     <div>
       <h1 className="text-2xl font-bold text-slate-800 mb-1">대시보드</h1>
-      <p className="text-sm text-slate-500 mb-8">Mall 스크래핑 → 상품마스터 → 오픈마켓 대량등록 엑셀 변환</p>
+      <p className="text-sm text-slate-500 mb-8">Mall 스크래핑 → 상품마스터 → 오픈마켓 대량등록 엑셀 변환, 이후 변동 감지로 지속 관리</p>
 
-      <div className="grid grid-cols-5 gap-4 mb-6">
+      <div className="grid grid-cols-3 gap-4 mb-6">
         {cards.map(c => (
           <button key={c.label} onClick={c.open}
             className="group bg-white rounded-2xl border border-slate-100 p-5 text-left transition-all duration-200

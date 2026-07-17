@@ -6,13 +6,16 @@ export async function GET() {
   const res = await pool.query(`
     SELECT s.id, s.site_id, s.url, s.status, s.scope_type, s.mode, s.product_count AS found_count,
            COUNT(p.id) AS saved_count, s.created_at,
+           site.name AS site_name, client.name AS client_name,
            (SELECT COUNT(*) FROM scrape_staging_items si WHERE si.session_id = s.id) AS staged_count,
            (SELECT COUNT(*) FROM scrape_staging_items si WHERE si.session_id = s.id AND si.status = 'pending') AS pending_count,
            (SELECT COUNT(*) FROM scrape_staging_items si WHERE si.session_id = s.id AND si.status = 'merged')  AS merged_count,
            (SELECT COUNT(*) FROM scrape_staging_items si WHERE si.session_id = s.id AND si.status = 'skipped') AS skipped_count
     FROM scrape_sessions s
     LEFT JOIN mall_products p ON p.last_seen_session_id = s.id
-    GROUP BY s.id
+    LEFT JOIN sites site ON site.id = s.site_id
+    LEFT JOIN supply_clients client ON client.id = site.client_id
+    GROUP BY s.id, site.name, client.name
     ORDER BY s.created_at DESC
   `)
   return NextResponse.json(res.rows)

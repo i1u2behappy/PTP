@@ -17,6 +17,8 @@ interface Session {
   merged_count: number
   skipped_count: number
   created_at: string
+  site_name: string | null
+  client_name: string | null
 }
 
 interface MasterRow {
@@ -131,6 +133,7 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
     const q = sessionSearch.trim().toLowerCase()
     if (!q) return true
     return s.url.toLowerCase().includes(q) || s.status.toLowerCase().includes(q) || new Date(s.created_at).toLocaleString().toLowerCase().includes(q)
+      || (s.client_name || '').toLowerCase().includes(q) || (s.site_name || '').toLowerCase().includes(q)
   })
 
   function selectClient(id: number | '') {
@@ -139,7 +142,6 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
   }
 
   function handleSearch() {
-    if (clientId === '' && siteId === '') { alert('거래처 또는 몰을 하나 이상 선택해주세요.'); return }
     setQueryClientId(clientId)
     setQuerySiteId(siteId)
     setSearched(true)
@@ -176,16 +178,16 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
             {filteredSites.map(s => <option key={s.id} value={s.id}>{s.name || s.url}</option>)}
           </select>
         </label>
-        <button onClick={handleSearch} disabled={clientId === '' && siteId === ''}
-          className="px-4 py-1.5 bg-teal-500 text-white text-sm font-semibold rounded-full hover:bg-teal-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
-          🔍 조회
+        <button onClick={handleSearch}
+          className="px-4 py-1.5 bg-teal-500 text-white text-sm font-semibold rounded-full hover:bg-teal-600 transition-colors">
+          🔍 조회 {clientId === '' && siteId === '' && '(전체)'}
         </button>
       </div>
 
       {!searched ? (
         <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 mb-4 shrink-0">
           <div className="text-4xl mb-3">🔍</div>
-          <p className="text-sm">거래처 또는 몰을 하나 이상 선택하고 조회 버튼을 눌러주세요.</p>
+          <p className="text-sm">조회 버튼을 눌러주세요 — 거래처/몰을 고르면 그 범위만, 그대로 두면 전체 스크랩 내역이 나옵니다.</p>
         </div>
       ) : sessions.length === 0 ? (
         <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 mb-4 shrink-0">
@@ -196,10 +198,10 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
         <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4 shrink-0">
           <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3">
             <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
-            <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="URL·상태·일시 검색..."
+            <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="거래처·몰·URL·상태·일시 검색..."
               className="flex-1 border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </div>
-          <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId} />
+          <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId} showClientMall />
         </div>
       )}
 

@@ -80,12 +80,12 @@ const COLUMNS_BEFORE_OPTIONS: ColumnDef[] = [
   { key: 'thumbnail_img', label: '이미지', getValue: p => p.thumbnail_urls?.length ?? 0 },
   { key: 'mall_product_code', label: '상품코드', getValue: p => p.mall_product_code },
   { key: 'name_original', label: '상품명', getValue: p => p.name_original },
+  { key: 'mall_category', label: '카테고리', getValue: p => p.mall_category },
   { key: 'price', label: '소비자판가', getValue: p => p.price },
   { key: 'sale_price', label: '공급가', getValue: p => p.sale_price },
   { key: 'brand', label: '브랜드', getValue: p => p.brand },
   { key: 'manufacturer', label: '제조사', getValue: p => p.manufacturer },
   { key: 'origin', label: '원산지', getValue: p => p.origin },
-  { key: 'mall_category', label: '카테고리', getValue: p => p.mall_category },
   { key: 'description', label: '설명', getValue: p => p.description },
   { key: 'thumbnail_names', label: '대표이미지', getValue: p => (p.thumbnail_urls || []).join(', ') },
   { key: 'detail_image_urls', label: '상세이미지', getValue: p => (p.detail_image_urls || []).join(', ') },
@@ -127,7 +127,7 @@ function widthFor(key: string): number {
   return DEFAULT_COL_WIDTH[key] ?? (key.startsWith('option_') ? 180 : 120)
 }
 
-const COL_ORDER_KEY = 'stagingGrid.colOrder.v5'
+const COL_ORDER_KEY = 'stagingGrid.colOrder.v6'
 const DEFAULT_COL_ORDER = [...COLUMNS_BEFORE_OPTIONS, ...COLUMNS_AFTER_OPTIONS].map(c => c.key)
 
 function loadColOrder(): string[] {

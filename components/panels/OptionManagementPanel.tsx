@@ -75,7 +75,7 @@ export function OptionManagementPanel({ params }: { params?: Record<string, unkn
                   <div className="flex items-start justify-between gap-3 mb-2">
                     <p className="text-sm font-semibold text-gray-700 truncate">{row.name_final || row.name_ai || row.name_original}</p>
                     <button onClick={() => save(row.id)} disabled={saving.has(row.id)}
-                      className="px-3 py-1 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors shrink-0">
+                      className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors shrink-0">
                       {saving.has(row.id) ? '저장 중...' : '저장'}
                     </button>
                   </div>

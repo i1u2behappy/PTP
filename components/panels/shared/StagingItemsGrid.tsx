@@ -397,7 +397,7 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
             </button>
           )}
           <button onClick={handleExport}
-            className="px-4 py-1.5 bg-slate-100 text-slate-700 text-xs font-semibold rounded-full hover:bg-slate-200 transition-colors">
+            className="px-4 py-1.5 bg-gray-100 text-gray-600 text-xs font-semibold rounded-full hover:bg-gray-200 transition-colors">
             📥 엑셀 다운로드
           </button>
           {selected.size > 0 && (

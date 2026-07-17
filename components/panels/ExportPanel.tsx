@@ -89,7 +89,7 @@ export function ExportPanel() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-800">📊 엑셀 내보내기</h1>
         <button onClick={handleExport} disabled={downloading || readyRows.length === 0}
-          className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0">
+          className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0">
           {downloading ? '생성 중...' : `📥 엑셀 다운로드 (${selectedCount}개)`}
         </button>
       </div>

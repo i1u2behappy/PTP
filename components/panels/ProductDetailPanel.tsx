@@ -121,27 +121,28 @@ export function ProductDetailPanel({ params }: { params?: Record<string, unknown
           <h1 className="text-2xl font-bold text-gray-800">📦 {data.name_original || `상품 #${data.id}`}</h1>
           <p className="text-xs text-gray-400 mt-1">몰 상품코드: {data.mall_product_code} · 마지막 스크랩: {data.last_scraped_at ? new Date(data.last_scraped_at).toLocaleString() : '-'}</p>
         </div>
-        <div className="flex gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
           <button onClick={handleRescrape} disabled={rescraping}
-            className="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+            className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
             {rescraping ? '재스크랩 중...' : '🔄 재스크랩'}
           </button>
           {data.master_product_id ? (
             <button onClick={() => openTab({ ...MASTER_LIST_TAB, type: 'master-detail', params: { masterId: data.master_product_id } })}
-              className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors">
+              className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-full transition-colors">
               🗂️ 상품마스터 보기
             </button>
           ) : (
             <button onClick={handleMigrate} disabled={migrating}
-              className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+              className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
               {migrating ? '가공 중...' : '➜ 상품마스터로 가공'}
             </button>
           )}
-          <button onClick={handleDelete} className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-semibold rounded-full transition-colors">
+          <button onClick={handleDelete}
+            className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-600 text-sm font-semibold rounded-full transition-colors mr-2">
             🗑 삭제
           </button>
           <button onClick={handleSave} disabled={saving}
-            className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+            className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
             {saving ? '저장 중...' : '변경사항 저장'}
           </button>
         </div>

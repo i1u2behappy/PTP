@@ -710,11 +710,11 @@ export function TransformPanel() {
                             <td className="px-2 py-2">
                               <div className="flex gap-1">
                                 <button onClick={() => handleCommit(row)} disabled={locked}
-                                  className="px-3 py-1 bg-emerald-500 hover:bg-emerald-600 text-white rounded-full disabled:opacity-50">
+                                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
                                   {committing === row.id ? '처리중...' : '반영'}
                                 </button>
                                 <button onClick={() => handleDiscard(row)} disabled={locked}
-                                  className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-full disabled:opacity-50">
+                                  className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
                                   {discarding === row.id ? '취소 중...' : '취소'}
                                 </button>
                               </div>

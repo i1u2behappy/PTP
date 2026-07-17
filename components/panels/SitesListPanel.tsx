@@ -74,7 +74,7 @@ export function SitesListPanel() {
         <h1 className="text-2xl font-bold text-gray-800">🏬 Mall 관리</h1>
         <div className="flex gap-2">
           <button onClick={handleRescrapeAll} disabled={rescrapingAll}
-            className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+            className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
             {rescrapingAll ? '실행 중...' : '🔄 전체 Mall 재스크랩'}
           </button>
           <button onClick={() => openDetail()}

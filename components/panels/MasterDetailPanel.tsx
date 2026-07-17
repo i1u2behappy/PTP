@@ -179,26 +179,27 @@ export function MasterDetailPanel({ params }: { params?: Record<string, unknown>
             {data.status === 'ready' ? <span className="text-emerald-600 font-medium">확정됨</span> : <span>{data.status}</span>}
           </p>
         </div>
-        <div className="flex gap-2 shrink-0">
-          <button onClick={backToList} className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-medium rounded-full transition-colors">
+        <div className="flex items-center gap-2 shrink-0">
+          <button onClick={backToList} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-full transition-colors">
             ← 목록
           </button>
           {data.mall_product_id && (
             <button onClick={() => openProductDetail(data.mall_product_id!)}
-              className="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs font-semibold rounded-full transition-colors">
+              className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-full transition-colors">
               📦 원본 보기
             </button>
           )}
           {data.status !== 'ready' && (
-            <button onClick={handleMarkReady} className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-full transition-colors">
+            <button onClick={handleMarkReady} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-full transition-colors">
               ✅ 확정
             </button>
           )}
-          <button onClick={handleDelete} className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-semibold rounded-full transition-colors">
+          <button onClick={handleDelete}
+            className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-600 text-sm font-semibold rounded-full transition-colors mr-2">
             🗑 삭제
           </button>
           <button onClick={handleSave} disabled={saving}
-            className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+            className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
             {saving ? '저장 중...' : '변경사항 저장'}
           </button>
         </div>
@@ -291,7 +292,7 @@ export function MasterDetailPanel({ params }: { params?: Record<string, unknown>
               %
             </label>
             <button onClick={applyTargetMargin} type="button"
-              className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-full transition-colors">
+              className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full transition-colors">
               이 마진율로 판매가 계산
             </button>
           </div>

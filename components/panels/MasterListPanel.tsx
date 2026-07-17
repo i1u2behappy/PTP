@@ -220,7 +220,7 @@ export function MasterListPanel() {
         <input value={renameTo} onChange={e => setRenameTo(e.target.value)} placeholder="변경할 값" list={renameField === 'brand' ? 'ml-brand-options' : 'ml-category-options'}
           className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs max-w-[160px] focus:outline-none focus:ring-2 focus:ring-teal-400" />
         <button onClick={applyRename} disabled={!renameFrom || !renameTo || renaming}
-          className="px-3 py-1.5 bg-slate-600 hover:bg-slate-700 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+          className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
           {renaming ? '변경 중...' : '일괄 변경 적용'}
         </button>
       </div>

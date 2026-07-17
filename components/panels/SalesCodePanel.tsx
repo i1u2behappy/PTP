@@ -147,7 +147,7 @@ export function SalesCodePanel({ params }: { params?: Record<string, unknown> })
                           </td>
                           <td className="px-4 py-2">
                             <button onClick={() => applyOne(row)} disabled={!preview || isApplied || savingId === row.id}
-                              className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-full disabled:opacity-40 transition-colors">
+                              className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full disabled:opacity-40 transition-colors">
                               {isApplied ? '적용됨' : savingId === row.id ? '적용 중...' : '조합 적용'}
                             </button>
                           </td>

@@ -8,6 +8,10 @@ export async function POST(req: NextRequest) {
   }
   if (!body.url) return NextResponse.json({ error: 'url required' }, { status: 400 })
 
-  const result = await scrapeSingleProduct(body)
-  return NextResponse.json(result)
+  try {
+    const result = await scrapeSingleProduct(body)
+    return NextResponse.json(result)
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 })
+  }
 }

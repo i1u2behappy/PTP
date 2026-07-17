@@ -29,6 +29,14 @@ async function isManualLoginSite(siteId: number): Promise<boolean> {
   return !!res.rows[0]?.manual_login_required
 }
 
+/** 사용자의 실제 개인 크롬을 정상 종료 요청한다(taskkill, /F 없음 — 강제 종료 아님). 같은 프로필을 쓰는
+ * 크롬 창은 로그인용으로 띄운 것이든 평소 쓰던 것이든 구분 없이 전부 닫힌다. 저장 안 된 내용(작성 중인
+ * 폼 등)이 있으면 크롬이 스스로 "떠나시겠습니까?" 확인창을 띄울 수 있다 — 그 경우 사용자가 직접 응답해야
+ * 실제로 닫히므로, 이후 재시도가 실패하면 사용자에게 직접 닫아달라고 안내한다. */
+async function closePersonalChromeGracefully(): Promise<void> {
+  await execFileAsync('taskkill', ['/IM', 'chrome.exe']).catch(() => {})
+}
+
 export interface ScrapeOptions {
   /** 시작 URL. 생략하면 로그인 창에서 현재 열려있는 페이지를 그대로 사용 */
   url?: string
@@ -224,17 +232,21 @@ async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, context: Bro
     }
     if (await isManualLoginSite(opts.siteId)) {
       // 직접로그인 필수 몰은 전용 폴더 대신 사용자의 실제 개인 크롬 프로필을 그대로 쓴다(openManualLoginWindow와
-      // 동일한 이유). 개인 브라우저이므로 여기서 기존 크롬 프로세스를 강제 종료하지 않는다 — 사용자가 크롬을
-      // 열어둔 채면 같은 프로필을 동시에 못 써서 launchPersistentContext가 실패하는데, 그 경우 사용자가 직접
-      // 크롬을 닫아야 한다.
-      let context: BrowserContext
-      try {
-        context = await chromium.launchPersistentContext(realChromeUserDataDir(), {
+      // 동일한 이유). 사용자가 크롬을 열어둔 채면(로그인용으로 띄운 창이든 평소 쓰던 창이든 — 같은 프로필을
+      // 공유하므로 구분 불가) 같은 프로필을 동시에 못 써서 첫 시도가 실패한다 — 이 경우 정상 종료(taskkill,
+      // 강제 종료 아님)를 요청해 저장 안 된 내용이 있으면 크롬이 스스로 확인창을 띄울 기회를 주고, 잠시 기다린
+      // 뒤 한 번만 재시도한다.
+      const context = await chromium.launchPersistentContext(realChromeUserDataDir(), {
+        headless: true, channel: 'chrome', chromiumSandbox: true,
+      }).catch(async () => {
+        await closePersonalChromeGracefully()
+        await sleep(2000)
+        return chromium.launchPersistentContext(realChromeUserDataDir(), {
           headless: true, channel: 'chrome', chromiumSandbox: true,
+        }).catch(() => {
+          throw new Error('개인 크롬 브라우저를 자동으로 종료하지 못했습니다. 직접 크롬을 모두 닫고 다시 시도해주세요.')
         })
-      } catch {
-        throw new Error('개인 크롬 브라우저가 열려있으면 이 몰은 스크랩할 수 없습니다. 크롬을 모두 닫고 다시 시도해주세요.')
-      }
+      })
       try {
         const page = context.pages()[0] || await context.newPage()
         return await fn(page, context)

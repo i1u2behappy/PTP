@@ -11,6 +11,10 @@ export async function POST(req: NextRequest) {
   const resolvedUrl = body.url || body.categoryUrls?.[0] || (body.siteId ? getOpenPageUrl(body.siteId) : null)
   if (!resolvedUrl) return NextResponse.json({ error: 'url required' }, { status: 400 })
 
-  const result = await previewCatalog(body)
-  return NextResponse.json(result)
+  try {
+    const result = await previewCatalog(body)
+    return NextResponse.json(result)
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 })
+  }
 }

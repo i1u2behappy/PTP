@@ -105,6 +105,16 @@ API로 전용 프로필에 옮겨 심는 방식(`importPersonalChromeCookies`)�
 분리하면 이 제약이 실질적으로 문제가 안 된다(별개 프로세스/프로필이라 서로 전혀 안 건드림). 코드 변경
 없이 사용자 쪽 사용 습관으로 해결.
 
+### 후속 — PTP 자체를 크롬으로 열면 엣지로 유도하는 팝업
+
+위 운영 방법을 사용자가 잊지 않도록, PTP를 크롬으로 열면(Edge/Opera/Brave는 UA에 `Chrome/`이 있어도
+각각 `Edg/`, `OPR/`, `Brave/`로 구분해 제외) "PTP는 엣지 브라우저에서 열어주세요" 팝업을 띄운다
+(`components/shell/ChromeWarning.tsx`, `app/layout.tsx`에 전역 삽입). "엣지 바로가기" 버튼은 엣지 설치 시
+Windows가 기본 등록하는 `microsoft-edge:` 프로토콜 핸들러로 현재 페이지를 그대로 엣지에서 연다(별도
+설치/확장 불필요, `window.location.href = 'microsoft-edge:' + 현재 URL`).
+이건 어디까지나 "크롬을 이 몰 전용으로 비워두라"는 운영 습관을 상기시키는 용도일 뿐 — PTP를 어느
+브라우저로 여는지는 "현재 페이지로" 같은 서버 쪽 기능(Playwright 추적 여부)과는 무관하다.
+
 ## 관련 파일
 
 - `lib/db.ts`: `sites.manual_login_required` 컬럼
@@ -117,12 +127,14 @@ API로 전용 프로필에 옮겨 심는 방식(`importPersonalChromeCookies`)�
 - `components/panels/SiteDetailPanel.tsx`: "직접로그인 필수" 체크박스
 - `components/panels/SitesListPanel.tsx`: 목록 배지
 - `components/panels/ScraperPanel.tsx`: 로그인 정보 섹션의 안내 문구 + 아이디/비번 복사 버튼
+- `components/shell/ChromeWarning.tsx`, `app/layout.tsx`: 크롬으로 PTP 접속 시 엣지 유도 팝업
 
 ## 상태
 
 **구현 완료 (2026-07-17).** 커밋: `a74832f`(플래그/UI), `3e517e9`(모든 스크래핑 경로 실제 크롬으로 통일),
 `763a775`(개인 프로필 사용으로 최종 해결), `e9c74e0`("현재 페이지로" 정리 + 안내 문구 축약),
 `18493c2`(개인 크롬 자동 종료 후 재시도 — 이후 되돌림), `037918f`(문서화),
-`b22c554`(자동 종료 및 쿠키 이전 방식 둘 다 되돌리고 개인 프로필 직접 사용으로 최종 확정).
+`b22c554`(자동 종료 및 쿠키 이전 방식 둘 다 되돌리고 개인 프로필 직접 사용으로 최종 확정),
+`efe87ab`(문서화), `b92f31d`(크롬으로 PTP 접속 시 엣지 유도 팝업).
 `mojasareo.com`(site id 3)에서 실제 로그인 성공까지 확인함. 스크랩 중 개인 크롬을 닫아둬야 하는 제약은
 남아있으며, 사용자는 크롬을 이 몰 전용으로 쓰고 평소 웹서핑은 다른 브라우저로 분리하는 방식으로 운영하기로 함.

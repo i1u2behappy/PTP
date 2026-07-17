@@ -198,7 +198,16 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
     setDragKey(null)
   }
 
-  const orderedColumns = colOrder.map(k => columns.find(c => c.key === k)).filter((c): c is ColumnDef => !!c)
+  // 옵션1/옵션2/... 컬럼은 사용자가 드래그로 순서를 바꿔도 항상 상세이미지 컬럼 바로 뒤에 위치하도록 강제한다.
+  const orderedColumnsRaw = colOrder.map(k => columns.find(c => c.key === k)).filter((c): c is ColumnDef => !!c)
+  const orderedColumns = (() => {
+    const optionCols = orderedColumnsRaw.filter(c => c.key.startsWith('option_'))
+    if (!optionCols.length) return orderedColumnsRaw
+    const rest = orderedColumnsRaw.filter(c => !c.key.startsWith('option_'))
+    const insertAt = rest.findIndex(c => c.key === 'detail_image_urls')
+    const idx = insertAt === -1 ? rest.length : insertAt + 1
+    return [...rest.slice(0, idx), ...optionCols, ...rest.slice(idx)]
+  })()
 
   function startResize(key: string, e: { clientX: number; preventDefault: () => void }) {
     e.preventDefault()
@@ -328,7 +337,15 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
 
   async function handleExport() {
     if (sessionId === '') return
-    const res = await fetch(`/api/scrape-staging/export?sessionId=${sessionId}`)
+    // 그리드에 실제로 보이는 것(현재 컬럼 순서·필터·정렬 결과) 그대로 내보낸다 — 서버가 별도 컬럼 구성을
+    // 갖고 있으면 화면과 엑셀 내용이 어긋나므로, 화면과 같은 columns/getValue를 그대로 재사용한다.
+    const headers = orderedColumns.map(c => c.label)
+    const rows = visibleItems.map(p => orderedColumns.map(c => c.getValue(p) ?? ''))
+    const res = await fetch(`/api/scrape-staging/export?sessionId=${sessionId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ headers, rows }),
+    })
     if (!res.ok) return alert('엑셀 다운로드에 실패했습니다.')
     const blob = await res.blob()
     const cd = res.headers.get('Content-Disposition') || ''

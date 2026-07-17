@@ -209,8 +209,9 @@ export function SiteDetailPanel({ params }: Props) {
       {!isNew && (
         <MemoLog baseUrl={`/api/sites/${siteId}/memos`}
           title="운영 메모"
-          description="이 몰만의 정산·배송 정보를 기록해두세요 — 예: 은행명/계좌번호, 배송(출고지) 주소, 택배사/택배비, 고객센터 연락처 등"
-          placeholder="예: 국민은행 123-456-789012 (예금주: 홍길동)" />
+          description="스크래핑 작업 시 파악해두어야 하는 이 몰만의 거래 정보입니다 — 택배사, 배송비, 배송/반품 주소지, 연락처, 은행, 계좌번호 등을 항목별로 구분해 적어주세요."
+          placeholder="메모 내용"
+          template={'택배사: \n배송비: \n배송/반품 주소지: \n연락처: \n은행: \n계좌번호: '} />
       )}
     </div>
   )

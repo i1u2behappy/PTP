@@ -16,11 +16,13 @@ function formatDisplay(iso: string) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-export function MemoLog({ baseUrl, title = '일자별 메모', description, placeholder = '메모 내용' }: {
+export function MemoLog({ baseUrl, title = '일자별 메모', description, placeholder = '메모 내용', template }: {
   baseUrl: string
   title?: string
   description?: string
   placeholder?: string
+  /** 항목별로 구분해 적어야 하는 메모(예: 택배사/배송비/주소 등)일 때, "템플릿 채우기" 버튼으로 넣어줄 여러 줄 골격 */
+  template?: string
 }) {
   const [memos, setMemos] = useState<MemoEntry[]>([])
   const [loading, setLoading] = useState(true)
@@ -70,14 +72,30 @@ export function MemoLog({ baseUrl, title = '일자별 메모', description, plac
     <div className="bg-white rounded-2xl border border-gray-200 p-6">
       <h2 className={`text-sm font-semibold text-gray-700 ${description ? 'mb-1' : 'mb-3'}`}>{title}</h2>
       {description && <p className="text-xs text-gray-400 mb-3">{description}</p>}
-      <div className="flex gap-2 mb-4">
-        <input value={newContent} onChange={e => setNewContent(e.target.value)} placeholder={placeholder}
-          onKeyDown={e => e.key === 'Enter' && addMemo()}
-          className="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
-        <button onClick={addMemo} className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors shrink-0">
-          추가
-        </button>
-      </div>
+      {template ? (
+        <div className="mb-4">
+          <div className="flex justify-end mb-1">
+            <button onClick={() => (!newContent.trim() || confirm('입력 중이던 내용을 템플릿으로 덮어쓸까요?')) && setNewContent(template)}
+              className="text-xs text-teal-600 hover:underline">📋 템플릿 채우기</button>
+          </div>
+          <textarea value={newContent} onChange={e => setNewContent(e.target.value)} placeholder={placeholder} rows={6}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          <div className="flex justify-end mt-2">
+            <button onClick={addMemo} className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors shrink-0">
+              추가
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex gap-2 mb-4">
+          <input value={newContent} onChange={e => setNewContent(e.target.value)} placeholder={placeholder}
+            onKeyDown={e => e.key === 'Enter' && addMemo()}
+            className="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          <button onClick={addMemo} className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors shrink-0">
+            추가
+          </button>
+        </div>
+      )}
       {loading ? (
         <p className="text-xs text-gray-400">불러오는 중...</p>
       ) : memos.length === 0 ? (

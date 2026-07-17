@@ -508,7 +508,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           {needsLogin ? (
             <div className="flex items-center gap-3 flex-wrap">
               <button onClick={handleOpenLogin} disabled={loginBusy}
-                className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+                className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
                 {loginStep === 'opened' || loginStep === 'confirmed' ? '로그인 창 다시 열기' : '로그인 창 열기'}
               </button>
               <button onClick={handleConfirmLogin} disabled={loginBusy || loginStep === 'none'}
@@ -576,7 +576,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               <span className="px-3 py-2 text-xs text-gray-400 shrink-0">이 몰은 직접로그인 몰이라 시작페이지를 직접 입력해 주세요</span>
             ) : loginStep === 'confirmed' && (
               <button onClick={handleRefreshCurrentUrl} title="로그인 창에서 현재 보고 있는 페이지로 갱신"
-                className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-medium rounded-full transition-colors shrink-0">
+                className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full transition-colors shrink-0">
                 현재 페이지로
               </button>
             )}
@@ -679,7 +679,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           <div className="flex items-center justify-between mb-2">
             <label className="block text-sm font-semibold text-gray-700">상품 페이지 미리보기</label>
             <button type="button" onClick={handlePreview} disabled={previewLoading || !canPreview}
-              className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0">
+              className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0">
               {previewLoading ? '확인 중...' : '🔍 스크랩 미리보기'}
             </button>
           </div>
@@ -867,7 +867,15 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         <div className="mt-4 bg-white rounded-2xl border border-gray-200 p-5">
           <div className="flex items-center justify-between mb-3">
             <span className="text-sm font-semibold text-gray-700">진행 상황</span>
-            <span className={`text-sm font-semibold ${statusColor[status]}`}>{statusLabel[status]}</span>
+            <div className="flex items-center gap-3">
+              <span className={`text-sm font-semibold ${statusColor[status]}`}>{statusLabel[status]}</span>
+              {status === 'done' && (
+                <button onClick={() => openTab(PRODUCTS_LIST_TAB)}
+                  className="px-4 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors">
+                  → 스크랩 Raw 확인
+                </button>
+              )}
+            </div>
           </div>
           {status === 'running' && (
             <div className="w-full bg-gray-100 rounded-full h-2 mb-3">
@@ -899,23 +907,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             <>
               {progress.error && <p className="mt-2 text-xs text-rose-500 break-all">{progress.error}</p>}
               <button onClick={handleBackToSettings}
-                className="mt-3 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium rounded-full transition-colors">
+                className="mt-3 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-full transition-colors">
                 ← 설정 화면으로 돌아가기
               </button>
             </>
           )}
-          {status === 'done' && (
-            <div className="mt-3 flex items-center gap-3">
-              <button onClick={() => openTab(PRODUCTS_LIST_TAB)}
-                className="inline-block text-sm text-teal-500 font-medium hover:underline">
-                → 스크랩 Raw 확인
+          {status === 'done' && failedUrls.length > 0 && (
+            <div className="mt-3">
+              <button onClick={handleRetryFailed} disabled={retrying}
+                className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+                {retrying ? '재시도 중...' : `실패 ${failedUrls.length}개 재시도`}
               </button>
-              {failedUrls.length > 0 && (
-                <button onClick={handleRetryFailed} disabled={retrying}
-                  className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
-                  {retrying ? '재시도 중...' : `실패 ${failedUrls.length}개 재시도`}
-                </button>
-              )}
             </div>
           )}
         </div>

@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import { Geist } from 'next/font/google'
+import { ChromeWarning } from '../components/shell/ChromeWarning'
 import './globals.css'
 
 const geist = Geist({ variable: '--font-geist', subsets: ['latin'] })
@@ -16,7 +17,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* 국내 SaaS(플로우/두레이 등)에서 표준적으로 쓰이는 한글 웹폰트 — CDN 스타일시트, npm 의존성 추가 없음 */}
         <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css" />
       </head>
-      <body className="min-h-full">{children}</body>
+      <body className="min-h-full">
+        <ChromeWarning />
+        {children}
+      </body>
     </html>
   )
 }

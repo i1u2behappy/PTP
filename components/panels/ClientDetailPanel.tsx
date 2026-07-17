@@ -133,8 +133,11 @@ export function ClientDetailPanel({ params }: Props) {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-800">🏢 {form.name} 수정</h1>
         <div className="flex items-center gap-2 shrink-0">
-          <button onClick={handleDelete} className="text-xs text-rose-500 hover:underline mr-2">🗑 이 거래처 삭제</button>
-          <button onClick={backToList} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-medium rounded-full transition-colors">
+          <button onClick={handleDelete}
+            className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-600 text-sm font-semibold rounded-full transition-colors mr-2">
+            🗑 삭제
+          </button>
+          <button onClick={backToList} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-full transition-colors">
             취소
           </button>
           <button onClick={handleSave} disabled={saving}
@@ -159,26 +162,31 @@ export function ClientDetailPanel({ params }: Props) {
           거래처 코드: <span className="font-mono text-teal-600">{existingCode || '-'}</span>
         </p>
 
-        <label className="block mb-3">
-          <span className="block text-xs text-gray-500 mb-1">사업자등록증 사본 (PDF 또는 이미지, 최대 10MB)</span>
-          <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp"
-            onChange={e => setDocFile(e.target.files?.[0] || null)}
-            className="w-full text-sm text-gray-600 file:mr-3 file:px-3 file:py-1.5 file:rounded-full file:border-0 file:bg-teal-50 file:text-teal-600 file:text-xs file:font-semibold hover:file:bg-teal-100" />
-          {docFile ? (
-            <p className="text-xs text-gray-500 mt-1">선택됨: {docFile.name} (저장 시 업로드됩니다)</p>
-          ) : existingDoc ? (
-            <p className="text-xs text-gray-500 mt-1">
-              등록된 파일: <a href={existingDoc.path} target="_blank" rel="noreferrer" className="text-teal-600 hover:underline">{existingDoc.name}</a>
-            </p>
-          ) : (
-            <p className="text-xs text-gray-300 mt-1">등록된 파일이 없습니다.</p>
-          )}
-        </label>
+        <div className="flex items-start gap-3 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 mb-3">
+          <span className="text-xs text-gray-500 shrink-0 pt-1.5">📎 사업자등록증 사본<br />(PDF/이미지, 최대 10MB)</span>
+          <div>
+            <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp"
+              onChange={e => setDocFile(e.target.files?.[0] || null)}
+              className="text-sm text-gray-600 file:mr-3 file:px-3 file:py-1.5 file:rounded-full file:border-0 file:bg-teal-50 file:text-teal-600 file:text-xs file:font-semibold hover:file:bg-teal-100" />
+            {docFile ? (
+              <p className="text-xs text-teal-600 mt-1">✓ 선택됨: {docFile.name} (저장 시 업로드됩니다)</p>
+            ) : existingDoc ? (
+              <p className="text-xs text-gray-500 mt-1">
+                등록된 파일: <a href={existingDoc.path} target="_blank" rel="noreferrer" className="text-teal-600 hover:underline">{existingDoc.name}</a>
+              </p>
+            ) : (
+              <p className="text-xs text-gray-300 mt-1">등록된 파일이 없습니다.</p>
+            )}
+          </div>
+        </div>
 
-        <label className="flex items-center gap-2 text-sm text-gray-600 mb-3">
+        <label className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5 mb-3">
           <input type="checkbox" checked={form.auto_internal_code !== 'false'}
             onChange={e => setForm(v => ({ ...v, auto_internal_code: String(e.target.checked) }))} />
-          상품마스터 가공 시 관리코드 자동 발급 (거래처 코드가 설정된 경우)
+          <span>
+            관리코드 자동 발급
+            <span className="block text-xs text-gray-400">상품마스터 가공 시 거래처 코드 기반 사내 관리코드를 자동으로 발급합니다 (거래처 코드가 설정된 경우)</span>
+          </span>
         </label>
       </div>
 

@@ -1,6 +1,5 @@
 'use client'
 import { useState } from 'react'
-import { englishInitialsOf } from '@/lib/koreanInitials'
 
 const FIELDS: { key: string; label: string }[] = [
   { key: 'name', label: '거래처명 *' },
@@ -74,23 +73,25 @@ export function NewClientForm({ onCreated }: { onCreated: () => void }) {
         ))}
       </div>
 
-      <div className="flex items-end gap-4 flex-wrap shrink-0">
-        <p className="text-[11px] text-gray-500">
-          거래처 코드: <span className="font-mono text-teal-600">{englishInitialsOf(form.name || '')}-????????</span>
-        </p>
+      <div className="flex items-stretch gap-3 flex-wrap shrink-0">
+        <div className="flex items-center gap-3 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2">
+          <span className="text-[11px] text-gray-500 shrink-0">📎 사업자등록증 사본<br />(PDF/이미지, 최대 10MB)</span>
+          <label className="shrink-0">
+            <span className="sr-only">사업자등록증 사본 선택</span>
+            <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp"
+              onChange={e => setDocFile(e.target.files?.[0] || null)}
+              className="text-xs text-gray-600 file:mr-2 file:px-2 file:py-1 file:rounded-full file:border-0 file:bg-teal-50 file:text-teal-600 file:text-[11px] file:font-semibold hover:file:bg-teal-100" />
+          </label>
+          {docFile && <span className="text-[11px] text-teal-600 truncate max-w-[160px]">✓ {docFile.name}</span>}
+        </div>
 
-        <label className="block">
-          <span className="block text-[11px] text-gray-500 mb-0.5">사업자등록증 사본 (PDF/이미지, 최대 10MB)</span>
-          <input type="file" accept=".pdf,.jpg,.jpeg,.png,.webp"
-            onChange={e => setDocFile(e.target.files?.[0] || null)}
-            className="text-xs text-gray-600 file:mr-2 file:px-2 file:py-1 file:rounded-full file:border-0 file:bg-teal-50 file:text-teal-600 file:text-[11px] file:font-semibold hover:file:bg-teal-100" />
-          {docFile && <span className="block text-[11px] text-gray-500 mt-0.5">선택됨: {docFile.name}</span>}
-        </label>
-
-        <label className="flex items-center gap-1.5 text-xs text-gray-600">
+        <label className="flex items-center gap-1.5 text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2">
           <input type="checkbox" checked={form.auto_internal_code !== 'false'}
             onChange={e => setForm(v => ({ ...v, auto_internal_code: String(e.target.checked) }))} />
-          관리코드 자동 발급
+          <span>
+            관리코드 자동 발급
+            <span className="block text-[10px] text-gray-400">상품마스터 가공 시 거래처 코드 기반 사내 관리코드를 자동으로 발급합니다</span>
+          </span>
         </label>
       </div>
     </div>

@@ -61,10 +61,6 @@ Windows 보안(PC인증) 창이 정상적으로 뜨고 통과도 됐지만, **PC
 - **헤드리스 스크래핑**(`withContext`): `sites.manual_login_required`를 DB에서 확인(`isManualLoginSite`)해,
   참이면 전용 폴더 대신 `realChromeUserDataDir()`(`%LOCALAPPDATA%\Google\Chrome\User Data`)를
   `launchPersistentContext`에 그대로 사용한다.
-- **개인 브라우저 보호**: 두 경로 모두 기존 크롬 프로세스를 강제 종료하지 않는다(전용 폴더였을 때는
-  `killOrphanedProfileProcess`로 정리했지만, 실제 개인 브라우저를 앱이 함부로 죽이면 안 되기 때문).
-  대신 사용자가 크롬을 열어둔 채 스크랩을 시도하면(같은 프로필 동시 사용 불가로 `launchPersistentContext`가
-  실패) "개인 크롬 브라우저가 열려있으면 이 몰은 스크랩할 수 없습니다" 에러로 명확히 안내한다.
 - **일반화**: `isManualLoginSite`가 `sites.manual_login_required` 플래그만 보고 판단하므로, 같은 유형의
   다른 몰도 그 플래그만 켜면 자동으로 이 방식(개인 프로필 사용)이 적용된다 — 몰별 특수 코드 불필요.
 - 스크래핑 화면 안내 문구(`components/panels/ScraperPanel.tsx`)도 "복사해서 별도 명령 실행" 방식에서
@@ -79,12 +75,26 @@ Windows 보안(PC인증) 창이 정상적으로 뜨고 통과도 됐지만, **PC
 그 버튼 자리를 "시작페이지를 직접 입력해 주세요" 안내로 대체했다. 직접로그인 안내 문구(로그인 정보
 섹션 상단)도 장황했던 걸 간결하게 줄였다.
 
+### 후속 — 개인 크롬이 열려있으면 자동으로 닫고 재시도
+
+사용자가 개인 크롬을 켜둔 채 미리보기/스크랩을 시도하면 `launchPersistentContext`가 프로필 lock으로
+실패했는데, 처음엔 "직접 닫아달라"는 에러만 띄웠다. 사용자 요청으로 자동 종료를 추가: 실패 시
+`taskkill`(**`/F` 강제 종료 아님** — 저장 안 된 내용이 있으면 크롬이 스스로 "떠나시겠습니까?" 확인창을
+띄울 기회를 줌)로 정상 종료를 요청하고 2초 뒤 한 번 자동 재시도한다(`withContext` 내부, 코드 한 곳에
+있어 미리보기·실제 스크래핑 모두 자동 적용). 그래도 실패하면(확인창이 뜬 채 안 닫혔거나 등) 그제서야
+에러를 보여준다. **주의**: 로그인용으로 띄운 창만 골라 닫는 게 아니라, 같은 프로필을 쓰는 크롬 창
+전부(사용자가 평소 쓰던 창 포함) 닫힌다 — 프로필 자체가 공유되어 구분할 방법이 없다.
+곁들여, `preview`/`preview-catalog` 라우트가 예외를 안 잡고 있어서 이 에러 메시지 자체가 화면에
+`확인 실패: 500`으로 뭉개지던 것도 같이 고쳤다(try/catch로 실제 메시지 반환).
+
 ## 관련 파일
 
 - `lib/db.ts`: `sites.manual_login_required` 컬럼
 - `lib/scraper.ts`: `openManualLoginWindow`(개인 프로필로 로그인 창 열기), `realChromeUserDataDir`,
-  `isManualLoginSite`, `withContext`(manual_login_required 몰은 개인 프로필로 헤드리스 실행)
+  `isManualLoginSite`, `closePersonalChromeGracefully`, `withContext`(manual_login_required 몰은 개인
+  프로필로 헤드리스 실행, 실패 시 자동 종료 후 1회 재시도)
 - `app/api/scrape/login/route.ts`: `manualLogin` 플래그로 `openLoginWindow`/`openManualLoginWindow` 분기
+- `app/api/scrape/preview/route.ts`, `preview-catalog/route.ts`: try/catch로 에러 메시지 반환
 - `app/api/sites/route.ts`, `app/api/sites/[id]/route.ts`: `manual_login_required` CRUD
 - `components/panels/SiteDetailPanel.tsx`: "직접로그인 필수" 체크박스
 - `components/panels/SitesListPanel.tsx`: 목록 배지
@@ -93,5 +103,6 @@ Windows 보안(PC인증) 창이 정상적으로 뜨고 통과도 됐지만, **PC
 ## 상태
 
 **구현 완료 (2026-07-17).** 커밋: `a74832f`(플래그/UI), `3e517e9`(모든 스크래핑 경로 실제 크롬으로 통일),
-`763a775`(개인 프로필 사용으로 최종 해결), `e9c74e0`("현재 페이지로" 정리 + 안내 문구 축약).
+`763a775`(개인 프로필 사용으로 최종 해결), `e9c74e0`("현재 페이지로" 정리 + 안내 문구 축약),
+`18493c2`(개인 크롬 자동 종료 후 재시도 + preview 라우트 에러 응답 수정).
 `mojasareo.com`(site id 3)에서 실제 로그인 성공까지 확인함.

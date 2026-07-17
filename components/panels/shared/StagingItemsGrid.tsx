@@ -141,8 +141,10 @@ function loadColOrder(): string[] {
   } catch { return DEFAULT_COL_ORDER }
 }
 
-/** 수집확인/데이터 마이그 목록 등에서 공용으로 쓰는, 스크랩 세션의 전체 컬럼 상세 그리드 (병합 여부 무관 조회용). */
-export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
+/** 수집확인/데이터 마이그 목록 등에서 공용으로 쓰는, 스크랩 세션의 전체 컬럼 상세 그리드 (병합 여부 무관 조회용).
+ *  siteId가 주어지면(세션 여러 개를 "선택 병합"한 경우) 그 몰의 모든 세션에 걸친 항목을 한번에 보여준다. */
+export function StagingItemsGrid({ sessionId, siteId }: { sessionId?: number | ''; siteId?: number | '' }) {
+  const scopeQuery = siteId ? `siteId=${siteId}` : sessionId ? `sessionId=${sessionId}` : ''
   const { openTab, activeTabId, refreshSignals, bumpRefresh } = useTabs()
   const [items, setItems] = useState<StagingRow[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
@@ -225,14 +227,14 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
   }
 
   const loadItems = useCallback(() => {
-    if (sessionId === '') return
-    fetch(`/api/scrape-staging?sessionId=${sessionId}`).then(r => r.json()).then((d: StagingRow[]) => { if (Array.isArray(d)) setItems(d) }).catch(() => {})
-  }, [sessionId])
+    if (!scopeQuery) return
+    fetch(`/api/scrape-staging?${scopeQuery}`).then(r => r.json()).then((d: StagingRow[]) => { if (Array.isArray(d)) setItems(d) }).catch(() => {})
+  }, [scopeQuery])
 
   useEffect(() => { loadItems() }, [loadItems, refreshSignals.products, refreshSignals.staging])
 
   /* eslint-disable react-hooks/set-state-in-effect */
-  useEffect(() => { setSelected(new Set()) }, [sessionId])
+  useEffect(() => { setSelected(new Set()) }, [scopeQuery])
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const issuesFiltered = issuesOnly ? items.filter(p => missingFields(p).length > 0) : items
@@ -336,12 +338,12 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
   }
 
   async function handleExport() {
-    if (sessionId === '') return
+    if (!scopeQuery) return
     // 그리드에 실제로 보이는 것(현재 컬럼 순서·필터·정렬 결과) 그대로 내보낸다 — 서버가 별도 컬럼 구성을
     // 갖고 있으면 화면과 엑셀 내용이 어긋나므로, 화면과 같은 columns/getValue를 그대로 재사용한다.
     const headers = orderedColumns.map(c => c.label)
     const rows = visibleItems.map(p => orderedColumns.map(c => c.getValue(p) ?? ''))
-    const res = await fetch(`/api/scrape-staging/export?sessionId=${sessionId}`, {
+    const res = await fetch(`/api/scrape-staging/export?${scopeQuery}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ headers, rows }),
@@ -363,7 +365,7 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
     return (
       <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 shrink-0">
         <div className="text-4xl mb-3">📭</div>
-        <p className="text-sm">{sessionId === '' ? '스크래핑 목록에서 항목을 선택하세요.' : '이 스크래핑에 수집된 항목이 없습니다.'}</p>
+        <p className="text-sm">{!scopeQuery ? '스크래핑 목록에서 항목을 선택하세요.' : '이 스크래핑에 수집된 항목이 없습니다.'}</p>
       </div>
     )
   }

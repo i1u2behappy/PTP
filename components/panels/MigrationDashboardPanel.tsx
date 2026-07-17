@@ -89,6 +89,8 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
   const [queryClientId, setQueryClientId] = useState<number | ''>('')
   const [querySiteId, setQuerySiteId] = useState<number | ''>('')
   const [searched, setSearched] = useState(false)
+  const [checkedSessionIds, setCheckedSessionIds] = useState<Set<number>>(new Set())
+  const [mergedSiteId, setMergedSiteId] = useState<number | ''>('')
 
   useEffect(() => {
     fetch('/api/clients').then(r => r.json()).then((d: Client[]) => setClients(Array.isArray(d) ? d : [])).catch(() => {})
@@ -119,9 +121,10 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const loadMasterRows = useCallback(() => {
-    if (selectedSessionId === '') return
-    fetch(`/api/master?sessionId=${selectedSessionId}`).then(r => r.json()).then((d: MasterRow[]) => setMasterRows(Array.isArray(d) ? d : [])).catch(() => {})
-  }, [selectedSessionId])
+    const query = mergedSiteId !== '' ? `siteId=${mergedSiteId}` : selectedSessionId !== '' ? `sessionId=${selectedSessionId}` : ''
+    if (!query) return
+    fetch(`/api/master?${query}`).then(r => r.json()).then((d: MasterRow[]) => setMasterRows(Array.isArray(d) ? d : [])).catch(() => {})
+  }, [selectedSessionId, mergedSiteId])
 
   useEffect(() => { loadMasterRows() }, [loadMasterRows])
 
@@ -145,6 +148,27 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
     setQueryClientId(clientId)
     setQuerySiteId(siteId)
     setSearched(true)
+    setCheckedSessionIds(new Set())
+    setMergedSiteId('')
+  }
+
+  function toggleCheckSession(id: number) {
+    setCheckedSessionIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+  }
+
+  function handleMergeSessions() {
+    const checked = sessions.filter(s => checkedSessionIds.has(s.id))
+    const distinctSites = new Set(checked.map(s => s.site_id))
+    if (distinctSites.size !== 1) {
+      alert('선택한 세션들의 거래처·몰이 서로 다릅니다. 같은 거래처·몰의 세션만 병합할 수 있습니다.')
+      return
+    }
+    setMergedSiteId(checked[0].site_id)
+  }
+
+  function clearMerge() {
+    setMergedSiteId('')
+    setCheckedSessionIds(new Set())
   }
 
   function counts(task: TaskDef) {
@@ -196,19 +220,33 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
         </div>
       ) : (
         <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4 shrink-0">
-          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3">
+          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3 flex-wrap">
             <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
             <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="거래처·몰·URL·상태·일시 검색..."
-              className="flex-1 border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+              className="flex-1 min-w-[200px] border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+            {checkedSessionIds.size > 0 && (
+              <button onClick={handleMergeSessions} disabled={checkedSessionIds.size < 2}
+                className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0">
+                🔗 선택 병합 ({checkedSessionIds.size})
+              </button>
+            )}
           </div>
-          <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId} showClientMall />
+          <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId} showClientMall
+            checkedIds={checkedSessionIds} onToggleCheck={toggleCheckSession} />
         </div>
       )}
 
       {searched && (
         <>
-          {/* 중단: 선택한 세션 기준 하위 작업 진행현황 */}
-          {selectedSessionId === '' ? (
+          {mergedSiteId !== '' && (
+            <div className="bg-cyan-50 border border-cyan-200 rounded-2xl px-4 py-2.5 mb-4 shrink-0 flex items-center justify-between text-xs text-cyan-700">
+              <span>🔗 체크한 {checkedSessionIds.size}개 세션을 같은 몰 기준으로 병합해 보는 중입니다 — 아래 진행현황과 상세 그리드는 이 몰의 전체 세션을 합친 결과입니다.</span>
+              <button onClick={clearMerge} className="text-cyan-700 font-semibold hover:underline shrink-0 ml-3">병합 해제</button>
+            </div>
+          )}
+
+          {/* 중단: 선택한 세션(또는 병합된 몰) 기준 하위 작업 진행현황 */}
+          {mergedSiteId === '' && selectedSessionId === '' ? (
             <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-gray-400 mb-4 shrink-0 text-sm">
               위 스크래핑 목록에서 세션을 선택하면 진행현황이 표시됩니다.
             </div>
@@ -221,10 +259,10 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
               {TASKS.map(task => {
                 const c = counts(task)
                 const total = masterRows.length || 1
-                const siteId = sessions.find(s => s.id === selectedSessionId)?.site_id
+                const taskSiteId = mergedSiteId !== '' ? mergedSiteId : sessions.find(s => s.id === selectedSessionId)?.site_id
                 return (
                   <button key={task.key}
-                    onClick={() => openTab({ ...task.tab, params: { siteId, sessionId: selectedSessionId } })}
+                    onClick={() => openTab({ ...task.tab, params: { siteId: taskSiteId, sessionId: mergedSiteId !== '' ? undefined : selectedSessionId } })}
                     className="bg-white rounded-2xl border border-gray-200 p-4 text-left hover:border-teal-300 transition-colors">
                     <p className="text-xs font-semibold text-gray-600 mb-2">{task.label}</p>
                     <div className="flex h-2 rounded-full overflow-hidden bg-gray-100 mb-2">
@@ -239,7 +277,7 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
           )}
 
           {/* 하단: 수집확인과 동일한 스크랩 상세 그리드 (작업진행사항 없이 조회된 건 전체를 그대로 표시) */}
-          <StagingItemsGrid sessionId={selectedSessionId} />
+          {mergedSiteId !== '' ? <StagingItemsGrid siteId={mergedSiteId} /> : <StagingItemsGrid sessionId={selectedSessionId} />}
         </>
       )}
     </div>

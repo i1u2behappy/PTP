@@ -11,7 +11,7 @@ interface SessionLike {
   site_name?: string | null
 }
 
-export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId, onSelect, onDelete, maxHeightClassName = 'max-h-52', showClientMall }: {
+export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId, onSelect, onDelete, maxHeightClassName = 'max-h-52', showClientMall, checkedIds, onToggleCheck }: {
   sessions: T[]
   selectedId: number | ''
   onSelect: (id: number) => void
@@ -19,6 +19,9 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
   maxHeightClassName?: string
   /** 거래처/몰이 뒤섞여 나오는 조회(예: 데이터 마이그 목록의 전체 조회)에서만 거래처명/몰명 컬럼을 보여준다. */
   showClientMall?: boolean
+  /** 세션 여러 개를 동시에 체크할 수 있게 한다 — "선택 병합"처럼 세션 단위 다중 선택이 필요한 화면에서만 전달. */
+  checkedIds?: Set<number>
+  onToggleCheck?: (id: number) => void
 }) {
   if (sessions.length === 0) return <p className="px-4 py-3 text-xs text-gray-400">검색 결과가 없습니다.</p>
 
@@ -28,6 +31,7 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
         {showClientMall && (
           <thead>
             <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+              {onToggleCheck && <th className="px-4 py-2 text-left w-8"></th>}
               <th className="px-4 py-2 text-left whitespace-nowrap">스크래핑 일시</th>
               <th className="px-4 py-2 text-left whitespace-nowrap">거래처</th>
               <th className="px-4 py-2 text-left whitespace-nowrap">몰</th>
@@ -45,6 +49,11 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
               <tr key={s.id} onClick={() => onSelect(s.id)}
                 className={`border-b border-gray-100 last:border-0 cursor-pointer transition-colors ${
                   s.id === selectedId ? 'bg-teal-50' : 'hover:bg-gray-50'}`}>
+                {onToggleCheck && (
+                  <td className="px-4 py-2" onClick={e => e.stopPropagation()}>
+                    <input type="checkbox" checked={checkedIds?.has(s.id) ?? false} onChange={() => onToggleCheck(s.id)} />
+                  </td>
+                )}
                 <td className="px-4 py-2 text-gray-400 whitespace-nowrap">{new Date(s.created_at).toLocaleString()}</td>
                 {showClientMall && (
                   <>

@@ -7,7 +7,7 @@ export type TabType =
   | 'products-list' | 'product-detail' | 'internal-codes' | 'category-mapping' | 'sales-code' | 'name-management'
   | 'option-management' | 'brand-origin-management' | 'pricing-management' | 'image-host'
   | 'master-list' | 'master-detail' | 'image-edit'
-  | 'export' | 'settings' | 'transform'
+  | 'export' | 'settings' | 'transform' | 'continuous-migration'
 
 export interface Tab {
   id: string

@@ -62,3 +62,24 @@
 - `lib/scrape/mallProfile.ts`: `runMallProfileCheck()` (비교 + `site_memos` 알림)
 - `app/api/scrape/login-confirm/route.ts`: 트리거 지점
 - `lib/db.ts`: `sites.scrape_profile` / `sites.scrape_profile_updated_at`
+
+## 보완 (2026-07-17) — 로그인 확인 없이 도는 예약 스크랩도 감지하도록
+
+기존엔 트리거가 "로그인 확인" 시점 하나뿐이라, 이미 로그인 세션이 남아있어 로그인 확인 없이 바로
+스크랩(예약 스크랩 포함)만 도는 몰은 구조 변경을 영영 감지하지 못했다. 발견 경위: 사용자가 "각 mall을
+등록한 후 첫 스크래핑을 하면... 이 기능이 반영되어 있는지 확인해달라"고 해 Explore 서브에이전트로
+점검한 결과 이 gap과, 수동 로그인 몰에서 프로파일링이 조용히 실패하는 gap 두 가지를 발견했다.
+
+- `lib/scraper.ts`: 기존 `profileMallStructure(siteId)`의 페이지 샘플링 로직을
+  `sampleMallProfile(page, startUrl)`로 분리하고, 스크랩 옵션(`ScrapeOptions`)을 받아 `withContext`로
+  페이지를 연 뒤 같은 샘플링을 수행하는 `profileMallStructureForScrape(opts)`를 추가했다. 시작 URL은
+  `opts.url` → `opts.categoryUrls[0]` → `opts.productUrls[0]` 순으로 정한다(첫 값만 있으면 `page.url()`이
+  `about:blank`라 아무 것도 못 읽고 조용히 실패하는 버그가 있었음 — 실제 스크랩 세션으로 재현/수정 확인).
+- `lib/scrape/mallProfile.ts`: 비교+`site_memos` 기록 로직을 `applyProfileResult(siteId, next)`로 분리하고,
+  `runMallProfileCheckForScrape(opts)` = `profileMallStructureForScrape` + `applyProfileResult`를 추가.
+- `lib/scrape/run.ts`: 실제 스크랩 로직 직전에 `await runMallProfileCheckForScrape(scrapeOpts).catch(...)`를
+  호출한다. **반드시 await**해야 한다 — fire-and-forget으로 두면 이 체크와 뒤이은 실제 스크랩이 동시에
+  같은 프로필 디렉터리에 `launchPersistentContext`를 시도해 경합할 수 있다(수동 로그인 몰은 실제 개인
+  Chrome 프로필을 공유하므로 특히 위험).
+- 검증: 실제 몰(걸스굽, site 1)에 두 차례 실제 스크랩을 걸어 `scrape_profile_updated_at`/`site_memos`가
+  올바르게 갱신됨을 `docker exec ... psql`로 확인 후, 테스트로 생성된 세션/메모 데이터는 삭제해 정리.

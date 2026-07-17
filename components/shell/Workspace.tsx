@@ -23,6 +23,7 @@ import { ImageEditPanel } from '../panels/ImageEditPanel'
 import { ExportPanel } from '../panels/ExportPanel'
 import { SettingsPanel } from '../panels/SettingsPanel'
 import { TransformPanel } from '../panels/TransformPanel'
+import { ContinuousMigrationPanel } from '../panels/ContinuousMigrationPanel'
 
 export function Workspace() {
   const { openTabs, activeTabId, canGoBack, goBack } = useTabs()
@@ -63,6 +64,7 @@ export function Workspace() {
           case 'export':         return <ExportPanel key={tab.id} />
           case 'settings':       return <SettingsPanel key={tab.id} />
           case 'transform':      return <TransformPanel key={tab.id} />
+          case 'continuous-migration': return <ContinuousMigrationPanel key={tab.id} />
           default:               return null
           }
         })()}

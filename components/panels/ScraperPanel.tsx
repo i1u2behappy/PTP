@@ -60,42 +60,15 @@ interface PreviewItem {
   thumbnail: string
 }
 
-const CHROME_EXE = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
-
-/** Windows Hello/WebAuthn(PC인증)처럼 자동화 브라우저로는 통과 못 하는 로그인 보안이 걸린 몰용 안내.
- * PTP의 로그인 창 대신, 이 몰이 쓰는 프로필 폴더를 그대로 가리켜 완전히 수동으로 크롬을 띄우게 하고 —
- * 그 크롬에서 로그인을 마치고 나면 쿠키가 디스크에 남아, 이후 스크래핑이 그 프로필을 그대로 재사용한다. */
-function ManualLoginNotice({ site }: { site: Site }) {
+/** 값을 클립보드에 복사하는 작은 버튼 — 직접로그인 필수 몰에서 별도로 뜬 크롬 창에 아이디/비번을 옮겨 붙일 때 씀. */
+function CopyButton({ value }: { value: string }) {
   const [copied, setCopied] = useState(false)
-  if (!site.profile_dir) return null
-  const command = `"${CHROME_EXE}" --user-data-dir="${site.profile_dir}" ${site.login_url || site.url}`
-
-  function copy() {
-    navigator.clipboard.writeText(command).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    }).catch(() => {})
-  }
-
+  if (!value) return null
   return (
-    <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
-      <p className="text-sm text-amber-800 font-semibold mb-1">🔒 직접로그인 필수 몰입니다</p>
-      <p className="text-xs text-amber-700 mb-3">
-        이 몰은 Windows Hello/PC인증처럼 자동화 브라우저로 통과할 수 없는 로그인 보안을 씁니다. 아래 명령으로 완전히
-        일반적인 크롬을 직접 띄워 로그인(PC인증 포함)까지 마친 뒤 창을 닫아주세요. 로그인 쿠키가 남아 이후 스크래핑이
-        자동으로 이어받습니다.
-      </p>
-      <div className="flex items-start gap-2">
-        <code className="flex-1 block bg-white border border-amber-200 rounded-lg px-3 py-2 text-[11px] text-gray-700 break-all">
-          {command}
-        </code>
-        <button onClick={copy}
-          className="shrink-0 px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg transition-colors">
-          {copied ? '✓ 복사됨' : '복사'}
-        </button>
-      </div>
-      <p className="text-xs text-amber-600 mt-2">PTP에서 이 몰의 로그인 창이 열려있다면 먼저 닫은 뒤 실행해주세요(같은 프로필 폴더를 동시에 쓸 수 없습니다).</p>
-    </div>
+    <button type="button" onClick={() => navigator.clipboard.writeText(value).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) }).catch(() => {})}
+      className="text-[11px] text-teal-500 hover:text-teal-600 shrink-0" tabIndex={-1}>
+      {copied ? '✓ 복사됨' : '복사'}
+    </button>
   )
 }
 
@@ -226,7 +199,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       await fetch('/api/scrape/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ siteId: selectedSite.id, url: selectedSite.login_url || selectedSite.url, loginId, loginPw }),
+        body: JSON.stringify({
+          siteId: selectedSite.id, url: selectedSite.login_url || selectedSite.url, loginId, loginPw,
+          manualLogin: selectedSite.manual_login_required,
+        }),
       })
       setLoginStep('opened')
     } finally {
@@ -502,22 +478,35 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       {selectedSite && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           <div className="text-sm font-semibold text-gray-700 mb-3">로그인 정보</div>
+          {selectedSite.manual_login_required && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mb-3">
+              🔒 이 몰은 Windows Hello/PC인증처럼 자동화로 통과할 수 없는 로그인 보안을 씁니다. &quot;로그인 창 열기&quot;를
+              누르면 사용자님의 실제 개인 크롬 프로필이 그대로 뜨는데(전용 프로필을 새로 쓰면 몰이 낯선 기기로 인식해
+              PC인증 후에도 로그인이 거부됨), 이미 저장된 로그인 정보가 있다면 자동으로, 없다면 아래 값을 복사해
+              직접 입력하고 PC인증까지 마친 뒤 창을 닫고 &quot;로그인 확인&quot;을 눌러주세요.
+              평소 쓰는 크롬 창이 열려있다면 먼저 모두 닫아주세요(같은 프로필을 동시에 쓸 수 없습니다).
+            </p>
+          )}
           <div className="grid grid-cols-2 gap-3 mb-4">
             <label className="block">
-              <span className="block text-xs text-gray-500 mb-1">아이디 / 이메일</span>
+              <span className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                아이디 / 이메일
+                {selectedSite.manual_login_required && <CopyButton value={loginId} />}
+              </span>
               <input type="text" value={loginId} onChange={e => { setLoginId(e.target.value); setLoginStep('none') }}
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
             </label>
             <label className="block">
-              <span className="block text-xs text-gray-500 mb-1">비밀번호</span>
+              <span className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                비밀번호
+                {selectedSite.manual_login_required && <CopyButton value={loginPw} />}
+              </span>
               <input type="password" value={loginPw} onChange={e => { setLoginPw(e.target.value); setLoginStep('none') }}
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
             </label>
           </div>
 
-          {selectedSite.manual_login_required ? (
-            <ManualLoginNotice site={selectedSite} />
-          ) : needsLogin ? (
+          {needsLogin ? (
             <div className="flex items-center gap-3 flex-wrap">
               <button onClick={handleOpenLogin} disabled={loginBusy}
                 className="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
@@ -528,7 +517,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 로그인 확인
               </button>
               {loginStep === 'confirmed' && <span className="text-xs text-emerald-600 font-medium">✓ 로그인 확인됨 (스크래핑 시작 시 창은 자동으로 닫히고 백그라운드에서 진행됩니다)</span>}
-              {loginStep === 'opened' && <span className="text-xs text-gray-500">브라우저 창에서 로그인을 완료한 뒤 확인을 눌러주세요.</span>}
+              {loginStep === 'opened' && (
+                <span className="text-xs text-gray-500">
+                  {selectedSite.manual_login_required ? '뜬 창에서 직접 로그인(PC인증 포함)을 완료한 뒤 확인을 눌러주세요.' : '브라우저 창에서 로그인을 완료한 뒤 확인을 눌러주세요.'}
+                </span>
+              )}
             </div>
           ) : (
             <p className="text-xs text-gray-400">아이디를 입력하지 않으면 로그인 없이 바로 스크래핑을 시작할 수 있습니다.</p>

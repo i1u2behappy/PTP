@@ -6,15 +6,28 @@
  * 짜야 한다. (예: 대표이미지/상세이미지의 개수·파일명, 옵션 값, 재고수량, 상세페이지 내 텍스트 설명 등)
  */
 import path from 'path'
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import { chromium, type BrowserContext, type Page } from 'playwright'
 import type { ExtractedProduct } from './ai'
 import { extractProductFieldsWithAI } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
+import pool from './db'
 
 const execFileAsync = promisify(execFile)
+
+/** 사용자의 실제 개인 크롬이 쓰는 기본 프로필 경로 (Windows). manual_login_required 몰은 이 프로필을
+ * 그대로 써서, 그 프로필에 이미 쌓여있는 로그인 신뢰(쿠키/PC인증 기록)를 그대로 물려받는다 — 전용 폴더를
+ * 새로 만들면 몰 입장에서 낯선 기기로 보여 PC인증 이후에도 로그인이 거부되는 문제가 있었다. */
+function realChromeUserDataDir(): string {
+  return path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'User Data')
+}
+
+async function isManualLoginSite(siteId: number): Promise<boolean> {
+  const res = await pool.query<{ manual_login_required: boolean }>('SELECT manual_login_required FROM sites WHERE id=$1', [siteId])
+  return !!res.rows[0]?.manual_login_required
+}
 
 export interface ScrapeOptions {
   /** 시작 URL. 생략하면 로그인 창에서 현재 열려있는 페이지를 그대로 사용 */
@@ -143,6 +156,25 @@ export async function openLoginWindow(siteId: number, opts: { url: string; login
   await loginIfNeeded(page, { url: opts.url, loginId: opts.loginId, loginPw: opts.loginPw }, { autoSubmit: false })
 }
 
+const CHROME_EXE = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+
+/**
+ * Windows Hello/WebAuthn(PC인증)처럼 CDP로 자동화 제어되는 브라우저에서는 통과할 수 없는 로그인 보안을
+ * 쓰는 몰(sites.manual_login_required)용 — 전용 프로필 폴더를 새로 만드는 대신, 사용자의 실제 개인 크롬
+ * 프로필을 그대로 띄운다(child_process.spawn, 원격 디버깅 포트/자동화 플래그 전혀 없음, --user-data-dir도
+ * 지정하지 않아 평소 더블클릭으로 여는 것과 완전히 동일하다). 전용 폴더는 몰 입장에서 "낯선 기기"로 보여
+ * PC인증을 통과해도 로그인 자체가 거부됐는데, 이미 신뢰가 쌓인 개인 프로필은 그대로 통과한다.
+ * 주의: 사용자가 이미 크롬을 열어둔 상태면 같은 프로필을 동시에 쓸 수 없어 실패한다 — 먼저 직접 닫아야 한다.
+ * (개인 브라우저이므로 여기서 기존 크롬 프로세스를 강제 종료하지 않는다.)
+ */
+export async function openManualLoginWindow(siteId: number, url: string): Promise<void> {
+  await closeLoginWindow(siteId)
+  // --no-first-run/--no-default-browser-check가 없으면 실제 크롬이 "Chrome에 로그인" 등 첫 실행 온보딩
+  // 화면을 활성 탭으로 띄워버려, 요청한 몰 로그인 URL로 바로 이동하지 않는다.
+  const child = spawn(CHROME_EXE, ['--no-first-run', '--no-default-browser-check', url], { detached: true, stdio: 'ignore' })
+  child.unref()
+}
+
 /** 현재 로그인 창에서 사용자가 보고 있는 페이지 URL (없으면 null) */
 export function getOpenPageUrl(siteId: number): string | null {
   const context = openSessions.get(siteId)
@@ -190,6 +222,30 @@ async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, context: Bro
       const page = pages.length ? pages[pages.length - 1] : await openContext.newPage()
       return await fn(page, openContext)
     }
+    if (await isManualLoginSite(opts.siteId)) {
+      // 직접로그인 필수 몰은 전용 폴더 대신 사용자의 실제 개인 크롬 프로필을 그대로 쓴다(openManualLoginWindow와
+      // 동일한 이유). 개인 브라우저이므로 여기서 기존 크롬 프로세스를 강제 종료하지 않는다 — 사용자가 크롬을
+      // 열어둔 채면 같은 프로필을 동시에 못 써서 launchPersistentContext가 실패하는데, 그 경우 사용자가 직접
+      // 크롬을 닫아야 한다.
+      let context: BrowserContext
+      try {
+        context = await chromium.launchPersistentContext(realChromeUserDataDir(), {
+          headless: true, channel: 'chrome', chromiumSandbox: true,
+        })
+      } catch {
+        throw new Error('개인 크롬 브라우저가 열려있으면 이 몰은 스크랩할 수 없습니다. 크롬을 모두 닫고 다시 시도해주세요.')
+      }
+      try {
+        const page = context.pages()[0] || await context.newPage()
+        return await fn(page, context)
+      } finally {
+        await context.close()
+      }
+    }
+
+    // 직접로그인 필수 몰은 사용자가 별도로 띄운(추적 안 되는) 크롬 창을 안 닫고 스크랩을 시작할 수 있어,
+    // 같은 프로필 폴더를 쓰는 헤드리스 실행이 lock 충돌로 실패하지 않도록 먼저 정리한다.
+    await killOrphanedProfileProcess(opts.siteId)
     const context = await chromium.launchPersistentContext(profileDir(opts.siteId), {
       headless: true, channel: 'chrome', chromiumSandbox: true,
     })

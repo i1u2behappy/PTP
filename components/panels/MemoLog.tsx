@@ -16,7 +16,12 @@ function formatDisplay(iso: string) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-export function MemoLog({ baseUrl }: { baseUrl: string }) {
+export function MemoLog({ baseUrl, title = '일자별 메모', description, placeholder = '메모 내용' }: {
+  baseUrl: string
+  title?: string
+  description?: string
+  placeholder?: string
+}) {
   const [memos, setMemos] = useState<MemoEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [newContent, setNewContent] = useState('')
@@ -63,9 +68,10 @@ export function MemoLog({ baseUrl }: { baseUrl: string }) {
 
   return (
     <div className="bg-white rounded-2xl border border-gray-200 p-6">
-      <h2 className="text-sm font-semibold text-gray-700 mb-3">일자별 메모</h2>
+      <h2 className={`text-sm font-semibold text-gray-700 ${description ? 'mb-1' : 'mb-3'}`}>{title}</h2>
+      {description && <p className="text-xs text-gray-400 mb-3">{description}</p>}
       <div className="flex gap-2 mb-4">
-        <input value={newContent} onChange={e => setNewContent(e.target.value)} placeholder="메모 내용"
+        <input value={newContent} onChange={e => setNewContent(e.target.value)} placeholder={placeholder}
           onKeyDown={e => e.key === 'Enter' && addMemo()}
           className="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
         <button onClick={addMemo} className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors shrink-0">

@@ -105,9 +105,12 @@ export function SiteDetailPanel({ params }: Props) {
         <h1 className="text-2xl font-bold text-gray-800">{isNew ? '➕ 새 Mall 등록' : `🏬 ${name || url} 수정`}</h1>
         <div className="flex items-center gap-2 shrink-0">
           {!isNew && (
-            <button onClick={handleDelete} className="text-xs text-rose-500 hover:underline mr-2">🗑 이 Mall 삭제</button>
+            <button onClick={handleDelete}
+              className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-600 text-sm font-semibold rounded-full transition-colors mr-2">
+              🗑 삭제
+            </button>
           )}
-          <button onClick={backToList} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-medium rounded-full transition-colors">
+          <button onClick={backToList} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-full transition-colors">
             취소
           </button>
           <button onClick={handleSave} disabled={saving}
@@ -203,7 +206,12 @@ export function SiteDetailPanel({ params }: Props) {
         </details>
       </div>
 
-      {!isNew && <MemoLog baseUrl={`/api/sites/${siteId}/memos`} />}
+      {!isNew && (
+        <MemoLog baseUrl={`/api/sites/${siteId}/memos`}
+          title="운영 메모"
+          description="이 몰만의 정산·배송 정보를 기록해두세요 — 예: 은행명/계좌번호, 배송(출고지) 주소, 택배사/택배비, 고객센터 연락처 등"
+          placeholder="예: 국민은행 123-456-789012 (예금주: 홍길동)" />
+      )}
     </div>
   )
 }

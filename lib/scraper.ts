@@ -879,7 +879,7 @@ export interface CatalogPreviewResult {
  */
 export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPreviewResult> {
   return withContext(opts, async page => {
-    const { urls, platform, linkInfo } = await collectProductUrls(page, { ...opts, maxPages: undefined })
+    const { urls, platform, linkInfo, categoryByUrl } = await collectProductUrls(page, { ...opts, maxPages: undefined })
     const items: CatalogPreviewItem[] = urls.map(url => ({
       url, name: linkInfo.get(url)?.name || '', thumbnail: linkInfo.get(url)?.thumbnail || '',
     }))
@@ -896,6 +896,8 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
     const domOptions = await extractOptionsFromDom(page)
     if (domOptions.length) product.options = domOptions
     await applyStockByOption(page, product)
+    const category = categoryByUrl.get(firstUrl)
+    if (category) product.category = category
 
     return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product }, items }
   })

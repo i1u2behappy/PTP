@@ -33,6 +33,7 @@ interface ItemLogRow {
 
 interface PreviewProduct {
   name: string
+  category: string
   price: number | null
   sale_price: number | null
   brand: string
@@ -126,7 +127,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [previewItems, setPreviewItems]     = useState<PreviewItem[]>([])
   const [previewLoading, setPreviewLoading] = useState(false)
 
-  const [mode, setMode]           = useState<'single' | 'catalog'>('single')
+  const [mode, setMode]           = useState<'single' | 'catalog'>('catalog')
   const [scrapeMode, setScrapeMode] = useState<'full' | 'incremental'>('full')
   const [hasPriorSession, setHasPriorSession] = useState(false)
   const [linkSel, setLinkSel]     = useState('')
@@ -561,10 +562,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           )}
           <div className="text-sm font-semibold text-gray-700 mb-2">스크랩 모드</div>
           <div className="flex gap-3 mb-4">
-            {(['single', 'catalog'] as const).map(m => (
+            {(['catalog', 'single'] as const).map(m => (
               <button key={m} onClick={() => { setMode(m); setPreviewResult(null); setPreviewTotal(null); setPreviewItems([]) }}
                 className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${mode === m ? 'bg-teal-500 text-white border-teal-500' : 'bg-white text-gray-600 border-gray-300 hover:border-teal-400'}`}>
-                {m === 'single' ? '단일 상품 페이지' : '목록/카탈로그 페이지'}
+                {m === 'single' ? '단일 상품 페이지' : '카테고리/목록 페이지'}
               </button>
             ))}
           </div>
@@ -741,6 +742,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 <table className="text-xs border-collapse whitespace-nowrap">
                   <thead className="bg-gray-50">
                     <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+                      <th className="px-3 py-2 text-left">카테고리</th>
                       <th className="px-3 py-2 text-left">가격</th>
                       <th className="px-3 py-2 text-left">브랜드</th>
                       <th className="px-3 py-2 text-left">제조사</th>
@@ -758,6 +760,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   </thead>
                   <tbody>
                     <tr>
+                      <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate" title={previewResult.product.category}>
+                        {previewResult.product.category || '-'}
+                      </td>
                       <td className="px-3 py-2 text-gray-700">
                         {previewResult.product.price != null ? `₩${previewResult.product.price.toLocaleString()}` : <span className="text-rose-500">찾지 못함</span>}
                       </td>

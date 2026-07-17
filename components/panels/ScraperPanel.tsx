@@ -482,7 +482,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mb-3">
               🔒 이 몰은 윈도우 인증(PC인증) 등의 필요로 &quot;직접 로그인&quot;이 필요합니다. 평소 쓰는 크롬 창을 먼저
               닫고 &quot;로그인 창 열기&quot;를 누르면 본인 크롬 프로필이 뜹니다 — 로그인(필요시 PC인증)까지 마친 뒤
-              창을 닫고 &quot;로그인 확인&quot;을 눌러주세요.
+              창을 닫고 &quot;로그인 확인&quot;을 눌러주세요. 스크랩하는 동안에도 같은 프로필을 쓰므로, 그동안은
+              크롬을 닫아둬야 합니다(다른 브라우저는 자유롭게 사용 가능).
             </p>
           )}
           <div className="grid grid-cols-2 gap-3 mb-4">

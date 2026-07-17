@@ -33,35 +33,55 @@
 - **`sites.manual_login_required` (BOOLEAN)**: Mall 단위로 이 로그인 보안 방식을 쓰는지 표시. 자동 판별이
   아니라 사용자가 직접 겪어보고 켜는 수동 플래그 — WebAuthn 사용 여부를 스크립트로 사전에 확실히 판별할
   방법이 없기 때문(로그인 페이지 정적 마크업만으로는 조건부 로직을 알 수 없음).
-- **프로필 폴더 그대로 재사용**: `.playwright-profiles/{siteId}`는 원래도 "로그인 창 쿠키를 남겨 이후
-  헤드리스 스크래핑이 재사용"하는 용도였다(`lib/scraper.ts`의 `withContext`). 이 설계를 그대로 살려,
-  PTP의 자동화 창 대신 **사용자가 그 폴더를 가리키는 완전히 독립적인 크롬**(`chrome.exe --user-data-dir=...`)
-  으로 수동 로그인하게 하면, WebAuthn 인증까지 정상적으로 완료된 세션이 디스크에 남고, 이후 스크래핑은
-  코드 변경 없이 그 쿠키를 그대로 읽는다.
-- **스크래핑 화면의 안내 박스**: `manual_login_required=true`인 몰을 선택하면 기존 "로그인 창 열기 / 로그인
-  확인" 버튼 대신, 그 몰의 `profile_dir`을 채운 복사 가능한 크롬 실행 명령을 보여준다(`ManualLoginNotice`,
-  `components/panels/ScraperPanel.tsx`). PTP가 그 몰용으로 열어둔 로그인 창이 있으면 프로필 폴더가
-  잠겨 충돌하므로, 먼저 닫으라는 안내도 포함.
 - **Mall 관리 화면 표기**: `SiteDetailPanel`에 체크박스, `SitesListPanel` 목록에 배지(🔒 직접로그인 필수)로
   노출.
 - **별개로 시도했다가 유지한 개선**: 로그인 창을 실제 설치된 크롬(`channel: 'chrome'`)으로 띄우고,
-  `navigator.webdriver`를 숨기고, `chromiumSandbox: true`로 `--no-sandbox` 경고 배너를 없앤 것 — WebAuthn
-  문제 자체는 해결 못 했지만, 일반적인 봇 탐지(UA/webdriver 체크) 회피에는 유효해 그대로 유지.
+  `navigator.webdriver`를 숨기고, `chromiumSandbox: true`로 `--no-sandbox` 경고 배너를 없앤 것 — 이후
+  드러난 진짜 원인과는 별개지만, 일반적인 봇 탐지(UA/webdriver 체크) 회피에는 유효해 그대로 유지.
+
+### 시행착오 — 전용 프로필 폴더 접근은 실패
+
+처음엔 `.playwright-profiles/{siteId}`(원래 "로그인 창 쿠키를 남겨 이후 헤드리스 스크래핑이 재사용"하던
+전용 폴더, `lib/scraper.ts`의 `withContext`)를 그대로 살려, PTP의 자동화 창 대신 그 폴더를 가리키는
+완전히 독립적인 실제 크롬(`chrome.exe --user-data-dir=... channel:'chrome'`, `child_process.spawn`으로
+CDP 연결 전혀 없이 띄움)으로 수동 로그인하게 하는 방식(`openManualLoginWindow`)을 만들었다. 이 창에서는
+Windows 보안(PC인증) 창이 정상적으로 뜨고 통과도 됐지만, **PC인증 통과 후에도 몰 서버가
+"아이디 또는 비밀번호가 일치하지 않습니다"로 로그인 자체를 거부**했다 — 같은 아이디/비번을 사용자의
+평소 개인 크롬으로 시도하면 즉시 정상 로그인됨을 확인해, 원인이 자동화 여부가 아니라 **프로필(브라우저
+저장공간) 자체가 몰 입장에서 낯선 기기로 취급되는 것**임을 특정했다. 즉 PC인증(하드웨어 인증)은 통과해도,
+그 프로필에 그 몰에 대한 기존 신뢰(쿠키/기기인식)가 없으면 로그인 자체가 거부된다.
+
+### 최종 해결 — 사용자의 실제 개인 크롬 프로필을 그대로 사용
+
+대안으로 검토한 3가지(①개인 프로필 그대로 사용 ②개인 프로필에서 로그인 후 쿠키만 수동 이전
+③크롬 암호화 쿠키 저장소를 자동으로 복사) 중, 사용자가 가장 간단한 **①번**을 선택했다:
+
+- **로그인 창 열기**(`lib/scraper.ts`의 `openManualLoginWindow`): `--user-data-dir`를 아예 지정하지 않고
+  `spawn` — 평소 더블클릭으로 여는 크롬과 완전히 동일하게 사용자의 실제 기본 프로필로 뜬다.
+- **헤드리스 스크래핑**(`withContext`): `sites.manual_login_required`를 DB에서 확인(`isManualLoginSite`)해,
+  참이면 전용 폴더 대신 `realChromeUserDataDir()`(`%LOCALAPPDATA%\Google\Chrome\User Data`)를
+  `launchPersistentContext`에 그대로 사용한다.
+- **개인 브라우저 보호**: 두 경로 모두 기존 크롬 프로세스를 강제 종료하지 않는다(전용 폴더였을 때는
+  `killOrphanedProfileProcess`로 정리했지만, 실제 개인 브라우저를 앱이 함부로 죽이면 안 되기 때문).
+  대신 사용자가 크롬을 열어둔 채 스크랩을 시도하면(같은 프로필 동시 사용 불가로 `launchPersistentContext`가
+  실패) "개인 크롬 브라우저가 열려있으면 이 몰은 스크랩할 수 없습니다" 에러로 명확히 안내한다.
+- **일반화**: `isManualLoginSite`가 `sites.manual_login_required` 플래그만 보고 판단하므로, 같은 유형의
+  다른 몰도 그 플래그만 켜면 자동으로 이 방식(개인 프로필 사용)이 적용된다 — 몰별 특수 코드 불필요.
+- 스크래핑 화면 안내 문구(`components/panels/ScraperPanel.tsx`)도 "복사해서 별도 명령 실행" 방식에서
+  "본인 크롬을 닫고 로그인 창 열기를 누르면 본인 프로필이 그대로 뜬다"는 설명으로 교체.
 
 ## 관련 파일
 
 - `lib/db.ts`: `sites.manual_login_required` 컬럼
-- `lib/scraper.ts`: `profileDir` export, `launchVisibleWindow`(`channel: 'chrome'`, `chromiumSandbox: true`,
-  `navigator.webdriver` 숨김)
-- `app/api/sites/route.ts`, `app/api/sites/[id]/route.ts`: `manual_login_required` CRUD, 상세 GET에
-  `profile_dir` 포함
+- `lib/scraper.ts`: `openManualLoginWindow`(개인 프로필로 로그인 창 열기), `realChromeUserDataDir`,
+  `isManualLoginSite`, `withContext`(manual_login_required 몰은 개인 프로필로 헤드리스 실행)
+- `app/api/scrape/login/route.ts`: `manualLogin` 플래그로 `openLoginWindow`/`openManualLoginWindow` 분기
+- `app/api/sites/route.ts`, `app/api/sites/[id]/route.ts`: `manual_login_required` CRUD
 - `components/panels/SiteDetailPanel.tsx`: "직접로그인 필수" 체크박스
 - `components/panels/SitesListPanel.tsx`: 목록 배지
-- `components/panels/ScraperPanel.tsx`: `ManualLoginNotice` 안내 박스
+- `components/panels/ScraperPanel.tsx`: 로그인 정보 섹션의 안내 문구 + 아이디/비번 복사 버튼
 
 ## 상태
 
-**구현 완료 (2026-07-17).** 커밋: `a74832f`. `mojasareo.com`(site id 3)에 플래그를 켜서 확인함.
-
-미검증: 실제로 수동 크롬 로그인 후 스크래핑이 그 세션을 이어받아 정상 동작하는지 end-to-end 확인은
-사용자가 다음에 직접 로그인해본 뒤 확인 예정.
+**구현 완료 (2026-07-17).** 커밋: `a74832f`(플래그/UI), `3e517e9`(모든 스크래핑 경로 실제 크롬으로 통일),
+`763a775`(개인 프로필 사용으로 최종 해결). `mojasareo.com`(site id 3)에서 실제 로그인 성공까지 확인함.

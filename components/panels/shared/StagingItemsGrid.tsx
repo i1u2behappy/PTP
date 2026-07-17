@@ -89,6 +89,7 @@ const COLUMNS_BEFORE_OPTIONS: ColumnDef[] = [
   { key: 'description', label: '설명', getValue: p => p.description },
   { key: 'thumbnail_names', label: '대표이미지', getValue: p => (p.thumbnail_urls || []).join(', ') },
   { key: 'detail_image_urls', label: '상세이미지', getValue: p => (p.detail_image_urls || []).join(', ') },
+  { key: 'source_url', label: 'URL', getValue: p => p.source_url },
 ]
 const COLUMNS_AFTER_OPTIONS: ColumnDef[] = [
   { key: 'stock_status', label: '재고상태', getValue: p => p.stock_status },
@@ -98,7 +99,6 @@ const COLUMNS_AFTER_OPTIONS: ColumnDef[] = [
   { key: 'english_name', label: '영문상품명', getValue: p => p.raw_data?.english_name || '' },
   { key: 'detail_text', label: '상세페이지 텍스트', getValue: p => p.raw_data?.detail_text || '' },
   { key: 'extra_info', label: '상품정보고시 전체', getValue: p => (p.raw_data?.extra_info || []).map(e => `${e.label}: ${e.value}`).join(' / ') },
-  { key: 'source_url', label: 'URL', getValue: p => p.source_url },
   { key: 'missing', label: '누락 데이터', getValue: p => missingFields(p).join(', ') },
   { key: 'migration_status', label: '마이그레이션 상태', getValue: p => STATUS_LABELS[p.status]?.text || p.status },
 ]
@@ -127,7 +127,7 @@ function widthFor(key: string): number {
   return DEFAULT_COL_WIDTH[key] ?? (key.startsWith('option_') ? 180 : 120)
 }
 
-const COL_ORDER_KEY = 'stagingGrid.colOrder.v4'
+const COL_ORDER_KEY = 'stagingGrid.colOrder.v5'
 const DEFAULT_COL_ORDER = [...COLUMNS_BEFORE_OPTIONS, ...COLUMNS_AFTER_OPTIONS].map(c => c.key)
 
 function loadColOrder(): string[] {

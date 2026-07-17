@@ -80,6 +80,14 @@ export function Sidebar() {
         <NavLeaf tab={{ id: 'export', type: 'export', title: '엑셀 내보내기', icon: '📊', closable: true }} icon={ExportIcon} />
         <NavLeaf tab={{ id: 'settings', type: 'settings', title: '설정', icon: '⚙️', closable: true }} icon={SettingsIcon} />
       </nav>
+
+      <div className="px-2 pb-3 shrink-0 border-t border-slate-100 pt-2">
+        <button onClick={async () => { await fetch('/api/auth/logout', { method: 'POST' }); window.location.href = '/login' }}
+          className="w-full flex items-center gap-2 px-3 py-1.5 text-sm rounded-full text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition-colors text-left">
+          <span aria-hidden="true">🚪</span>
+          <span>로그아웃</span>
+        </button>
+      </div>
     </aside>
   )
 }

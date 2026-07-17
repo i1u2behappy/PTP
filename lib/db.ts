@@ -1,5 +1,6 @@
 import { Pool } from 'pg'
 import crypto from 'crypto'
+import { hashPassword } from './auth'
 
 const pool = new Pool({
   host:     process.env.DB_HOST     || 'localhost',
@@ -92,6 +93,15 @@ export async function initDb() {
   import('./scheduler').then(m => m.startScheduler()).catch(() => {})
 
   await pool.query(`
+    -- PTP 앱 자체 로그인 관리자 계정(단일 계정). 몰 스크래핑 로그인 정보(sites 테이블)와는 별개.
+    CREATE TABLE IF NOT EXISTS admin_accounts (
+      id            SERIAL PRIMARY KEY,
+      username      TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      password_salt TEXT NOT NULL,
+      updated_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS sites (
       id                         SERIAL PRIMARY KEY,
       name                       TEXT,
@@ -538,4 +548,14 @@ export async function initDb() {
       ('sabangnet', '사방넷', 1000, 0, 3000)
     ON CONFLICT (code) DO NOTHING;
   `)
+
+  const adminCount = await pool.query('SELECT COUNT(*) FROM admin_accounts')
+  if (Number(adminCount.rows[0].count) === 0) {
+    const { hash, salt } = hashPassword('admin1234')
+    await pool.query(
+      'INSERT INTO admin_accounts (username, password_hash, password_salt) VALUES ($1,$2,$3)',
+      ['admin', hash, salt],
+    )
+    console.warn('[auth] 기본 관리자 계정 생성: admin / admin1234 — 설정 메뉴에서 즉시 변경해주세요.')
+  }
 }

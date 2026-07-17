@@ -5,6 +5,7 @@ import { useTabs } from '../shell/TabsContext'
 interface NamingTemplate { id: number; name: string; prompt_template: string; max_length: number; is_default: boolean }
 interface MarketplaceConfig { code: string; name: string; max_batch_size: number; default_commission_rate: number; default_shipping_fee: number }
 interface Client { id: number; name: string; business_reg_no: string | null; memo: string | null; created_at: string }
+interface AdminAccount { id: number; username: string }
 
 export function SettingsPanel() {
   const { openTab } = useTabs()
@@ -13,14 +14,44 @@ export function SettingsPanel() {
   const [newTemplatePrompt, setNewTemplatePrompt] = useState('원본 상품명: {{name}}\n\n오픈마켓 등록용 상품명을 만들어줘.')
   const [configs, setConfigs]         = useState<MarketplaceConfig[]>([])
   const [clients, setClients]         = useState<Client[]>([])
+  const [admin, setAdmin]             = useState<AdminAccount | null>(null)
+  const [newUsername, setNewUsername] = useState('')
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [adminError, setAdminError]   = useState('')
+  const [adminSaved, setAdminSaved]   = useState(false)
 
   const load = useCallback(() => {
     fetch('/api/naming-templates').then(r => r.json()).then((d: NamingTemplate[]) => setTemplates(Array.isArray(d) ? d : []))
     fetch('/api/marketplace-configs').then(r => r.json()).then((d: MarketplaceConfig[]) => setConfigs(Array.isArray(d) ? d : []))
     fetch('/api/clients').then(r => r.json()).then((d: Client[]) => setClients(Array.isArray(d) ? d : []))
+    fetch('/api/auth/admin').then(r => r.json()).then((d: AdminAccount | null) => { setAdmin(d); setNewUsername(d?.username || '') })
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  async function saveAdmin() {
+    setAdminError('')
+    setAdminSaved(false)
+    if (!currentPassword) { setAdminError('현재 비밀번호를 입력해주세요.'); return }
+    const res = await fetch('/api/auth/admin', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        currentPassword,
+        newUsername: newUsername !== admin?.username ? newUsername : undefined,
+        newPassword: newPassword || undefined,
+      }),
+    })
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}))
+      setAdminError(d.error || '변경에 실패했습니다.')
+      return
+    }
+    setCurrentPassword('')
+    setNewPassword('')
+    setAdminSaved(true)
+    load()
+  }
 
   async function addTemplate() {
     if (!newTemplateName || !newTemplatePrompt) return
@@ -48,6 +79,33 @@ export function SettingsPanel() {
   return (
     <div className="max-w-4xl space-y-6">
       <h1 className="text-2xl font-bold text-gray-800">⚙️ 설정</h1>
+
+      {/* 관리자 계정 */}
+      <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+        <div className="px-6 py-3 border-b border-gray-100 bg-gray-50">
+          <h2 className="text-sm font-semibold text-gray-700">관리자 계정 (PTP 로그인)</h2>
+        </div>
+        <div className="p-6 space-y-3 max-w-md">
+          <label className="block">
+            <span className="block text-xs font-semibold text-gray-500 mb-1">아이디</span>
+            <input value={newUsername} onChange={e => setNewUsername(e.target.value)}
+              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          </label>
+          <label className="block">
+            <span className="block text-xs font-semibold text-gray-500 mb-1">새 비밀번호 (변경하지 않으려면 비워두세요)</span>
+            <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)}
+              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          </label>
+          <label className="block">
+            <span className="block text-xs font-semibold text-gray-500 mb-1">현재 비밀번호 (확인용, 필수)</span>
+            <input type="password" value={currentPassword} onChange={e => setCurrentPassword(e.target.value)}
+              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          </label>
+          {adminError && <p className="text-xs text-rose-500">{adminError}</p>}
+          {adminSaved && <p className="text-xs text-emerald-600">저장되었습니다.</p>}
+          <button onClick={saveAdmin} className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full transition-colors">저장</button>
+        </div>
+      </div>
 
       {/* 마켓별 설정 */}
       <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">

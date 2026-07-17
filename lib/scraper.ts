@@ -179,9 +179,9 @@ export async function closeLoginWindow(siteId: number) {
   }
 }
 
+// 어디서든 Playwright 번들 Chromium이 아니라 실제 설치된 크롬을 띄운다 — 몰이 자동화 브라우저를
+// 감지해 차단/도전과제를 거는 경우(예: manual-login-required 몰의 봇 탐지) 실제 크롬 쪽이 더 정상적으로 통과한다.
 async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, context: BrowserContext) => Promise<T>): Promise<T> {
-  const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-
   if (opts.siteId) {
     const openContext = openSessions.get(opts.siteId)
     if (openContext) {
@@ -190,7 +190,9 @@ async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, context: Bro
       const page = pages.length ? pages[pages.length - 1] : await openContext.newPage()
       return await fn(page, openContext)
     }
-    const context = await chromium.launchPersistentContext(profileDir(opts.siteId), { headless: true, userAgent })
+    const context = await chromium.launchPersistentContext(profileDir(opts.siteId), {
+      headless: true, channel: 'chrome', chromiumSandbox: true,
+    })
     try {
       const page = context.pages()[0] || await context.newPage()
       return await fn(page, context)
@@ -199,9 +201,9 @@ async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, context: Bro
     }
   }
 
-  const browser = await chromium.launch({ headless: true })
+  const browser = await chromium.launch({ headless: true, channel: 'chrome', chromiumSandbox: true })
   try {
-    const ctx  = await browser.newContext({ userAgent })
+    const ctx  = await browser.newContext()
     const page = await ctx.newPage()
     return await fn(page, ctx)
   } finally {

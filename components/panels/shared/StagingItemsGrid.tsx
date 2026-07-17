@@ -77,6 +77,7 @@ interface ColumnDef {
  *  옵션 개수만큼만 상세이미지 뒤에 동적으로 끼워 넣는다 (컴포넌트 내부의 `columns` 계산 참고). */
 const COLUMNS_BEFORE_OPTIONS: ColumnDef[] = [
   { key: 'created_at', label: '스크래핑 일시', getValue: p => p.created_at },
+  { key: 'source_url', label: 'URL', getValue: p => p.source_url },
   { key: 'thumbnail_img', label: '이미지', getValue: p => p.thumbnail_urls?.length ?? 0 },
   { key: 'mall_product_code', label: '상품코드', getValue: p => p.mall_product_code },
   { key: 'name_original', label: '상품명', getValue: p => p.name_original },
@@ -89,7 +90,6 @@ const COLUMNS_BEFORE_OPTIONS: ColumnDef[] = [
   { key: 'description', label: '설명', getValue: p => p.description },
   { key: 'thumbnail_names', label: '대표이미지', getValue: p => (p.thumbnail_urls || []).join(', ') },
   { key: 'detail_image_urls', label: '상세이미지', getValue: p => (p.detail_image_urls || []).join(', ') },
-  { key: 'source_url', label: 'URL', getValue: p => p.source_url },
 ]
 const COLUMNS_AFTER_OPTIONS: ColumnDef[] = [
   { key: 'stock_status', label: '재고상태', getValue: p => p.stock_status },
@@ -127,7 +127,7 @@ function widthFor(key: string): number {
   return DEFAULT_COL_WIDTH[key] ?? (key.startsWith('option_') ? 180 : 120)
 }
 
-const COL_ORDER_KEY = 'stagingGrid.colOrder.v6'
+const COL_ORDER_KEY = 'stagingGrid.colOrder.v7'
 const DEFAULT_COL_ORDER = [...COLUMNS_BEFORE_OPTIONS, ...COLUMNS_AFTER_OPTIONS].map(c => c.key)
 
 function loadColOrder(): string[] {

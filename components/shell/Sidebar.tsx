@@ -1,7 +1,8 @@
 'use client'
 import { useState } from 'react'
+import Image from 'next/image'
 import { useTabs, type Tab } from './TabsContext'
-import { BoltIcon, DashboardIcon, ClientIcon, StoreIcon, ListIcon, SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ImageEditIcon, ExportIcon, SettingsIcon, TagIcon, MapIcon, CoinIcon } from './icons'
+import { DashboardIcon, ClientIcon, StoreIcon, ListIcon, SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ImageEditIcon, ExportIcon, SettingsIcon, TagIcon, MapIcon, CoinIcon } from './icons'
 import { CLIENTS_LIST_TAB, SITES_LIST_TAB, MASTER_LIST_TAB, PRODUCTS_LIST_TAB } from './menuTabs'
 
 type IconComponent = (props: { active?: boolean }) => React.ReactNode
@@ -42,11 +43,8 @@ function NavLeaf({ tab, icon: Icon, nested }: { tab: Tab; icon: IconComponent; n
 export function Sidebar() {
   return (
     <aside className="w-64 shrink-0 bg-white border-r border-slate-100 flex flex-col h-full overflow-y-auto">
-      <div className="px-5 h-16 flex items-center gap-2 shrink-0">
-        <span className="w-8 h-8 rounded-xl bg-teal-500 text-white flex items-center justify-center p-1.5 shrink-0" aria-hidden="true">
-          <BoltIcon className="w-full h-full" />
-        </span>
-        <span className="font-bold text-slate-800 text-sm tracking-wide">PTP</span>
+      <div className="px-5 h-16 flex items-center shrink-0">
+        <Image src="/logo.jpg" alt="ILDA:Bridge" width={600} height={566} className="h-10 w-auto" priority />
       </div>
 
       <nav className="flex-1 px-2 pb-3 space-y-1" aria-label="주 메뉴">

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { verifySessionToken, SESSION_COOKIE } from '@/lib/auth'
 
-const PUBLIC_PATHS = ['/login']
+// /login 렌더링에 필요한 정적 자산(로고, 파비콘 라우트)도 로그인 전에 열려있어야 한다.
+const PUBLIC_PATHS = ['/login', '/logo.jpg', '/icon.jpg']
 const PUBLIC_API_PREFIXES = ['/api/auth/']
 
 export function proxy(request: NextRequest) {

@@ -480,11 +480,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           <div className="text-sm font-semibold text-gray-700 mb-3">로그인 정보</div>
           {selectedSite.manual_login_required && (
             <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mb-3">
-              🔒 이 몰은 Windows Hello/PC인증처럼 자동화로 통과할 수 없는 로그인 보안을 씁니다. &quot;로그인 창 열기&quot;를
-              누르면 사용자님의 실제 개인 크롬 프로필이 그대로 뜨는데(전용 프로필을 새로 쓰면 몰이 낯선 기기로 인식해
-              PC인증 후에도 로그인이 거부됨), 이미 저장된 로그인 정보가 있다면 자동으로, 없다면 아래 값을 복사해
-              직접 입력하고 PC인증까지 마친 뒤 창을 닫고 &quot;로그인 확인&quot;을 눌러주세요.
-              평소 쓰는 크롬 창이 열려있다면 먼저 모두 닫아주세요(같은 프로필을 동시에 쓸 수 없습니다).
+              🔒 이 몰은 윈도우 인증(PC인증) 등의 필요로 &quot;직접 로그인&quot;이 필요합니다. 평소 쓰는 크롬 창을 먼저
+              닫고 &quot;로그인 창 열기&quot;를 누르면 본인 크롬 프로필이 뜹니다 — 로그인(필요시 PC인증)까지 마친 뒤
+              창을 닫고 &quot;로그인 확인&quot;을 눌러주세요.
             </p>
           )}
           <div className="grid grid-cols-2 gap-3 mb-4">
@@ -566,14 +564,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           <div className="flex gap-2 mb-1 items-end">
             <label className="flex-1 block">
               <span className="block text-xs text-gray-500 mb-1">
-                시작 URL {loginStep === 'confirmed' && '(로그인 창에서 이동한 페이지를 그대로 사용할 수 있습니다)'}
+                시작 URL {loginStep === 'confirmed' && !selectedSite.manual_login_required && '(로그인 창에서 이동한 페이지를 그대로 사용할 수 있습니다)'}
               </span>
               <input value={targetUrl} onChange={e => setTargetUrl(e.target.value)}
                 placeholder="https://shop.example.com/products/123"
                 disabled={mode === 'catalog' && categoryUrlsText.trim().length > 0}
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 disabled:bg-gray-100 disabled:text-gray-400" />
             </label>
-            {loginStep === 'confirmed' && (
+            {selectedSite.manual_login_required ? (
+              <span className="px-3 py-2 text-xs text-gray-400 shrink-0">이 몰은 직접로그인 몰이라 시작페이지를 직접 입력해 주세요</span>
+            ) : loginStep === 'confirmed' && (
               <button onClick={handleRefreshCurrentUrl} title="로그인 창에서 현재 보고 있는 페이지로 갱신"
                 className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-medium rounded-full transition-colors shrink-0">
                 현재 페이지로

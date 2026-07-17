@@ -1,6 +1,7 @@
 import pool from '../db'
 import { scrapeSingleProduct, scrapeCatalogPage, closeLoginWindow, detectIsListingPage } from '../scraper'
 import { stageScrapedProduct } from './staging'
+import { runMallProfileCheckForScrape } from './mallProfile'
 import type { ScrapeResult } from '../scraper'
 
 export interface RunScrapingOpts {
@@ -56,6 +57,12 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
     priceSelector: site?.custom_price_selector || undefined,
     thumbnailSelector: site?.custom_thumbnail_selector || undefined,
   }
+
+  // 몰 구조 프로파일링(신규몰 기준정보 저장/변경 감지)은 로그인 확인 시점에도 도는데, 직접로그인 필수
+  // 몰처럼 그때 추적되는 세션이 없던 경우를 대비해 실제 스크랩 시작 시점에도 한 번 더 시도한다. 실제
+  // 스크랩과 같은 프로필 폴더/개인 크롬 프로필을 동시에 열려고 하면 lock 충돌로 스크랩 자체가 실패할 수
+  // 있어, 백그라운드로 두지 않고 순서대로(await) 먼저 끝낸 뒤 스크랩을 시작한다 — 실패해도 스크랩은 계속 진행.
+  await runMallProfileCheckForScrape(scrapeOpts).catch(err => console.error('[mallProfileCheck:scrape]', err))
 
   // '단일 상품' 모드로 시작했어도 실제로는 상품이 여럿인 카테고리 URL을 넣는 실수가 흔하다 — 링크가
   // 여럿 발견되면 자동으로 카탈로그(전체 순회) 모드로 전환한다. (반대 방향: 카탈로그 모드인데 상품 링크가

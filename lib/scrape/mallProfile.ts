@@ -1,5 +1,5 @@
 import pool from '../db'
-import { profileMallStructure, type MallProfileSignals } from '../scraper'
+import { profileMallStructure, profileMallStructureForScrape, type MallProfileSignals, type ScrapeOptions } from '../scraper'
 
 function summarizeProfile(p: MallProfileSignals): string {
   return [
@@ -37,15 +37,9 @@ function describeDiff(prev: MallProfileSignals, next: MallProfileSignals): strin
   return diffs
 }
 
-/**
- * 로그인 확인마다 백그라운드로 호출한다. 이 몰의 기준정보(sites.scrape_profile)가 없으면 이번 샘플링
- * 결과를 기준정보로 저장하고, 있으면 새로 샘플링한 결과와 비교해 구조가 달라졌을 때만 메모로 남긴다.
- * (Mall 목록 화면에 이미 "최신 메모" 컬럼이 있어 별도 알림 UI 없이 그대로 노출된다.)
- */
-export async function runMallProfileCheck(siteId: number): Promise<void> {
-  const next = await profileMallStructure(siteId)
-  if (!next) return
-
+/** 새로 샘플링한 프로파일을 기준정보와 비교해 DB에 반영한다. 기준정보가 없으면 이번 결과를 기준으로
+ * 저장하고, 있으면 달라진 점만 site_memos에 메모로 남긴다(Mall 목록의 "최신 메모" 컬럼에 그대로 노출). */
+async function applyProfileResult(siteId: number, next: MallProfileSignals): Promise<void> {
   const res = await pool.query<{ scrape_profile: MallProfileSignals | null }>(
     `SELECT scrape_profile FROM sites WHERE id = $1`, [siteId],
   )
@@ -71,4 +65,25 @@ export async function runMallProfileCheck(siteId: number): Promise<void> {
       [siteId, `⚠ 상품페이지 구조 변경 감지: ${diffs.join(' / ')}`],
     )
   }
+}
+
+/**
+ * 로그인 확인마다 백그라운드로 호출한다. 로그인 창(openSessions)이 열려있어야 동작한다 — 직접로그인
+ * 필수 몰처럼 추적되는 세션이 없으면 아무 일도 하지 않으므로, 그 경우를 위해 runMallProfileCheckForScrape가 있다.
+ */
+export async function runMallProfileCheck(siteId: number): Promise<void> {
+  const next = await profileMallStructure(siteId)
+  if (!next) return
+  await applyProfileResult(siteId, next)
+}
+
+/**
+ * 실제 스크래핑 시작마다 백그라운드로 호출한다. openSessions 추적 여부와 무관하게 그 스크랩이 쓸 브라우저
+ * 컨텍스트를 그대로 재사용해 프로파일링하므로, 직접로그인 필수 몰을 포함한 모든 몰 유형에서 동작한다.
+ */
+export async function runMallProfileCheckForScrape(opts: ScrapeOptions): Promise<void> {
+  if (!opts.siteId) return
+  const next = await profileMallStructureForScrape(opts)
+  if (!next) return
+  await applyProfileResult(opts.siteId, next)
 }

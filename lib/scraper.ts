@@ -611,7 +611,25 @@ export async function profileMallStructure(siteId: number): Promise<MallProfileS
   const page = pages.length ? pages[pages.length - 1] : await context.newPage()
   const startUrl = page.url()
   if (!startUrl || startUrl === 'about:blank') return null
+  return sampleMallProfile(page, startUrl)
+}
 
+/**
+ * profileMallStructure와 같은 프로파일링을, "로그인 확인" 시 열려있던 화면(openSessions)이 아니라
+ * 실제 스크래핑이 이번에 쓸 브라우저 컨텍스트를 그대로 재사용해 수행한다. 직접로그인 필수 몰처럼
+ * openSessions에 추적되는 세션이 없는 경우에도(개인 크롬을 헤드리스로 재사용하는 경로 포함) 스크래핑
+ * 시작 시점마다 동작하도록 하기 위한 것 — withContext가 이미 모든 몰 유형을 알아서 처리해준다.
+ */
+export async function profileMallStructureForScrape(opts: ScrapeOptions): Promise<MallProfileSignals | null> {
+  if (!opts.siteId) return null
+  // 실패한 상품만 재시도하는 등 productUrls만 있고 url/categoryUrls가 없는 호출도 있어, 새로 여는 빈 탭의
+  // about:blank를 그대로 시작점으로 쓰지 않도록 productUrls의 첫 항목을 대신 사용한다.
+  const startUrlHint = opts.url || opts.categoryUrls?.[0] || opts.productUrls?.[0]
+  if (!startUrlHint) return null
+  return withContext(opts, page => sampleMallProfile(page, startUrlHint))
+}
+
+async function sampleMallProfile(page: Page, startUrl: string): Promise<MallProfileSignals | null> {
   let sampleUrls: string[] = []
   try {
     const { urls } = await collectProductUrls(page, { maxPages: 1 })

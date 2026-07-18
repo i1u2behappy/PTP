@@ -3,13 +3,26 @@ import { generateTransformColumns, type TransformFewShotExample } from '../ai'
 import { migrateToMaster } from '../master/migrate'
 import { getGuidePairs } from './matching'
 
-/** product_master 컬럼 중 이 기능이 덮어써도 되는 필드만 허용 (target_field를 그대로 SQL에 꽂아 넣으므로 반드시 화이트리스트를 거친다) */
-export const ALLOWED_TARGET_FIELDS = new Set([
+/** product_master 고정 컬럼 중 이 기능이 덮어써도 되는 필드만 허용 (target_field를 그대로 SQL에 꽂아 넣으므로
+ * 반드시 화이트리스트를 거친다). 거래처가 등록한 커스텀 필드는 이 목록에 없어도 client_master_schema_fields에
+ * 있으면 허용된다 — getAllowedTargetFields() 참고. */
+export const FIXED_TARGET_FIELDS = new Set([
   'name_final', 'master_category', 'brand', 'manufacturer', 'origin', 'description',
   'cost_price', 'list_price', 'sale_price', 'shipping_fee', 'other_cost',
   'stock_status', 'stock_qty', 'internal_code', 'sales_code',
 ])
 const NUMERIC_TARGET_FIELDS = new Set(['cost_price', 'list_price', 'sale_price', 'shipping_fee', 'other_cost', 'stock_qty'])
+
+export interface CustomFieldOption { field_key: string; field_label: string }
+
+/** 이 거래처에서 Transform 규칙의 target_field로 고를 수 있는 전체 목록 — 고정 컬럼 + 거래처가 등록한 커스텀 필드. */
+export async function getAllowedTargetFields(clientId: number): Promise<{ fixed: string[]; custom: CustomFieldOption[] }> {
+  const res = await pool.query<CustomFieldOption>(
+    `SELECT field_key, field_label FROM client_master_schema_fields WHERE client_id=$1 AND is_custom ORDER BY sort_order, id`,
+    [clientId],
+  )
+  return { fixed: [...FIXED_TARGET_FIELDS], custom: res.rows }
+}
 
 export type RuleMode = 'ai' | 'lookup' | 'copy' | 'composite'
 
@@ -172,7 +185,11 @@ export async function commitGeneratedRow(generatedRowId: number, clientId: numbe
   if (!row) throw new Error('generated row not found')
 
   const rules = await getColumnRules(row.site_id)
-  const mapped = rules.filter(r => r.target_field && ALLOWED_TARGET_FIELDS.has(r.target_field))
+  const customFieldsRes = await pool.query<{ field_key: string }>(
+    `SELECT field_key FROM client_master_schema_fields WHERE client_id=$1 AND is_custom`, [clientId],
+  )
+  const customFieldKeys = new Set(customFieldsRes.rows.map(r => r.field_key))
+  const mapped = rules.filter(r => r.target_field && (FIXED_TARGET_FIELDS.has(r.target_field) || customFieldKeys.has(r.target_field)))
 
   const { masterIds } = await migrateToMaster([row.mall_product_id], clientId)
   const masterId = masterIds[0]
@@ -180,12 +197,21 @@ export async function commitGeneratedRow(generatedRowId: number, clientId: numbe
 
   const setClauses: string[] = []
   const params: unknown[] = []
+  const customValues: Record<string, string> = {}
   mapped.forEach(rule => {
     const value = row.generated_values[rule.column_name]
     if (value === undefined) return
+    if (customFieldKeys.has(rule.target_field!)) {
+      customValues[rule.target_field!] = value
+      return
+    }
     params.push(NUMERIC_TARGET_FIELDS.has(rule.target_field!) ? (value === '' ? null : Number(value)) : value)
     setClauses.push(`${rule.target_field} = $${params.length}`)
   })
+  if (Object.keys(customValues).length) {
+    params.push(JSON.stringify(customValues))
+    setClauses.push(`custom_fields = custom_fields || $${params.length}::jsonb`)
+  }
   if (setClauses.length) {
     params.push(masterId)
     await pool.query(`UPDATE product_master SET ${setClauses.join(', ')}, updated_at = NOW() WHERE id = $${params.length}`, params)
@@ -196,4 +222,19 @@ export async function commitGeneratedRow(generatedRowId: number, clientId: numbe
     [masterId, generatedRowId],
   )
   return masterId
+}
+
+/** 여러 draft 행을 한 번에 확정한다 — 하나가 실패해도 나머지는 계속 진행. */
+export async function commitGeneratedRows(ids: number[], clientId: number): Promise<{ committed: number[]; failed: { id: number; error: string }[] }> {
+  const committed: number[] = []
+  const failed: { id: number; error: string }[] = []
+  for (const id of ids) {
+    try {
+      await commitGeneratedRow(id, clientId)
+      committed.push(id)
+    } catch (e) {
+      failed.push({ id, error: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  return { committed, failed }
 }

@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
-import { ALLOWED_TARGET_FIELDS, type RuleMode } from '@/lib/transform/generate'
+import { FIXED_TARGET_FIELDS, getAllowedTargetFields, type RuleMode } from '@/lib/transform/generate'
 
 const VALID_MODES = new Set<RuleMode>(['ai', 'lookup', 'copy', 'composite'])
+
+async function getClientIdForSite(siteId: number): Promise<number | null> {
+  const res = await pool.query<{ client_id: number | null }>('SELECT client_id FROM sites WHERE id=$1', [siteId])
+  return res.rows[0]?.client_id ?? null
+}
 
 /** siteId의 최신 업로드 헤더 기준으로, 헤더마다 한 행씩(기존 규칙 있으면 그 값, 없으면 기본값) 반환한다. */
 export async function GET(req: NextRequest) {
@@ -26,7 +31,10 @@ export async function GET(req: NextRequest) {
     id: null, column_name: name, target_field: null, mode: 'ai' as RuleMode,
     ai_instruction: '', source_field: null, composite_config: {},
   })
-  return NextResponse.json({ rows, allowedTargetFields: [...ALLOWED_TARGET_FIELDS] })
+
+  const clientId = await getClientIdForSite(siteId)
+  const allowed = clientId ? await getAllowedTargetFields(clientId) : { fixed: [...FIXED_TARGET_FIELDS], custom: [] }
+  return NextResponse.json({ rows, allowedTargetFields: [...allowed.fixed, ...allowed.custom.map(c => c.field_key)], customFields: allowed.custom })
 }
 
 interface ColumnRuleBody {
@@ -43,8 +51,11 @@ export async function PUT(req: NextRequest) {
   const b = await req.json() as ColumnRuleBody
   if (!b.siteId || !b.columnName) return NextResponse.json({ error: 'siteId, columnName required' }, { status: 400 })
   if (!VALID_MODES.has(b.mode)) return NextResponse.json({ error: 'invalid mode' }, { status: 400 })
-  if (b.targetField && !ALLOWED_TARGET_FIELDS.has(b.targetField)) {
-    return NextResponse.json({ error: 'invalid targetField' }, { status: 400 })
+  if (b.targetField) {
+    const clientId = await getClientIdForSite(b.siteId)
+    const allowed = clientId ? await getAllowedTargetFields(clientId) : { fixed: [...FIXED_TARGET_FIELDS], custom: [] }
+    const validFields = new Set([...allowed.fixed, ...allowed.custom.map(c => c.field_key)])
+    if (!validFields.has(b.targetField)) return NextResponse.json({ error: 'invalid targetField' }, { status: 400 })
   }
 
   const res = await pool.query<{ id: number }>(

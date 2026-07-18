@@ -15,6 +15,8 @@ interface Mall {
   login_id: string | null
 }
 
+interface SchemaField { field_key: string; field_label: string; is_custom: boolean }
+
 interface ClientDetail {
   id: number
   name: string
@@ -60,6 +62,11 @@ export function ClientDetailPanel({ params }: Props) {
   const [existingDoc, setExistingDoc] = useState<{ path: string; name: string } | null>(null)
   const [docFile, setDocFile] = useState<File | null>(null)
   const [existingCode, setExistingCode] = useState<string | null>(null)
+  const [schemaFields, setSchemaFields] = useState<SchemaField[]>([])
+  const [schemaFile, setSchemaFile] = useState<File | null>(null)
+  const [schemaUploading, setSchemaUploading] = useState(false)
+  const [schemaSaving, setSchemaSaving] = useState(false)
+  const [schemaSaved, setSchemaSaved] = useState(false)
 
   const load = useCallback(() => {
     fetch(`/api/clients/${clientId}`).then(r => r.json()).then((d: ClientDetail) => {
@@ -71,6 +78,7 @@ export function ClientDetailPanel({ params }: Props) {
       setExistingDoc(d.business_reg_doc_path ? { path: d.business_reg_doc_path, name: d.business_reg_doc_name || '사업자등록증' } : null)
       setExistingCode(d.code)
     }).finally(() => setLoading(false))
+    fetch(`/api/master/schema?clientId=${clientId}`).then(r => r.json()).then((d: SchemaField[]) => { if (Array.isArray(d)) setSchemaFields(d) }).catch(() => {})
   }, [clientId])
 
   useEffect(() => { load() }, [load])
@@ -110,6 +118,47 @@ export function ClientDetailPanel({ params }: Props) {
     await fetch(`/api/clients/${clientId}`, { method: 'DELETE' })
     bumpRefresh('clients')
     backToList()
+  }
+
+  /** 엑셀 헤더로 필드 목록 초안을 불러온다 — 저장 전까지는 반영되지 않으니 저장을 눌러야 확정된다. */
+  async function handleSchemaUpload() {
+    if (!schemaFile) return
+    setSchemaUploading(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', schemaFile)
+      const res = await fetch('/api/master/schema/upload', { method: 'POST', body: fd })
+      if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`업로드 실패: ${e.error || res.status}`); return }
+      const d = await res.json() as { fields: SchemaField[] }
+      setSchemaFields(d.fields)
+      setSchemaFile(null)
+    } finally {
+      setSchemaUploading(false)
+    }
+  }
+
+  function updateSchemaField(i: number, patch: Partial<SchemaField>) {
+    setSchemaFields(prev => prev.map((f, idx) => idx === i ? { ...f, ...patch } : f))
+  }
+  function removeSchemaField(i: number) {
+    setSchemaFields(prev => prev.filter((_, idx) => idx !== i))
+  }
+  function addSchemaField() {
+    setSchemaFields(prev => [...prev, { field_key: `custom_${prev.length + 1}`, field_label: '', is_custom: true }])
+  }
+
+  async function saveSchemaFields() {
+    setSchemaSaving(true)
+    try {
+      await fetch('/api/master/schema', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId, fields: schemaFields }),
+      })
+      setSchemaSaved(true)
+      setTimeout(() => setSchemaSaved(false), 2000)
+    } finally {
+      setSchemaSaving(false)
+    }
   }
 
   function openMall(mall?: Mall) {
@@ -188,6 +237,73 @@ export function ClientDetailPanel({ params }: Props) {
             <span className="block text-xs text-gray-400">상품마스터 가공 시 거래처 코드 기반 사내 관리코드를 자동으로 발급합니다 (거래처 코드가 설정된 경우)</span>
           </span>
         </label>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
+        <h2 className="text-sm font-semibold text-gray-700 mb-1">기준 Master DB</h2>
+        <p className="text-xs text-gray-400 mb-3">
+          이 거래처가 원하는 최종 컬럼 구성입니다 — 마이그레이션2_Transform의 컬럼 규칙에서 타깃 필드로 고를 수 있습니다.
+          엑셀 헤더 행을 업로드하면 기존 상품마스터 컬럼과 자동으로 매칭을 시도하고, 매칭 안 된 항목은 커스텀 필드로 남습니다.
+        </p>
+        <div className="flex items-center gap-2 mb-3">
+          <input type="file" accept=".xlsx,.xls" onChange={e => setSchemaFile(e.target.files?.[0] || null)}
+            className="text-xs text-gray-600 file:mr-2 file:px-2 file:py-1 file:rounded-full file:border-0 file:bg-teal-50 file:text-teal-600 file:text-xs file:font-semibold hover:file:bg-teal-100" />
+          <button onClick={handleSchemaUpload} disabled={!schemaFile || schemaUploading}
+            className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors shrink-0">
+            {schemaUploading ? '불러오는 중...' : '엑셀에서 불러오기'}
+          </button>
+        </div>
+
+        {schemaFields.length === 0 ? (
+          <p className="text-xs text-gray-400 mb-3">등록된 필드가 없습니다. 엑셀을 업로드하거나 직접 추가해주세요.</p>
+        ) : (
+          <div className="border border-gray-100 rounded-xl overflow-hidden mb-3">
+            <table className="w-full text-xs border-collapse">
+              <thead className="bg-gray-50">
+                <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+                  <th className="px-3 py-2 text-left">라벨(엑셀 헤더)</th>
+                  <th className="px-3 py-2 text-left">필드 키</th>
+                  <th className="px-3 py-2 text-left">종류</th>
+                  <th className="px-3 py-2 text-left">관리</th>
+                </tr>
+              </thead>
+              <tbody>
+                {schemaFields.map((f, i) => (
+                  <tr key={i} className="border-b border-gray-100 last:border-0">
+                    <td className="px-3 py-2">
+                      <input value={f.field_label} onChange={e => updateSchemaField(i, { field_label: e.target.value })}
+                        className="w-full border border-gray-200 rounded px-2 py-1 text-xs" />
+                    </td>
+                    <td className="px-3 py-2">
+                      <input value={f.field_key} onChange={e => updateSchemaField(i, { field_key: e.target.value })}
+                        className="w-full border border-gray-200 rounded px-2 py-1 text-xs font-mono" />
+                    </td>
+                    <td className="px-3 py-2">
+                      <select value={f.is_custom ? 'custom' : 'fixed'} onChange={e => updateSchemaField(i, { is_custom: e.target.value === 'custom' })}
+                        className="border border-gray-200 rounded px-2 py-1 text-xs">
+                        <option value="fixed">기존 컬럼</option>
+                        <option value="custom">커스텀 필드</option>
+                      </select>
+                    </td>
+                    <td className="px-3 py-2">
+                      <button onClick={() => removeSchemaField(i)} className="text-rose-500 hover:underline">삭제</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
+          <button onClick={addSchemaField} className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full transition-colors">
+            ➕ 필드 추가
+          </button>
+          <button onClick={saveSchemaFields} disabled={schemaSaving}
+            className="px-4 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+            {schemaSaving ? '저장 중...' : schemaSaved ? '✓ 저장됨' : '필드 목록 저장'}
+          </button>
+        </div>
       </div>
 
       <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">

@@ -66,15 +66,17 @@ export function ContinuousMigrationPanel() {
   }
 
   async function migrateSelected() {
-    if (!selected.size) return
+    if (!selected.size || siteId === '') return
     setMigrating(true)
     try {
       const rows = changes.filter(c => selected.has(c.mallProductId))
       const clientIdForCall = rows[0]?.clientId || 1
-      await fetch('/api/master/migrate', {
+      const res = await fetch('/api/master/reapply', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mallProductIds: rows.map(r => r.mallProductId), clientId: clientIdForCall }),
+        body: JSON.stringify({ mallProductIds: rows.map(r => r.mallProductId), clientId: clientIdForCall, siteId }),
       })
+      const d = await res.json() as { failed?: { id: number; error: string }[] }
+      if (d.failed?.length) alert(`${d.failed.length}건은 컬럼 규칙 반영에 실패했습니다 (상품마스터 기본 갱신은 완료됨).`)
       await detectChanges()
     } finally {
       setMigrating(false)

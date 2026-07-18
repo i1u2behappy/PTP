@@ -152,6 +152,7 @@ export function TransformPanel() {
   const [codeColumn, setCodeColumn] = useState('')
 
   const [rules, setRules] = useState<ColumnRule[]>([])
+  const [customFields, setCustomFields] = useState<{ field_key: string; field_label: string }[]>([])
   const [lookupEntries, setLookupEntries] = useState<Record<number, LookupEntry[]>>({})
 
   const [products, setProducts] = useState<MallProduct[]>([])
@@ -161,6 +162,7 @@ export function TransformPanel() {
   const [generatedRows, setGeneratedRows] = useState<GeneratedRow[]>([])
   const [committing, setCommitting] = useState<number | null>(null)
   const [discarding, setDiscarding] = useState<number | null>(null)
+  const [bulkCommitting, setBulkCommitting] = useState(false)
 
   const loadGuide = useCallback((siteId: number) => {
     fetch(`/api/transform/guide?siteId=${siteId}`).then(r => r.json())
@@ -172,7 +174,10 @@ export function TransformPanel() {
   }, [])
   const loadRules = useCallback((siteId: number) => {
     fetch(`/api/transform/columns?siteId=${siteId}`).then(r => r.json())
-      .then((d: { rows: ColumnRule[] }) => setRules(d.rows || []))
+      .then((d: { rows: ColumnRule[]; customFields?: { field_key: string; field_label: string }[] }) => {
+        setRules(d.rows || [])
+        setCustomFields(d.customFields || [])
+      })
   }, [])
   const loadProducts = useCallback((siteId: number, sessionId: number | '') => {
     const qs = new URLSearchParams({ siteId: String(siteId) })
@@ -356,6 +361,25 @@ export function TransformPanel() {
     }
   }
 
+  /** 일괄 반영: 아직 확정 전(draft)인 검토 결과를 한 번에 전부 반영한다. */
+  async function handleBulkCommit() {
+    if (!selectedSite?.client_id) { alert('이 Mall에 연결된 거래처가 없습니다.'); return }
+    const draftIds = generatedRows.filter(r => r.status !== 'committed').map(r => r.id)
+    if (!draftIds.length) return
+    setBulkCommitting(true)
+    try {
+      const res = await fetch('/api/transform/results/bulk', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteId: selectedSite.id, clientId: selectedSite.client_id, ids: draftIds }),
+      })
+      const d = await res.json() as { committed: number[]; failed: { id: number; error: string }[] }
+      if (d.failed?.length) alert(`${d.failed.length}건은 반영에 실패했습니다 (${d.committed.length}건 성공).`)
+      loadGeneratedRows(selectedSite.id)
+    } finally {
+      setBulkCommitting(false)
+    }
+  }
+
   /** 취소: 확정 전 생성 결과를 지우고 되돌린다 — 필요하면 대상 상품에서 다시 생성할 수 있다. */
   async function handleDiscard(row: GeneratedRow) {
     if (!selectedSite) return
@@ -536,6 +560,11 @@ export function TransformPanel() {
                             className="border border-gray-300 rounded-lg px-2 py-1 text-xs">
                             <option value="">(미매핑)</option>
                             {TARGET_FIELDS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                            {customFields.length > 0 && (
+                              <optgroup label="거래처 커스텀 필드">
+                                {customFields.map(f => <option key={f.field_key} value={f.field_key}>{f.field_label}</option>)}
+                              </optgroup>
+                            )}
                           </select>
                         </td>
                         <td className="px-2 py-2">
@@ -664,8 +693,16 @@ export function TransformPanel() {
 
               {generatedRows.length > 0 && (
                 <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-                  <div className="text-xs font-semibold text-gray-500 mb-1">2차 검증 — 생성 결과 검토 & 반영</div>
-                  <p className="text-[11px] text-gray-400 mb-3">컬럼마다 어떤 기준으로 생성됐는지 다시 표시했습니다. 값을 확인·수정한 뒤 행마다 반영하거나, 마음에 안 들면 취소해 되돌리세요.</p>
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="text-xs font-semibold text-gray-500">2차 검증 — 생성 결과 검토 & 반영</div>
+                    {generatedRows.some(r => r.status !== 'committed') && (
+                      <button onClick={handleBulkCommit} disabled={bulkCommitting}
+                        className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+                        {bulkCommitting ? '일괄 반영 중...' : `전체 반영 (${generatedRows.filter(r => r.status !== 'committed').length})`}
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-gray-400 mb-3">컬럼마다 어떤 기준으로 생성됐는지 다시 표시했습니다. 값을 확인·수정한 뒤 행마다 반영하거나, 마음에 안 들면 취소해 되돌리세요. 규칙을 믿고 한 번에 처리하려면 &quot;전체 반영&quot;을 누르세요.</p>
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs border-collapse">
                       <thead>

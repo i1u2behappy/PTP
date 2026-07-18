@@ -352,6 +352,20 @@ export async function initDb() {
     CREATE UNIQUE INDEX IF NOT EXISTS product_master_internal_code_idx ON product_master(internal_code) WHERE internal_code IS NOT NULL;
     -- 판매관리코드 = 이 시스템에서 상품을 관리하는 키값이므로 상품마다 고유해야 한다
     CREATE UNIQUE INDEX IF NOT EXISTS product_master_sales_code_idx ON product_master(sales_code) WHERE sales_code IS NOT NULL;
+    -- 거래처별 커스텀 필드(기준 Master DB에서 정의) 값 저장 — { field_key: value }
+    ALTER TABLE product_master ADD COLUMN IF NOT EXISTS custom_fields JSONB DEFAULT '{}';
+
+    -- 거래처별 "기준 Master DB" 타깃 필드 목록 — 엑셀 업로드로 정의, 기존 고정 컬럼 매핑 또는 신규 커스텀 필드
+    CREATE TABLE IF NOT EXISTS client_master_schema_fields (
+      id           SERIAL PRIMARY KEY,
+      client_id    INT NOT NULL REFERENCES supply_clients(id) ON DELETE CASCADE,
+      field_key    TEXT NOT NULL,
+      field_label  TEXT NOT NULL,
+      is_custom    BOOLEAN NOT NULL DEFAULT true,
+      sort_order   INT DEFAULT 0,
+      created_at   TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (client_id, field_key)
+    );
 
     -- 이미지 레코드 (원본명/정규화명/저장위치)
     CREATE TABLE IF NOT EXISTS product_images (

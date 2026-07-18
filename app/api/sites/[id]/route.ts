@@ -40,7 +40,7 @@ interface SiteBody {
   customThumbnailSelector?: string
   autoScrapeEnabled?: boolean
   autoScrapeHour?: number | null
-  manualLoginRequired?: boolean
+  manualLoginRequired?: boolean | null
   mainItems?: string
 }
 
@@ -58,8 +58,19 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
      WHERE id=$15`,
     [b.name, b.url, b.loginUrl || null, b.loginId || null, encrypted, iv, b.clientId || null,
       b.customNameSelector || null, b.customPriceSelector || null, b.customThumbnailSelector || null,
-      !!b.autoScrapeEnabled, b.autoScrapeHour ?? null, !!b.manualLoginRequired, b.mainItems || null, id],
+      !!b.autoScrapeEnabled, b.autoScrapeHour ?? null, b.manualLoginRequired ?? null, b.mainItems || null, id],
   )
+  return NextResponse.json({ ok: true })
+}
+
+/** 스크래핑 화면에서 "일반모드/개발자모드" 중 하나를 확정할 때 쓰는 최소 갱신 — 로그인정보/셀렉터 등
+ * 전체 필드를 요구하는 PUT과 달리 이 값 하나만 바꾼다(그 화면은 다른 필드를 갖고 있지 않아, PUT을 그대로
+ * 쓰면 나머지 필드를 실수로 지울 위험이 있다). */
+export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params
+  const b = await req.json() as { manualLoginRequired: boolean }
+  if (typeof b.manualLoginRequired !== 'boolean') return NextResponse.json({ error: 'manualLoginRequired required' }, { status: 400 })
+  await pool.query(`UPDATE sites SET manual_login_required=$1 WHERE id=$2`, [b.manualLoginRequired, id])
   return NextResponse.json({ ok: true })
 }
 

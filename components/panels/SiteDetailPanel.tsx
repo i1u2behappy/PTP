@@ -30,7 +30,7 @@ export function SiteDetailPanel({ params }: Props) {
   const [thumbnailSelector, setThumbnailSelector] = useState('')
   const [autoScrapeEnabled, setAutoScrapeEnabled] = useState(false)
   const [autoScrapeHour, setAutoScrapeHour] = useState(3)
-  const [manualLoginRequired, setManualLoginRequired] = useState(false)
+  const [manualLoginRequired, setManualLoginRequired] = useState<boolean | null>(isNew ? null : false)
   const [loading, setLoading] = useState(!isNew)
   const [saving, setSaving] = useState(false)
   const [justSaved, setJustSaved] = useState(false)
@@ -44,14 +44,14 @@ export function SiteDetailPanel({ params }: Props) {
     fetch(`/api/sites/${siteId}`).then(r => r.json()).then((d: {
       name: string | null; url: string; login_url: string | null; login_id: string | null; login_pw: string | null; client_id: number | null
       custom_name_selector: string | null; custom_price_selector: string | null; custom_thumbnail_selector: string | null
-      auto_scrape_enabled: boolean; auto_scrape_hour: number | null; manual_login_required: boolean; main_items: string | null
+      auto_scrape_enabled: boolean; auto_scrape_hour: number | null; manual_login_required: boolean | null; main_items: string | null
     }) => {
       setName(d.name || ''); setMainItems(d.main_items || ''); setUrl(d.url); setLoginUrl(d.login_url || ''); setLoginId(d.login_id || ''); setLoginPw(d.login_pw || '')
       setClientId(d.client_id ?? '')
       setNameSelector(d.custom_name_selector || ''); setPriceSelector(d.custom_price_selector || '')
       setThumbnailSelector(d.custom_thumbnail_selector || '')
       setAutoScrapeEnabled(!!d.auto_scrape_enabled); setAutoScrapeHour(d.auto_scrape_hour ?? 3)
-      setManualLoginRequired(!!d.manual_login_required)
+      setManualLoginRequired(d.manual_login_required)
     }).finally(() => setLoading(false))
   }, [siteId, isNew])
 
@@ -165,18 +165,27 @@ export function SiteDetailPanel({ params }: Props) {
           </label>
         </div>
 
-        <label className="flex items-start gap-2 text-sm text-gray-600 mb-3">
-          <input type="checkbox" checked={manualLoginRequired} onChange={e => setManualLoginRequired(e.target.checked)} className="mt-0.5" />
-          <span>
-            🧩 크롬익스텐션-개발자모드
-            <span className="block text-xs text-gray-400 mt-0.5">
-              Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 근본적으로 안 되는 몰입니다. 체크하면
-              스크래핑 화면에서 자동 실행 대신, 사용자가 실제 브라우저에서 직접 로그인한 상태로 크롬 확장을
-              이용해 스크랩하는 방법을 안내합니다. 사람이 직접 브라우저를 열고 클릭해야 하는 방식이라
-              매일 자동 재스크랩은 지원하지 않습니다.
-            </span>
-          </span>
-        </label>
+        <div className="mb-3">
+          <span className="block text-xs text-gray-500 mb-1">스크랩 방식</span>
+          <div className="flex gap-2">
+            {([
+              { v: null, label: '❔ 아직 모름' },
+              { v: false, label: '🤖 일반모드' },
+              { v: true, label: '🧩 개발자모드' },
+            ] as const).map(opt => (
+              <button key={String(opt.v)} type="button" onClick={() => setManualLoginRequired(opt.v)}
+                className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+                  manualLoginRequired === opt.v ? 'bg-teal-500 text-white border-teal-500' : 'bg-white text-gray-600 border-gray-300 hover:border-teal-400'}`}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-gray-400 mt-1">
+            {manualLoginRequired === null && '처음 스크랩을 시도할 때 스크래핑 화면에서 한 번 선택하면 됩니다 — 어떤 몰인지 미리 알 수 없어 기본값입니다.'}
+            {manualLoginRequired === false && 'PTP가 자동으로 로그인하고 스크랩합니다. 대부분의 몰은 이 방식이면 충분합니다.'}
+            {manualLoginRequired === true && 'Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 근본적으로 안 되는 몰입니다. 스크래핑 화면에서 자동 실행 대신, 사용자가 실제 브라우저에서 직접 로그인한 상태로 크롬 확장을 이용해 스크랩하는 방법을 안내합니다. 사람이 직접 브라우저를 열고 클릭해야 하는 방식이라 매일 자동 재스크랩은 지원하지 않습니다.'}
+          </p>
+        </div>
 
         <details className="mb-3">
           <summary className="text-xs text-gray-500 cursor-pointer select-none mb-2">고급 설정: 수동 추출 셀렉터{!manualLoginRequired && ' · 자동 재스크랩'}</summary>

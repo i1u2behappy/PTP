@@ -45,7 +45,7 @@ interface SiteBody {
   customThumbnailSelector?: string
   autoScrapeEnabled?: boolean
   autoScrapeHour?: number | null
-  manualLoginRequired?: boolean
+  manualLoginRequired?: boolean | null
   mainItems?: string
 }
 
@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
     [b.name, b.url, b.loginUrl || null, b.loginId || null, encrypted, iv, b.clientId || null,
       b.customNameSelector || null, b.customPriceSelector || null, b.customThumbnailSelector || null,
-      !!b.autoScrapeEnabled, b.autoScrapeHour ?? null, !!b.manualLoginRequired, b.mainItems || null],
+      !!b.autoScrapeEnabled, b.autoScrapeHour ?? null, b.manualLoginRequired ?? null, b.mainItems || null],
   )
   return NextResponse.json({ id: res.rows[0].id })
 }

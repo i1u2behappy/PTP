@@ -11,7 +11,7 @@ interface Site {
   login_pw_masked: string | null
   client_name: string | null
   blocked: boolean
-  manual_login_required: boolean
+  manual_login_required: boolean | null
   main_items: string | null
   latest_memo: string | null
   created_at: string
@@ -117,9 +117,14 @@ export function SitesListPanel() {
                   <tr key={s.id} onClick={() => openScraper(s)} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
                     <td className="px-3 py-2 text-gray-800 font-medium sticky left-0 bg-white">
                       {s.name || '(이름 없음)'}
-                      {s.manual_login_required && (
+                      {s.manual_login_required === true && (
                         <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold whitespace-nowrap" title="Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 안 되는 몰 — 크롬 확장(개발자모드)으로 스크랩">
                           🧩 개발자모드
+                        </span>
+                      )}
+                      {s.manual_login_required === null && (
+                        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold whitespace-nowrap" title="아직 스크랩 방식이 정해지지 않았습니다 — 스크래핑 화면에서 처음 스크랩할 때 선택하세요">
+                          ❔ 미정
                         </span>
                       )}
                     </td>

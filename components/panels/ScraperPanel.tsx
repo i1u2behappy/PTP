@@ -2,7 +2,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useTabs } from '../shell/TabsContext'
 import { PRODUCTS_LIST_TAB } from '../shell/menuTabs'
-import { ScrapeSessionGrid } from './shared/ScrapeSessionGrid'
 
 type Status = 'idle' | 'running' | 'done' | 'error' | 'stopped'
 type LoginStep = 'none' | 'opened' | 'confirmed'
@@ -13,7 +12,7 @@ interface Site {
   url: string
   login_url: string | null
   login_id: string | null
-  manual_login_required?: boolean
+  manual_login_required?: boolean | null
   profile_dir?: string
   client_id?: number | null
   client_name?: string | null
@@ -66,10 +65,11 @@ interface PreviewItem {
   thumbnail: string
 }
 
-/** 개발자모드(크롬 확장) 몰의 세션 이력 그리드용 — /api/sessions?siteId= 응답 중 ScrapeSessionGrid가 요구하는 필드만. */
+/** 개발자모드(크롬 확장) 몰의 새 세션 감지용 — /api/sessions?siteId= 응답 중 필요한 필드만. */
 interface DevModeSession {
   id: number
   url: string
+  status: string
   found_count: number
   staged_count: number
   pending_count: number
@@ -117,8 +117,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [stopping, setStopping]   = useState(false)
   const [itemLog, setItemLog]     = useState<ItemLogRow[]>([])
   const [retrying, setRetrying]   = useState(false)
+  const [modeSaving, setModeSaving] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const [devModeSessions, setDevModeSessions] = useState<DevModeSession[]>([])
 
   useEffect(() => {
     fetch('/api/sites').then(r => r.json()).then((d: Site[]) => { if (Array.isArray(d)) setSites(d) }).catch(() => {})
@@ -176,22 +176,52 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   }, [sessionId, status, bumpRefresh])
 
   // 개발자모드(크롬 확장) 몰은 PTP가 아니라 사용자의 실제 브라우저에서 확장이 직접 세션을 만들고 채운다
-  // (POST /api/scrape/extension-ingest) — 그래서 위 세션 폴링과 달리 "이 몰에 새 세션이 생겼는지"를
-  // 주기적으로 다시 조회해야 진행상황이 보인다.
+  // (POST /api/scrape/extension-ingest) — "스크래핑 시작" 버튼이 없으니, 이 몰이 선택된 동안 새로 생긴
+  // 세션이 있는지 주기적으로 확인하다가 발견되면 sessionId/status에 그대로 편입시킨다. 이후로는 위
+  // 표준 진행상황 폴링(직접 시작했을 때와 동일한 로직)이 이어받아 진행률을 갱신하고 완료 시 "→ 스크랩
+  // Raw 확인" 버튼까지 똑같이 띄운다.
   useEffect(() => {
-    if (!selectedSite?.manual_login_required) { setDevModeSessions([]); return }
-    const siteId = selectedSite.id
-    function load() {
-      fetch(`/api/sessions?siteId=${siteId}`).then(r => r.json()).then((d: DevModeSession[]) => {
-        if (Array.isArray(d)) setDevModeSessions(d)
+    if (selectedSite?.manual_login_required !== true) return
+    const site = selectedSite
+    function checkForRunningSession() {
+      fetch(`/api/sessions?siteId=${site.id}`).then(r => r.json()).then((d: DevModeSession[]) => {
+        const latest = Array.isArray(d) ? d[0] : undefined
+        if (!latest || latest.status !== 'running') return
+        setSessionId(latest.id)
+        setStatus('running')
+        setProgress({ saved: Number(latest.staged_count) || 0, total: Number(latest.found_count) || 0 })
+        localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ site, sessionId: latest.id }))
       }).catch(() => {})
     }
-    load()
-    const timer = setInterval(load, 5000)
+    checkForRunningSession()
+    const timer = setInterval(checkForRunningSession, 5000)
     return () => clearInterval(timer)
   }, [selectedSite])
 
   const failedUrls = itemLog.filter(r => r.status === 'failed').map(r => r.url)
+
+  // 이 몰이 "일반모드"(PTP 자동화) / "개발자모드"(크롬 확장) 중 무엇인지 — 아직 정해지지 않았으면(null)
+  // 어느 흐름도 보여주지 않고 선택부터 받는다. PC인증 등으로 자동 로그인이 근본적으로 안 되는 몰인지는
+  // 실제로 겪어보기 전엔 알 수 없어(이미 여러 번 확인된 사실), 최초 스크랩 시점에 사용자가 한 번 고르게
+  // 한다. 아래 재스크랩 "전체/증분" 선택과는 별개 개념이라 이름을 다르게 둔다(scrapeMode는 이미 그 용도로 씀).
+  const mallMode = !selectedSite ? null
+    : selectedSite.manual_login_required === null ? 'undetermined'
+    : selectedSite.manual_login_required ? 'devmode' : 'normal'
+
+  async function handleChooseScrapeMode(devMode: boolean) {
+    if (!selectedSite) return
+    setModeSaving(true)
+    try {
+      await fetch(`/api/sites/${selectedSite.id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ manualLoginRequired: devMode }),
+      })
+      setSelectedSite(prev => prev && { ...prev, manual_login_required: devMode })
+      bumpRefresh('sites')
+    } finally {
+      setModeSaving(false)
+    }
+  }
 
   async function selectSite(siteId: number) {
     const res = await fetch(`/api/sites/${siteId}`)
@@ -516,9 +546,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                         className="border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors">
                         <td className="px-3 py-2 text-gray-800 font-medium whitespace-nowrap">
                           {s.name || '(이름 없음)'}
-                          {s.manual_login_required && (
+                          {s.manual_login_required === true && (
                             <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold whitespace-nowrap" title="Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 안 되는 몰 — 크롬 확장(개발자모드)으로 스크랩">
                               🧩 개발자모드
+                            </span>
+                          )}
+                          {s.manual_login_required === null && (
+                            <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold whitespace-nowrap" title="아직 스크랩 방식이 정해지지 않았습니다 — 선택하면 처음 스크랩할 때 물어봅니다">
+                              ❔ 미정
                             </span>
                           )}
                         </td>
@@ -535,8 +570,28 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         )}
       </div>
 
+      {/* 스크랩 방식 선택 (최초 스크랩 — 아직 정해지지 않은 몰만) */}
+      {mallMode === 'undetermined' && (
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
+          <div className="text-sm font-semibold text-gray-700 mb-1">이 몰은 스크랩 방식이 아직 정해지지 않았습니다</div>
+          <p className="text-xs text-gray-400 mb-4">처음 스크랩할 때 한 번만 선택하면 됩니다 — 나중에 Mall 상세관리에서 다시 바꿀 수 있습니다.</p>
+          <div className="flex gap-3">
+            <button type="button" onClick={() => handleChooseScrapeMode(false)} disabled={modeSaving}
+              className="flex-1 text-left px-4 py-3 rounded-xl border border-gray-300 hover:border-teal-400 disabled:opacity-50 transition-colors">
+              <div className="text-sm font-semibold text-gray-800">🤖 일반모드</div>
+              <div className="text-xs text-gray-400 mt-0.5">PTP가 자동으로 로그인하고 스크랩합니다. 대부분의 몰은 이 방식이면 충분합니다.</div>
+            </button>
+            <button type="button" onClick={() => handleChooseScrapeMode(true)} disabled={modeSaving}
+              className="flex-1 text-left px-4 py-3 rounded-xl border border-gray-300 hover:border-teal-400 disabled:opacity-50 transition-colors">
+              <div className="text-sm font-semibold text-gray-800">🧩 개발자모드</div>
+              <div className="text-xs text-gray-400 mt-0.5">PC인증(윈도우 보안) 등으로 자동 로그인이 안 되는 몰입니다. 크롬 확장으로 직접 스크랩합니다.</div>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 로그인 */}
-      {selectedSite && !selectedSite.manual_login_required && (
+      {selectedSite && mallMode === 'normal' && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           <div className="text-sm font-semibold text-gray-700 mb-3">로그인 정보</div>
           <div className="grid grid-cols-2 gap-3 mb-4">
@@ -574,7 +629,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       )}
 
       {/* 스크랩 대상 */}
-      {selectedSite && !selectedSite.manual_login_required && (
+      {selectedSite && mallMode === 'normal' && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           {hasPriorSession && (
             <>
@@ -717,7 +772,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       )}
 
       {/* 상품 페이지 미리보기 */}
-      {selectedSite && !selectedSite.manual_login_required && (
+      {selectedSite && mallMode === 'normal' && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           <div className="flex items-center justify-between mb-2">
             <label className="block text-sm font-semibold text-gray-700">상품 페이지 미리보기</label>
@@ -892,23 +947,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         </div>
       )}
 
-      {/* 실행 버튼 / 개발자모드 안내 + 세션 이력 */}
-      {selectedSite?.manual_login_required ? (
+      {/* 실행 버튼 / 개발자모드 안내 */}
+      {mallMode === 'devmode' && selectedSite ? (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           <div className="text-sm font-semibold text-gray-700 mb-3">🧩 개발자모드 스크랩 방법</div>
-          <ol className="list-decimal list-inside text-sm text-gray-600 space-y-1 mb-4">
+          <ol className="list-decimal list-inside text-sm text-gray-600 space-y-1">
             <li>{selectedSite.name || selectedSite.url}에 평소 쓰는 크롬으로 로그인한 상태로 상품 목록(카테고리) 페이지를 여세요.</li>
             <li>크롬 우측 상단의 확장 아이콘을 클릭하면 자동으로 상품을 순회하며 스크랩합니다.</li>
-            <li>완료되면 아래 목록에 새 세션이 나타납니다 — 눌러서 스크랩 Raw 확인/검수로 넘어가세요.</li>
+            <li>진행 상황은 아래에 자동으로 나타나며, 완료되면 &quot;스크랩 Raw 확인&quot;으로 바로 이동할 수 있습니다.</li>
           </ol>
-          <div className="text-xs font-semibold text-gray-500 mb-2">세션 이력</div>
-          {devModeSessions.length === 0 ? (
-            <p className="text-xs text-gray-400">아직 이 몰로 진행된 세션이 없습니다.</p>
-          ) : (
-            <ScrapeSessionGrid sessions={devModeSessions} selectedId="" onSelect={() => openTab(PRODUCTS_LIST_TAB)} maxHeightClassName="max-h-72" />
-          )}
         </div>
-      ) : status === 'running' ? (
+      ) : mallMode !== 'normal' ? null : status === 'running' ? (
         <button onClick={handleStop} disabled={stopping}
           className="w-full py-3 rounded-2xl bg-rose-500 text-white font-semibold text-sm hover:bg-rose-600 disabled:opacity-50 transition-colors">
           {stopping ? '중지 처리 중...' : '⏸ 스크래핑 중지'}

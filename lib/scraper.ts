@@ -5,6 +5,7 @@
  * 추출 로직은 "이 몰 한 페이지"가 아니라 "이 몰의 상품마다 달라질 수 있는 모든 경우"를 놓치지 않게
  * 짜야 한다. (예: 대표이미지/상세이미지의 개수·파일명, 옵션 값, 재고수량, 상세페이지 내 텍스트 설명 등)
  */
+import fs from 'fs'
 import path from 'path'
 import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
@@ -17,13 +18,60 @@ import pool from './db'
 
 const execFileAsync = promisify(execFile)
 
-/** 사용자의 실제 개인 크롬이 쓰는 기본 프로필 경로 (Windows). manual_login_required 몰은 이 프로필을 로그인뿐
- * 아니라 실제 스크래핑에도 그대로 쓴다 — 전용 폴더로 분리하고 쿠키만 옮기는 방식은 시도해봤지만, 이 몰(PC인증
- * 연동 사업자회원전용 도매몰)의 세션이 쿠키만이 아니라 인증을 통과한 그 브라우저 자체에 묶여있어 실패했다
- * (쿠키를 그대로 복사해도 서버가 로그인 안 된 것으로 취급). 그래서 전용 폴더는 포기하고 개인 프로필을 그대로
- * 쓴다 — 대신 스크래핑 중엔 사용자가 개인 크롬을 닫아둬야 한다(같은 프로필 동시 사용 불가). */
+/** 사용자의 실제 개인 크롬이 쓰는 프로필 루트 경로 (Windows). manual_login_required 몰은 이 프로필을
+ * 로그인뿐 아니라 실제 스크래핑에도 그대로 써야 한다 — 전용 폴더로 분리하고 쿠키만 옮기는 방식은 시도해
+ * 봤지만, 이 몰(PC인증 연동 사업자회원전용 도매몰)의 세션이 쿠키만이 아니라 인증을 통과한 그 브라우저
+ * 자체에 묶여있어 실패했다(쿠키를 그대로 복사해도 서버가 로그인 안 된 것으로 취급). */
 function realChromeUserDataDir(): string {
   return path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'User Data')
+}
+
+/** 이 폴더 루트 아래에서 실제로 활성 상태인 프로필 폴더명("Default", "Profile 6" 등)을 Local State에서
+ * 읽는다. --profile-directory를 지정하지 않고 크롬을 열면 이 값이 그대로 열리므로, 사본도 같은 프로필을
+ * 지정해야 사용자가 실제 로그인해둔 그 프로필과 일치한다. */
+function activeProfileDirName(userDataDir: string): string {
+  try {
+    const localState = JSON.parse(fs.readFileSync(path.join(userDataDir, 'Local State'), 'utf-8'))
+    return localState?.profile?.last_used || 'Default'
+  } catch {
+    return 'Default'
+  }
+}
+
+const MANUAL_LOGIN_PROFILE_COPY_ROOT = path.join(process.cwd(), '.playwright-profiles', '_manual-login-real-copy')
+// 로그인/보안 상태와 무관한 순수 성능 캐시만 제외한다. 설치된 확장프로그램(Extensions)은 용량이 커도 제외
+//하지 않는다 — 국내 몰의 PC인증/본인인증이 보안 프로그램 확장의 설치 여부를 확인하는 경우가 흔해서다.
+const PROFILE_COPY_CACHE_EXCLUDES = ['Cache', 'Code Cache', 'GPUCache', 'DawnWebGPUCache', 'DawnGraphiteCache']
+
+/**
+ * 최신 크롬은 자기 자신의 실제 기본 프로필 경로에는 원격 디버깅(자동화 제어)을 거부한다
+ * ("DevTools remote debugging requires a non-default data directory") — 그래서 개인 프로필을 그대로
+ * Playwright로 띄우면 크롬 프로세스는 뜨지만 CDP 연결이 끝내 안 되고 결국 타임아웃난다(2026-07-18 확인).
+ * 우회: 쿠키만이 아니라 활성 프로필 폴더 전체(확장프로그램·로컬스토리지·Web Data 등 포함, 순수 캐시만 제외)를
+ * 별도 경로에 통째로 복사해 그 사본을 띄운다 — robocopy /MIR로 미러링해 최초 1회 이후로는 바뀐 파일만
+ * 복사되어 빠르다. 이전에 시도했다가 실패한 "쿠키만 이전" 방식과 달리 프로필 전체를 복사하므로, 세션이
+ * 브라우저 자체(로컬스토리지/확장 상태 등)에 묶여있어도 통과할 가능성이 있다 — 다만 WebAuthn이 브라우저
+ * 프로필이 아니라 Windows OS/TPM에 바인딩돼 있으면 이 방법으로도 안 될 수 있다(미검증, 실사용하며 확인).
+ */
+async function syncManualLoginProfileCopy(): Promise<{ userDataDir: string; profileDirName: string }> {
+  const srcRoot = realChromeUserDataDir()
+  const profileDirName = activeProfileDirName(srcRoot)
+  const destRoot = MANUAL_LOGIN_PROFILE_COPY_ROOT
+  fs.mkdirSync(destRoot, { recursive: true })
+
+  const excludeArgs = PROFILE_COPY_CACHE_EXCLUDES.flatMap(d => ['/XD', path.join(srcRoot, profileDirName, d)])
+  await execFileAsync('robocopy', [
+    path.join(srcRoot, profileDirName), path.join(destRoot, profileDirName),
+    '/MIR', '/NFL', '/NDL', '/NJH', '/NJS', '/R:1', '/W:1', ...excludeArgs,
+  ]).catch(e => {
+    // robocopy는 0~7이 정상(파일 복사/스킵 조합), 8 이상은 일부 파일을 못 옮겼다는 뜻 — 대개 개인 크롬이
+    // 실행 중이라 Cookies/Login Data 같은 세션 파일이 잠겨있어서다(2026-07-18 확인: 실제로 이 경우였음).
+    if (typeof e?.code === 'number' && e.code < 8) return
+    throw new Error('개인 크롬이 켜져 있어 프로필 일부 파일(로그인/쿠키 정보)을 복사하지 못했습니다. 크롬을 모두 닫고 다시 시도해주세요.')
+  })
+  fs.copyFileSync(path.join(srcRoot, 'Local State'), path.join(destRoot, 'Local State'))
+
+  return { userDataDir: destRoot, profileDirName }
 }
 
 async function isManualLoginSite(siteId: number): Promise<boolean> {
@@ -225,17 +273,18 @@ async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, context: Bro
       return await fn(page, openContext)
     }
     if (await isManualLoginSite(opts.siteId)) {
-      // 직접로그인 필수 몰은 전용 폴더 대신 사용자의 실제 개인 크롬 프로필을 그대로 쓴다(realChromeUserDataDir
-      // 주석 참고 — 전용 폴더+쿠키 이전 방식은 이 몰에서 실패해 포기함). 개인 브라우저이므로 여기서 기존 크롬
-      // 프로세스를 강제 종료하지 않는다 — 사용자가 크롬을 열어둔 채면 같은 프로필을 동시에 못 써서 실패하는데,
-      // 그 경우 사용자가 직접 크롬을 닫아야 한다.
+      // 직접로그인 필수 몰은 사용자의 실제 개인 크롬 프로필(활성 프로필 전체)을 사본으로 복제해 그 사본을
+      // 헤드리스로 띄운다 — syncManualLoginProfileCopy() 주석 참고. 개인 브라우저 자체를 건드리지 않으므로
+      // 여기서 기존 크롬 프로세스를 강제 종료하지 않는다.
       let context: BrowserContext
       try {
-        context = await chromium.launchPersistentContext(realChromeUserDataDir(), {
+        const { userDataDir, profileDirName } = await syncManualLoginProfileCopy()
+        context = await chromium.launchPersistentContext(userDataDir, {
           headless: true, channel: 'chrome', chromiumSandbox: true,
+          args: profileDirName !== 'Default' ? [`--profile-directory=${profileDirName}`] : [],
         })
-      } catch {
-        throw new Error('개인 크롬 브라우저가 열려있으면 이 몰은 스크랩할 수 없습니다. 크롬을 모두 닫고 다시 시도해주세요.')
+      } catch (e) {
+        throw new Error(`개인 크롬 프로필 복사본 실행에 실패했습니다: ${e instanceof Error ? e.message : String(e)}`)
       }
       try {
         const page = context.pages()[0] || await context.newPage()
@@ -451,7 +500,11 @@ async function scanSelectOptions(page: Page, rootSelector?: string): Promise<Dom
       .filter(sel => !navOnchangeRe.test(sel.getAttribute('onchange') || ''))
       .map(sel => {
         const name = sel.getAttribute('title') || sel.name || sel.id || ''
+        // value=""인 <option>은 "사이즈"/"색상" 같은 안내용 placeholder인 경우가 흔하다(플레이스홀더
+        // 문구가 "선택하세요" 류가 아니어도 마찬가지라 텍스트 패턴만으론 못 걸러낸다) — 실제 선택 가능한
+        // 옵션이라면 value가 비어있을 이유가 없으므로 텍스트 패턴 필터와 별개로 항상 제외한다.
         const values = Array.from((sel as HTMLSelectElement).options)
+          .filter(o => o.value !== '')
           .map(o => (o.textContent || '').trim())
           .filter(v => v && !placeholderRe.test(v))
         return { name, values }

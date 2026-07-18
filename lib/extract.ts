@@ -59,10 +59,22 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       availability = firstOffer?.availability || ''
     }
 
-    if (!name) name = ogContent('og:title') || document.title || ''
+    // 일부 몰은 상품명을 표준 위치(ld+json/og:title)에 안 두고, 장바구니 제출용 hidden input에만
+    // 실제 상품명을 담아둔다(예: 신우) — document.title(사이트 공통 타이틀)보다 우선한다.
+    if (!name) name = ogContent('og:title') || document.querySelector<HTMLInputElement>('input[name="brandname"]')?.value || document.title || ''
     if (!mainImages.length) {
       const ogImg = ogContent('og:image')
       if (ogImg) mainImages = [ogImg]
+    }
+    if (!mainImages.length) {
+      // 대표이미지가 여러 장인 갤러리형 UI(예: 신우의 .img_small 썸네일 목록)를 먼저 시도하고,
+      // 없으면 큰 대표이미지 하나(#bigimage)만이라도 쓴다.
+      const galleryImgs = Array.from(document.querySelectorAll<HTMLImageElement>('.img_small .small img')).map(img => img.src).filter(Boolean)
+      if (galleryImgs.length) mainImages = galleryImgs
+      else {
+        const bigImg = document.querySelector<HTMLImageElement>('#bigimage')
+        if (bigImg?.src) mainImages = [bigImg.src]
+      }
     }
 
     // ld+json/og 이미지는 URL만 있고 alt 텍스트가 없으니, 페이지의 실제 <img> 태그에서 src 기준으로 alt를 찾아 붙인다.
@@ -79,16 +91,18 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     }
     const mainImageNames = mainImages.map(nameForImage)
 
-    // ld+json/og의 대표 이미지 갤러리(여러 장일 수 있음)와는 별개로, 카페24 표준 상세설명 영역(#prdDetail)에
-    // 판매자가 직접 올린 상품별 상세 이미지(사이즈/소재 등 텍스트로는 안 남는 구분 정보)를 모은다.
+    // ld+json/og의 대표 이미지 갤러리(여러 장일 수 있음)와는 별개로, 상세설명 영역에 판매자가 직접
+    // 올린 상품별 상세 이미지(사이즈/소재 등 텍스트로는 안 남는 구분 정보)를 모은다. 카페24는 #prdDetail을
+    // 쓰고, 그게 없으면 다른 자체 제작 몰에서 흔한 .detail_con(예: 신우)을 대신 시도한다.
     // /upload/appfiles/ 경로는 카페24 앱스토어 위젯이 심는 몰 공통 배너로, 상품마다 똑같이 끼어들어오므로 제외한다.
-    const detailImageEls = Array.from(document.querySelectorAll<HTMLImageElement>('#prdDetail img'))
+    const detailContainer = document.querySelector('#prdDetail') || document.querySelector('.detail_con')
+    const detailImageEls = Array.from(detailContainer?.querySelectorAll<HTMLImageElement>('img') || [])
       .filter(img => img.src && !mainImages.includes(img.src) && !img.src.includes('/upload/appfiles/'))
     const detailImages = detailImageEls.map(img => img.src)
     const detailImageNames = detailImageEls.map(img => nameForImage(img.src))
 
     // 상세페이지에 이미지가 아니라 텍스트로 직접 박혀 있는 설명 내용 (소재/사이즈 안내 등)
-    const detailText = (document.querySelector('#prdDetail')?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 3000)
+    const detailText = (detailContainer?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 3000)
 
     if (!description) {
       description = ogContent('og:description') || document.querySelector('meta[name="description"]')?.getAttribute('content') || ''
@@ -100,6 +114,13 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
         const m = (el.textContent || '').match(/([\d,]{3,})\s*원/)
         if (m) { price = Number(m[1].replace(/,/g, '')); break }
       }
+    }
+    if (price == null) {
+      // 로그인 전에는 "회원공개" 같은 문구로 화면 표시만 가려두고, 장바구니 제출용 hidden input에는
+      // 실제 가격이 그대로 남아있는 몰이 있다(예: 신우) — 로그인 여부와 무관하게 이 값을 폴백으로 쓴다.
+      const priceInput = document.querySelector<HTMLInputElement>('input[name="price"], input#price')
+      const v = priceInput ? Number(priceInput.value) : NaN
+      if (Number.isFinite(v) && v > 0) price = v
     }
 
     // 품절/재입고/단종 배지 텍스트 및 재고수량 문구를 탐색 (ld+json availability/상품정보고시 표가 없는 사이트 대비)
@@ -155,7 +176,7 @@ function resolveStockQty(rows: [string, string][], stockQtyText: string): number
 function extractMallProductCodeFromUrl(url: string): string {
   try {
     const u = new URL(url)
-    for (const key of ['branduid', 'goodsno', 'goods_no', 'product_no', 'productNo', 'idx', 'no']) {
+    for (const key of ['branduid', 'brandcode', 'goodsno', 'goods_no', 'product_no', 'productNo', 'idx', 'no']) {
       const v = u.searchParams.get(key)
       if (v) return v
     }

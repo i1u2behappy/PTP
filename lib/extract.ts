@@ -80,9 +80,10 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     const mainImageNames = mainImages.map(nameForImage)
 
     // ld+json/og의 대표 이미지 갤러리(여러 장일 수 있음)와는 별개로, 카페24 표준 상세설명 영역(#prdDetail)에
-    // 판매자가 직접 올린 상품별 상세 이미지(사이즈/소재 등 텍스트로는 안 남는 구분 정보)를 모은다
+    // 판매자가 직접 올린 상품별 상세 이미지(사이즈/소재 등 텍스트로는 안 남는 구분 정보)를 모은다.
+    // /upload/appfiles/ 경로는 카페24 앱스토어 위젯이 심는 몰 공통 배너로, 상품마다 똑같이 끼어들어오므로 제외한다.
     const detailImageEls = Array.from(document.querySelectorAll<HTMLImageElement>('#prdDetail img'))
-      .filter(img => img.src && !mainImages.includes(img.src))
+      .filter(img => img.src && !mainImages.includes(img.src) && !img.src.includes('/upload/appfiles/'))
     const detailImages = detailImageEls.map(img => img.src)
     const detailImageNames = detailImageEls.map(img => nameForImage(img.src))
 

@@ -3,6 +3,7 @@ import type { ScrapeResult } from '../scraper'
 import type { ExtractedProduct } from '../ai'
 import { upsertMallProduct, markMissingAsDiscontinued } from './incremental'
 import { downloadProductImages } from '../images'
+import { migrateToMaster } from '../master/migrate'
 
 export interface StageOptions {
   siteId: number
@@ -101,6 +102,7 @@ function toScrapeResult(row: StagingRow): ScrapeResult {
 export interface MergeResult {
   merged: number[]
   skipped: { id: number; reason: string }[]
+  noClient: number[]
 }
 
 /**
@@ -131,7 +133,17 @@ async function checkSessionCompletion(sessionId: number) {
 export async function mergeStagingItems(ids: number[], opts: { force?: boolean } = {}): Promise<MergeResult> {
   const merged: number[] = []
   const skipped: { id: number; reason: string }[] = []
+  const noClient: number[] = []
   const touchedSessions = new Set<number>()
+  const siteClientCache = new Map<number, number | null>()
+
+  async function clientIdForSite(siteId: number): Promise<number | null> {
+    if (siteClientCache.has(siteId)) return siteClientCache.get(siteId)!
+    const res = await pool.query<{ client_id: number | null }>('SELECT client_id FROM sites WHERE id=$1', [siteId])
+    const clientId = res.rows[0]?.client_id ?? null
+    siteClientCache.set(siteId, clientId)
+    return clientId
+  }
 
   for (const id of ids) {
     const res = await pool.query<StagingRow>(`SELECT * FROM scrape_staging_items WHERE id=$1 AND status='pending'`, [id])
@@ -151,14 +163,17 @@ export async function mergeStagingItems(ids: number[], opts: { force?: boolean }
     }
 
     const { id: mallProductId } = await upsertMallProduct({ siteId: row.site_id, sessionId: row.session_id }, toScrapeResult(row))
-    await downloadProductImages(row.thumbnail_urls || [], row.detail_image_urls || [], mallProductId, row.name_original)
+    await downloadProductImages(row.thumbnail_urls || [], row.detail_image_urls || [], mallProductId, row.mall_product_code, row.name_original, row.session_id)
+    const clientId = await clientIdForSite(row.site_id)
+    if (clientId != null) await migrateToMaster([mallProductId], clientId)
+    else noClient.push(id)
     await pool.query(`UPDATE scrape_staging_items SET status='merged', matched_mall_product_id=$2, updated_at=NOW() WHERE id=$1`, [id, mallProductId])
     merged.push(id)
   }
 
   for (const sid of touchedSessions) await checkSessionCompletion(sid)
 
-  return { merged, skipped }
+  return { merged, skipped, noClient }
 }
 
 export async function discardStagingItems(ids: number[]): Promise<void> {

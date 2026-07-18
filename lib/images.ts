@@ -29,16 +29,41 @@ function originalFileNameFromUrl(url: string): string {
   }
 }
 
-/** 상품명 기반 파일명 정규화 (일괄 규칙: 대표N/상세N — 대표이미지도 여러 장일 수 있어 모두 번호를 붙인다) */
-export function normalizeFileName(productName: string, type: 'thumb' | 'detail', idx?: number): string {
-  const safe = (productName || '상품').replace(/[^가-힣a-zA-Z0-9]/g, '_').slice(0, 30)
-  return type === 'thumb' ? `${safe}_대표${idx ?? 1}` : `${safe}_상세${idx ?? 1}`
+/** 상품코드+상품명 기반 파일명 정규화 (일괄 규칙: 대표N/상세N). 폴더가 세션 단위로 여러 상품을 함께
+ *  담으므로, 상품명만으로는 다른 상품과 겹칠 수 있어 상품코드를 항상 앞에 붙여 고유성을 보장한다. */
+export function normalizeFileName(productCode: string, productName: string, type: 'thumb' | 'detail', idx?: number): string {
+  const safeCode = (productCode || '').replace(/[^a-zA-Z0-9_-]/g, '_')
+  const safeName = (productName || '상품').replace(/[^가-힣a-zA-Z0-9]/g, '_').slice(0, 30)
+  const base = safeCode ? `${safeCode}_${safeName}` : safeName
+  return type === 'thumb' ? `${base}_대표${idx ?? 1}` : `${base}_상세${idx ?? 1}`
+}
+
+/** 폴더명: "몰_스크래핑날짜_회차" — 회차는 그 몰의 그 날짜(달력 기준) 내 몇 번째 스크랩 세션인지. */
+async function resolveScrapeFolderName(sessionId: number): Promise<string> {
+  const res = await pool.query<{ site_id: number; created_at: string; site_name: string | null }>(
+    `SELECT ss.site_id, ss.created_at, s.name AS site_name
+     FROM scrape_sessions ss JOIN sites s ON s.id = ss.site_id
+     WHERE ss.id = $1`,
+    [sessionId],
+  )
+  const row = res.rows[0]
+  if (!row) return `session_${sessionId}`
+
+  const created = new Date(row.created_at)
+  const dateStr = `${created.getFullYear()}${String(created.getMonth() + 1).padStart(2, '0')}${String(created.getDate()).padStart(2, '0')}`
+  const roundRes = await pool.query<{ round: string }>(
+    `SELECT COUNT(*) AS round FROM scrape_sessions WHERE site_id=$1 AND created_at::date = $2::date AND id <= $3`,
+    [row.site_id, row.created_at, sessionId],
+  )
+  const safeMallName = (row.site_name || `site${row.site_id}`).replace(/[^가-힣a-zA-Z0-9]/g, '_')
+  return `${safeMallName}_${dateStr}_${roundRes.rows[0].round}`
 }
 
 async function downloadAndNormalize(
-  url: string, mallProductId: number, productName: string, type: 'thumb' | 'detail', idx: number | undefined,
+  url: string, folderName: string, productCode: string, productName: string, type: 'thumb' | 'detail', idx: number | undefined,
 ): Promise<SavedImage> {
-  const dir = path.join(SAVE_ROOT, String(mallProductId))
+  const subDir = type === 'thumb' ? 'Top_img' : 'Detail_img'
+  const dir = path.join(SAVE_ROOT, folderName, subDir)
   ensureDir(dir)
 
   const res = await axios.get<ArrayBuffer>(url, {
@@ -47,18 +72,22 @@ async function downloadAndNormalize(
     headers: { 'User-Agent': 'Mozilla/5.0', Referer: url },
   })
 
-  const finalName = `${normalizeFileName(productName, type, idx)}.jpg`
+  const finalName = `${normalizeFileName(productCode, productName, type, idx)}.jpg`
   const filePath = path.join(dir, finalName)
 
-  // 파일 사이즈/포맷을 일괄 규칙(최대 1200px, JPEG 85% 품질)으로 정리
+  // 대표이미지는 정사각형에 가까워 가로·세로 모두 1200px로 제한해도 되지만, 상세이미지는 국내 쇼핑몰 관행상
+  // 세로로 매우 긴 인포그래픽형이 많아 세로까지 같이 제한하면 가로가 찌그러진다 — 가로만 제한한다.
+  const resizeOptions = type === 'thumb'
+    ? { width: MAX_DIMENSION, height: MAX_DIMENSION, fit: 'inside' as const, withoutEnlargement: true }
+    : { width: MAX_DIMENSION, withoutEnlargement: true }
   await sharp(Buffer.from(res.data))
-    .resize({ width: MAX_DIMENSION, height: MAX_DIMENSION, fit: 'inside', withoutEnlargement: true })
+    .resize(resizeOptions)
     .jpeg({ quality: JPEG_QUALITY })
     .toFile(filePath)
 
   return {
     url,
-    storagePath: `/scraped/${mallProductId}/${finalName}`,
+    storagePath: `/scraped/${folderName}/${subDir}/${finalName}`,
     originalFileName: originalFileNameFromUrl(url),
     normalizedFileName: finalName,
     fileSizeBytes: fs.statSync(filePath).size,
@@ -70,16 +99,19 @@ export async function downloadProductImages(
   thumbnailUrls: string[],
   detailUrls: string[],
   mallProductId: number,
+  productCode: string,
   productName: string,
+  sessionId: number,
 ): Promise<{ thumbnails: SavedImage[]; details: SavedImage[] }> {
+  const folderName = await resolveScrapeFolderName(sessionId)
   const thumbnails: SavedImage[] = []
   const details: SavedImage[] = []
 
   for (let i = 0; i < thumbnailUrls.length; i++) {
-    try { thumbnails.push(await downloadAndNormalize(thumbnailUrls[i], mallProductId, productName, 'thumb', i + 1)) } catch { /* 실패 무시 */ }
+    try { thumbnails.push(await downloadAndNormalize(thumbnailUrls[i], folderName, productCode, productName, 'thumb', i + 1)) } catch { /* 실패 무시 */ }
   }
   for (let i = 0; i < detailUrls.length; i++) {
-    try { details.push(await downloadAndNormalize(detailUrls[i], mallProductId, productName, 'detail', i + 1)) } catch { /* 실패 무시 */ }
+    try { details.push(await downloadAndNormalize(detailUrls[i], folderName, productCode, productName, 'detail', i + 1)) } catch { /* 실패 무시 */ }
   }
 
   // 재스크랩 시 이전 이미지 레코드를 대체한다 (파일 자체는 같은 정규화 이름으로 덮어써짐)

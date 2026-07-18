@@ -311,9 +311,12 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids, force: includeMigrated }),
       })
-      const d = await res.json() as { merged: number[]; skipped: { id: number; reason: string }[] }
+      const d = await res.json() as { merged: number[]; skipped: { id: number; reason: string }[]; noClient?: number[] }
       if (d.skipped?.length) {
         alert(`${d.skipped.length}개는 이미 가공된 상품이라 확정되지 않았습니다. "이미 가공된 상품도 포함"을 켜고 다시 시도하세요.`)
+      }
+      if (d.noClient?.length) {
+        alert(`${d.noClient.length}개는 몰에 거래처가 연결되어 있지 않아 상품마스터로 반영되지 않았습니다. Mall 상세관리에서 거래처를 먼저 지정해주세요.`)
       }
       setSelected(new Set())
       bumpRefresh('products')

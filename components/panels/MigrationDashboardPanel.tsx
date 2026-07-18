@@ -77,7 +77,7 @@ const TASKS: TaskDef[] = [
 ]
 
 export function MigrationDashboardPanel({ params }: { params?: Record<string, unknown> }) {
-  const { openTab } = useTabs()
+  const { openTab, refreshSignals } = useTabs()
   const wantedSessionId = useRef(params?.sessionId as number | undefined)
   const [clients, setClients] = useState<Client[]>([])
   const [clientId, setClientId] = useState<number | ''>('')
@@ -114,6 +114,12 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 마운트 시 1회만
   }, [])
+
+  // 하단 StagingItemsGrid에서 "확정"하면 그 세션의 미확정/확정 개수가 바뀌므로, 위 스크래핑 목록의 상태값도 바로 갱신한다.
+  useEffect(() => {
+    if (searched) loadSessions()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadSessions/searched는 의존성에서 제외(매 렌더 재생성/조회 전 상태라 무한루프 방지)
+  }, [refreshSignals.staging, refreshSignals.products])
 
   // 수집확인 등 다른 화면에서 특정 몰/세션을 지정해 넘어온 경우 — 거래처/몰 조건을 채우고 곧바로 조회 상태로 만든다.
   /* eslint-disable react-hooks/set-state-in-effect */

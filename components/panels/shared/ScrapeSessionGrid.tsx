@@ -82,7 +82,7 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
           const confirmed = Number(s.staged_count) > 0 && Number(s.pending_count) === 0
           return (
             <>
-              <span className={confirmed ? 'text-emerald-600' : 'text-amber-600'}>{confirmed ? '✓ 마이그레이션 완료' : `⚠ 미확정 ${s.pending_count}개`}</span>
+              <span className={confirmed ? 'text-emerald-600' : 'text-amber-600'}>{confirmed ? '✓ 확정 - 데이터 검수 완' : `⚠ 미확정 ${s.pending_count}개`}</span>
               {s.merge_group_id != null && (
                 <span title="다른 세션과 병합된 상태입니다" className="ml-1.5 px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-600 text-[10px] font-semibold">🔗 병합</span>
               )}

@@ -385,7 +385,7 @@ export function TransformPanel() {
   }
 
   return (
-    <div className="max-w-4xl">
+    <div>
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-800">🧬 마이그레이션2_Transform</h1>
         <p className="text-xs text-gray-400 mt-1">

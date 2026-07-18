@@ -211,6 +211,12 @@ export async function initDb() {
       mode          TEXT DEFAULT 'full',
       created_at    TIMESTAMPTZ DEFAULT NOW()
     );
+    -- 데이터 마이그 목록의 "선택 병합" — 같은 몰의 세션 여러 개를 하나로 묶어, 다른 메뉴에서 이 중 아무
+    -- 세션이나 조회해도(sessionId 파라미터) 병합된 전체가 함께 보이게 한다. 그룹 식별자는 실제 세션 id를
+    -- 재사용하지 않고 별도 시퀀스로 발급해, 그룹의 "대표" 세션이라는 개념 없이 모든 멤버를 동등하게 다룬다.
+    CREATE SEQUENCE IF NOT EXISTS scrape_session_merge_seq;
+    ALTER TABLE scrape_sessions ADD COLUMN IF NOT EXISTS merge_group_id INTEGER;
+    CREATE INDEX IF NOT EXISTS idx_scrape_sessions_merge_group ON scrape_sessions(merge_group_id) WHERE merge_group_id IS NOT NULL;
 
     -- 카탈로그 스크랩 중 상품별 성공/실패 로그 (진행 화면의 실시간 로그 + 실패 재시도 큐 근거)
     CREATE TABLE IF NOT EXISTS scrape_item_log (

@@ -19,6 +19,7 @@ interface Session {
   created_at: string
   site_name: string | null
   client_name: string | null
+  merge_group_id: number | null
 }
 
 interface MasterRow {
@@ -90,14 +91,19 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
   const [querySiteId, setQuerySiteId] = useState<number | ''>('')
   const [searched, setSearched] = useState(false)
   const [checkedSessionIds, setCheckedSessionIds] = useState<Set<number>>(new Set())
-  const [mergedSiteId, setMergedSiteId] = useState<number | ''>('')
+
+  const loadSessions = useCallback((onDone?: (d: Session[]) => void) => {
+    fetch('/api/sessions').then(r => r.json()).then((d: Session[]) => {
+      if (!Array.isArray(d)) return
+      setSessions(d)
+      onDone?.(d)
+    }).catch(() => {})
+  }, [])
 
   useEffect(() => {
     fetch('/api/clients').then(r => r.json()).then((d: Client[]) => setClients(Array.isArray(d) ? d : [])).catch(() => {})
     fetch('/api/sites').then(r => r.json()).then((d: Site[]) => setSites(Array.isArray(d) ? d : [])).catch(() => {})
-    fetch('/api/sessions').then(r => r.json()).then((d: Session[]) => {
-      if (!Array.isArray(d)) return
-      setSessions(d)
+    loadSessions(d => {
       const wantedMatch = wantedSessionId.current != null ? d.find(s => s.id === wantedSessionId.current) : undefined
       if (wantedMatch) {
         wantedSessionId.current = undefined
@@ -105,7 +111,8 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
       } else {
         setSelectedSessionId(current => current === '' && d.length ? d[0].id : current)
       }
-    }).catch(() => {})
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 마운트 시 1회만
   }, [])
 
   // 수집확인 등 다른 화면에서 특정 몰/세션을 지정해 넘어온 경우 — 거래처/몰 조건을 채우고 곧바로 조회 상태로 만든다.
@@ -121,10 +128,10 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const loadMasterRows = useCallback(() => {
-    const query = mergedSiteId !== '' ? `siteId=${mergedSiteId}` : selectedSessionId !== '' ? `sessionId=${selectedSessionId}` : ''
-    if (!query) return
-    fetch(`/api/master?${query}`).then(r => r.json()).then((d: MasterRow[]) => setMasterRows(Array.isArray(d) ? d : [])).catch(() => {})
-  }, [selectedSessionId, mergedSiteId])
+    if (selectedSessionId === '') return
+    // 선택한 세션이 "선택 병합"된 세션이면 서버가 그 그룹 전체의 상품마스터를 함께 내려준다.
+    fetch(`/api/master?sessionId=${selectedSessionId}`).then(r => r.json()).then((d: MasterRow[]) => setMasterRows(Array.isArray(d) ? d : [])).catch(() => {})
+  }, [selectedSessionId])
 
   useEffect(() => { loadMasterRows() }, [loadMasterRows])
 
@@ -149,26 +156,42 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
     setQuerySiteId(siteId)
     setSearched(true)
     setCheckedSessionIds(new Set())
-    setMergedSiteId('')
   }
 
   function toggleCheckSession(id: number) {
     setCheckedSessionIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
   }
 
-  function handleMergeSessions() {
-    const checked = sessions.filter(s => checkedSessionIds.has(s.id))
-    const distinctSites = new Set(checked.map(s => s.site_id))
+  const checkedSessions = sessions.filter(s => checkedSessionIds.has(s.id))
+  const canSplit = checkedSessions.some(s => s.merge_group_id != null)
+  const selectedSession = sessions.find(s => s.id === selectedSessionId)
+  const mergedSiblingCount = selectedSession?.merge_group_id != null
+    ? sessions.filter(s => s.merge_group_id === selectedSession.merge_group_id && s.id !== selectedSession.id).length
+    : 0
+
+  async function handleMergeSessions() {
+    const distinctSites = new Set(checkedSessions.map(s => s.site_id))
     if (distinctSites.size !== 1) {
       alert('선택한 세션들의 거래처·몰이 서로 다릅니다. 같은 거래처·몰의 세션만 병합할 수 있습니다.')
       return
     }
-    setMergedSiteId(checked[0].site_id)
+    const sessionIds = [...checkedSessionIds]
+    const res = await fetch('/api/sessions/merge', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionIds }),
+    })
+    if (!res.ok) { alert('병합에 실패했습니다.'); return }
+    setCheckedSessionIds(new Set())
+    loadSessions()
+    setSelectedSessionId(Math.min(...sessionIds))
   }
 
-  function clearMerge() {
-    setMergedSiteId('')
+  async function handleSplitSessions() {
+    const sessionIds = [...checkedSessionIds]
+    await fetch('/api/sessions/split', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionIds }),
+    })
     setCheckedSessionIds(new Set())
+    loadSessions()
   }
 
   function counts(task: TaskDef) {
@@ -224,10 +247,16 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
             <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
             <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="거래처·몰·URL·상태·일시 검색..."
               className="flex-1 min-w-[200px] border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
-            {checkedSessionIds.size > 0 && (
-              <button onClick={handleMergeSessions} disabled={checkedSessionIds.size < 2}
-                className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0">
+            {checkedSessionIds.size >= 2 && (
+              <button onClick={handleMergeSessions}
+                className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors shrink-0">
                 🔗 선택 병합 ({checkedSessionIds.size})
+              </button>
+            )}
+            {canSplit && (
+              <button onClick={handleSplitSessions}
+                className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full transition-colors shrink-0">
+                🔓 선택 분할 ({checkedSessionIds.size})
               </button>
             )}
           </div>
@@ -238,15 +267,14 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
 
       {searched && (
         <>
-          {mergedSiteId !== '' && (
-            <div className="bg-cyan-50 border border-cyan-200 rounded-2xl px-4 py-2.5 mb-4 shrink-0 flex items-center justify-between text-xs text-cyan-700">
-              <span>🔗 체크한 {checkedSessionIds.size}개 세션을 같은 몰 기준으로 병합해 보는 중입니다 — 아래 진행현황과 상세 그리드는 이 몰의 전체 세션을 합친 결과입니다.</span>
-              <button onClick={clearMerge} className="text-cyan-700 font-semibold hover:underline shrink-0 ml-3">병합 해제</button>
+          {selectedSession?.merge_group_id != null && (
+            <div className="bg-cyan-50 border border-cyan-200 rounded-2xl px-4 py-2.5 mb-4 shrink-0 text-xs text-cyan-700">
+              🔗 이 세션은 다른 {mergedSiblingCount}개 세션과 병합되어 있어, 아래 진행현황·상세 그리드에 그 세션들의 스크랩 항목이 함께 표시됩니다. 스크래핑한 일자는 각 상품 행에 그대로 남아있습니다.
             </div>
           )}
 
-          {/* 중단: 선택한 세션(또는 병합된 몰) 기준 하위 작업 진행현황 */}
-          {mergedSiteId === '' && selectedSessionId === '' ? (
+          {/* 중단: 선택한 세션(병합된 경우 그 그룹 전체) 기준 하위 작업 진행현황 */}
+          {selectedSessionId === '' ? (
             <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-gray-400 mb-4 shrink-0 text-sm">
               위 스크래핑 목록에서 세션을 선택하면 진행현황이 표시됩니다.
             </div>
@@ -259,10 +287,10 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
               {TASKS.map(task => {
                 const c = counts(task)
                 const total = masterRows.length || 1
-                const taskSiteId = mergedSiteId !== '' ? mergedSiteId : sessions.find(s => s.id === selectedSessionId)?.site_id
+                const taskSiteId = selectedSession?.site_id
                 return (
                   <button key={task.key}
-                    onClick={() => openTab({ ...task.tab, params: { siteId: taskSiteId, sessionId: mergedSiteId !== '' ? undefined : selectedSessionId } })}
+                    onClick={() => openTab({ ...task.tab, params: { siteId: taskSiteId, sessionId: selectedSessionId } })}
                     className="bg-white rounded-2xl border border-gray-200 p-4 text-left hover:border-teal-300 transition-colors">
                     <p className="text-xs font-semibold text-gray-600 mb-2">{task.label}</p>
                     <div className="flex h-2 rounded-full overflow-hidden bg-gray-100 mb-2">
@@ -277,7 +305,7 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
           )}
 
           {/* 하단: 수집확인과 동일한 스크랩 상세 그리드 (작업진행사항 없이 조회된 건 전체를 그대로 표시) */}
-          {mergedSiteId !== '' ? <StagingItemsGrid siteId={mergedSiteId} /> : <StagingItemsGrid sessionId={selectedSessionId} />}
+          <StagingItemsGrid sessionId={selectedSessionId} />
         </>
       )}
     </div>

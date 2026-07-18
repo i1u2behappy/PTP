@@ -10,6 +10,8 @@ interface SessionLike {
   created_at: string
   client_name?: string | null
   site_name?: string | null
+  /** "선택 병합"으로 다른 세션들과 하나로 묶여있으면 그 그룹 식별자 — 다른 메뉴에서 이 중 아무 세션이나 조회해도 그룹 전체가 함께 조회된다. */
+  merge_group_id?: number | null
 }
 
 interface ColumnDef<T> {
@@ -65,7 +67,14 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
       { key: 'pending_count', label: '상태', getValue: s => Number(s.pending_count),
         render: s => {
           const confirmed = Number(s.staged_count) > 0 && Number(s.pending_count) === 0
-          return <span className={confirmed ? 'text-emerald-600' : 'text-amber-600'}>{confirmed ? '✓ 마이그레이션 완료' : `⚠ 미확정 ${s.pending_count}개`}</span>
+          return (
+            <>
+              <span className={confirmed ? 'text-emerald-600' : 'text-amber-600'}>{confirmed ? '✓ 마이그레이션 완료' : `⚠ 미확정 ${s.pending_count}개`}</span>
+              {s.merge_group_id != null && (
+                <span title="다른 세션과 병합된 상태입니다" className="ml-1.5 px-1.5 py-0.5 rounded-full bg-cyan-50 text-cyan-600 text-[10px] font-semibold">🔗 병합</span>
+              )}
+            </>
+          )
         },
         className: 'font-medium whitespace-nowrap' },
     )

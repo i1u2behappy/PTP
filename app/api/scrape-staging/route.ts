@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
+import { resolveSessionGroup } from '@/lib/scrape/mergeGroup'
 
 const COMPARE_FIELDS = [
   ['name_original', 'mp_name_original'],
@@ -28,8 +29,9 @@ export async function GET(req: NextRequest) {
     FROM scrape_staging_items si
     LEFT JOIN mall_products mp ON mp.id = si.matched_mall_product_id
     WHERE 1=1`
-  const params: (string | number)[] = []
-  if (sessionId) { params.push(sessionId); query += ` AND si.session_id=$${params.length}` }
+  const params: (string | number | number[])[] = []
+  // sessionId 하나만 넘어와도, 그 세션이 "선택 병합"된 그룹의 일원이면 그룹 전체를 함께 보여준다.
+  if (sessionId) { params.push(await resolveSessionGroup(Number(sessionId))); query += ` AND si.session_id=ANY($${params.length})` }
   if (siteId)    { params.push(siteId);    query += ` AND si.site_id=$${params.length}` }
   if (status)    { params.push(status);    query += ` AND si.status=$${params.length}` }
   query += ' ORDER BY si.created_at DESC'

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
+import { resolveSessionGroup } from '@/lib/scrape/mergeGroup'
 
 const ALLOWED_FIELDS = ['brand', 'master_category', 'manufacturer', 'origin'] as const
 type AllowedField = typeof ALLOWED_FIELDS[number]
@@ -22,10 +23,10 @@ export async function GET(req: NextRequest) {
          FROM product_master pm
          JOIN mall_products mp ON mp.id = pm.mall_product_id
          JOIN scrape_staging_items si ON si.matched_mall_product_id = mp.id
-         WHERE si.session_id = $1 AND pm.${field} IS NOT NULL AND pm.${field} <> ''
+         WHERE si.session_id = ANY($1) AND pm.${field} IS NOT NULL AND pm.${field} <> ''
          GROUP BY pm.${field}
          ORDER BY count DESC`,
-        [sessionId],
+        [await resolveSessionGroup(Number(sessionId))],
       )
     : await pool.query(
         `SELECT ${field} AS value, COUNT(*) AS count
@@ -53,8 +54,8 @@ export async function PUT(req: NextRequest) {
         `UPDATE product_master pm SET ${field}=$1, updated_at=NOW()
          FROM mall_products mp, scrape_staging_items si
          WHERE mp.id = pm.mall_product_id AND si.matched_mall_product_id = mp.id
-           AND si.session_id = $2 AND pm.${field} = $3`,
-        [to, sessionId, from],
+           AND si.session_id = ANY($2) AND pm.${field} = $3`,
+        [to, await resolveSessionGroup(sessionId), from],
       )
     : await pool.query(
         `UPDATE product_master SET ${field}=$1, updated_at=NOW() WHERE client_id=$2 AND ${field}=$3`,

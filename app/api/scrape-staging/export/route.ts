@@ -6,16 +6,13 @@ import pool from '@/lib/db'
  * 컬럼을 구성하면 화면과 다운로드 내용이 어긋나므로, 어떤 컬럼/값을 넣을지는 전적으로 클라이언트(그리드)가 정한다. */
 export async function POST(req: NextRequest) {
   const sessionId = req.nextUrl.searchParams.get('sessionId')
-  const siteId = req.nextUrl.searchParams.get('siteId')
-  if (!sessionId && !siteId) return NextResponse.json({ error: 'sessionId or siteId required' }, { status: 400 })
+  if (!sessionId) return NextResponse.json({ error: 'sessionId required' }, { status: 400 })
   const { headers, rows } = await req.json() as { headers: string[]; rows: (string | number)[][] }
   if (!Array.isArray(headers) || !Array.isArray(rows)) return NextResponse.json({ error: 'headers, rows required' }, { status: 400 })
 
-  const siteRes = siteId
-    ? await pool.query<{ name: string | null }>(`SELECT name FROM sites WHERE id=$1`, [siteId])
-    : await pool.query<{ name: string | null }>(
-        `SELECT s.name FROM scrape_sessions ss JOIN sites s ON s.id = ss.site_id WHERE ss.id=$1`, [sessionId],
-      )
+  const siteRes = await pool.query<{ name: string | null }>(
+    `SELECT s.name FROM scrape_sessions ss JOIN sites s ON s.id = ss.site_id WHERE ss.id=$1`, [sessionId],
+  )
   const mallName = (siteRes.rows[0]?.name || 'Mall').replace(/[\\/:*?"<>|]/g, '')
 
   const wb = new ExcelJS.Workbook()

@@ -142,9 +142,9 @@ function loadColOrder(): string[] {
 }
 
 /** 수집확인/데이터 마이그 목록 등에서 공용으로 쓰는, 스크랩 세션의 전체 컬럼 상세 그리드 (병합 여부 무관 조회용).
- *  siteId가 주어지면(세션 여러 개를 "선택 병합"한 경우) 그 몰의 모든 세션에 걸친 항목을 한번에 보여준다. */
-export function StagingItemsGrid({ sessionId, siteId }: { sessionId?: number | ''; siteId?: number | '' }) {
-  const scopeQuery = siteId ? `siteId=${siteId}` : sessionId ? `sessionId=${sessionId}` : ''
+ *  sessionId가 "선택 병합"된 세션이면 서버(/api/scrape-staging)가 그 그룹 전체를 함께 내려준다. */
+export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
+  const scopeQuery = sessionId ? `sessionId=${sessionId}` : ''
   const { openTab, activeTabId, refreshSignals, bumpRefresh } = useTabs()
   const [items, setItems] = useState<StagingRow[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())

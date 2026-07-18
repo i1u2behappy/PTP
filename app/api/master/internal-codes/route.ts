@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { assignInternalCodeIfMissing } from '@/lib/master/migrate'
+import { resolveSessionGroup } from '@/lib/scrape/mergeGroup'
 
 /** sessionId가 있으면 그 스크랩 세션에서 병합된 상품마스터로 범위를 좁힌다 (거래처는 그 세션이 속한 몰의 거래처로 자동 결정). */
 export async function GET(req: NextRequest) {
@@ -12,9 +13,9 @@ export async function GET(req: NextRequest) {
        FROM product_master pm
        JOIN mall_products mp ON mp.id = pm.mall_product_id
        JOIN scrape_staging_items si ON si.matched_mall_product_id = mp.id
-       WHERE si.session_id = $1
+       WHERE si.session_id = ANY($1)
        ORDER BY pm.id`,
-      [sessionId],
+      [await resolveSessionGroup(Number(sessionId))],
     )
     const clientId = rows.rows[0]?.client_id
     const client = clientId ? await pool.query('SELECT id, name, code, auto_internal_code FROM supply_clients WHERE id=$1', [clientId]) : null
@@ -44,8 +45,8 @@ export async function POST(req: NextRequest) {
        FROM product_master pm
        JOIN mall_products mp ON mp.id = pm.mall_product_id
        JOIN scrape_staging_items si ON si.matched_mall_product_id = mp.id
-       WHERE si.session_id = $1 AND pm.internal_code IS NULL`,
-      [sessionId],
+       WHERE si.session_id = ANY($1) AND pm.internal_code IS NULL`,
+      [await resolveSessionGroup(sessionId)],
     )
     for (const row of missing.rows) await assignInternalCodeIfMissing(row.id, row.client_id)
     return NextResponse.json({ generated: missing.rows.length })

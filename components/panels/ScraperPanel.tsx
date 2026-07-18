@@ -80,9 +80,10 @@ function CopyButton({ value }: { value: string }) {
 export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const { openTab, bumpRefresh } = useTabs()
   const initialSiteId = params?.siteId as number | undefined
+  const initialClientId = params?.clientId as number | undefined
   const [sites, setSites]         = useState<Site[]>([])
   const [clients, setClients]     = useState<Client[]>([])
-  const [clientFilter, setClientFilter] = useState<number | ''>('')
+  const [clientFilter, setClientFilter] = useState<number | ''>(initialClientId ?? '')
   const [siteQuery, setSiteQuery] = useState('')
   const [selectedSite, setSelectedSite] = useState<Site | null>(null)
 
@@ -125,8 +126,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   }, [])
 
   useEffect(() => {
-    // Mall 목록에서 특정 몰을 지정해 들어온 경우, 그 몰을 새로 선택하는 게 우선이므로 이전 세션 복원은 건너뛴다.
+    // Mall 목록/거래처 목록에서 특정 몰(또는 거래처)을 지정해 들어온 경우, 그 선택이 우선이므로 이전 세션 복원은 건너뛴다.
     if (initialSiteId) { selectSite(initialSiteId); return }
+    if (initialClientId) return
     const raw = localStorage.getItem(LAST_SESSION_KEY)
     if (!raw) return
     try {

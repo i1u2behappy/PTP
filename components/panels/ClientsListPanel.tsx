@@ -161,6 +161,10 @@ export function ClientsListPanel() {
     openTab({ ...CLIENTS_LIST_TAB, type: 'client-detail', params: { clientId: client.id } })
   }
 
+  function openScraper(client: Client) {
+    openTab({ id: 'scraper', type: 'scraper', title: '스크래핑', icon: '🔍', params: { clientId: client.id }, closable: true })
+  }
+
   async function handleDelete(id: number) {
     if (!confirm('이 거래처를 삭제할까요? (연결된 Mall은 삭제되지 않고, 거래처 연결만 해제됩니다)')) return
     try {
@@ -252,7 +256,7 @@ export function ClientsListPanel() {
                     {visibleClients.length === 0 ? (
                       <tr><td colSpan={orderedColumns.length + 1} className="px-3 py-3 text-center text-gray-400">필터에 맞는 거래처가 없습니다.</td></tr>
                     ) : visibleClients.map(c => (
-                      <tr key={c.id} onClick={() => openDetail(c)} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
+                      <tr key={c.id} onClick={() => openScraper(c)} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
                         {orderedColumns.map(col => (
                           <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''}`} title={col.key === 'business_address' || col.key === 'memo' ? col.getValue(c) : undefined}>
                             {col.render(c)}

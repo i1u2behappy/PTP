@@ -14,7 +14,7 @@ function NavGroup({ label, icon: Icon, defaultOpen, tab, children }: { label: st
   return (
     <div>
       <button onClick={() => { if (tab) openTab(tab); setOpen(true) }} aria-expanded={open}
-        className={`group w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold transition-colors
+        className={`group w-full flex items-center gap-2 px-3 py-2 text-sm font-semibold transition-colors
           ${isActive ? 'text-teal-700' : 'text-slate-400 hover:text-slate-600'}`}>
         <Icon active={isActive} />
         <span className="flex-1 text-left">{label}</span>
@@ -61,6 +61,7 @@ export function Sidebar() {
         {/* 컬럼별 전처리/변환 작업을 단계별 하위 메뉴로 구분. 그룹명 클릭 시 하위 작업 진행현황 대시보드가 열린다 */}
         <NavGroup label="마이그레이션" icon={ReviewIcon} defaultOpen
           tab={{ id: 'migration-dashboard', type: 'migration-dashboard', title: '데이터 마이그 목록', icon: '📊', closable: true }}>
+          <NavLeaf tab={{ id: 'master-schema', type: 'master-schema', title: '기준 Master 테이블 관리', icon: '🧱', closable: true }} icon={ArchiveIcon} nested />
           <NavLeaf tab={{ id: 'sales-code', type: 'sales-code', title: '판매관리코드 관리', icon: '💳', closable: true }} icon={TagIcon} nested />
           <NavLeaf tab={{ id: 'category-mapping', type: 'category-mapping', title: '카테고리 관리', icon: '🗺️', closable: true }} icon={MapIcon} nested />
           <NavLeaf tab={{ id: 'internal-codes', type: 'internal-codes', title: '업체코드-상품내부코드 생성', icon: '🏷️', closable: true }} icon={TagIcon} nested />

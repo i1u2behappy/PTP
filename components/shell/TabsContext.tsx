@@ -3,7 +3,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 export type TabType =
   | 'dashboard' | 'clients-list' | 'client-detail' | 'sites-list' | 'site-detail' | 'scraper'
-  | 'migration-dashboard'
+  | 'migration-dashboard' | 'master-schema'
   | 'products-list' | 'product-detail' | 'internal-codes' | 'category-mapping' | 'sales-code' | 'name-management'
   | 'option-management' | 'brand-origin-management' | 'pricing-management' | 'image-host'
   | 'master-list' | 'master-detail' | 'image-edit'

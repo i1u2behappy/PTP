@@ -7,6 +7,7 @@ import { SitesListPanel } from '../panels/SitesListPanel'
 import { SiteDetailPanel } from '../panels/SiteDetailPanel'
 import { ScraperPanel } from '../panels/ScraperPanel'
 import { MigrationDashboardPanel } from '../panels/MigrationDashboardPanel'
+import { MasterSchemaPanel } from '../panels/MasterSchemaPanel'
 import { ProductsListPanel } from '../panels/ProductsListPanel'
 import { ProductDetailPanel } from '../panels/ProductDetailPanel'
 import { InternalCodePanel } from '../panels/InternalCodePanel'
@@ -48,6 +49,7 @@ export function Workspace() {
           case 'site-detail':    return <SiteDetailPanel key={tab.id} params={tab.params} />
           case 'scraper':        return <ScraperPanel key={tab.id} params={tab.params} />
           case 'migration-dashboard': return <MigrationDashboardPanel key={tab.id} params={tab.params} />
+          case 'master-schema':  return <MasterSchemaPanel key={tab.id} params={tab.params} />
           case 'internal-codes': return <InternalCodePanel key={tab.id} params={tab.params} />
           case 'category-mapping': return <CategoryMappingPanel key={tab.id} params={tab.params} />
           case 'sales-code':      return <SalesCodePanel key={tab.id} params={tab.params} />
@@ -63,7 +65,7 @@ export function Workspace() {
           case 'image-edit':     return <ImageEditPanel key={tab.id} params={tab.params} />
           case 'export':         return <ExportPanel key={tab.id} />
           case 'settings':       return <SettingsPanel key={tab.id} />
-          case 'transform':      return <TransformPanel key={tab.id} />
+          case 'transform':      return <TransformPanel key={tab.id} params={tab.params} />
           case 'continuous-migration': return <ContinuousMigrationPanel key={tab.id} />
           default:               return null
           }

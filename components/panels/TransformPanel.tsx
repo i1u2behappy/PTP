@@ -129,9 +129,9 @@ function diffFields(pair: GuidePair, toBeHeaders: string[]): { key: string; asIs
     .filter(f => f.asIs || f.toBe)
 }
 
-export function TransformPanel() {
+export function TransformPanel({ params }: { params?: Record<string, unknown> }) {
   const [clients, setClients] = useState<Client[]>([])
-  const [clientId, setClientId] = useState<number | ''>('')
+  const [clientId, setClientId] = useState<number | ''>((params?.clientId as number | undefined) ?? '')
   const [sites, setSites] = useState<Site[]>([])
   const [siteFilterId, setSiteFilterId] = useState<number | ''>('')
   const [sessions, setSessions] = useState<Session[]>([])

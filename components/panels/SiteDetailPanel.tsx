@@ -63,7 +63,8 @@ export function SiteDetailPanel({ params }: Props) {
       name, mainItems: mainItems || undefined, url, loginUrl: loginUrl || undefined, loginId, loginPw, clientId: clientId === '' ? null : clientId,
       customNameSelector: nameSelector || undefined, customPriceSelector: priceSelector || undefined,
       customThumbnailSelector: thumbnailSelector || undefined,
-      autoScrapeEnabled, autoScrapeHour: autoScrapeEnabled ? autoScrapeHour : null,
+      autoScrapeEnabled: manualLoginRequired ? false : autoScrapeEnabled,
+      autoScrapeHour: !manualLoginRequired && autoScrapeEnabled ? autoScrapeHour : null,
       manualLoginRequired,
     })
     try {
@@ -167,16 +168,18 @@ export function SiteDetailPanel({ params }: Props) {
         <label className="flex items-start gap-2 text-sm text-gray-600 mb-3">
           <input type="checkbox" checked={manualLoginRequired} onChange={e => setManualLoginRequired(e.target.checked)} className="mt-0.5" />
           <span>
-            🔒 직접로그인 필수
+            🧩 크롬익스텐션-개발자모드
             <span className="block text-xs text-gray-400 mt-0.5">
-              Windows Hello/WebAuthn(PC인증) 등 자동화 브라우저로는 통과할 수 없는 로그인 보안이 걸린 몰입니다.
-              체크하면 스크래핑 화면에서 자동 로그인 대신, 직접 발급받은 브라우저 프로필로 수동 로그인하는 방법을 안내합니다.
+              Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 근본적으로 안 되는 몰입니다. 체크하면
+              스크래핑 화면에서 자동 실행 대신, 사용자가 실제 브라우저에서 직접 로그인한 상태로 크롬 확장을
+              이용해 스크랩하는 방법을 안내합니다. 사람이 직접 브라우저를 열고 클릭해야 하는 방식이라
+              매일 자동 재스크랩은 지원하지 않습니다.
             </span>
           </span>
         </label>
 
         <details className="mb-3">
-          <summary className="text-xs text-gray-500 cursor-pointer select-none mb-2">고급 설정: 수동 추출 셀렉터 · 자동 재스크랩</summary>
+          <summary className="text-xs text-gray-500 cursor-pointer select-none mb-2">고급 설정: 수동 추출 셀렉터{!manualLoginRequired && ' · 자동 재스크랩'}</summary>
           <div className="grid grid-cols-3 gap-3 mb-3">
             <label className="block">
               <span className="block text-xs text-gray-500 mb-1">상품명 CSS 셀렉터 (선택)</span>
@@ -196,20 +199,24 @@ export function SiteDetailPanel({ params }: Props) {
           </div>
           <p className="text-xs text-gray-400 mb-3">자동 추출(구조화 데이터/메타태그)이 이 몰에서 실패할 때만 채워주세요. 지정하면 자동 추출 결과보다 우선합니다.</p>
 
-          <label className="flex items-center gap-2 text-sm text-gray-600 mb-2">
-            <input type="checkbox" checked={autoScrapeEnabled} onChange={e => setAutoScrapeEnabled(e.target.checked)} />
-            매일 자동 재스크랩 (증분)
-          </label>
-          {autoScrapeEnabled && (
-            <label className="block max-w-[160px]">
-              <span className="block text-xs text-gray-500 mb-1">실행 시각</span>
-              <select value={autoScrapeHour} onChange={e => setAutoScrapeHour(Number(e.target.value))}
-                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
-                {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
-              </select>
-            </label>
+          {!manualLoginRequired && (
+            <>
+              <label className="flex items-center gap-2 text-sm text-gray-600 mb-2">
+                <input type="checkbox" checked={autoScrapeEnabled} onChange={e => setAutoScrapeEnabled(e.target.checked)} />
+                매일 자동 재스크랩 (증분)
+              </label>
+              {autoScrapeEnabled && (
+                <label className="block max-w-[160px]">
+                  <span className="block text-xs text-gray-500 mb-1">실행 시각</span>
+                  <select value={autoScrapeHour} onChange={e => setAutoScrapeHour(Number(e.target.value))}
+                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
+                    {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
+                  </select>
+                </label>
+              )}
+              <p className="text-xs text-gray-400 mt-2">스크래핑 화면에서 최소 한 번 스크랩을 실행해야(그 설정이 저장돼야) 자동 재스크랩이 동작합니다.</p>
+            </>
           )}
-          <p className="text-xs text-gray-400 mt-2">스크래핑 화면에서 최소 한 번 스크랩을 실행해야(그 설정이 저장돼야) 자동 재스크랩이 동작합니다.</p>
         </details>
       </div>
 

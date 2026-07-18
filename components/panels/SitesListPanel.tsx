@@ -118,8 +118,8 @@ export function SitesListPanel() {
                     <td className="px-3 py-2 text-gray-800 font-medium sticky left-0 bg-white">
                       {s.name || '(이름 없음)'}
                       {s.manual_login_required && (
-                        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold whitespace-nowrap" title="Windows Hello/WebAuthn 등으로 자동 로그인이 안 되는 몰 — 직접 로그인 필요">
-                          🔒 직접로그인 필수
+                        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold whitespace-nowrap" title="Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 안 되는 몰 — 크롬 확장(개발자모드)으로 스크랩">
+                          🧩 개발자모드
                         </span>
                       )}
                     </td>

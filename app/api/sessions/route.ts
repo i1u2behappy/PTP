@@ -1,8 +1,10 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 
 /** 세션별로 원 상품페이지에서 찾은 개수(product_count) 대비 실제 저장된 상품 수를 비교한다. */
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const siteIdParam = req.nextUrl.searchParams.get('siteId')
+  const siteId = siteIdParam ? Number(siteIdParam) : null
   const res = await pool.query(`
     SELECT s.id, s.site_id, s.url, s.status, s.scope_type, s.mode, s.product_count AS found_count,
            COUNT(p.id) AS saved_count, s.created_at, s.merge_group_id, s.merged_at,
@@ -15,8 +17,9 @@ export async function GET() {
     LEFT JOIN mall_products p ON p.last_seen_session_id = s.id
     LEFT JOIN sites site ON site.id = s.site_id
     LEFT JOIN supply_clients client ON client.id = site.client_id
+    WHERE $1::int IS NULL OR s.site_id = $1::int
     GROUP BY s.id, s.merge_group_id, s.merged_at, site.name, client.name
     ORDER BY s.created_at DESC
-  `)
+  `, [siteId])
   return NextResponse.json(res.rows)
 }

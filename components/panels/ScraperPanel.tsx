@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useTabs } from '../shell/TabsContext'
 import { PRODUCTS_LIST_TAB } from '../shell/menuTabs'
+import { ScrapeSessionGrid } from './shared/ScrapeSessionGrid'
 
 type Status = 'idle' | 'running' | 'done' | 'error' | 'stopped'
 type LoginStep = 'none' | 'opened' | 'confirmed'
@@ -65,16 +66,14 @@ interface PreviewItem {
   thumbnail: string
 }
 
-/** 값을 클립보드에 복사하는 작은 버튼 — 직접로그인 필수 몰에서 별도로 뜬 크롬 창에 아이디/비번을 옮겨 붙일 때 씀. */
-function CopyButton({ value }: { value: string }) {
-  const [copied, setCopied] = useState(false)
-  if (!value) return null
-  return (
-    <button type="button" onClick={() => navigator.clipboard.writeText(value).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) }).catch(() => {})}
-      className="text-[11px] text-teal-500 hover:text-teal-600 shrink-0" tabIndex={-1}>
-      {copied ? '✓ 복사됨' : '복사'}
-    </button>
-  )
+/** 개발자모드(크롬 확장) 몰의 세션 이력 그리드용 — /api/sessions?siteId= 응답 중 ScrapeSessionGrid가 요구하는 필드만. */
+interface DevModeSession {
+  id: number
+  url: string
+  found_count: number
+  staged_count: number
+  pending_count: number
+  created_at: string
 }
 
 export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
@@ -119,6 +118,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [itemLog, setItemLog]     = useState<ItemLogRow[]>([])
   const [retrying, setRetrying]   = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [devModeSessions, setDevModeSessions] = useState<DevModeSession[]>([])
 
   useEffect(() => {
     fetch('/api/sites').then(r => r.json()).then((d: Site[]) => { if (Array.isArray(d)) setSites(d) }).catch(() => {})
@@ -174,6 +174,22 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     }, 2000)
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [sessionId, status, bumpRefresh])
+
+  // 개발자모드(크롬 확장) 몰은 PTP가 아니라 사용자의 실제 브라우저에서 확장이 직접 세션을 만들고 채운다
+  // (POST /api/scrape/extension-ingest) — 그래서 위 세션 폴링과 달리 "이 몰에 새 세션이 생겼는지"를
+  // 주기적으로 다시 조회해야 진행상황이 보인다.
+  useEffect(() => {
+    if (!selectedSite?.manual_login_required) { setDevModeSessions([]); return }
+    const siteId = selectedSite.id
+    function load() {
+      fetch(`/api/sessions?siteId=${siteId}`).then(r => r.json()).then((d: DevModeSession[]) => {
+        if (Array.isArray(d)) setDevModeSessions(d)
+      }).catch(() => {})
+    }
+    load()
+    const timer = setInterval(load, 5000)
+    return () => clearInterval(timer)
+  }, [selectedSite])
 
   const failedUrls = itemLog.filter(r => r.status === 'failed').map(r => r.url)
 
@@ -513,31 +529,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       </div>
 
       {/* 로그인 */}
-      {selectedSite && (
+      {selectedSite && !selectedSite.manual_login_required && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           <div className="text-sm font-semibold text-gray-700 mb-3">로그인 정보</div>
-          {selectedSite.manual_login_required && (
-            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mb-3">
-              🔒 이 몰은 윈도우 인증(PC인증) 등의 필요로 &quot;직접 로그인&quot;이 필요합니다. 평소 쓰는 크롬 창을 먼저
-              닫고 &quot;로그인 창 열기&quot;를 누르면 본인 크롬 프로필이 뜹니다 — 로그인(필요시 PC인증)까지 마친 뒤
-              창을 닫고 &quot;로그인 확인&quot;을 눌러주세요. 스크랩하는 동안에도 같은 프로필을 쓰므로, 그동안은
-              크롬을 닫아둬야 합니다(다른 브라우저는 자유롭게 사용 가능).
-            </p>
-          )}
           <div className="grid grid-cols-2 gap-3 mb-4">
             <label className="block">
-              <span className="flex items-center justify-between text-xs text-gray-500 mb-1">
-                아이디 / 이메일
-                {selectedSite.manual_login_required && <CopyButton value={loginId} />}
-              </span>
+              <span className="block text-xs text-gray-500 mb-1">아이디 / 이메일</span>
               <input type="text" value={loginId} onChange={e => { setLoginId(e.target.value); setLoginStep('none') }}
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
             </label>
             <label className="block">
-              <span className="flex items-center justify-between text-xs text-gray-500 mb-1">
-                비밀번호
-                {selectedSite.manual_login_required && <CopyButton value={loginPw} />}
-              </span>
+              <span className="block text-xs text-gray-500 mb-1">비밀번호</span>
               <input type="password" value={loginPw} onChange={e => { setLoginPw(e.target.value); setLoginStep('none') }}
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
             </label>
@@ -555,9 +557,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               </button>
               {loginStep === 'confirmed' && <span className="text-xs text-emerald-600 font-medium">✓ 로그인 확인됨 (스크래핑 시작 시 창은 자동으로 닫히고 백그라운드에서 진행됩니다)</span>}
               {loginStep === 'opened' && (
-                <span className="text-xs text-gray-500">
-                  {selectedSite.manual_login_required ? '뜬 창에서 직접 로그인(PC인증 포함)을 완료한 뒤 확인을 눌러주세요.' : '브라우저 창에서 로그인을 완료한 뒤 확인을 눌러주세요.'}
-                </span>
+                <span className="text-xs text-gray-500">브라우저 창에서 로그인을 완료한 뒤 확인을 눌러주세요.</span>
               )}
             </div>
           ) : (
@@ -567,7 +567,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       )}
 
       {/* 스크랩 대상 */}
-      {selectedSite && (
+      {selectedSite && !selectedSite.manual_login_required && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           {hasPriorSession && (
             <>
@@ -603,16 +603,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           <div className="flex gap-2 mb-1 items-end">
             <label className="flex-1 block">
               <span className="block text-xs text-gray-500 mb-1">
-                시작 URL {loginStep === 'confirmed' && !selectedSite.manual_login_required && '(로그인 창에서 이동한 페이지를 그대로 사용할 수 있습니다)'}
+                시작 URL {loginStep === 'confirmed' && '(로그인 창에서 이동한 페이지를 그대로 사용할 수 있습니다)'}
               </span>
               <input value={targetUrl} onChange={e => setTargetUrl(e.target.value)}
                 placeholder="https://shop.example.com/products/123"
                 disabled={mode === 'catalog' && categoryUrlsText.trim().length > 0}
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 disabled:bg-gray-100 disabled:text-gray-400" />
             </label>
-            {selectedSite.manual_login_required ? (
-              <span className="px-3 py-2 text-xs text-gray-400 shrink-0">이 몰은 직접로그인 몰이라 시작페이지를 직접 입력해 주세요</span>
-            ) : loginStep === 'confirmed' && (
+            {loginStep === 'confirmed' && (
               <button onClick={handleRefreshCurrentUrl} title="로그인 창에서 현재 보고 있는 페이지로 갱신"
                 className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full transition-colors shrink-0">
                 현재 페이지로
@@ -712,7 +710,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       )}
 
       {/* 상품 페이지 미리보기 */}
-      {selectedSite && (
+      {selectedSite && !selectedSite.manual_login_required && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           <div className="flex items-center justify-between mb-2">
             <label className="block text-sm font-semibold text-gray-700">상품 페이지 미리보기</label>
@@ -887,8 +885,23 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         </div>
       )}
 
-      {/* 실행 버튼 */}
-      {status === 'running' ? (
+      {/* 실행 버튼 / 개발자모드 안내 + 세션 이력 */}
+      {selectedSite?.manual_login_required ? (
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
+          <div className="text-sm font-semibold text-gray-700 mb-3">🧩 개발자모드 스크랩 방법</div>
+          <ol className="list-decimal list-inside text-sm text-gray-600 space-y-1 mb-4">
+            <li>{selectedSite.name || selectedSite.url}에 평소 쓰는 크롬으로 로그인한 상태로 상품 목록(카테고리) 페이지를 여세요.</li>
+            <li>크롬 우측 상단의 확장 아이콘을 클릭하면 자동으로 상품을 순회하며 스크랩합니다.</li>
+            <li>완료되면 아래 목록에 새 세션이 나타납니다 — 눌러서 스크랩 Raw 확인/검수로 넘어가세요.</li>
+          </ol>
+          <div className="text-xs font-semibold text-gray-500 mb-2">세션 이력</div>
+          {devModeSessions.length === 0 ? (
+            <p className="text-xs text-gray-400">아직 이 몰로 진행된 세션이 없습니다.</p>
+          ) : (
+            <ScrapeSessionGrid sessions={devModeSessions} selectedId="" onSelect={() => openTab(PRODUCTS_LIST_TAB)} maxHeightClassName="max-h-72" />
+          )}
+        </div>
+      ) : status === 'running' ? (
         <button onClick={handleStop} disabled={stopping}
           className="w-full py-3 rounded-2xl bg-rose-500 text-white font-semibold text-sm hover:bg-rose-600 disabled:opacity-50 transition-colors">
           {stopping ? '중지 처리 중...' : '⏸ 스크래핑 중지'}

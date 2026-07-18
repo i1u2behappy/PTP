@@ -313,7 +313,7 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
       })
       const d = await res.json() as { merged: number[]; skipped: { id: number; reason: string }[] }
       if (d.skipped?.length) {
-        alert(`${d.skipped.length}개는 이미 가공된 상품이라 병합되지 않았습니다. "이미 가공된 상품도 포함"을 켜고 다시 시도하세요.`)
+        alert(`${d.skipped.length}개는 이미 가공된 상품이라 확정되지 않았습니다. "이미 가공된 상품도 포함"을 켜고 다시 시도하세요.`)
       }
       setSelected(new Set())
       bumpRefresh('products')
@@ -410,7 +410,7 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
           )}
           <button onClick={handleMerge} disabled={!selected.size || merging}
             className="px-4 py-1.5 bg-teal-500 text-white text-xs font-semibold rounded-full hover:bg-teal-600 disabled:opacity-40 transition-colors">
-            {merging ? '병합 중...' : `선택 병합 (${selected.size})`}
+            {merging ? '확정 중...' : `확정 (스크랩검수 후) (${selected.size})`}
           </button>
         </div>
       </div>

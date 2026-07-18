@@ -30,9 +30,17 @@ function compareValues(a: string | number, b: string | number): number {
 type SortDir = 'asc' | 'desc'
 interface SortKey { key: string; dir: SortDir }
 
+const DEFAULT_COL_WIDTH: Record<string, number> = {
+  created_at: 140, client_name: 110, site_name: 110, url: 280, staged_count: 150, pending_count: 170,
+}
+const MIN_COL_WIDTH = 50
+function widthFor(key: string): number {
+  return DEFAULT_COL_WIDTH[key] ?? 120
+}
+
 /** 스크랩 세션 목록 그리드 — 데이터 마이그 목록 상단 조회와 마이그레이션 하위 메뉴들(ScrapeScopePicker)이
- *  공유한다. 컬럼 클릭 정렬(Shift+클릭 복합 정렬)과 컬럼별 필터를 모두 지원해, 이 컴포넌트를 쓰는 화면은
- *  전부 동일한 조작 방식을 갖는다. */
+ *  공유한다. 컬럼 클릭 정렬(Shift+클릭 복합 정렬), 컬럼별 필터, 컬럼 폭 조절·드래그 순서 변경까지
+ *  StagingItemsGrid와 동일한 조작 방식을 제공한다. */
 export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId, onSelect, onDelete, maxHeightClassName = 'max-h-52', showClientMall, checkedIds, onToggleCheck }: {
   sessions: T[]
   selectedId: number | ''
@@ -48,6 +56,9 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
   const [sortKeys, setSortKeys] = useState<SortKey[]>([])
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [showFilters, setShowFilters] = useState(false)
+  const [colWidths, setColWidths] = useState<Record<string, number>>({})
+  const [colOrder, setColOrder] = useState<string[]>([])
+  const [dragKey, setDragKey] = useState<string | null>(null)
 
   const columns = useMemo<ColumnDef<T>[]>(() => {
     const cols: ColumnDef<T>[] = [
@@ -80,6 +91,41 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
     )
     return cols
   }, [showClientMall])
+
+  // 컬럼 구성이 바뀌어도(showClientMall 전환 등) colOrder state를 별도로 동기화하지 않고, 렌더링 시점에
+  // "기존 순서 + 아직 안 담긴 새 키"를 매번 계산한다 — state-sync용 useEffect 없이 항상 최신 컬럼 목록과
+  // 일치시키기 위함.
+  const effectiveOrder = useMemo(() => {
+    const keys = columns.map(c => c.key)
+    const known = colOrder.filter(k => keys.includes(k))
+    const missing = keys.filter(k => !known.includes(k))
+    return [...known, ...missing]
+  }, [colOrder, columns])
+
+  const orderedColumns = effectiveOrder.map(k => columns.find(c => c.key === k)).filter((c): c is ColumnDef<T> => !!c)
+
+  function handleColDrop(targetKey: string) {
+    if (!dragKey || dragKey === targetKey) return
+    const next = effectiveOrder.filter(k => k !== dragKey)
+    next.splice(next.indexOf(targetKey), 0, dragKey)
+    setColOrder(next)
+    setDragKey(null)
+  }
+
+  function startResize(key: string, e: { clientX: number; preventDefault: () => void }) {
+    e.preventDefault()
+    const startX = e.clientX
+    const startWidth = colWidths[key] ?? widthFor(key)
+    function onMove(ev: MouseEvent) {
+      setColWidths(w => ({ ...w, [key]: Math.max(MIN_COL_WIDTH, startWidth + (ev.clientX - startX)) }))
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
 
   const hasFilters = Object.values(filters).some(Boolean)
 
@@ -119,6 +165,8 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
 
   if (sessions.length === 0) return <p className="px-4 py-3 text-xs text-gray-400">검색 결과가 없습니다.</p>
 
+  const tableWidth = (onToggleCheck ? 40 : 0) + orderedColumns.reduce((sum, col) => sum + (colWidths[col.key] ?? widthFor(col.key)), 0) + (onDelete ? 80 : 0)
+
   return (
     <div>
       <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-gray-100 bg-gray-50">
@@ -133,19 +181,31 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
           </button>
         )}
       </div>
-      <div className={`${maxHeightClassName} overflow-y-auto`}>
-        <table className="w-full text-xs border-collapse">
+      <div className={`${maxHeightClassName} overflow-auto`}>
+        <table className="text-xs border-collapse" style={{ tableLayout: 'fixed', width: tableWidth }}>
+          <colgroup>
+            {onToggleCheck && <col style={{ width: 40 }} />}
+            {orderedColumns.map(col => <col key={col.key} style={{ width: colWidths[col.key] ?? widthFor(col.key) }} />)}
+            {onDelete && <col style={{ width: 80 }} />}
+          </colgroup>
           <thead className="sticky top-0 z-10 bg-gray-50">
             <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-              {onToggleCheck && <th className="px-4 py-2 text-left w-8"></th>}
-              {columns.map(col => {
+              {onToggleCheck && <th className="px-4 py-2 text-left"></th>}
+              {orderedColumns.map(col => {
                 const idx = sortKeys.findIndex(s => s.key === col.key)
                 const active = idx !== -1
                 return (
-                  <th key={col.key} className="px-4 py-2 text-left cursor-pointer select-none hover:bg-gray-100 whitespace-nowrap"
-                    onClick={e => handleSort(col.key, e)} title="클릭: 정렬 · Shift+클릭: 복합 정렬 추가">
+                  <th key={col.key} draggable
+                    onDragStart={() => setDragKey(col.key)}
+                    onDragOver={e => e.preventDefault()}
+                    onDrop={() => handleColDrop(col.key)}
+                    onDragEnd={() => setDragKey(null)}
+                    className={`relative px-4 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${dragKey === col.key ? 'opacity-40' : ''}`}
+                    onClick={e => handleSort(col.key, e)} title="드래그: 컬럼 순서 이동 · 클릭: 정렬 · Shift+클릭: 복합 정렬 추가">
                     <span className={active ? 'text-gray-800' : ''}>{col.label}</span>
                     {active && <span className="ml-1 text-teal-500">{sortKeys[idx].dir === 'asc' ? '▲' : '▼'}{sortKeys.length > 1 ? idx + 1 : ''}</span>}
+                    <div onMouseDown={e => { e.stopPropagation(); startResize(col.key, e) }} onClick={e => e.stopPropagation()} draggable={false}
+                      className="absolute top-0 right-0 bottom-0 w-1.5 cursor-col-resize hover:bg-teal-400 active:bg-teal-500" />
                   </th>
                 )
               })}
@@ -154,7 +214,7 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
             {showFilters && (
               <tr className="border-b border-gray-200 bg-white">
                 {onToggleCheck && <th className="px-4 py-1.5"></th>}
-                {columns.map(col => (
+                {orderedColumns.map(col => (
                   <th key={col.key} className="px-2 py-1.5 font-normal">
                     <input value={filters[col.key] || ''} onChange={e => setFilters(f => ({ ...f, [col.key]: e.target.value }))}
                       placeholder="필터..." onClick={e => e.stopPropagation()}
@@ -167,7 +227,7 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
           </thead>
           <tbody>
             {visibleSessions.length === 0 ? (
-              <tr><td colSpan={columns.length + (onToggleCheck ? 1 : 0) + (onDelete ? 1 : 0)} className="px-4 py-3 text-xs text-gray-400 text-center">필터에 맞는 세션이 없습니다.</td></tr>
+              <tr><td colSpan={orderedColumns.length + (onToggleCheck ? 1 : 0) + (onDelete ? 1 : 0)} className="px-4 py-3 text-xs text-gray-400 text-center">필터에 맞는 세션이 없습니다.</td></tr>
             ) : visibleSessions.map(s => (
               <tr key={s.id} onClick={() => onSelect(s.id)}
                 className={`border-b border-gray-100 last:border-0 cursor-pointer transition-colors ${
@@ -177,8 +237,8 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
                     <input type="checkbox" checked={checkedIds?.has(s.id) ?? false} onChange={() => onToggleCheck(s.id)} />
                   </td>
                 )}
-                {columns.map(col => (
-                  <td key={col.key} className={`px-4 py-2 ${col.className ?? ''}`} title={col.key === 'url' ? s.url : undefined}>
+                {orderedColumns.map(col => (
+                  <td key={col.key} className={`px-4 py-2 truncate ${col.className ?? ''}`} title={col.key === 'url' ? s.url : undefined}>
                     {col.render(s)}
                   </td>
                 ))}

@@ -18,6 +18,6 @@ export async function POST(req: NextRequest) {
 
   const seq = await pool.query<{ nextval: string }>(`SELECT nextval('scrape_session_merge_seq') AS nextval`)
   const groupId = Number(seq.rows[0].nextval)
-  await pool.query('UPDATE scrape_sessions SET merge_group_id=$1 WHERE id = ANY($2)', [groupId, sessionIds])
+  await pool.query('UPDATE scrape_sessions SET merge_group_id=$1, merged_at=NOW() WHERE id = ANY($2)', [groupId, sessionIds])
   return NextResponse.json({ groupId })
 }

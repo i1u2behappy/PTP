@@ -14,7 +14,12 @@ interface Site {
   login_id: string | null
   manual_login_required?: boolean
   profile_dir?: string
+  client_id?: number | null
+  client_name?: string | null
+  main_items?: string | null
 }
+
+interface Client { id: number; name: string }
 
 const PLATFORM_LABELS: Record<string, string> = {
   cafe24: '카페24', makeshop: '메이크샵', godomall: '고도몰', unknown: '알 수 없음 (범용 방식 사용)',
@@ -76,6 +81,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const { openTab, bumpRefresh } = useTabs()
   const initialSiteId = params?.siteId as number | undefined
   const [sites, setSites]         = useState<Site[]>([])
+  const [clients, setClients]     = useState<Client[]>([])
+  const [clientFilter, setClientFilter] = useState<number | ''>('')
   const [siteQuery, setSiteQuery] = useState('')
   const [selectedSite, setSelectedSite] = useState<Site | null>(null)
 
@@ -114,6 +121,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   useEffect(() => {
     fetch('/api/sites').then(r => r.json()).then((d: Site[]) => { if (Array.isArray(d)) setSites(d) }).catch(() => {})
+    fetch('/api/clients').then(r => r.json()).then((d: Client[]) => { if (Array.isArray(d)) setClients(d) }).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -139,9 +147,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   const filteredSites = useMemo(() => {
     const q = siteQuery.trim().toLowerCase()
-    if (!q) return sites
-    return sites.filter(s => (s.name || '').toLowerCase().includes(q) || s.url.toLowerCase().includes(q))
-  }, [sites, siteQuery])
+    return sites.filter(s => {
+      if (clientFilter !== '' && s.client_id !== clientFilter) return false
+      if (!q) return true
+      return (s.name || '').toLowerCase().includes(q) || s.url.toLowerCase().includes(q) || (s.main_items || '').toLowerCase().includes(q)
+    })
+  }, [sites, siteQuery, clientFilter])
 
   useEffect(() => {
     if (!sessionId || status !== 'running') return
@@ -436,34 +447,59 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             <button onClick={() => openTab({ id: 'sites-list', type: 'sites-list', title: 'Mall 상세관리', icon: '📋', closable: true })}
               className="text-teal-500 hover:underline">Mall 등록관리에서 추가하기 →</button>
           </div>
-        ) : selectedSite ? (
-          <div className="flex items-center justify-between bg-teal-50 rounded-xl px-3 py-2">
-            <div>
-              <div className="text-sm font-medium text-gray-800">{selectedSite.name || selectedSite.url}</div>
-              <div className="text-xs text-gray-500">{selectedSite.url}</div>
-            </div>
-            <button onClick={() => { setSelectedSite(null); setLoginStep('none') }} className="text-xs text-gray-500 hover:underline">
-              변경
-            </button>
-          </div>
         ) : (
           <div>
-            <label className="block">
-              <span className="sr-only">Mall 이름 또는 URL 검색</span>
-              <input value={siteQuery} onChange={e => setSiteQuery(e.target.value)} placeholder="이름 또는 URL 검색..."
-                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-            </label>
-            <div className="mt-2 border border-gray-100 rounded-xl max-h-52 overflow-y-auto">
+            <div className="flex flex-wrap items-center gap-3 mb-3">
+              <label className="flex items-center gap-2 text-sm text-gray-600">
+                거래처
+                <select value={clientFilter} onChange={e => setClientFilter(e.target.value ? Number(e.target.value) : '')}
+                  className="border border-gray-300 rounded-xl px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
+                  <option value="">전체</option>
+                  {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-600">
+                몰
+                <select value={selectedSite?.id ?? ''}
+                  onChange={e => { if (e.target.value) selectSite(Number(e.target.value)); else { setSelectedSite(null); setLoginStep('none') } }}
+                  className="border border-gray-300 rounded-xl px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 min-w-[180px]">
+                  <option value="">몰을 선택하세요</option>
+                  {filteredSites.map(s => <option key={s.id} value={s.id}>{s.name || s.url}</option>)}
+                </select>
+              </label>
+              <label className="flex-1 min-w-[200px] block">
+                <span className="sr-only">Mall 이름 · 메인 품목 · URL 검색</span>
+                <input value={siteQuery} onChange={e => setSiteQuery(e.target.value)} placeholder="Mall 이름·메인 품목·URL 검색..."
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+              </label>
+            </div>
+            {selectedSite && (
+              <div className="mb-3 bg-teal-50 rounded-xl px-3 py-2">
+                <div className="text-sm font-medium text-gray-800">{selectedSite.name || selectedSite.url}</div>
+                <div className="text-xs text-gray-500">{selectedSite.url}</div>
+              </div>
+            )}
+            <div className="border border-gray-100 rounded-xl max-h-64 overflow-y-auto">
               {filteredSites.length === 0 ? (
-                <div className="px-3 py-2 text-xs text-gray-400">검색 결과가 없습니다.</div>
+                <div className="px-3 py-3 text-xs text-gray-400 text-center">검색 결과가 없습니다.</div>
               ) : (
                 <table className="w-full text-xs border-collapse">
+                  <thead className="sticky top-0 z-10 bg-gray-50">
+                    <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+                      <th className="px-3 py-2 text-left whitespace-nowrap">Mall 이름</th>
+                      <th className="px-3 py-2 text-left whitespace-nowrap">메인 품목</th>
+                      <th className="px-3 py-2 text-left whitespace-nowrap">거래처</th>
+                      <th className="px-3 py-2 text-left">URL</th>
+                    </tr>
+                  </thead>
                   <tbody>
                     {filteredSites.map(s => (
                       <tr key={s.id} onClick={() => selectSite(s.id)}
                         className="border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors">
                         <td className="px-3 py-2 text-gray-800 font-medium whitespace-nowrap">{s.name || '(이름 없음)'}</td>
-                        <td className="px-3 py-2 text-gray-500 max-w-[280px] truncate" title={s.url}>{s.url}</td>
+                        <td className="px-3 py-2 text-gray-500 max-w-[160px] truncate" title={s.main_items || ''}>{s.main_items || '-'}</td>
+                        <td className="px-3 py-2 text-teal-600 whitespace-nowrap">{s.client_name || '-'}</td>
+                        <td className="px-3 py-2 text-gray-500 max-w-[240px] truncate" title={s.url}>{s.url}</td>
                       </tr>
                     ))}
                   </tbody>

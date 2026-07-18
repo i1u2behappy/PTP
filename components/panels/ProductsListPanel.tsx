@@ -15,6 +15,10 @@ interface Session {
   merged_count: number
   skipped_count: number
   created_at: string
+  site_name: string | null
+  client_name: string | null
+  merge_group_id: number | null
+  merged_at: string | null
 }
 
 export function ProductsListPanel() {
@@ -37,6 +41,7 @@ export function ProductsListPanel() {
     const q = sessionSearch.trim().toLowerCase()
     if (!q) return true
     return s.url.toLowerCase().includes(q) || s.status.toLowerCase().includes(q) || new Date(s.created_at).toLocaleString().toLowerCase().includes(q)
+      || (s.client_name || '').toLowerCase().includes(q) || (s.site_name || '').toLowerCase().includes(q)
   })
 
   const selectedSession = sessions.find(s => s.id === selectedSessionId)
@@ -88,11 +93,11 @@ export function ProductsListPanel() {
         <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4 shrink-0">
           <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3">
             <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
-            <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="URL·상태·일시 검색..."
+            <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="거래처·몰·URL·상태·일시 검색..."
               className="flex-1 border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </div>
           <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId}
-            onDelete={handleDeleteSession} maxHeightClassName="max-h-80" />
+            onDelete={handleDeleteSession} maxHeightClassName="max-h-80" showClientMall />
         </div>
       )}
 

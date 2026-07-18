@@ -18,6 +18,7 @@ export function SiteDetailPanel({ params }: Props) {
   function backToList() { openTab(SITES_LIST_TAB) }
 
   const [name, setName] = useState('')
+  const [mainItems, setMainItems] = useState('')
   const [url, setUrl] = useState('')
   const [loginUrl, setLoginUrl] = useState('')
   const [loginId, setLoginId] = useState('')
@@ -43,9 +44,9 @@ export function SiteDetailPanel({ params }: Props) {
     fetch(`/api/sites/${siteId}`).then(r => r.json()).then((d: {
       name: string | null; url: string; login_url: string | null; login_id: string | null; login_pw: string | null; client_id: number | null
       custom_name_selector: string | null; custom_price_selector: string | null; custom_thumbnail_selector: string | null
-      auto_scrape_enabled: boolean; auto_scrape_hour: number | null; manual_login_required: boolean
+      auto_scrape_enabled: boolean; auto_scrape_hour: number | null; manual_login_required: boolean; main_items: string | null
     }) => {
-      setName(d.name || ''); setUrl(d.url); setLoginUrl(d.login_url || ''); setLoginId(d.login_id || ''); setLoginPw(d.login_pw || '')
+      setName(d.name || ''); setMainItems(d.main_items || ''); setUrl(d.url); setLoginUrl(d.login_url || ''); setLoginId(d.login_id || ''); setLoginPw(d.login_pw || '')
       setClientId(d.client_id ?? '')
       setNameSelector(d.custom_name_selector || ''); setPriceSelector(d.custom_price_selector || '')
       setThumbnailSelector(d.custom_thumbnail_selector || '')
@@ -55,10 +56,11 @@ export function SiteDetailPanel({ params }: Props) {
   }, [siteId, isNew])
 
   async function handleSave() {
+    if (!name) return alert('Mall 이름을 입력하세요.')
     if (!url) return alert('URL을 입력하세요.')
     setSaving(true)
     const body = JSON.stringify({
-      name, url, loginUrl: loginUrl || undefined, loginId, loginPw, clientId: clientId === '' ? null : clientId,
+      name, mainItems: mainItems || undefined, url, loginUrl: loginUrl || undefined, loginId, loginPw, clientId: clientId === '' ? null : clientId,
       customNameSelector: nameSelector || undefined, customPriceSelector: priceSelector || undefined,
       customThumbnailSelector: thumbnailSelector || undefined,
       autoScrapeEnabled, autoScrapeHour: autoScrapeEnabled ? autoScrapeHour : null,
@@ -130,9 +132,14 @@ export function SiteDetailPanel({ params }: Props) {
               {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </label>
-          <label className="col-span-2 block">
-            <span className="block text-xs text-gray-500 mb-1">이름 (선택)</span>
+          <label className="block">
+            <span className="block text-xs text-gray-500 mb-1">Mall 이름 *</span>
             <input value={name} onChange={e => setName(e.target.value)}
+              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+          </label>
+          <label className="block">
+            <span className="block text-xs text-gray-500 mb-1">메인 품목 (선택 · 이 몰의 주요 판매 품목)</span>
+            <input value={mainItems} onChange={e => setMainItems(e.target.value)} placeholder="예: 여성 신발, 스니커즈"
               className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </label>
           <label className="col-span-2 block">

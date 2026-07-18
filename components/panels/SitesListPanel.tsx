@@ -12,6 +12,7 @@ interface Site {
   client_name: string | null
   blocked: boolean
   manual_login_required: boolean
+  main_items: string | null
   latest_memo: string | null
   created_at: string
 }
@@ -99,7 +100,8 @@ export function SitesListPanel() {
             <table className="text-xs border-collapse whitespace-nowrap">
               <thead className="sticky top-0 z-10 bg-gray-50">
                 <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                  <th className="px-3 py-2 text-left sticky left-0 bg-gray-50 z-20">이름</th>
+                  <th className="px-3 py-2 text-left sticky left-0 bg-gray-50 z-20">Mall 이름</th>
+                  <th className="px-3 py-2 text-left">메인 품목</th>
                   <th className="px-3 py-2 text-left">URL</th>
                   <th className="px-3 py-2 text-left">로그인ID</th>
                   <th className="px-3 py-2 text-left">비밀번호</th>
@@ -121,6 +123,7 @@ export function SitesListPanel() {
                         </span>
                       )}
                     </td>
+                    <td className="px-3 py-2 text-gray-500 max-w-[200px] truncate" title={s.main_items || ''}>{s.main_items || '-'}</td>
                     <td className="px-3 py-2 text-gray-500 max-w-[280px] truncate" title={s.url}>{s.url}</td>
                     <td className="px-3 py-2 text-gray-500">{s.login_id || '-'}</td>
                     <td className="px-3 py-2 text-gray-500 font-mono">{s.login_pw_masked || '-'}</td>

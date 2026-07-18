@@ -132,6 +132,9 @@ export async function initDb() {
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS scrape_profile_updated_at TIMESTAMPTZ;
     -- Windows Hello/WebAuthn 등 자동화 브라우저로는 통과할 수 없는 로그인 보안을 쓰는 몰 표시용
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS manual_login_required BOOLEAN DEFAULT false;
+    -- Mall 등록 시 기입하는 주요 판매 품목 (자유 텍스트)
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS main_items TEXT;
+    ALTER TABLE sites ALTER COLUMN name SET NOT NULL;
 
     CREATE TABLE IF NOT EXISTS supply_clients (
       id                   SERIAL PRIMARY KEY,
@@ -216,6 +219,7 @@ export async function initDb() {
     -- 재사용하지 않고 별도 시퀀스로 발급해, 그룹의 "대표" 세션이라는 개념 없이 모든 멤버를 동등하게 다룬다.
     CREATE SEQUENCE IF NOT EXISTS scrape_session_merge_seq;
     ALTER TABLE scrape_sessions ADD COLUMN IF NOT EXISTS merge_group_id INTEGER;
+    ALTER TABLE scrape_sessions ADD COLUMN IF NOT EXISTS merged_at TIMESTAMPTZ;
     CREATE INDEX IF NOT EXISTS idx_scrape_sessions_merge_group ON scrape_sessions(merge_group_id) WHERE merge_group_id IS NOT NULL;
 
     -- 카탈로그 스크랩 중 상품별 성공/실패 로그 (진행 화면의 실시간 로그 + 실패 재시도 큐 근거)

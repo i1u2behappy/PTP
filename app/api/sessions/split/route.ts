@@ -12,12 +12,12 @@ export async function POST(req: NextRequest) {
   const affected = await pool.query<{ merge_group_id: number }>(
     'SELECT DISTINCT merge_group_id FROM scrape_sessions WHERE id = ANY($1) AND merge_group_id IS NOT NULL', [sessionIds],
   )
-  await pool.query('UPDATE scrape_sessions SET merge_group_id=NULL WHERE id = ANY($1)', [sessionIds])
+  await pool.query('UPDATE scrape_sessions SET merge_group_id=NULL, merged_at=NULL WHERE id = ANY($1)', [sessionIds])
 
   for (const { merge_group_id } of affected.rows) {
     const remaining = await pool.query('SELECT id FROM scrape_sessions WHERE merge_group_id=$1', [merge_group_id])
     if (remaining.rows.length <= 1) {
-      await pool.query('UPDATE scrape_sessions SET merge_group_id=NULL WHERE merge_group_id=$1', [merge_group_id])
+      await pool.query('UPDATE scrape_sessions SET merge_group_id=NULL, merged_at=NULL WHERE merge_group_id=$1', [merge_group_id])
     }
   }
   return NextResponse.json({ ok: true })

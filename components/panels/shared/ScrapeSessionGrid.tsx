@@ -12,6 +12,8 @@ interface SessionLike {
   site_name?: string | null
   /** "선택 병합"으로 다른 세션들과 하나로 묶여있으면 그 그룹 식별자 — 다른 메뉴에서 이 중 아무 세션이나 조회해도 그룹 전체가 함께 조회된다. */
   merge_group_id?: number | null
+  /** 병합된 시각 — 병합 안 된 세션이면 null. */
+  merged_at?: string | null
 }
 
 interface ColumnDef<T> {
@@ -31,7 +33,7 @@ type SortDir = 'asc' | 'desc'
 interface SortKey { key: string; dir: SortDir }
 
 const DEFAULT_COL_WIDTH: Record<string, number> = {
-  created_at: 140, client_name: 110, site_name: 110, url: 280, staged_count: 150, pending_count: 170,
+  created_at: 140, client_name: 110, site_name: 110, url: 280, staged_count: 150, pending_count: 170, merged_at: 140,
 }
 const MIN_COL_WIDTH = 50
 function widthFor(key: string): number {
@@ -88,6 +90,8 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
           )
         },
         className: 'font-medium whitespace-nowrap' },
+      { key: 'merged_at', label: '병합 일시', getValue: s => s.merged_at || '',
+        render: s => s.merged_at ? new Date(s.merged_at).toLocaleString() : '-', className: 'text-gray-400 whitespace-nowrap' },
     )
     return cols
   }, [showClientMall])

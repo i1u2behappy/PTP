@@ -3,6 +3,7 @@ import { scrapeSingleProduct, scrapeCatalogPage, closeLoginWindow, detectIsListi
 import { stageScrapedProduct } from './staging'
 import { runMallProfileCheckForScrape } from './mallProfile'
 import type { ScrapeResult } from '../scraper'
+import type { ExtractionRule } from '../ai'
 
 export interface RunScrapingOpts {
   url?: string
@@ -41,8 +42,11 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
     [siteId],
   )
 
-  const siteRes = await pool.query<{ custom_name_selector: string | null; custom_price_selector: string | null; custom_thumbnail_selector: string | null }>(
-    `SELECT custom_name_selector, custom_price_selector, custom_thumbnail_selector FROM sites WHERE id=$1`,
+  const siteRes = await pool.query<{
+    custom_name_selector: string | null; custom_price_selector: string | null; custom_thumbnail_selector: string | null
+    extraction_rules: Record<string, ExtractionRule> | null
+  }>(
+    `SELECT custom_name_selector, custom_price_selector, custom_thumbnail_selector, extraction_rules FROM sites WHERE id=$1`,
     [siteId],
   )
   const site = siteRes.rows[0]
@@ -56,6 +60,7 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
     nameSelector: site?.custom_name_selector || undefined,
     priceSelector: site?.custom_price_selector || undefined,
     thumbnailSelector: site?.custom_thumbnail_selector || undefined,
+    extractionRules: site?.extraction_rules || undefined,
   }
 
   // 몰 구조 프로파일링(신규몰 기준정보 저장/변경 감지)은 로그인 확인 시점에도 도는데, 직접로그인 필수

@@ -8,7 +8,7 @@ export async function GET(req: NextRequest) {
   const res = await pool.query(`
     SELECT s.id, s.site_id, s.url, s.status, s.scope_type, s.mode, s.product_count AS found_count,
            COUNT(p.id) AS saved_count, s.created_at, s.merge_group_id, s.merged_at,
-           site.name AS site_name, client.name AS client_name,
+           site.name AS site_name, client.name AS client_name, site.manual_login_required AS site_manual_login_required,
            (SELECT COUNT(*) FROM scrape_staging_items si WHERE si.session_id = s.id) AS staged_count,
            (SELECT COUNT(*) FROM scrape_staging_items si WHERE si.session_id = s.id AND si.status = 'pending') AS pending_count,
            (SELECT COUNT(*) FROM scrape_staging_items si WHERE si.session_id = s.id AND si.status = 'merged')  AS merged_count,
@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
     LEFT JOIN sites site ON site.id = s.site_id
     LEFT JOIN supply_clients client ON client.id = site.client_id
     WHERE $1::int IS NULL OR s.site_id = $1::int
-    GROUP BY s.id, s.merge_group_id, s.merged_at, site.name, client.name
+    GROUP BY s.id, s.merge_group_id, s.merged_at, site.name, client.name, site.manual_login_required
     ORDER BY s.created_at DESC
   `, [siteId])
   return NextResponse.json(res.rows)

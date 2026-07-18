@@ -13,6 +13,7 @@ import { chromium, type BrowserContext, type Page } from 'playwright'
 import type { ExtractedProduct } from './ai'
 import { extractProductFieldsWithAI } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
+import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
 import pool from './db'
 
@@ -111,6 +112,8 @@ export interface ScrapeOptions {
   nameSelector?: string
   priceSelector?: string
   thumbnailSelector?: string
+  /** "스크랩 조정" 기능이 AI로 학습해 저장한 그 몰 전용 추출 규칙 (sites.extraction_rules) */
+  extractionRules?: Record<string, ExtractionRule>
 }
 
 export function profileDir(siteId: number) {
@@ -747,7 +750,7 @@ export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeRe
         await waitForExtractableContent(page)
         const sourceUrl = opts.url || page.url()
         lastUrl = sourceUrl
-        const product = await extractProductRuleBased(page, sourceUrl, selectorOverrides(opts))
+        const product = await extractProductRuleBased(page, sourceUrl, selectorOverrides(opts), opts.extractionRules)
         const domOptions = await extractOptionsFromDom(page)
         if (domOptions.length) product.options = domOptions
         await applyStockByOption(page, product)
@@ -769,6 +772,15 @@ export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeRe
       if (aiProduct) return { sourceUrl: lastUrl, product: aiProduct }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError))
+  })
+}
+
+/** "스크랩 조정" 기능(일반모드)이 AI에게 실제 페이지를 보여주기 위해 원문을 그대로 가져온다. */
+export async function fetchPageText(opts: ScrapeOptions & { url: string }): Promise<string> {
+  return withContext(opts, async page => {
+    await page.goto(opts.url, { waitUntil: 'load', timeout: 30_000 })
+    await loginIfNeeded(page, opts)
+    return page.content()
   })
 }
 
@@ -1021,7 +1033,7 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
       await page.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     }
     await waitForExtractableContent(page)
-    const product = await extractProductRuleBased(page, firstUrl, selectorOverrides(opts))
+    const product = await extractProductRuleBased(page, firstUrl, selectorOverrides(opts), opts.extractionRules)
     const domOptions = await extractOptionsFromDom(page)
     if (domOptions.length) product.options = domOptions
     await applyStockByOption(page, product)
@@ -1059,7 +1071,7 @@ export async function scrapeCatalogPage(
     if (productUrls.length === 0) {
       const singleUrl = opts.url || page.url()
       await waitForExtractableContent(page)
-      const product = await extractProductRuleBased(page, singleUrl, selectorOverrides(opts))
+      const product = await extractProductRuleBased(page, singleUrl, selectorOverrides(opts), opts.extractionRules)
       const domOptions = await extractOptionsFromDom(page)
       if (domOptions.length) product.options = domOptions
       await applyStockByOption(page, product)
@@ -1091,7 +1103,7 @@ export async function scrapeCatalogPage(
             await workerPage.goto(pUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
           }
           await waitForExtractableContent(workerPage)
-          const product = await extractProductRuleBased(workerPage, pUrl, selectorOverrides(opts))
+          const product = await extractProductRuleBased(workerPage, pUrl, selectorOverrides(opts), opts.extractionRules)
           const domOptions = await extractOptionsFromDom(workerPage)
           if (domOptions.length) product.options = domOptions
           await applyStockByOption(workerPage, product)

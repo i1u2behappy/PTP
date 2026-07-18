@@ -64,7 +64,8 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
 
   const columns = useMemo<ColumnDef<T>[]>(() => {
     const cols: ColumnDef<T>[] = [
-      { key: 'created_at', label: '스크래핑 일시', getValue: s => s.created_at, render: s => new Date(s.created_at).toLocaleString(),
+      { key: 'created_at', label: '스크래핑 일시', getValue: s => s.created_at,
+        render: s => new Date(s.created_at).toLocaleString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
         className: 'text-gray-400 whitespace-nowrap' },
     ]
     if (showClientMall) {

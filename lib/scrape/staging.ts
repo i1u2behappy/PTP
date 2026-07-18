@@ -77,6 +77,8 @@ function toScrapeResult(row: StagingRow): ScrapeResult {
     name: row.name_original,
     price: row.price,
     sale_price: row.sale_price,
+    cost_price: extra.cost_price ?? null,
+    shipping_fee: extra.shipping_fee ?? null,
     brand: row.brand,
     manufacturer: row.manufacturer,
     origin: row.origin,

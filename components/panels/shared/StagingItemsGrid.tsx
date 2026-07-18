@@ -10,6 +10,8 @@ interface RawExtra {
   english_name?: string
   extra_info?: { label: string; value: string }[]
   stock_by_option?: { option: string; qty: number }[]
+  cost_price?: number | null
+  shipping_fee?: number | null
 }
 
 interface StagingRow {
@@ -142,8 +144,15 @@ function loadColOrder(): string[] {
 }
 
 /** 수집확인/데이터 마이그 목록 등에서 공용으로 쓰는, 스크랩 세션의 전체 컬럼 상세 그리드 (병합 여부 무관 조회용).
- *  sessionId가 "선택 병합"된 세션이면 서버(/api/scrape-staging)가 그 그룹 전체를 함께 내려준다. */
-export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
+ *  sessionId가 "선택 병합"된 세션이면 서버(/api/scrape-staging)가 그 그룹 전체를 함께 내려준다.
+ *  siteId/manualLoginRequired/siteName은 "스크랩 조정" 기능용 — 셋 다 있어야(호출부가 몰 정보를 알 때만)
+ *  그 버튼이 보인다(예: 데이터 마이그 목록 화면은 아직 안 넘겨줘서 자연히 숨겨짐). */
+export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteName }: {
+  sessionId: number | ''
+  siteId?: number
+  manualLoginRequired?: boolean | null
+  siteName?: string | null
+}) {
   const scopeQuery = sessionId ? `sessionId=${sessionId}` : ''
   const { openTab, activeTabId, refreshSignals, bumpRefresh } = useTabs()
   const [items, setItems] = useState<StagingRow[]>([])
@@ -158,6 +167,13 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
   const [colOrder, setColOrder] = useState<string[]>(loadColOrder)
   const [dragKey, setDragKey] = useState<string | null>(null)
+
+  const [showAdjust, setShowAdjust] = useState(false)
+  const [adjustPrompt, setAdjustPrompt] = useState('')
+  const [adjustBusy, setAdjustBusy] = useState(false)
+  const [adjustMessage, setAdjustMessage] = useState<string | null>(null)
+  const [adjustStarted, setAdjustStarted] = useState(false)
+  const [adjustDevPromptSaved, setAdjustDevPromptSaved] = useState(false)
 
   // 옵션1/옵션2/... 컬럼은 실제 값(values)이 있는 항목만 세고, 빈 옵션 슬롯만으로는 컬럼을 만들지 않는다.
   const maxOptionCount = items.reduce((max, p) => {
@@ -340,6 +356,81 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
     }
   }
 
+  function openAdjust() {
+    setShowAdjust(true)
+    setAdjustPrompt('')
+    setAdjustMessage(null)
+    setAdjustStarted(false)
+    setAdjustDevPromptSaved(false)
+  }
+
+  /** "스크랩 조정 개시" — 속도를 위해 지금 그리드 맨 위에 보이는 상품 1건만 대상으로 규칙을 만들고
+   *  테스트해본다(일반모드). 개발자모드는 백엔드가 페이지를 못 열어보니 프롬프트만 저장해두고 사용자가
+   *  실제 상품 페이지에서 확장 우클릭 메뉴를 실행해야 한다. */
+  async function handleAdjustStart() {
+    if (!siteId || !adjustPrompt.trim()) return
+    const target = visibleItems[0]
+    setAdjustBusy(true)
+    setAdjustMessage(null)
+    try {
+      if (manualLoginRequired) {
+        const res = await fetch(`/api/sites/${siteId}/adjust/prompt`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: adjustPrompt }),
+        })
+        if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
+        setAdjustDevPromptSaved(true)
+      } else {
+        if (!target) { setAdjustMessage('테스트할 상품이 없습니다.'); return }
+        const res = await fetch(`/api/sites/${siteId}/adjust`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ itemId: target.id, prompt: adjustPrompt }),
+        })
+        const data = await res.json() as { updated?: number; failed?: { error: string }[]; error?: string }
+        if (!res.ok) throw new Error(data.error || `서버 오류 (${res.status})`)
+        if (data.failed?.length) throw new Error(data.failed[0].error)
+        setAdjustMessage('✓ 1개 상품에 테스트 적용했습니다 — 그리드 첫 줄에서 결과를 확인해보세요.')
+        setAdjustStarted(true)
+        loadItems()
+      }
+    } catch (e) {
+      setAdjustMessage(`실패: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setAdjustBusy(false)
+    }
+  }
+
+  /** "조정 확정" — 테스트해본 규칙을 이 세션의 미확정 상품 전체에 적용한다(일반모드). 개발자모드는
+   *  PTP가 그 결과(확장 캡처가 실제로 규칙을 만들었는지)를 알 방법이 없으니, 사용자가 우클릭 캡처를
+   *  실제로 마쳤는지 먼저 확인한 뒤 다음 단계(재스크랩)를 안내한다 — 안 했는데 눌러 헷갈리지 않도록. */
+  async function handleAdjustConfirm() {
+    if (!siteId) return
+    if (manualLoginRequired) {
+      const done = confirm(`${siteName || '이 몰'} 상품 페이지에서 마우스 우클릭 → "PTP 조정 반영"을 이미 실행하셨나요?\n\n아직이라면 취소를 누르고 먼저 그 단계를 진행해주세요.`)
+      if (!done) return
+      setAdjustMessage('좋습니다. 이제 카테고리 페이지에서 확장 아이콘을 다시 눌러 전체를 재스크랩해주세요 — 개발자모드는 기존 항목을 그 자리에서 못 고치고 새 세션으로 다시 수집합니다.')
+      return
+    }
+    if (!sessionId) return
+    setAdjustBusy(true)
+    setAdjustMessage(null)
+    try {
+      const res = await fetch(`/api/sites/${siteId}/adjust/confirm`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      })
+      const data = await res.json() as { updated?: number; error?: string }
+      if (!res.ok) throw new Error(data.error || `서버 오류 (${res.status})`)
+      setAdjustMessage(`✓ 전체 ${data.updated ?? 0}개 항목을 재추출했습니다.`)
+      bumpRefresh('staging')
+      loadItems()
+    } catch (e) {
+      setAdjustMessage(`실패: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setAdjustBusy(false)
+    }
+  }
+
   async function handleExport() {
     if (!scopeQuery) return
     // 그리드에 실제로 보이는 것(현재 컬럼 순서·필터·정렬 결과) 그대로 내보낸다 — 서버가 별도 컬럼 구성을
@@ -374,6 +465,7 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
   }
 
   return (
+    <>
     <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-0 flex flex-col">
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 shrink-0 flex-wrap gap-2">
         <label className="flex items-center gap-3 text-xs text-gray-600 cursor-pointer">
@@ -409,6 +501,12 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
             <button onClick={discardSelected} disabled={discarding}
               className="px-4 py-1.5 bg-rose-50 text-rose-600 text-xs font-semibold rounded-full hover:bg-rose-100 disabled:opacity-50 transition-colors">
               🗑 선택 무시 ({selected.size})
+            </button>
+          )}
+          {siteId != null && (
+            <button onClick={openAdjust}
+              className="px-4 py-1.5 bg-white border border-gray-300 text-gray-600 text-xs font-semibold rounded-full hover:border-teal-400 transition-colors">
+              🔧 스크랩 조정
             </button>
           )}
           <button onClick={handleMerge} disabled={!selected.size || merging}
@@ -570,5 +668,80 @@ export function StagingItemsGrid({ sessionId }: { sessionId: number | '' }) {
         </table>
       </div>
     </div>
+
+    {showAdjust && siteId != null && (
+      <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={() => setShowAdjust(false)}>
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
+          <div className="flex items-center gap-2 mb-1">
+            <h2 className="text-lg font-bold text-gray-800">🔧 스크랩 조정</h2>
+            <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${manualLoginRequired ? 'bg-amber-100 text-amber-700' : 'bg-teal-100 text-teal-700'}`}>
+              {manualLoginRequired ? '🧩 개발자모드' : '🤖 일반모드'}
+            </span>
+            <button onClick={() => setShowAdjust(false)} className="ml-auto text-gray-400 hover:text-gray-600 text-sm">닫기</button>
+          </div>
+
+          {/* 모드마다 절차가 완전히 다르므로(일반모드=자동, 개발자모드=브라우저 수동 조작 필요),
+              헷갈리지 않게 지금 몰의 모드에 맞는 안내만 번호 순서로 보여준다. */}
+          {manualLoginRequired ? (
+            <ol className="text-xs text-gray-500 list-decimal list-inside space-y-1 mb-3">
+              <li>아래에 조정 내용을 입력하고 <b className="text-gray-600">스크랩 조정 개시</b>를 누르면 프롬프트가 저장됩니다 (이 몰은 개발자모드라 PTP가 페이지를 직접 열어볼 수 없어요).</li>
+              <li><b className="text-gray-600">{siteName || '이 몰'}</b> 상품 페이지(맨 위 상품 페이지 권장)를 열고 마우스 우클릭 → <b className="text-gray-600">PTP 조정 반영</b>을 눌러 규칙을 만드세요.</li>
+              <li>규칙을 만들었으면 <b className="text-gray-600">조정 확정</b>을 눌러, 안내에 따라 카테고리 페이지에서 확장 아이콘을 다시 실행해 전체를 재스크랩하세요.</li>
+            </ol>
+          ) : (
+            <ol className="text-xs text-gray-500 list-decimal list-inside space-y-1 mb-3">
+              <li>아래에 조정 내용을 입력하고 <b className="text-gray-600">스크랩 조정 개시</b>를 누르면, 맨 위 상품 1건으로 자동 테스트합니다.</li>
+              <li>그리드 첫 줄에서 결과가 맞는지 확인하세요.</li>
+              <li>맞으면 <b className="text-gray-600">조정 확정</b>을 눌러 이 세션의 전체 상품에 반영하세요.</li>
+            </ol>
+          )}
+          <p className="text-[11px] text-gray-400 mb-4">확정한 내용은 앞으로 이 몰을 스크랩할 때도 계속 적용되는 규칙으로 저장됩니다.</p>
+
+          {visibleItems[0] && (
+            <div className="bg-gray-50 rounded-xl p-3 mb-4 text-xs text-gray-600 space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-gray-700">현재 추출된 값 (맨 위 1건)</span>
+                {visibleItems[0].source_url && (
+                  <a href={visibleItems[0].source_url} target="_blank" rel="noreferrer" className="text-teal-500 hover:underline">몰 상품 페이지 열기 ↗</a>
+                )}
+              </div>
+              <p>상품명: {visibleItems[0].name_original || '-'}</p>
+              <p>가격: {visibleItems[0].price != null ? `₩${visibleItems[0].price.toLocaleString()}` : '-'}</p>
+              <p>공급가(도매가): {visibleItems[0].raw_data?.cost_price != null ? `₩${visibleItems[0].raw_data.cost_price.toLocaleString()}` : '-'}</p>
+              <p>배송비: {visibleItems[0].raw_data?.shipping_fee != null ? `₩${visibleItems[0].raw_data.shipping_fee.toLocaleString()}` : '-'}</p>
+              <p>카테고리: {visibleItems[0].mall_category || '-'}</p>
+            </div>
+          )}
+
+          {manualLoginRequired && adjustDevPromptSaved ? (
+            <p className="text-sm text-gray-700 bg-teal-50 border border-teal-200 rounded-xl px-3 py-3 mb-3">
+              ✓ 1단계 완료(프롬프트 저장됨). 이제 2단계 — {siteName || '이 몰'} 상품 페이지(맨 위 상품 페이지
+              권장)를 열고 마우스 우클릭 → &quot;PTP 조정 반영&quot;을 눌러주세요. 끝나면 아래
+              &quot;조정 확정&quot;을 눌러 3단계로 넘어가세요.
+            </p>
+          ) : (
+            <textarea value={adjustPrompt} onChange={e => setAdjustPrompt(e.target.value)} rows={4}
+              placeholder="예: 가격은 도매가격이 아니라 소비자가에서 가져와야 해. 배송비도 배송비 라벨에서 가져와줘."
+              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 mb-3" />
+          )}
+
+          {adjustMessage && <p className="text-xs text-gray-600 mb-3">{adjustMessage}</p>}
+
+          <div className="flex gap-2">
+            <button onClick={handleAdjustStart} disabled={adjustBusy || !adjustPrompt.trim() || (manualLoginRequired ? adjustDevPromptSaved : false)}
+              className="flex-1 py-2.5 rounded-xl bg-teal-500 text-white text-sm font-semibold hover:bg-teal-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+              {adjustBusy ? '처리 중...' : '스크랩 조정 개시'}
+            </button>
+            <button onClick={handleAdjustConfirm}
+              disabled={adjustBusy || (manualLoginRequired ? !adjustDevPromptSaved : !adjustStarted)}
+              title={manualLoginRequired && !adjustDevPromptSaved ? '먼저 "스크랩 조정 개시"로 프롬프트를 저장해주세요' : !manualLoginRequired && !adjustStarted ? '먼저 "스크랩 조정 개시"로 1건 테스트를 해주세요' : undefined}
+              className="flex-1 py-2.5 rounded-xl bg-white border border-gray-300 text-gray-700 text-sm font-semibold hover:border-teal-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+              조정 확정
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   )
 }

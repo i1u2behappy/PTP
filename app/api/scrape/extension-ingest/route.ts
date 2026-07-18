@@ -27,7 +27,7 @@ interface IngestBody {
 }
 
 const EMPTY_PRODUCT: ExtractedProduct = {
-  name: '', price: null, sale_price: null, brand: '', manufacturer: '', origin: '', category: '',
+  name: '', price: null, sale_price: null, cost_price: null, shipping_fee: null, brand: '', manufacturer: '', origin: '', category: '',
   description: '', options: [], thumbnail_urls: [], thumbnail_names: [], detail_image_urls: [],
   detail_image_names: [], detail_text: '', summary_info: '', english_name: '', extra_info: [],
   stock_status: '판매중', stock_qty: null, stock_by_option: [], mall_product_code: '',

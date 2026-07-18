@@ -1,9 +1,12 @@
 import type { Page } from 'playwright'
-import type { ExtractedProduct } from './ai'
+import type { ExtractedProduct, ExtractionRule } from './ai'
 
 interface RawPageData {
   name: string
   price: number | null
+  costPrice: number | null
+  shippingFee: number | null
+  categoryFromDetail: string
   brand: string
   description: string
   mainImages: string[]
@@ -107,12 +110,52 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     if (!description) {
       description = ogContent('og:description') || document.querySelector('meta[name="description"]')?.getAttribute('content') || ''
     }
+
+    // 국내 쇼핑몰은 전자상거래법상 "상품정보제공고시" 표를 의무 게시하므로, 라벨-값 쌍에서 부가 정보를 찾는다.
+    // 카페24 등은 <table>(th/td)로, 신우 같은 구형 자체 솔루션은 <dl><dt>/<dd>로 같은 걸 표현하니 둘 다 본다.
+    const infoRows: [string, string][] = []
+    document.querySelectorAll('table tr').forEach(tr => {
+      const cells = Array.from(tr.querySelectorAll('th,td')).map(c => (c.textContent || '').trim())
+      if (cells.length === 2 && cells[0] && cells[1]) infoRows.push([cells[0], cells[1]])
+    })
+    document.querySelectorAll('dl').forEach(dl => {
+      Array.from(dl.querySelectorAll('dt')).forEach(dt => {
+        // 인덱스로 dt[i]/dd[i]를 짝짓지 않는다 — 중간에 짝 없는 dd가 끼면 그 뒤로 전부 밀린다.
+        // 대신 각 dt에서 다음 dt를 만나기 전 첫 dd를 직접 찾는다.
+        let sib = dt.nextElementSibling
+        while (sib && sib.tagName !== 'DD' && sib.tagName !== 'DT') sib = sib.nextElementSibling
+        if (sib && sib.tagName === 'DD') {
+          const label = (dt.textContent || '').trim()
+          const value = (sib.textContent || '').trim()
+          if (label && value) infoRows.push([label, value])
+        }
+      })
+    })
+
+    // 소비자가/도매가(공급가)/배송비를 라벨로 찾는다 — "회원공개"처럼 로그인 전에는 가려지는 값도 있어
+    // 숫자가 실제로 있을 때만 채택한다. (page.evaluate 콜백은 브라우저에서 실행되므로 바깥의
+    // findInfoValue 헬퍼를 못 쓴다 — 여기서 바로 같은 로직을 인라인으로 둔다.)
+    const infoValue = (labelPattern: RegExp) => infoRows.find(([label]) => labelPattern.test(label))?.[1] || ''
+    const firstNumber = (text: string): number | null => {
+      const m = text.match(/[\d,]{2,}(?=\s*원)/)
+      return m ? Number(m[0].replace(/,/g, '')) : null
+    }
+    const costPrice = firstNumber(infoValue(/도매가|공급가/))
+    const shippingFee = firstNumber(infoValue(/배\s*송\s*비/))
+    const labeledRetailPrice = firstNumber(infoValue(/소비자가|시중가|오픈마켓/))
+
+    if (price == null && labeledRetailPrice != null) price = labeledRetailPrice
     if (price == null) {
-      // 가격 표시 요소(class/id에 price 포함)에서 "숫자,콤마 + 원" 패턴을 찾는다
+      // 가격 표시 요소(class/id에 price 포함)에서 "숫자,콤마 + 원" 패턴을 찾는다 — 단, 위에서 이미 도매가로
+      // 확인된 값과 같은 요소를 소비자가로 잘못 집지 않도록 그 숫자는 건너뛴다.
       const priceEls = Array.from(document.querySelectorAll('[class*="price" i], [id*="price" i]'))
       for (const el of priceEls) {
         const m = (el.textContent || '').match(/([\d,]{3,})\s*원/)
-        if (m) { price = Number(m[1].replace(/,/g, '')); break }
+        if (!m) continue
+        const candidate = Number(m[1].replace(/,/g, ''))
+        if (costPrice != null && candidate === costPrice) continue
+        price = candidate
+        break
       }
     }
     if (price == null) {
@@ -121,6 +164,18 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       const priceInput = document.querySelector<HTMLInputElement>('input[name="price"], input#price')
       const v = priceInput ? Number(priceInput.value) : NaN
       if (Number.isFinite(v) && v > 0) price = v
+    }
+
+    // 목록(카테고리) 페이지의 브레드크럼에서 카테고리를 못 찾은 경우(예: 상품 페이지를 단건으로 바로
+    // 스크랩)를 대비해, 상세페이지 자체에도 같은 후보 셀렉터로 한 번 더 시도해둔다 — 실제 사용 여부는
+    // 호출부(스크랩 오케스트레이션)가 목록 기반 카테고리 유무에 따라 결정한다.
+    let categoryFromDetail = ''
+    for (const sel of ['.xans-product-headcategory', 'nav[aria-label*="breadcrumb" i]', '.breadcrumb', '.location']) {
+      for (const el of Array.from(document.querySelectorAll(sel))) {
+        const text = (el.textContent || '').split('/').map(s => s.trim()).filter(Boolean).join(' > ')
+        if (text) { categoryFromDetail = text; break }
+      }
+      if (categoryFromDetail) break
     }
 
     // 품절/재입고/단종 배지 텍스트 및 재고수량 문구를 탐색 (ld+json availability/상품정보고시 표가 없는 사이트 대비)
@@ -136,15 +191,9 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       if (stockText && stockQtyText) break
     }
 
-    // 국내 쇼핑몰은 전자상거래법상 "상품정보제공고시" 표를 의무 게시하므로, 라벨-값 테이블에서 부가 정보를 찾는다
-    const infoRows: [string, string][] = []
-    document.querySelectorAll('table tr').forEach(tr => {
-      const cells = Array.from(tr.querySelectorAll('th,td')).map(c => (c.textContent || '').trim())
-      if (cells.length === 2 && cells[0] && cells[1]) infoRows.push([cells[0], cells[1]])
-    })
-
     return {
-      name, price, brand, description, mainImages, mainImageNames, detailImages, detailImageNames, detailText,
+      name, price, costPrice, shippingFee, categoryFromDetail,
+      brand, description, mainImages, mainImageNames, detailImages, detailImageNames, detailText,
       infoRows, sku, availability, stockText, stockQtyText,
     }
   })
@@ -201,18 +250,26 @@ export interface ExtractSelectorOverrides {
  * ld+json Product가 없는 사이트에서는 og 메타태그/가격 텍스트 패턴으로 대체하지만, brand/manufacturer/origin/category처럼
  * 표에 없으면 알아낼 방법이 없는 필드는 빈 값으로 남는다 — AI 추측 대신 정직하게 비워두는 쪽을 택했다.
  * overrides로 몰별 수동 CSS 셀렉터가 지정되면(Mall 상세관리에서 설정), 자동 추출 결과보다 우선한다.
+ * extractionRules는 "스크랩 조정" 기능이 AI로 학습해 저장한 그 몰 전용 규칙(sites.extraction_rules)으로,
+ * overrides보다도 나중에(더 우선순위 높게) 적용된다 — 사용자가 프롬프트로 직접 고친 규칙이 항상 이긴다.
  */
-export async function extractProductRuleBased(page: Page, url: string, overrides?: ExtractSelectorOverrides): Promise<ExtractedProduct> {
+export async function extractProductRuleBased(
+  page: Page, url: string, overrides?: ExtractSelectorOverrides, extractionRules?: Record<string, ExtractionRule>,
+): Promise<ExtractedProduct> {
   const raw = await scrapePageData(page)
 
   const result: ExtractedProduct = {
     name: raw.name || url,
     price: raw.price,
     sale_price: raw.price,
+    cost_price: raw.costPrice,
+    shipping_fee: raw.shippingFee,
     brand: raw.brand || findInfoValue(raw.infoRows, /브랜드/i),
     manufacturer: findInfoValue(raw.infoRows, /제조사|제조자/i),
     origin: findInfoValue(raw.infoRows, /원산지|제조국/i),
-    category: '',
+    // 목록 페이지 브레드크럼 기반 카테고리는 lib/scraper.ts 오케스트레이션이 나중에 덮어쓴다
+    // (categoryByUrl이 있으면 그쪽 우선) — 여기 값은 그게 없을 때(단건 스크랩 등)의 폴백이다.
+    category: raw.categoryFromDetail || '',
     description: raw.description,
     options: [], // extractOptionsFromDom이 별도로 채운다
     thumbnail_urls: raw.mainImages,
@@ -250,6 +307,30 @@ export async function extractProductRuleBased(page: Page, url: string, overrides
       (els: HTMLImageElement[]) => els.map(el => el.src).filter(Boolean),
     ).catch(() => [])
     if (srcs.length) result.thumbnail_urls = srcs
+  }
+
+  if (extractionRules) {
+    for (const [field, rule] of Object.entries(extractionRules)) {
+      let text: string | null = null
+      if (rule.type === 'label') {
+        try { text = findInfoValue(raw.infoRows, new RegExp(rule.value)) || null } catch { text = null }
+      } else {
+        text = await page.locator(rule.value).first().textContent({ timeout: 3_000 }).catch(() => null)
+      }
+      const trimmed = text?.trim()
+      if (!trimmed) continue
+
+      if (field === 'price' || field === 'cost_price' || field === 'shipping_fee') {
+        const m = trimmed.match(/[\d,]{2,}/)
+        if (!m) continue
+        const n = Number(m[0].replace(/,/g, ''))
+        if (field === 'price') { result.price = n; result.sale_price = n }
+        else if (field === 'cost_price') result.cost_price = n
+        else result.shipping_fee = n
+      } else if (field === 'name' || field === 'brand' || field === 'manufacturer' || field === 'origin' || field === 'category') {
+        result[field] = trimmed
+      }
+    }
   }
 
   return result

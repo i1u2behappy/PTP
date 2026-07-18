@@ -135,6 +135,12 @@ export async function initDb() {
     -- Mall 등록 시 기입하는 주요 판매 품목 (자유 텍스트)
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS main_items TEXT;
     ALTER TABLE sites ALTER COLUMN name SET NOT NULL;
+    -- "스크랩 조정" 기능이 AI로 학습해 저장하는 이 몰 전용 영구 추출 규칙
+    -- { [field]: { type: 'label', pattern: string } | { type: 'selector', value: string } }
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS extraction_rules JSONB DEFAULT '{}';
+    -- 개발자모드 몰의 "스크랩 조정" 1단계(프롬프트 입력)와 2단계(확장이 페이지 캡처해서 보냄) 사이에
+    -- 잠깐 들고 있는 값 — 확장이 캡처를 보내오는 즉시 소비되고 비워진다.
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS pending_adjustment_prompt TEXT;
 
     CREATE TABLE IF NOT EXISTS supply_clients (
       id                   SERIAL PRIMARY KEY,

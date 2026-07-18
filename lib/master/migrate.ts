@@ -63,13 +63,18 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
     const category = mp.mall_category || ref?.category || ''
     const description = mp.description || ref?.description || ''
     const salePrice = mp.sale_price ?? mp.price
+    // cost_price(공급가)/shipping_fee는 mall_products에 전용 컬럼이 없어, 스크랩 당시 전체를 담아둔
+    // raw_data에서 꺼낸다(lib/scrape/incremental.ts의 upsertMallProduct가 저장해둔 것).
+    const rawData = (mp.raw_data || {}) as { cost_price?: number | null; shipping_fee?: number | null }
+    const costPrice = rawData.cost_price ?? null
+    const shippingFee = rawData.shipping_fee ?? null
 
     const upsert = await pool.query<{ id: number }>(
       `INSERT INTO product_master
         (mall_product_id, client_id, name_original, mall_category, master_category,
          brand, manufacturer, origin, description, options,
-         sale_price, list_price, stock_status, stock_qty, status)
-       VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,'draft')
+         sale_price, list_price, cost_price, shipping_fee, stock_status, stock_qty, status)
+       VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,$14,'draft')
        ON CONFLICT (mall_product_id, client_id) DO UPDATE SET
          name_original = $3,
          mall_category = $4,
@@ -80,12 +85,14 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
          options       = $9,
          sale_price    = COALESCE(product_master.sale_price, $10),
          list_price    = COALESCE(product_master.list_price, $10),
-         stock_status  = $11,
-         stock_qty     = $12,
+         cost_price    = COALESCE(product_master.cost_price, $11),
+         shipping_fee  = COALESCE(product_master.shipping_fee, $12),
+         stock_status  = $13,
+         stock_qty     = $14,
          updated_at    = NOW()
        RETURNING id`,
       [mallProductId, clientId, mp.name_original, category, brand, manufacturer, origin, description,
-        JSON.stringify(mp.options || []), salePrice, mp.stock_status, mp.stock_qty],
+        JSON.stringify(mp.options || []), salePrice, costPrice, shippingFee, mp.stock_status, mp.stock_qty],
     )
     const masterId = upsert.rows[0].id
     masterIds.push(masterId)

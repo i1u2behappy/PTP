@@ -8,10 +8,14 @@ const PUBLIC_PATHS = ['/login', '/logo.jpg', '/icon.jpg']
 // 도구라는 이 앱의 기존 보안 모델과 동일하게, 외부 노출 없이 로컬에서만 닿는 브릿지 엔드포인트라
 // 인증 없이 허용한다.
 const PUBLIC_API_PREFIXES = ['/api/auth/', '/api/scrape/extension-ingest', '/api/sites/resolve']
+// adjust/capture는 몰 id가 경로 중간에 끼어 있어(/api/sites/{id}/adjust/capture) 단순 prefix로 못 걸러
+// 정규식으로 따로 둔다 — "스크랩 조정"(개발자모드 2단계)에서 확장이 세션 쿠키 없이 호출한다.
+const PUBLIC_API_PATTERNS = [/^\/api\/sites\/\d+\/adjust\/capture$/]
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
   const isPublic = PUBLIC_PATHS.includes(pathname) || PUBLIC_API_PREFIXES.some(p => pathname.startsWith(p))
+    || PUBLIC_API_PATTERNS.some(re => re.test(pathname))
   const username = verifySessionToken(request.cookies.get(SESSION_COOKIE)?.value)
 
   if (isPublic) {

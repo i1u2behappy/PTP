@@ -10,6 +10,10 @@ export interface ExtractedProduct {
   name: string
   price: number | null
   sale_price: number | null
+  /** 도매가/공급가 — 소비자가(price)와 별도로 노출하는 몰에서만 채워짐(예: 신우). */
+  cost_price: number | null
+  /** 배송비 — "3,000~4,000원"처럼 범위로 나오면 최저값. */
+  shipping_fee: number | null
   brand: string
   manufacturer: string
   origin: string
@@ -138,6 +142,79 @@ ${columns.map(c => `- ${c.name}: ${c.instruction || '(지시문 없음, 예시 �
     const toolUse = response.content.find(b => b.type === 'tool_use')
     if (!toolUse || toolUse.type !== 'tool_use') return {}
     return toolUse.input as Record<string, string>
+  } catch {
+    return {}
+  }
+}
+
+export interface ExtractionRule {
+  type: 'label' | 'selector'
+  value: string
+}
+
+const EXTRACTION_RULE_FIELDS = ['name', 'price', 'cost_price', 'shipping_fee', 'category', 'brand', 'manufacturer', 'origin'] as const
+
+/**
+ * "스크랩 조정" 기능용 — 사용자가 지적한 프롬프트 + 지금 잘못 추출된 값 + 실제 페이지 내용을 보고,
+ * 수정이 필요한 필드마다 추출 규칙(라벨 정규식 또는 CSS 셀렉터)을 만든다. generateTransformColumns와
+ * 같은 tool-call 강제 스키마 패턴 — 확신이 없는 필드는 rules에서 아예 빼도 되게 required를 안 건다.
+ * ANTHROPIC_API_KEY가 없으면 조용히 빈 규칙을 반환한다(호출부에서 전체 흐름을 막지 않도록).
+ */
+export async function generateExtractionRules(
+  mallName: string,
+  userPrompt: string,
+  currentValues: Partial<ExtractedProduct>,
+  pageText: string,
+): Promise<Record<string, ExtractionRule>> {
+  if (!process.env.ANTHROPIC_API_KEY || !userPrompt.trim()) return {}
+
+  const ruleSchema = {
+    type: 'object',
+    properties: {
+      type: { type: 'string', enum: ['label', 'selector'], description: "'label'이면 dt/dd나 표의 라벨 텍스트를 정규식으로 찾고, 'selector'면 CSS 셀렉터로 직접 값을 읽는다." },
+      value: { type: 'string', description: "type='label'이면 라벨과 매칭할 정규식 문자열(예: '도매가|공급가'), type='selector'면 CSS 셀렉터 문자열." },
+    },
+    required: ['type', 'value'],
+  }
+  const properties: Record<string, unknown> = {}
+  EXTRACTION_RULE_FIELDS.forEach(f => { properties[f] = ruleSchema })
+
+  const prompt = `몰 '${mallName}'의 상품 페이지를 스크랩하는데 값이 잘못 추출되고 있다.
+
+[사용자 지적 사항]
+${userPrompt}
+
+[지금 추출된 값 (잘못됐을 수 있음)]
+${JSON.stringify(currentValues)}
+
+[실제 상품 페이지 내용 (일부)]
+${pageText.slice(0, 30_000)}
+
+위 페이지에서 사용자가 지적한 필드(들)의 올바른 값을 찾을 수 있는 방법을 알아내라. 페이지에 라벨-값
+쌍(예: <dt>도매가격</dt><dd>12,000원</dd> 같은 구조나 표)이 보이면 그 라벨 텍스트를 정규식으로 만들고
+(type='label'), 그게 아니라 특정 요소를 CSS 셀렉터로 바로 집어야 하면 type='selector'로 답하라. 사용자가
+언급하지 않았거나 페이지에서 확신할 수 없는 필드는 절대 넣지 마라 — 아는 것만 답한다.`
+
+  try {
+    const response = await getClient().messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      tools: [{
+        name: 'set_extraction_rules',
+        description: '수정이 필요하다고 확신하는 필드에 대해서만 추출 규칙을 채워 반환한다. 확신 없는 필드는 아예 넣지 않는다.',
+        input_schema: {
+          type: 'object',
+          properties: { rules: { type: 'object', properties } },
+          required: ['rules'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'set_extraction_rules' },
+      messages: [{ role: 'user', content: prompt }],
+    })
+    const toolUse = response.content.find(b => b.type === 'tool_use')
+    if (!toolUse || toolUse.type !== 'tool_use') return {}
+    const input = toolUse.input as { rules?: Record<string, ExtractionRule> }
+    return input.rules || {}
   } catch {
     return {}
   }

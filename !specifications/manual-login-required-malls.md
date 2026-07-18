@@ -115,26 +115,59 @@ Windows가 기본 등록하는 `microsoft-edge:` 프로토콜 핸들러로 현�
 이건 어디까지나 "크롬을 이 몰 전용으로 비워두라"는 운영 습관을 상기시키는 용도일 뿐 — PTP를 어느
 브라우저로 여는지는 "현재 페이지로" 같은 서버 쪽 기능(Playwright 추적 여부)과는 무관하다.
 
+### 후속 (2026-07-18) — 개인 프로필 방식도 결국 실패, 크롬 확장(개발자모드)으로 전환
+
+"최종 해결"로 기록했던 개인 프로필 직접 사용 방식이 **최신 크롬(136+)에서 근본적으로 막혔다**:
+크롬이 `--user-data-dir`가 OS 기본 프로필 디렉터리로 잡히는 원격 디버깅(CDP) 자체를 보안상 거부한다
+("DevTools remote debugging requires a non-default data directory", 인포스틸러 악성코드 대응 조치,
+엔터프라이즈 정책으로도 우회 불가). 그래서 프로필 전체를 별도 경로에 복사한 사본을 대신 띄우는 방식
+(`syncManualLoginProfileCopy`)으로 한 번 더 우회를 시도했으나 — 이 사본은 CDP 연결까지는 성공했지만
+(사용자가 신고한 "크롬을 모두 닫아도 실패" 증상의 실제 원인이 바로 이 CDP 거부였음), 실제 로그인 세션
+자체가 파일 복사로는 옮겨지지 않아(신뢰가 프로필 파일이 아니라 그 브라우저/기기 자체에 묶여있음) 여전히
+로그인 안 된 상태로 취급됐다.
+
+**최종 채택**: `chrome.debugger` API 기반 크롬 확장(`extension-poc/`). Playwright/CDP 커맨드라인 자동화가
+아니라 크롬 자체의 내부 확장 API라 위 원격 디버깅 거부 대상이 아니고, 사용자의 실제 로그인된 브라우저를
+그대로 읽는다. 확장 아이콘 클릭 → 현재 탭 도메인으로 `/api/sites/resolve`를 호출해 siteId를 알아냄 →
+상품 목록을 순회하며 `chrome.debugger`의 `Runtime.evaluate`로 페이지에서 직접 정보를 추출 →
+`/api/scrape/extension-ingest`로 전송해 기존 스테이징 파이프라인에 그대로 태움. 모자사러 실제 카테고리
+3페이지(45개 상품)까지 스크랩 검증 완료.
+
+- 확장은 몰 하나에 종속되지 않는다 — 탭 도메인으로 siteId를 물어보므로, 같은 유형의 몰이 또 생겨도
+  Mall 관리에서 체크박스만 켜면 되고 확장을 새로 만들거나 재설치할 필요가 없다.
+- Mall 관리 표기를 실제 처리 방식에 맞게 "🔒 직접로그인 필수" → "🧩 크롬익스텐션-개발자모드"로 변경
+  (`sites.manual_login_required` 컬럼/의미는 그대로 두고 라벨과 동작만 바꿈).
+- 이 방식은 사람이 브라우저를 직접 열고 클릭해야 해서 cron 기반 "매일 자동 재스크랩"이 구조적으로
+  불가능하다 — Mall 관리에서 해당 설정을 숨기고 저장 시 강제로 꺼지도록 함.
+- 스크래핑 화면(`ScraperPanel.tsx`)도 이 몰이면 기존 로그인/시작URL/미리보기/시작버튼 UI를 전부 숨기고,
+  사용법 안내 + 실시간 세션 이력(5초 폴링, `ScrapeSessionGrid` 재사용)으로 교체.
+- 기존 `openManualLoginWindow`/`syncManualLoginProfileCopy`/`realChromeUserDataDir`/`isManualLoginSite`
+  (`lib/scraper.ts`)와 `manualLogin` 로그인 라우트 분기는 이제 화면에서 트리거되지 않는 죽은 코드가
+  됐지만, 이번 범위에서는 삭제하지 않고 남겨둠(알려진 정리 대상).
+
 ## 관련 파일
 
-- `lib/db.ts`: `sites.manual_login_required` 컬럼
-- `lib/scraper.ts`: `openManualLoginWindow`(개인 프로필로 로그인 창 열기), `realChromeUserDataDir`,
-  `isManualLoginSite`, `withContext`(manual_login_required 몰은 개인 프로필로 헤드리스 실행 — 실패 시
-  자동 종료 없이 에러만 반환)
-- `app/api/scrape/login/route.ts`: `manualLogin` 플래그로 `openLoginWindow`/`openManualLoginWindow` 분기
-- `app/api/scrape/preview/route.ts`, `preview-catalog/route.ts`: try/catch로 에러 메시지 반환
-- `app/api/sites/route.ts`, `app/api/sites/[id]/route.ts`: `manual_login_required` CRUD
-- `components/panels/SiteDetailPanel.tsx`: "직접로그인 필수" 체크박스
+- `lib/db.ts`: `sites.manual_login_required` 컬럼 (의미: "PC인증 등으로 자동 로그인이 안 돼 크롬
+  확장(개발자모드)으로 스크랩하는 몰")
+- `lib/scraper.ts`: `openManualLoginWindow`/`syncManualLoginProfileCopy`/`realChromeUserDataDir`/
+  `isManualLoginSite` — 더 이상 화면에서 쓰이지 않는 이전 방식(정리 대상으로만 남김)
+- `app/api/sites/resolve/route.ts`: 확장이 탭 도메인으로 siteId를 물어보는 공용 조회 (세션 쿠키 없이
+  호출되므로 `proxy.ts`의 `PUBLIC_API_PREFIXES`에 포함)
+- `app/api/scrape/extension-ingest/route.ts`: 확장이 긁은 상품을 기존 `scrape_staging_items` 파이프라인에
+  태우는 입력 경로 (마찬가지로 `PUBLIC_API_PREFIXES`)
+- `app/api/sessions/route.ts`: `?siteId=` 필터 추가 (스크래핑 화면의 몰별 세션 이력 조회용)
+- `extension-poc/manifest.json`, `background.js`: 몰 공용 크롬 확장 본체
+- `components/panels/SiteDetailPanel.tsx`: "🧩 크롬익스텐션-개발자모드" 체크박스, 자동 재스크랩 섹션
+  조건부 숨김 + 저장 시 강제 비활성화
 - `components/panels/SitesListPanel.tsx`: 목록 배지
-- `components/panels/ScraperPanel.tsx`: 로그인 정보 섹션의 안내 문구 + 아이디/비번 복사 버튼
-- `components/shell/ChromeWarning.tsx`, `app/layout.tsx`: 크롬으로 PTP 접속 시 엣지 유도 팝업
+- `components/panels/ScraperPanel.tsx`: 개발자모드 몰이면 안내 + 세션 이력 그리드로 교체
+- `components/shell/ChromeWarning.tsx`, `app/layout.tsx`: 크롬으로 PTP 접속 시 엣지 유도 팝업 (개인
+  프로필 스크랩 방식 시절의 운영 습관 안내 — 지금은 모자사러에 해당 없지만 다른 몰엔 여전히 유효)
 
 ## 상태
 
-**구현 완료 (2026-07-17).** 커밋: `a74832f`(플래그/UI), `3e517e9`(모든 스크래핑 경로 실제 크롬으로 통일),
-`763a775`(개인 프로필 사용으로 최종 해결), `e9c74e0`("현재 페이지로" 정리 + 안내 문구 축약),
-`18493c2`(개인 크롬 자동 종료 후 재시도 — 이후 되돌림), `037918f`(문서화),
-`b22c554`(자동 종료 및 쿠키 이전 방식 둘 다 되돌리고 개인 프로필 직접 사용으로 최종 확정),
-`efe87ab`(문서화), `b92f31d`(크롬으로 PTP 접속 시 엣지 유도 팝업).
-`mojasareo.com`(site id 3)에서 실제 로그인 성공까지 확인함. 스크랩 중 개인 크롬을 닫아둬야 하는 제약은
-남아있으며, 사용자는 크롬을 이 몰 전용으로 쓰고 평소 웹서핑은 다른 브라우저로 분리하는 방식으로 운영하기로 함.
+**구현 완료 (2026-07-18, 크롬 확장 방식으로 전환).** 이전 개인 프로필 방식 커밋: `a74832f`, `3e517e9`,
+`763a775`, `e9c74e0`, `18493c2`(이후 되돌림), `037918f`, `b22c554`, `efe87ab`, `b92f31d`(엣지 유도 팝업,
+지금도 유효). 이번 전환 커밋: `b1bad0d`(비표준 몰 추출 폴백 + 프로필 복사 시도 — 결과적으로 이것도
+실패로 판명), `564523a`(크롬 확장 도입 + Mall 표기 변경 + 화면 재설계).
+`mojasareo.com`(site id 3)에서 크롬 확장으로 실제 카테고리 3페이지·45개 상품 스크랩 성공까지 확인함.

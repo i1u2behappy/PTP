@@ -159,7 +159,20 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
   }
 
   function toggleCheckSession(id: number) {
-    setCheckedSessionIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+    const target = sessions.find(s => s.id === id)
+    if (!target) return
+    setCheckedSessionIds(prev => {
+      if (prev.has(id)) {
+        const n = new Set(prev); n.delete(id); return n
+      }
+      // 체크하는 즉시 거래처·몰이 다르면 바로 알리고 선택에 넣지 않는다 — "선택 병합" 클릭까지 기다리지 않는다.
+      const firstChecked = prev.size > 0 ? sessions.find(s => s.id === [...prev][0]) : undefined
+      if (firstChecked && firstChecked.site_id !== target.site_id) {
+        alert('이미 체크한 세션들과 거래처·몰이 다릅니다. 같은 거래처·몰의 세션만 함께 선택할 수 있습니다.')
+        return prev
+      }
+      return new Set(prev).add(id)
+    })
   }
 
   const checkedSessions = sessions.filter(s => checkedSessionIds.has(s.id))
@@ -170,11 +183,6 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
     : 0
 
   async function handleMergeSessions() {
-    const distinctSites = new Set(checkedSessions.map(s => s.site_id))
-    if (distinctSites.size !== 1) {
-      alert('선택한 세션들의 거래처·몰이 서로 다릅니다. 같은 거래처·몰의 세션만 병합할 수 있습니다.')
-      return
-    }
     const sessionIds = [...checkedSessionIds]
     const res = await fetch('/api/sessions/merge', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionIds }),

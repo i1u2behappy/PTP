@@ -231,7 +231,10 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
   }, [colOrder])
 
   // 옵션 개수가 늘어나 새 옵션 컬럼이 생기면(또는 컬럼 구성이 바뀌면) colOrder에 없는 키를 뒤에 추가한다.
-  useEffect(() => {
+  // (렌더링 중 state를 조정하는 React 공식 패턴 — effect 안에서 setState하지 않도록 prevColumns로 비교)
+  const [prevColumns, setPrevColumns] = useState(columns)
+  if (columns !== prevColumns) {
+    setPrevColumns(columns)
     const allKeys = columns.map(c => c.key)
     setColOrder(prev => {
       const kept = prev.filter(k => allKeys.includes(k))
@@ -239,7 +242,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
       if (!added.length && kept.length === prev.length) return prev
       return [...kept, ...added]
     })
-  }, [columns])
+  }
 
   function handleColDrop(targetKey: string) {
     if (!dragKey || dragKey === targetKey) return

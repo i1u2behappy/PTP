@@ -482,6 +482,12 @@ async function loginIfNeeded(
     if (!clicked) await pwEl.press('Enter')
 
     await page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
+    // 로그인 성공 페이지가 뜬 뒤 클라이언트 스크립트가 지연 리다이렉트를 거는 몰이 있다(예: 로그인
+    // 처리 화면을 잠깐 보여준 뒤 setTimeout으로 원래 페이지로 이동) — 'load' 이벤트만 보고 함수가
+    // 반환되면, 호출한 쪽이 바로 이어서 하는 page.evaluate()가 그 지연 리다이렉트와 겹쳐
+    // "Execution context was destroyed" 오류로 죽는 게 실제로 발견됐다(펫투비). 네트워크가 짧게라도
+    // 잠잠해질 때까지 한 번 더 기다려 그 지연 리다이렉트가 이 함수 밖으로 나가기 전에 끝나게 한다.
+    await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {})
   }
 }
 

@@ -20,13 +20,13 @@ export async function runAdjustment(
   pageText: string,
   currentValues: Partial<ExtractedProduct>,
 ): Promise<AdjustmentResult> {
-  const res = await pool.query<{ name: string | null; extraction_rules: Record<string, ExtractionRule> | null }>(
-    `SELECT name, extraction_rules FROM sites WHERE id=$1`, [siteId],
+  const res = await pool.query<{ name: string | null; extraction_rules: Record<string, ExtractionRule> | null; scrape_profile: Record<string, unknown> | null }>(
+    `SELECT name, extraction_rules, scrape_profile FROM sites WHERE id=$1`, [siteId],
   )
   const site = res.rows[0]
   if (!site) throw new Error('mall not found')
 
-  const rules = await generateExtractionRules(site.name || `site${siteId}`, prompt, currentValues, pageText)
+  const rules = await generateExtractionRules(site.name || `site${siteId}`, prompt, currentValues, pageText, site.scrape_profile)
   const merged = { ...(site.extraction_rules || {}), ...rules }
   await pool.query(`UPDATE sites SET extraction_rules=$1 WHERE id=$2`, [JSON.stringify(merged), siteId])
   return { rules, merged }

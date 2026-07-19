@@ -670,6 +670,11 @@ async function applyStockByOption(page: Page, product: ExtractedProduct): Promis
 
 export interface MallProfileSignals {
   sampleCount: number
+  /** 카페24/메이크샵/고도몰 등 감지된 구축 플랫폼 — 이후 이 몰을 다시 손볼 때(코드 수정, AI 규칙 생성)
+   *  마다 매번 실제 페이지를 다시 열어보지 않고도 참고할 수 있도록 남겨둔다. */
+  platform: MallPlatform
+  /** 샘플링에 실제로 쓴 상품 URL 1건 — 나중에 이 몰을 디버깅할 때 바로 열어볼 수 있는 참고용. */
+  sampleProductUrl: string
   hasMainImages: boolean
   hasDetailImages: boolean
   optionUiTypes: ('select' | 'swatch' | 'none')[]
@@ -679,6 +684,10 @@ export interface MallProfileSignals {
   hasStockByOption: boolean
   hasDetailText: boolean
   infoLabels: string[]
+  /** 샘플링한 상품들의 카테고리 경로(목록 페이지 브레드크럼 기준) — 전체 카테고리 트리를 다 훑는 건 아니고
+   *  샘플로 실제 확인된 경로만이라, 몰의 카테고리 구조가 몇 단계인지 정도의 근사치로 봐야 한다. */
+  categoryPaths: string[]
+  categoryMaxDepth: number
 }
 
 const MALL_PROFILE_SAMPLE_SIZE = 6
@@ -720,21 +729,31 @@ export async function profileMallStructureForScrape(opts: ScrapeOptions): Promis
 
 async function sampleMallProfile(page: Page, startUrl: string): Promise<MallProfileSignals | null> {
   let sampleUrls: string[] = []
+  let platform: MallPlatform = 'unknown'
+  let categoryByUrl = new Map<string, CategoryLabel>()
   try {
-    const { urls } = await collectProductUrls(page, { maxPages: 1 })
-    sampleUrls = urls.slice(0, MALL_PROFILE_SAMPLE_SIZE)
+    const collected = await collectProductUrls(page, { maxPages: 1 })
+    sampleUrls = collected.urls.slice(0, MALL_PROFILE_SAMPLE_SIZE)
+    platform = collected.platform
+    categoryByUrl = collected.categoryByUrl
   } catch { /* 카탈로그로 인식되지 않으면 아래에서 현재 페이지를 상품 페이지 1건으로 취급 */ }
   if (!sampleUrls.length) sampleUrls = [startUrl]
+  // 카탈로그로 인식되지 않아 platform이 못 잡혔으면(위 예외로 빠진 경우), 지금 보고 있는 페이지 자체에서
+  // 다시 감지한다 — 상품 상세페이지도 플랫폼 감지에 필요한 generator/스크립트 태그는 대부분 그대로 갖고 있다.
+  if (platform === 'unknown') platform = await detectMallPlatform(page).catch(() => 'unknown' as MallPlatform)
 
   const signals: MallProfileSignals = {
-    sampleCount: 0, hasMainImages: false, hasDetailImages: false,
+    sampleCount: 0, platform, sampleProductUrl: sampleUrls[0], hasMainImages: false, hasDetailImages: false,
     optionUiTypes: [], hasCascadingOptions: false, hasStockQty: false, hasStockStatusText: false,
-    hasStockByOption: false, hasDetailText: false, infoLabels: [],
+    hasStockByOption: false, hasDetailText: false, infoLabels: [], categoryPaths: [], categoryMaxDepth: 0,
   }
   const optionTypes = new Set<'select' | 'swatch' | 'none'>()
   const infoLabelSet = new Set<string>()
+  const categoryPathSet = new Set<string>()
 
   for (const url of sampleUrls) {
+    const category = categoryByUrl.get(url)?.category
+    if (category) categoryPathSet.add(category)
     try {
       await page.goto(url, { waitUntil: 'load', timeout: 20_000 })
       await waitForExtractableContent(page)
@@ -761,6 +780,8 @@ async function sampleMallProfile(page: Page, startUrl: string): Promise<MallProf
   }
   signals.optionUiTypes = [...optionTypes]
   signals.infoLabels = [...infoLabelSet].sort()
+  signals.categoryPaths = [...categoryPathSet].sort()
+  signals.categoryMaxDepth = signals.categoryPaths.reduce((max, p) => Math.max(max, p.split(' > ').length), 0)
 
   await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
   return signals.sampleCount > 0 ? signals : null

@@ -83,3 +83,51 @@
   Chrome 프로필을 공유하므로 특히 위험).
 - 검증: 실제 몰(걸스굽, site 1)에 두 차례 실제 스크랩을 걸어 `scrape_profile_updated_at`/`site_memos`가
   올바르게 갱신됨을 `docker exec ... psql`로 확인 후, 테스트로 생성된 세션/메모 데이터는 삭제해 정리.
+
+## 확장 (2026-07-20) — 수동 "몰 구조 파악" 버튼 + 카테고리/플랫폼 신호 + AI 컨텍스트 주입
+
+기존엔 로그인 확인마다 완전히 조용히 도는 자동 체크뿐이라 사용자가 결과를 바로 볼 방법이 없었고,
+상품 구조만 봤지 카테고리 구조나 어떤 구축 플랫폼인지는 몰랐다. 사용자 요청: 신규 몰 등록 → 로그인
+확인 후 "몰 구조 파악" 버튼으로 즉시 실행+결과 확인 가능하게 하고, 그 결과(카테고리/상품 구조)가
+이후 작업(AI 추출규칙 생성)에 실제로 반영되게 해달라는 것.
+
+사용자가 확정한 방향:
+1. 기존 자동 체크(로그인 확인마다 조용히)는 그대로 두고, 버튼은 "직접 실행+결과 화면 표시"용으로 추가.
+2. "반영"은 AI가 추출규칙(스크랩 조정)을 생성할 때 이 몰의 알려진 구조를 프롬프트 컨텍스트로 자동
+   주입하는 것을 의미 — 코드가 구조에 따라 자동으로 선택자를 바꾸는 것까지는 아님.
+
+### 신호 확장 — `MallProfileSignals`(`lib/scraper.ts`)
+
+- `platform: MallPlatform` — `collectProductUrls`가 이미 계산해두는 값을 재사용(새 페이지 방문 없음).
+  카탈로그로 인식 못 해 못 얻으면(상품 상세 1건짜리 폴백일 때) `detectMallPlatform(page)`로 한 번 더 시도.
+- `sampleProductUrl: string` — 샘플링에 실제로 쓴 상품 URL 1건. 나중에 이 몰을 다시 손볼 때(코드 수정,
+  AI가 참고) 바로 열어볼 수 있는 참고용 — 매번 처음부터 카테고리를 찾아 들어갈 필요가 없다.
+- `categoryPaths: string[]` / `categoryMaxDepth: number` — `collectProductUrls`가 상품 링크 수집 시
+  이미 계산해두는 `categoryByUrl`(목록 페이지 브레드크럼)을 재사용해, 샘플링된 상품들의 카테고리 경로를
+  모은다. **전체 카테고리 트리를 크롤링하는 게 아니다** — 샘플(최대 6개) 상품이 속한 경로만 아는 근사치.
+  전체 트리를 걸으려면 카테고리 내비게이션 메뉴 자체를 파싱해야 하는데, 몰마다 마크업이 완전히 달라
+  일반화하기 어려워 이번 범위에서 뺐다(하지 않는 것 참고).
+
+### 수동 실행 — "몰 구조 파악" 버튼
+
+- `lib/scrape/mallProfile.ts`: `applyProfileResult`/`runMallProfileCheck`/`runMallProfileCheckForScrape`가
+  `void` 대신 `ProfileCheckResult { signals, diffs, isFirstTime }`를 반환하도록 변경 — 기존 fire-and-forget
+  호출부(`login-confirm`, `lib/scrape/run.ts`)는 반환값을 그냥 버리므로 영향 없음.
+- `app/api/sites/[id]/profile/route.ts`(신규): `runMallProfileCheck(siteId)`를 그대로 재사용해 즉시 실행
+  하고 결과를 응답으로 돌려준다 — 새 로직을 만들지 않고 기존 자동 체크와 완전히 같은 경로를 태움.
+- `components/panels/ScraperPanel.tsx`: 로그인 확인 버튼 옆에 "🔍 몰 구조 파악" 버튼 추가(`loginStep ===
+  'confirmed'`일 때만), 결과를 플랫폼/카테고리 단계/옵션 UI/재고 표기 방식 등으로 요약해 카드 형태로 표시.
+
+### AI 컨텍스트 주입
+
+- `lib/ai.ts`의 `generateExtractionRules`가 `mallProfile?: Record<string, unknown> | null` 파라미터를
+  추가로 받아 프롬프트에 "미리 확인해둔 정보(참고만, 실제 페이지가 우선)"로 포함한다.
+- `lib/scrape/adjustment.ts`의 `runAdjustment`가 `sites.scrape_profile`을 같이 조회해 그대로 전달한다 —
+  "스크랩 조정" 기능이 AI로 규칙을 생성할 때마다 자동으로 이 몰의 알려진 구조를 참고하게 된다.
+
+## 하지 않는 것 (알려진 한계, 확장분)
+
+- 카테고리 구조는 샘플 상품들의 브레드크럼 기준 근사치일 뿐, 카테고리 내비게이션 전체를 크롤링해
+  정확한 트리(노드 수 등)를 만들지 않는다.
+- 코드가 파악된 구조에 따라 스스로 선택자/로직을 바꾸는 자동화는 없다 — AI 프롬프트 컨텍스트로만 쓰인다.
+- "몰 구조 파악" 버튼은 로그인 창(openSessions)이 열려있어야 동작한다(기존 자동 체크와 같은 제약).

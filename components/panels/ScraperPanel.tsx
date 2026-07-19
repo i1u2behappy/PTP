@@ -65,6 +65,29 @@ interface PreviewItem {
   thumbnail: string
 }
 
+/** lib/scraper.ts의 MallProfileSignals와 같은 모양 — "몰 구조 파악" 버튼 결과 표시용. */
+interface MallProfileSignals {
+  sampleCount: number
+  platform: string
+  sampleProductUrl: string
+  hasMainImages: boolean
+  hasDetailImages: boolean
+  optionUiTypes: string[]
+  hasCascadingOptions: boolean
+  hasStockQty: boolean
+  hasStockStatusText: boolean
+  hasStockByOption: boolean
+  hasDetailText: boolean
+  infoLabels: string[]
+  categoryPaths: string[]
+  categoryMaxDepth: number
+}
+interface ProfileCheckResult {
+  signals: MallProfileSignals
+  diffs: string[]
+  isFirstTime: boolean
+}
+
 /** 개발자모드(크롬 확장) 몰의 새 세션 감지용 — /api/sessions?siteId= 응답 중 필요한 필드만. */
 interface DevModeSession {
   id: number
@@ -90,6 +113,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [loginPw, setLoginPw]     = useState('')
   const [loginStep, setLoginStep] = useState<LoginStep>('none')
   const [loginBusy, setLoginBusy] = useState(false)
+
+  const [profileResult, setProfileResult] = useState<ProfileCheckResult | null>(null)
+  const [profileLoading, setProfileLoading] = useState(false)
+  const [profileError, setProfileError] = useState('')
 
   const [targetUrl, setTargetUrl]           = useState('')
   const [categoryUrlsText, setCategoryUrlsText] = useState('')
@@ -307,8 +334,30 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       const d = await res.json() as { ok: boolean; currentUrl: string | null }
       if (d.currentUrl) { setTargetUrl(d.currentUrl); setCategoryUrlsText('') }
       setLoginStep('confirmed')
+      setProfileResult(null)
+      setProfileError('')
     } finally {
       setLoginBusy(false)
+    }
+  }
+
+  /** "몰 구조 파악" — 로그인 확인 시마다 조용히 도는 백그라운드 프로파일링을 그 자리에서 즉시 실행해
+   *  결과를 화면에 보여준다(같은 로직, app/api/sites/[id]/profile이 lib/scrape/mallProfile.ts의
+   *  runMallProfileCheck를 그대로 재사용). 새 몰을 등록한 직후 카테고리/상품 구조가 어떤지 바로 확인하고
+   *  싶을 때 로그인 확인마다의 자동 체크를 기다리지 않아도 되도록. */
+  async function handleProfileMall() {
+    if (!selectedSite) return
+    setProfileLoading(true)
+    setProfileError('')
+    try {
+      const res = await fetch(`/api/sites/${selectedSite.id}/profile`, { method: 'POST' })
+      const d = await res.json()
+      if (!res.ok) { setProfileError(d.error || '몰 구조 파악에 실패했습니다'); return }
+      setProfileResult(d as ProfileCheckResult)
+    } catch {
+      setProfileError('몰 구조 파악에 실패했습니다')
+    } finally {
+      setProfileLoading(false)
     }
   }
 
@@ -643,6 +692,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
                 로그인 확인
               </button>
+              {loginStep === 'confirmed' && (
+                <button onClick={handleProfileMall} disabled={profileLoading}
+                  className="px-4 py-2 bg-white border border-teal-400 text-teal-600 hover:bg-teal-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+                  {profileLoading ? '몰 구조 파악 중...' : '🔍 몰 구조 파악'}
+                </button>
+              )}
               {loginStep === 'confirmed' && <span className="text-xs text-emerald-600 font-medium">✓ 로그인 확인됨 (이 창을 열어두면 스크래핑도 이 창에서 이어서 진행되고, 닫으면 백그라운드에서 진행됩니다)</span>}
               {loginStep === 'opened' && (
                 <span className="text-xs text-gray-500">브라우저 창에서 로그인을 완료한 뒤 확인을 눌러주세요.</span>
@@ -650,6 +705,35 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </div>
           ) : (
             <p className="text-xs text-gray-400">아이디를 입력하지 않으면 로그인 없이 바로 스크래핑을 시작할 수 있습니다.</p>
+          )}
+
+          {profileError && <p className="text-xs text-rose-500 mt-3">{profileError}</p>}
+          {profileResult && (
+            <div className="mt-3 pt-3 border-t border-gray-100 text-xs text-gray-600 space-y-1">
+              <p className="font-semibold text-gray-700">
+                {profileResult.isFirstTime ? '🔍 몰 구조 파악 완료' : profileResult.diffs.length ? '⚠ 이전과 구조가 달라졌습니다' : '✓ 이전과 구조 동일'}
+                <span className="font-normal text-gray-400"> (상품 {profileResult.signals.sampleCount}건 샘플 기준)</span>
+              </p>
+              {profileResult.diffs.length > 0 && (
+                <p className="text-amber-600">{profileResult.diffs.join(' / ')}</p>
+              )}
+              <ul className="grid grid-cols-2 gap-x-4 gap-y-0.5">
+                <li>플랫폼: {profileResult.signals.platform}</li>
+                <li>카테고리: {profileResult.signals.categoryMaxDepth > 0 ? `${profileResult.signals.categoryMaxDepth}단계 (샘플 기준)` : '파악 안 됨'}</li>
+                <li>옵션 UI: {profileResult.signals.optionUiTypes.join('/') || '없음'}{profileResult.signals.hasCascadingOptions && ' (연쇄옵션)'}</li>
+                <li>대표/상세이미지: {profileResult.signals.hasMainImages ? '있음' : '없음'} / {profileResult.signals.hasDetailImages ? '있음' : '없음'}</li>
+                <li>재고수량 표시: {profileResult.signals.hasStockQty ? '있음' : '없음'}</li>
+                <li>재고상태 문구: {profileResult.signals.hasStockStatusText ? '있음' : '없음'}</li>
+                <li>옵션별 재고 위젯: {profileResult.signals.hasStockByOption ? '있음' : '없음'}</li>
+                <li>상세페이지 텍스트: {profileResult.signals.hasDetailText ? '있음' : '없음'}</li>
+              </ul>
+              {profileResult.signals.infoLabels.length > 0 && (
+                <p>상품정보 항목: {profileResult.signals.infoLabels.join(', ')}</p>
+              )}
+              {profileResult.signals.categoryPaths.length > 0 && (
+                <p>확인된 카테고리 경로: {profileResult.signals.categoryPaths.join(', ')}</p>
+              )}
+            </div>
           )}
         </div>
       )}

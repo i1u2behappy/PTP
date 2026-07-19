@@ -173,6 +173,9 @@ export async function generateExtractionRules(
   userPrompt: string,
   currentValues: Partial<ExtractedProduct>,
   pageText: string,
+  /** "몰 구조 파악"으로 미리 확인해둔 이 몰의 구조 정보(있으면) — 플랫폼/옵션 UI 형태/재고 표기 방식 등을
+   *  참고해 더 정확한 규칙을 만들 수 있다. lib/scraper.ts의 MallProfileSignals와 같은 모양. */
+  mallProfile?: Record<string, unknown> | null,
 ): Promise<Record<string, ExtractionRule>> {
   if (!process.env.ANTHROPIC_API_KEY || !userPrompt.trim()) return {}
 
@@ -202,7 +205,7 @@ ${JSON.stringify(currentValues)}
 
 [실제 상품 페이지 내용 (일부)]
 ${pageText.slice(0, 30_000)}
-
+${mallProfile ? `\n[이 몰에 대해 "몰 구조 파악"으로 미리 확인해둔 정보 — 참고만 하고, 실제 페이지 내용과 다르면 실제 페이지를 따른다]\n${JSON.stringify(mallProfile)}\n` : ''}
 위 페이지에서 사용자가 지적한 필드(들)의 올바른 값을 찾을 수 있는 방법을 알아내라. 페이지에 라벨-값
 쌍(예: <dt>도매가격</dt><dd>12,000원</dd> 같은 구조나 표)이 보이면 그 라벨 텍스트를 정규식으로 만들고
 (type='label'), 그게 아니라 특정 요소를 CSS 셀렉터로 바로 집어야 하면 type='selector'로 답하라. 사용자가

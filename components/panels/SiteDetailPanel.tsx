@@ -151,16 +151,21 @@ export function SiteDetailPanel({ params }: Props) {
           <label className="col-span-2 block">
             <span className="block text-xs text-gray-500 mb-1">로그인 URL (선택 · 위 대표 URL과 로그인 페이지가 다른 경우에만 입력 — &quot;로그인창 열기&quot;가 이 URL로 바로 이동합니다)</span>
             <input type="url" value={loginUrl} onChange={e => setLoginUrl(e.target.value)} placeholder="https://shop.example.com/member/login.html"
+              autoComplete="off"
               className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </label>
           <label className="block">
             <span className="block text-xs text-gray-500 mb-1">아이디 / 이메일</span>
+            {/* 이 몰의 로그인 아이디이지, PTP 자체 로그인 계정과 무관하다 — 브라우저가 저장된 다른
+                아이디를 자동으로 채워 넣지 않도록 autoComplete를 끈다. */}
             <input value={loginId} onChange={e => setLoginId(e.target.value)}
+              autoComplete="off"
               className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </label>
           <label className="block">
             <span className="block text-xs text-gray-500 mb-1">비밀번호</span>
             <input type="password" value={loginPw} onChange={e => setLoginPw(e.target.value)}
+              autoComplete="new-password"
               className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </label>
         </div>

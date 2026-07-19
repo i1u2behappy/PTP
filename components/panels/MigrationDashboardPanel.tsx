@@ -53,9 +53,9 @@ const TASKS: TaskDef[] = [
   { key: 'sales_code', label: '판매관리코드', compute: r => r.sales_code ? '완료' : '미시작',
     tab: { id: 'sales-code', type: 'sales-code', title: '판매관리코드 관리', icon: '💳', closable: true } },
   { key: 'category', label: '카테고리', compute: r => r.master_category ? '완료' : '미시작',
-    tab: { id: 'category-mapping', type: 'category-mapping', title: '카테고리 관리', icon: '🗺️', closable: true } },
+    tab: { id: 'category-mapping', type: 'category-mapping', title: '카테고리 매핑', icon: '🗺️', closable: true } },
   { key: 'internal_code', label: '업체/내부코드', compute: r => r.internal_code ? '완료' : '미시작',
-    tab: { id: 'internal-codes', type: 'internal-codes', title: '업체코드-상품내부코드 생성', icon: '🏷️', closable: true } },
+    tab: { id: 'internal-codes', type: 'internal-codes', title: '관리코드 생성', icon: '🏷️', closable: true } },
   { key: 'name', label: '상품명', compute: r => r.name_final ? '완료' : r.name_ai ? '진행중' : '미시작',
     tab: { id: 'name-management', type: 'name-management', title: '상품명 관리', icon: '✏️', closable: true } },
   { key: 'options', label: '옵션', compute: r => (r.options && r.options.length > 0) ? '완료' : '미시작',
@@ -64,16 +64,16 @@ const TASKS: TaskDef[] = [
       const filled = [r.brand, r.manufacturer, r.origin].filter(Boolean).length
       return filled === 3 ? '완료' : filled === 0 ? '미시작' : '진행중'
     },
-    tab: { id: 'brand-origin-management', type: 'brand-origin-management', title: '브랜드,제조사,원산지 관리', icon: '🏭', closable: true } },
+    tab: { id: 'brand-origin-management', type: 'brand-origin-management', title: '브랜드·제조사·원산지 관리', icon: '🏭', closable: true } },
   { key: 'image', label: '이미지', compute: r => r.thumbnail_locals?.length ? '완료' : '미시작',
-    tab: { id: 'image-edit', type: 'image-edit', title: '이미지 관리', icon: '🖼️', closable: true } },
+    tab: { id: 'image-edit', type: 'image-edit', title: '이미지 편집', icon: '🖼️', closable: true } },
   { key: 'pricing', label: '가격/이익', compute: r => {
       const hasCost = r.cost_price != null, hasSale = r.sale_price != null, hasTarget = r.target_margin_rate != null
       if (hasCost && hasSale && hasTarget) return '완료'
       if (hasCost || hasSale) return '진행중'
       return '미시작'
     },
-    tab: { id: 'pricing-management', type: 'pricing-management', title: '가격및이익관리', icon: '💰', closable: true } },
+    tab: { id: 'pricing-management', type: 'pricing-management', title: '가격 및 이익 관리', icon: '💰', closable: true } },
 ]
 
 export function MigrationDashboardPanel({ params }: { params?: Record<string, unknown> }) {
@@ -104,12 +104,13 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
     fetch('/api/clients').then(r => r.json()).then((d: Client[]) => setClients(Array.isArray(d) ? d : [])).catch(() => {})
     fetch('/api/sites').then(r => r.json()).then((d: Site[]) => setSites(Array.isArray(d) ? d : [])).catch(() => {})
     loadSessions(d => {
+      // 다른 화면에서 특정 세션을 지정해 넘어온 경우에만 자동 선택한다 — 지정된 게 없는데 아무 세션이나
+      // (그것도 확정 여부와 무관하게 가장 최근 것을) 미리 골라두면, 사용자가 조회하기도 전에 아래
+      // 그리드에 엉뚱한(심지어 미확정일 수도 있는) 세션의 내용이 떠 있게 된다.
       const wantedMatch = wantedSessionId.current != null ? d.find(s => s.id === wantedSessionId.current) : undefined
       if (wantedMatch) {
         wantedSessionId.current = undefined
         setSelectedSessionId(wantedMatch.id)
-      } else {
-        setSelectedSessionId(current => current === '' && d.length ? d[0].id : current)
       }
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 마운트 시 1회만
@@ -144,6 +145,12 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
   const siteClientMap = new Map(sites.map(s => [s.id, s.client_id]))
   const filteredSites = clientId === '' ? sites : sites.filter(s => s.client_id === clientId)
   const filteredSessions = sessions.filter(s => {
+    // 이 메뉴는 전단계("스크랩Raw확인")에서 확정까지 끝난 세션만 다룬다 — 미확정 항목이 남아있으면
+    // 아직 상품마스터가 없어 이 화면의 하위 작업(판매관리코드/카테고리/...)을 진행할 수 없다.
+    // ScrapeSessionGrid의 "✓ 확정 - 데이터 검수 완" 판정과 동일한 기준을 쓴다. staged_count/pending_count는
+    // Postgres COUNT(*)가 내려준 값이라 JSON에서도 문자열("0")로 온다 — Number()로 변환해야 비교가 된다
+    // (안 그러면 "0" === 0 이 항상 false라 모든 세션이 걸러져 목록이 텅 비어버린다).
+    if (!(Number(s.staged_count) > 0 && Number(s.pending_count) === 0)) return false
     if (querySiteId !== '' && s.site_id !== querySiteId) return false
     if (querySiteId === '' && queryClientId !== '' && siteClientMap.get(s.site_id) !== queryClientId) return false
     const q = sessionSearch.trim().toLowerCase()
@@ -162,6 +169,9 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
     setQuerySiteId(siteId)
     setSearched(true)
     setCheckedSessionIds(new Set())
+    // 조회 조건이 바뀌면 목록에 안 보일 수도 있는 이전 선택 세션을 그대로 들고 있으면 안 된다 —
+    // 아래 진행상황 카드/StagingItemsGrid가 목록에도 없는 세션 데이터를 계속 보여주게 된다.
+    setSelectedSessionId('')
   }
 
   function toggleCheckSession(id: number) {
@@ -216,13 +226,13 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
 
   return (
     <div className="h-full flex flex-col">
-      <div className="mb-6 shrink-0">
+      <div className="mb-3 shrink-0">
         <h1 className="text-2xl font-bold text-gray-800">📊 데이터 마이그 목록</h1>
-        <p className="text-xs text-gray-400 mt-1">스크래핑 목록에서 세션을 검색·선택하면, 그 세션 기준으로 마이그레이션 하위 작업 진행현황과 스크랩 상세내역을 확인할 수 있습니다.</p>
+        <p className="text-xs text-gray-400 mt-1">전단계(스크랩Raw확인)에서 확정한 세션만 검색·선택하면, 그 세션 기준으로 마이그레이션 하위 작업 진행현황과 스크랩 상세내역을 확인할 수 있습니다.</p>
       </div>
 
       {/* 상단: 거래처/몰/일시로 검색하는 스크래핑 목록 */}
-      <div className="bg-white rounded-2xl border border-gray-200 p-4 mb-4 flex flex-wrap items-center gap-3 shrink-0">
+      <div className="bg-white rounded-2xl border border-gray-200 p-3 mb-3 flex flex-wrap items-center gap-3 shrink-0">
         <label className="flex items-center gap-2 text-sm text-gray-600">
           거래처
           <select value={clientId} onChange={e => selectClient(e.target.value ? Number(e.target.value) : '')}
@@ -246,19 +256,19 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
       </div>
 
       {!searched ? (
-        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 mb-4 shrink-0">
-          <div className="text-4xl mb-3">🔍</div>
-          <p className="text-sm">조회 버튼을 눌러주세요 — 거래처/몰을 고르면 그 범위만, 그대로 두면 전체 스크랩 내역이 나옵니다.</p>
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 text-center text-gray-400 mb-3 shrink-0">
+          <div className="text-2xl mb-2">🔍</div>
+          <p className="text-sm">조회 버튼을 눌러주세요 — 거래처/몰을 고르면 그 범위만, 그대로 두면 확정된 전체 내역이 나옵니다.</p>
         </div>
       ) : sessions.length === 0 ? (
-        <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 mb-4 shrink-0">
-          <div className="text-4xl mb-3">📭</div>
+        <div className="bg-white rounded-2xl border border-gray-200 p-6 text-center text-gray-400 mb-3 shrink-0">
+          <div className="text-2xl mb-2">📭</div>
           <p className="text-sm">수집된 스크래핑이 없습니다.</p>
         </div>
       ) : (
-        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4 shrink-0">
-          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3 flex-wrap">
-            <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
+        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-3 shrink-0">
+          <div className="px-4 py-2 border-b border-gray-100 bg-gray-50 flex items-center gap-3 flex-wrap">
+            <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록 (확정 완료분)</span>
             <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="거래처·몰·URL·상태·일시 검색..."
               className="flex-1 min-w-[200px] border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
             {checkedSessionIds.size >= 2 && (
@@ -275,29 +285,29 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
             )}
           </div>
           <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId} showClientMall
-            checkedIds={checkedSessionIds} onToggleCheck={toggleCheckSession} />
+            checkedIds={checkedSessionIds} onToggleCheck={toggleCheckSession} maxHeightClassName="max-h-40" />
         </div>
       )}
 
       {searched && (
         <>
           {selectedSession?.merge_group_id != null && (
-            <div className="bg-cyan-50 border border-cyan-200 rounded-2xl px-4 py-2.5 mb-4 shrink-0 text-xs text-cyan-700">
+            <div className="bg-cyan-50 border border-cyan-200 rounded-2xl px-4 py-2 mb-3 shrink-0 text-xs text-cyan-700">
               🔗 이 세션은 다른 {mergedSiblingCount}개 세션과 병합되어 있어, 아래 진행현황·상세 그리드에 그 세션들의 스크랩 항목이 함께 표시됩니다. 스크래핑한 일자는 각 상품 행에 그대로 남아있습니다.
             </div>
           )}
 
           {/* 중단: 선택한 세션(병합된 경우 그 그룹 전체) 기준 하위 작업 진행현황 */}
           {selectedSessionId === '' ? (
-            <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-gray-400 mb-4 shrink-0 text-sm">
+            <div className="bg-white rounded-2xl border border-gray-200 p-4 text-center text-gray-400 mb-3 shrink-0 text-sm">
               위 스크래핑 목록에서 세션을 선택하면 진행현황이 표시됩니다.
             </div>
           ) : masterRows.length === 0 ? (
-            <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-gray-400 mb-4 shrink-0 text-sm">
+            <div className="bg-white rounded-2xl border border-gray-200 p-4 text-center text-gray-400 mb-3 shrink-0 text-sm">
               이 세션은 아직 마이그레이션(병합)되지 않아 진행현황을 계산할 상품마스터가 없습니다.
             </div>
           ) : (
-            <div className="grid grid-cols-4 gap-3 mb-4 shrink-0">
+            <div className="grid grid-cols-4 gap-2 mb-3 shrink-0">
               {TASKS.map(task => {
                 const c = counts(task)
                 const total = masterRows.length || 1
@@ -305,9 +315,9 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
                 return (
                   <button key={task.key}
                     onClick={() => openTab({ ...task.tab, params: { siteId: taskSiteId, sessionId: selectedSessionId } })}
-                    className="bg-white rounded-2xl border border-gray-200 p-4 text-left hover:border-teal-300 transition-colors">
-                    <p className="text-xs font-semibold text-gray-600 mb-2">{task.label}</p>
-                    <div className="flex h-2 rounded-full overflow-hidden bg-gray-100 mb-2">
+                    className="bg-white rounded-2xl border border-gray-200 p-3 text-left hover:border-teal-300 transition-colors">
+                    <p className="text-xs font-semibold text-gray-600 mb-1.5">{task.label}</p>
+                    <div className="flex h-2 rounded-full overflow-hidden bg-gray-100 mb-1.5">
                       <div className="bg-emerald-400" style={{ width: `${(c['완료'] / total) * 100}%` }} />
                       <div className="bg-amber-400" style={{ width: `${(c['진행중'] / total) * 100}%` }} />
                     </div>

@@ -27,6 +27,8 @@ export function ProductsListPanel() {
   const [sessions, setSessions] = useState<Session[]>([])
   const [sessionSearch, setSessionSearch] = useState('')
   const [selectedSessionId, setSelectedSessionId] = useState<number | ''>('')
+  const [checkedSessionIds, setCheckedSessionIds] = useState<Set<number>>(new Set())
+  const [deleting, setDeleting] = useState(false)
 
   const loadSessions = useCallback(() => {
     fetch('/api/sessions').then(r => r.json()).then((d: Session[]) => {
@@ -56,6 +58,31 @@ export function ProductsListPanel() {
       loadSessions()
     } catch (e) {
       alert(`삭제에 실패했습니다: ${e instanceof Error ? e.message : e}`)
+    }
+  }
+
+  function toggleCheckSession(id: number) {
+    setCheckedSessionIds(prev => {
+      const n = new Set(prev)
+      n.has(id) ? n.delete(id) : n.add(id)
+      return n
+    })
+  }
+
+  async function handleDeleteChecked() {
+    if (!checkedSessionIds.size) return
+    if (!confirm(`선택한 ${checkedSessionIds.size}개 스크래핑 세션을 삭제할까요? 수집된 상세내역이 모두 삭제되며 되돌릴 수 없습니다. (이미 마이그레이션된 상품 데이터는 영향받지 않습니다)`)) return
+    setDeleting(true)
+    try {
+      const ids = [...checkedSessionIds]
+      await Promise.all(ids.map(id => fetch(`/api/sessions/${id}`, { method: 'DELETE' })))
+      if (selectedSessionId !== '' && checkedSessionIds.has(selectedSessionId)) setSelectedSessionId('')
+      setCheckedSessionIds(new Set())
+      loadSessions()
+    } catch (e) {
+      alert(`삭제에 실패했습니다: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -92,13 +119,20 @@ export function ProductsListPanel() {
         </div>
       ) : (
         <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4 shrink-0">
-          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3">
+          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3 flex-wrap">
             <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
             <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="거래처·몰·URL·상태·일시 검색..."
-              className="flex-1 border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+              className="flex-1 min-w-[200px] border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+            {checkedSessionIds.size > 0 && (
+              <button onClick={handleDeleteChecked} disabled={deleting}
+                className="px-3 py-1.5 bg-rose-50 text-rose-600 text-xs font-semibold rounded-full hover:bg-rose-100 disabled:opacity-50 transition-colors shrink-0">
+                🗑 선택 삭제 ({checkedSessionIds.size})
+              </button>
+            )}
           </div>
           <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId}
-            onDelete={handleDeleteSession} maxHeightClassName="max-h-48" showClientMall />
+            onDelete={handleDeleteSession} maxHeightClassName="max-h-48" showClientMall
+            checkedIds={checkedSessionIds} onToggleCheck={toggleCheckSession} />
         </div>
       )}
 

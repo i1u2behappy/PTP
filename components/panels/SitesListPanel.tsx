@@ -134,7 +134,7 @@ export function SitesListPanel() {
                     <td className="px-3 py-2 text-gray-500 font-mono">{s.login_pw_masked || '-'}</td>
                     <td className="px-3 py-2 text-teal-600">{s.client_name || '-'}</td>
                     <td className="px-3 py-2">{s.blocked ? <span className="font-semibold text-rose-500">차단</span> : <span className="text-emerald-600">정상</span>}</td>
-                    <td className="px-3 py-2 text-gray-500 max-w-xl whitespace-normal break-words">{s.latest_memo || '-'}</td>
+                    <td className="px-3 py-2 text-gray-500 max-w-xs truncate" title={s.latest_memo || ''}>{s.latest_memo || '-'}</td>
                     <td className="px-3 py-2 text-gray-400">{new Date(s.created_at).toLocaleDateString()}</td>
                     <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
                       <button onClick={() => openDetail(s)} className="text-teal-500 hover:underline mr-2">수정</button>

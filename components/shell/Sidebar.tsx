@@ -63,14 +63,14 @@ export function Sidebar() {
           tab={{ id: 'migration-dashboard', type: 'migration-dashboard', title: '데이터 마이그 목록', icon: '📊', closable: true }}>
           <NavLeaf tab={{ id: 'master-schema', type: 'master-schema', title: '기준 Master 테이블 관리', icon: '🧱', closable: true }} icon={ArchiveIcon} nested />
           <NavLeaf tab={{ id: 'sales-code', type: 'sales-code', title: '판매관리코드 관리', icon: '💳', closable: true }} icon={TagIcon} nested />
-          <NavLeaf tab={{ id: 'category-mapping', type: 'category-mapping', title: '카테고리 관리', icon: '🗺️', closable: true }} icon={MapIcon} nested />
-          <NavLeaf tab={{ id: 'internal-codes', type: 'internal-codes', title: '업체코드-상품내부코드 생성', icon: '🏷️', closable: true }} icon={TagIcon} nested />
+          <NavLeaf tab={{ id: 'category-mapping', type: 'category-mapping', title: '카테고리 매핑', icon: '🗺️', closable: true }} icon={MapIcon} nested />
+          <NavLeaf tab={{ id: 'internal-codes', type: 'internal-codes', title: '관리코드 생성', icon: '🏷️', closable: true }} icon={TagIcon} nested />
           <NavLeaf tab={{ id: 'name-management', type: 'name-management', title: '상품명 관리', icon: '✏️', closable: true }} icon={ListIcon} nested />
           <NavLeaf tab={{ id: 'option-management', type: 'option-management', title: '옵션 관리', icon: '🎛️', closable: true }} icon={SettingsIcon} nested />
-          <NavLeaf tab={{ id: 'brand-origin-management', type: 'brand-origin-management', title: '브랜드,제조사,원산지 관리', icon: '🏭', closable: true }} icon={StoreIcon} nested />
-          <NavLeaf tab={{ id: 'image-edit', type: 'image-edit', title: '이미지 관리', icon: '🖼️', closable: true }} icon={ImageEditIcon} nested />
-          <NavLeaf tab={{ id: 'image-host', type: 'image-host', title: '이미지 호스팅관리', icon: '🌐', closable: true }} icon={ImageEditIcon} nested />
-          <NavLeaf tab={{ id: 'pricing-management', type: 'pricing-management', title: '가격및이익관리', icon: '💰', closable: true }} icon={CoinIcon} nested />
+          <NavLeaf tab={{ id: 'brand-origin-management', type: 'brand-origin-management', title: '브랜드·제조사·원산지 관리', icon: '🏭', closable: true }} icon={StoreIcon} nested />
+          <NavLeaf tab={{ id: 'image-edit', type: 'image-edit', title: '이미지 편집', icon: '🖼️', closable: true }} icon={ImageEditIcon} nested />
+          <NavLeaf tab={{ id: 'image-host', type: 'image-host', title: '이미지 호스팅 관리', icon: '🌐', closable: true }} icon={ImageEditIcon} nested />
+          <NavLeaf tab={{ id: 'pricing-management', type: 'pricing-management', title: '가격 및 이익 관리', icon: '💰', closable: true }} icon={CoinIcon} nested />
         </NavGroup>
 
         <NavLeaf tab={MASTER_LIST_TAB} icon={ArchiveIcon} />

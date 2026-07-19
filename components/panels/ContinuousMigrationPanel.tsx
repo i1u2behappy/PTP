@@ -96,7 +96,7 @@ export function ContinuousMigrationPanel() {
       <div className="bg-white rounded-2xl border border-gray-200 p-4 mb-4 flex flex-wrap items-center gap-3 shrink-0">
         <label className="flex items-center gap-2 text-sm text-gray-600">
           거래처
-          <select value={clientId} onChange={e => { setClientId(e.target.value ? Number(e.target.value) : ''); setSiteId('') }}
+          <select value={clientId} onChange={e => { setClientId(e.target.value ? Number(e.target.value) : ''); setSiteId(''); setChanges([]); setSelected(new Set()); setSearched(false) }}
             className="border border-gray-300 rounded-xl px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
             <option value="">전체</option>
             {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -104,7 +104,10 @@ export function ContinuousMigrationPanel() {
         </label>
         <label className="flex items-center gap-2 text-sm text-gray-600">
           몰
-          <select value={siteId} onChange={e => setSiteId(e.target.value ? Number(e.target.value) : '')}
+          {/* 몰을 바꾸면 이전 몰의 "변동 감지" 결과(changes/selected)를 그대로 두지 않는다 — 안 그러면
+              다시 감지를 누르기 전까지 화면엔 이전 몰의 행이 남아있고, 그 상태로 "선택 반영"을 누르면
+              지금 고른 몰과 이전 몰의 상품 id가 섞인 요청이 나간다. */}
+          <select value={siteId} onChange={e => { setSiteId(e.target.value ? Number(e.target.value) : ''); setChanges([]); setSelected(new Set()); setSearched(false) }}
             className="border border-gray-300 rounded-xl px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
             <option value="">몰을 선택하세요</option>
             {filteredSites.map(s => <option key={s.id} value={s.id}>{s.name || s.url}</option>)}

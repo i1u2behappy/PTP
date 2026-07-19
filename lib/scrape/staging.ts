@@ -97,6 +97,7 @@ function toScrapeResult(row: StagingRow): ScrapeResult {
     stock_qty: row.stock_qty,
     stock_by_option: extra.stock_by_option || [],
     mall_product_code: row.mall_product_code,
+    custom_fields: extra.custom_fields || {},
   }
   return { sourceUrl: row.source_url, product }
 }

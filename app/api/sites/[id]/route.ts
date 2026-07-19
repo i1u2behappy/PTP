@@ -7,7 +7,8 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   const res = await pool.query(
     `SELECT id, name, url, login_url, login_id, login_pw_encrypted, login_pw_iv, client_id,
             custom_name_selector, custom_price_selector, custom_thumbnail_selector,
-            auto_scrape_enabled, auto_scrape_hour, manual_login_required, main_items, extraction_rules
+            auto_scrape_enabled, auto_scrape_hour, manual_login_required, main_items, extraction_rules,
+            last_adjustment_preview
      FROM sites WHERE id = $1`,
     [id],
   )
@@ -25,6 +26,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     manual_login_required: site.manual_login_required,
     main_items: site.main_items,
     extraction_rules: site.extraction_rules,
+    last_adjustment_preview: site.last_adjustment_preview,
     profile_dir: profileDir(site.id),
   })
 }

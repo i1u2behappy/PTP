@@ -24,22 +24,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return NextResponse.json({ error: 'itemId와 prompt가 필요합니다' }, { status: 400 })
   }
 
-  const res = await pool.query<{
-    id: number; source_url: string; name_original: string; price: number | null; mall_category: string | null
-    brand: string; manufacturer: string; origin: string; raw_data: Partial<ExtractedProduct> | null
-  }>(
-    `SELECT id, source_url, name_original, price, mall_category, brand, manufacturer, origin, raw_data
-     FROM scrape_staging_items WHERE id=$1 AND site_id=$2 AND status='pending'`,
+  const res = await pool.query<{ id: number; source_url: string; raw_data: Partial<ExtractedProduct> | null }>(
+    `SELECT id, source_url, raw_data FROM scrape_staging_items WHERE id=$1 AND site_id=$2 AND status='pending'`,
     [body.itemId, siteId],
   )
   const sample = res.rows[0]
   if (!sample) return NextResponse.json({ error: '조정할 대상(미확정 항목)을 찾을 수 없습니다' }, { status: 400 })
 
-  const currentValues: Partial<ExtractedProduct> = {
-    name: sample.name_original, price: sample.price, category: sample.mall_category || '',
-    brand: sample.brand, manufacturer: sample.manufacturer, origin: sample.origin,
-    cost_price: sample.raw_data?.cost_price ?? null, shipping_fee: sample.raw_data?.shipping_fee ?? null,
-  }
+  // raw_data는 스크랩 당시(또는 지난 조정 라운드) ExtractedProduct 전체를 그대로 담아둔 것이라, 컬럼별로
+  // 따로 안 읽어와도 모든 필드(옵션/재고/커스텀 컬럼 포함)를 그대로 AI 컨텍스트로 넘길 수 있다.
+  const currentValues: Partial<ExtractedProduct> = sample.raw_data || {}
 
   let pageText: string
   try {
@@ -48,7 +42,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return NextResponse.json({ error: `상품 페이지를 다시 열어보지 못했습니다: ${e instanceof Error ? e.message : e}` }, { status: 500 })
   }
 
-  const rules = await runAdjustment(siteId, body.prompt, pageText, currentValues)
+  let rules
+  try {
+    ({ rules } = await runAdjustment(siteId, body.prompt, pageText, currentValues))
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 })
+  }
   const { updated, failed } = await reExtractStagingItems([sample.id])
 
   return NextResponse.json({ rules, updated: updated.length, failed })

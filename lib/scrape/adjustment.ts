@@ -7,12 +7,19 @@ import { generateExtractionRules, type ExtractedProduct, type ExtractionRule } f
  * 이미 스크랩된 데이터를 어떻게 재적용하는지)은 각 모드 쪽 코드가 맡고, "AI로 규칙을 만들고 그 몰의
  * 영구 규칙으로 저장"하는 핵심 로직은 여기 한 곳에만 있다.
  */
+export interface AdjustmentResult {
+  /** 방금 새로 갱신된 필드만 — 호출부가 "어떤 필드가 바뀌었는지" 사용자에게 보여줄 때 쓴다. */
+  rules: Record<string, ExtractionRule>
+  /** 기존 규칙 + 방금 갱신된 규칙 전체 — 미리보기 재추출 등 "지금 이 몰의 전체 규칙"이 필요할 때 쓴다. */
+  merged: Record<string, ExtractionRule>
+}
+
 export async function runAdjustment(
   siteId: number,
   prompt: string,
   pageText: string,
   currentValues: Partial<ExtractedProduct>,
-): Promise<Record<string, ExtractionRule>> {
+): Promise<AdjustmentResult> {
   const res = await pool.query<{ name: string | null; extraction_rules: Record<string, ExtractionRule> | null }>(
     `SELECT name, extraction_rules FROM sites WHERE id=$1`, [siteId],
   )
@@ -22,6 +29,5 @@ export async function runAdjustment(
   const rules = await generateExtractionRules(site.name || `site${siteId}`, prompt, currentValues, pageText)
   const merged = { ...(site.extraction_rules || {}), ...rules }
   await pool.query(`UPDATE sites SET extraction_rules=$1 WHERE id=$2`, [JSON.stringify(merged), siteId])
-  // 방금 새로 갱신된 필드만 반환 — 호출부가 "어떤 필드가 바뀌었는지" 사용자에게 보여줄 때 쓴다.
-  return rules
+  return { rules, merged }
 }

@@ -65,16 +65,18 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
     const salePrice = mp.sale_price ?? mp.price
     // cost_price(공급가)/shipping_fee는 mall_products에 전용 컬럼이 없어, 스크랩 당시 전체를 담아둔
     // raw_data에서 꺼낸다(lib/scrape/incremental.ts의 upsertMallProduct가 저장해둔 것).
-    const rawData = (mp.raw_data || {}) as { cost_price?: number | null; shipping_fee?: number | null }
+    const rawData = (mp.raw_data || {}) as { cost_price?: number | null; shipping_fee?: number | null; custom_fields?: Record<string, string> }
     const costPrice = rawData.cost_price ?? null
     const shippingFee = rawData.shipping_fee ?? null
+    // "스크랩 조정"으로 새로 추가된 컬럼들 — Transform 등이 이미 써둔 custom_fields를 덮어쓰지 않도록 병합한다.
+    const scrapedCustomFields = rawData.custom_fields || {}
 
     const upsert = await pool.query<{ id: number }>(
       `INSERT INTO product_master
         (mall_product_id, client_id, name_original, mall_category, master_category,
          brand, manufacturer, origin, description, options,
-         sale_price, list_price, cost_price, shipping_fee, stock_status, stock_qty, status)
-       VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,$14,'draft')
+         sale_price, list_price, cost_price, shipping_fee, stock_status, stock_qty, custom_fields, status)
+       VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,$14,$15,'draft')
        ON CONFLICT (mall_product_id, client_id) DO UPDATE SET
          name_original = $3,
          mall_category = $4,
@@ -89,10 +91,12 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
          shipping_fee  = COALESCE(product_master.shipping_fee, $12),
          stock_status  = $13,
          stock_qty     = $14,
+         custom_fields = COALESCE(product_master.custom_fields, '{}'::jsonb) || $15::jsonb,
          updated_at    = NOW()
        RETURNING id`,
       [mallProductId, clientId, mp.name_original, category, brand, manufacturer, origin, description,
-        JSON.stringify(mp.options || []), salePrice, costPrice, shippingFee, mp.stock_status, mp.stock_qty],
+        JSON.stringify(mp.options || []), salePrice, costPrice, shippingFee, mp.stock_status, mp.stock_qty,
+        JSON.stringify(scrapedCustomFields)],
     )
     const masterId = upsert.rows[0].id
     masterIds.push(masterId)

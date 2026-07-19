@@ -141,6 +141,13 @@ export async function initDb() {
     -- 개발자모드 몰의 "스크랩 조정" 1단계(프롬프트 입력)와 2단계(확장이 페이지 캡처해서 보냄) 사이에
     -- 잠깐 들고 있는 값 — 확장이 캡처를 보내오는 즉시 소비되고 비워진다.
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS pending_adjustment_prompt TEXT;
+    -- 개발자모드 몰은 백엔드가 실제 데이터를 다시 스크랩할 수 없어, 확장이 캡처해온 HTML을 새 규칙으로
+    -- 재추출한 "미리보기"만 여기 저장해둔다("개발자모드 재기동"이 이 값을 다시 읽어 화면에 보여준다).
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS last_adjustment_preview JSONB;
+    -- "스크랩 조정 개시" 시점에 화면에 보이던(방금 스크랩한 세션의) 맨 위 상품 id를 같이 저장해둔다 —
+    -- 이게 없으면 확장이 "이 몰에서 아무 미확정 상품이나 최신순 1건"을 테스트 대상으로 골라버려서,
+    -- 사용자가 지금 보고 있는(방금 스크랩한) 세션이 아니라 다른 세션의 상품을 조정해버릴 수 있었다.
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS pending_adjustment_item_id INT;
 
     CREATE TABLE IF NOT EXISTS supply_clients (
       id                   SERIAL PRIMARY KEY,

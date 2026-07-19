@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useTabs } from '../../shell/TabsContext'
 
 interface RawExtra {
@@ -177,6 +177,10 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
   const [adjustRoundCount, setAdjustRoundCount] = useState(0)
   // 개발자모드는 백엔드가 재추출을 못 하니, "개발자모드 재기동"으로 확인한 최신 학습 규칙을 대신 보여준다.
   const [adjustRules, setAdjustRules] = useState<Record<string, { type: string; value: string }> | null>(null)
+  // 뒤 화면(그리드)을 참조하면서 조정할 수 있게, 모달을 드래그로 옮길 수 있게 한다 — null이면 기본
+  // 위치(가운데)에 두고, 한 번이라도 드래그하면 그 좌표를 그대로 기억한다.
+  const [adjustPos, setAdjustPos] = useState<{ left: number; top: number } | null>(null)
+  const adjustDragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
 
   // 옵션1/옵션2/... 컬럼은 실제 값(values)이 있는 항목만 세고, 빈 옵션 슬롯만으로는 컬럼을 만들지 않는다.
   const maxOptionCount = items.reduce((max, p) => {
@@ -365,6 +369,27 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     setAdjustMessage(null)
     setAdjustRoundCount(0)
     setAdjustRules(null)
+    setAdjustPos(null)
+  }
+
+  /** 조정 모달 제목 표시줄을 눌러서 끄는 드래그 — 컬럼 폭 조절(startResize)과 같은 방식(마우스 이동/뗌을
+   *  document에 직접 붙였다 뗀다). 뒤에 있는 그리드 내용을 보면서 조정할 수 있도록 위치를 옮길 수 있게 한다. */
+  function startAdjustDrag(e: React.MouseEvent) {
+    const panel = (e.currentTarget as HTMLElement).closest('[data-adjust-panel]') as HTMLElement | null
+    if (!panel) return
+    const rect = panel.getBoundingClientRect()
+    adjustDragRef.current = { offsetX: e.clientX - rect.left, offsetY: e.clientY - rect.top }
+    function onMove(ev: MouseEvent) {
+      if (!adjustDragRef.current) return
+      setAdjustPos({ left: ev.clientX - adjustDragRef.current.offsetX, top: ev.clientY - adjustDragRef.current.offsetY })
+    }
+    function onUp() {
+      adjustDragRef.current = null
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
   }
 
   /** "스크랩 조정 개시" — 몇 번이든 반복 가능하다. 속도를 위해 지금 그리드 맨 위에 보이는 상품 1건만
@@ -696,14 +721,18 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     </div>
 
     {showAdjust && siteId != null && (
-      <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4" onClick={() => setShowAdjust(false)}>
-        <div className="bg-white rounded-2xl border border-gray-200 p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
+      <div className="fixed z-50"
+        style={adjustPos ? { left: adjustPos.left, top: adjustPos.top } : { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}>
+        <div data-adjust-panel className="bg-white rounded-2xl border border-gray-200 shadow-2xl p-6 w-[32rem] max-w-[calc(100vw-2rem)] max-h-[85vh] overflow-y-auto">
           <div className="flex items-center gap-2 mb-1">
-            <h2 className="text-lg font-bold text-gray-800">🔧 스크랩 조정</h2>
-            <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${manualLoginRequired ? 'bg-amber-100 text-amber-700' : 'bg-teal-100 text-teal-700'}`}>
-              {manualLoginRequired ? '🧩 개발자모드' : '🤖 일반모드'}
-            </span>
-            <button onClick={() => setShowAdjust(false)} className="ml-auto text-gray-400 hover:text-gray-600 text-sm">닫기</button>
+            <div className="flex items-center gap-2 flex-1 cursor-move select-none" onMouseDown={startAdjustDrag} title="여기를 눌러 드래그하면 위치를 옮길 수 있습니다">
+              <h2 className="text-lg font-bold text-gray-800">🔧 스크랩 조정</h2>
+              <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${manualLoginRequired ? 'bg-amber-100 text-amber-700' : 'bg-teal-100 text-teal-700'}`}>
+                {manualLoginRequired ? '🧩 개발자모드' : '🤖 일반모드'}
+              </span>
+              <span className="text-gray-300 text-xs">✥ 드래그해서 옮기기</span>
+            </div>
+            <button onClick={() => setShowAdjust(false)} className="text-gray-400 hover:text-gray-600 text-sm shrink-0">닫기</button>
           </div>
 
           {/* 모드마다 절차가 완전히 다르므로(일반모드=자동, 개발자모드=브라우저 수동 조작 필요),

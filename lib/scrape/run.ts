@@ -1,5 +1,5 @@
 import pool from '../db'
-import { scrapeSingleProduct, scrapeCatalogPage, closeLoginWindow, detectIsListingPage } from '../scraper'
+import { scrapeSingleProduct, scrapeCatalogPage, detectIsListingPage } from '../scraper'
 import { stageScrapedProduct } from './staging'
 import { runMallProfileCheckForScrape } from './mallProfile'
 import type { ScrapeResult } from '../scraper'
@@ -32,9 +32,10 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
   const siteId = opts.siteId
   const scrapeMode = opts.scrapeMode || 'full'
 
-  // 로그인 확인용으로 열어둔 화면은 여기서 닫는다 — 실제 스크래핑은 화면에 상품을 하나씩 띄우지 않고
-  // 백그라운드(헤드리스)로 진행한다. 로그인 세션(쿠키)은 프로필 디렉터리에 저장되어 그대로 재사용된다.
-  await closeLoginWindow(siteId)
+  // 로그인 확인용으로 열어둔 화면이 있으면 억지로 닫지 않는다 — withContext가 그 화면이 열려있으면
+  // 그대로 재사용하고(닫으면 화면 밖으로), 없으면 알아서 백그라운드(헤드리스)로 새로 띄운다. 예전엔
+  // 여기서 무조건 먼저 닫아버려서, 사용자가 그 창에서 캡차/본인인증 등을 마저 처리해야 하는 상품이
+  // 실패했을 때 "실패 재시도"를 눌러도 그 창이 다시 닫혀버려 같은 이유로 계속 실패했다.
 
   // 이미 스크랩된 상품(같은 몰)은 목록에서 발견되어도 건너뛴다 (이어서 스크랩하기)
   const excluded = await pool.query<{ source_url: string }>(

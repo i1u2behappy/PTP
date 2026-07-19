@@ -7,6 +7,8 @@ interface RawPageData {
   costPrice: number | null
   shippingFee: number | null
   categoryFromDetail: string
+  /** 상세페이지 브레드크럼에 "브랜드" 카테고리 노드가 있어(예: 브랜드 > 나이키) 그 아래 항목을 브랜드로 뽑아낸 값 */
+  brandFromCategoryDetail: string
   brand: string
   description: string
   mainImages: string[]
@@ -136,54 +138,105 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     // 숫자가 실제로 있을 때만 채택한다. (page.evaluate 콜백은 브라우저에서 실행되므로 바깥의
     // findInfoValue 헬퍼를 못 쓴다 — 여기서 바로 같은 로직을 인라인으로 둔다.)
     const infoValue = (labelPattern: RegExp) => infoRows.find(([label]) => labelPattern.test(label))?.[1] || ''
+    // "3,000 ~ 4,000원"처럼 범위로 적힌 값은 최저값을 쓴다(배송비가 흔히 이렇게 표기된다) — 범위 표기를
+    // 못 가려내면 "원" 바로 앞 숫자(범위의 마지막 값)만 잡혀 최저값 대신 최고값이 들어가는 문제가 있었다
+    // (실제 발견된 사례: 배송비 3,000~4,000원인데 4,000원이 저장됨).
     const firstNumber = (text: string): number | null => {
+      const range = text.match(/([\d,]{2,})\s*~\s*[\d,]{2,}\s*(?=원)/)
+      if (range) return Number(range[1].replace(/,/g, ''))
       const m = text.match(/[\d,]{2,}(?=\s*원)/)
       return m ? Number(m[0].replace(/,/g, '')) : null
     }
-    const costPrice = firstNumber(infoValue(/도매가|공급가/))
+    let costPrice = firstNumber(infoValue(/도매가|공급가/))
     const shippingFee = firstNumber(infoValue(/배\s*송\s*비/))
-    const labeledRetailPrice = firstNumber(infoValue(/소비자가|시중가|오픈마켓/))
+    const labeledRetailPrice = firstNumber(infoValue(/소비자가|시중가|오픈마켓|정상\s*판매\s*가|정상가/))
 
-    if (price == null && labeledRetailPrice != null) price = labeledRetailPrice
-    if (price == null) {
-      // 가격 표시 요소(class/id에 price 포함)에서 "숫자,콤마 + 원" 패턴을 찾는다 — 단, 위에서 이미 도매가로
-      // 확인된 값과 같은 요소를 소비자가로 잘못 집지 않도록 그 숫자는 건너뛴다.
+    // 라벨로 명시된 소비자가/정상판매가는 ld+json이 이미 값을 채워놨어도 항상 우선한다 — 사람이 페이지에
+    // 직접 적어둔 라벨이 구조화 메타데이터(할인 중인 실제 판매가 등 다른 값을 가리킬 수 있음)보다 확실하다.
+    if (labeledRetailPrice != null) price = labeledRetailPrice
+    // 이 시스템이 스크랩하는 몰은 대부분 거래처가 사입하는 도매/공급 전용몰이다 — 페이지에 "소비자가/
+    // 시중가/오픈마켓"이라고 명시적으로 라벨링된 값이 없다면, 화면에 보이는 유일한 가격 표시나 숨은
+    // 입력값은 사실 공급가(거래처가 매입하는 값)로 봐야 한다. 오픈마켓 노출가(소비자판가)는 스크랩
+    // 시점에 알 수 있는 값이 아니라 이후 가격이익관리 단계에서 공급가에 마진을 붙여 정하는 값이다.
+    if (price == null && costPrice == null) {
+      // 가격 표시 요소(class/id에 price 포함)에서 "숫자,콤마 + 원" 패턴을 찾는다.
       const priceEls = Array.from(document.querySelectorAll('[class*="price" i], [id*="price" i]'))
       for (const el of priceEls) {
         const m = (el.textContent || '').match(/([\d,]{3,})\s*원/)
         if (!m) continue
-        const candidate = Number(m[1].replace(/,/g, ''))
-        if (costPrice != null && candidate === costPrice) continue
-        price = candidate
+        costPrice = Number(m[1].replace(/,/g, ''))
         break
       }
     }
-    if (price == null) {
+    if (price == null && costPrice == null) {
       // 로그인 전에는 "회원공개" 같은 문구로 화면 표시만 가려두고, 장바구니 제출용 hidden input에는
-      // 실제 가격이 그대로 남아있는 몰이 있다(예: 신우) — 로그인 여부와 무관하게 이 값을 폴백으로 쓴다.
+      // 실제 가격이 그대로 남아있는 몰이 있다 — 로그인 여부와 무관하게 이 값을 폴백으로 쓴다.
       const priceInput = document.querySelector<HTMLInputElement>('input[name="price"], input#price')
       const v = priceInput ? Number(priceInput.value) : NaN
-      if (Number.isFinite(v) && v > 0) price = v
+      if (Number.isFinite(v) && v > 0) costPrice = v
     }
 
     // 목록(카테고리) 페이지의 브레드크럼에서 카테고리를 못 찾은 경우(예: 상품 페이지를 단건으로 바로
     // 스크랩)를 대비해, 상세페이지 자체에도 같은 후보 셀렉터로 한 번 더 시도해둔다 — 실제 사용 여부는
     // 호출부(스크랩 오케스트레이션)가 목록 기반 카테고리 유무에 따라 결정한다.
     let categoryFromDetail = ''
+    let brandFromCategoryDetail = ''
     for (const sel of ['.xans-product-headcategory', 'nav[aria-label*="breadcrumb" i]', '.breadcrumb', '.location']) {
       for (const el of Array.from(document.querySelectorAll(sel))) {
-        const text = (el.textContent || '').split('/').map(s => s.trim()).filter(Boolean).join(' > ')
-        if (text) { categoryFromDetail = text; break }
+        // <li>로 계층이 명확히 나뉘어 있으면 그 경계를 그대로 쓴다 — "/" 기준으로 통째로 쪼개면
+        // "SANDAL/MULE"처럼 카테고리명 자체에 "/"가 들어있는 경우까지 잘못 쪼개진다(실제 발견된 사례).
+        // 각 <li> 자체가 "/ 라벨"처럼 구분자를 텍스트 안에 그대로 갖고 있는 몰도 있어(실제 발견된 사례)
+        // 앞뒤의 "/"·공백은 벗겨낸다.
+        const items = Array.from(el.querySelectorAll('li'))
+          .map(li => (li.textContent || '').replace(/^[\s/]+|[\s/]+$/g, '').trim())
+          .filter(Boolean)
+        if (!items.length) {
+          const text = (el.textContent || '').split('/').map(s => s.trim()).filter(Boolean).join(' > ')
+          if (text) { categoryFromDetail = text; break }
+          continue
+        }
+        // "브랜드"라는 카테고리 노드 바로 아래는 상품 종류 구분이 아니라 실제 브랜드명이다(예: 브랜드 > 나이키).
+        const brandIdx = items.findIndex(t => t === '브랜드')
+        if (brandIdx !== -1 && brandIdx + 1 < items.length) {
+          categoryFromDetail = items.slice(0, brandIdx).join(' > ')
+          brandFromCategoryDetail = items[brandIdx + 1]
+        } else {
+          categoryFromDetail = items.join(' > ')
+        }
+        break
       }
-      if (categoryFromDetail) break
+      if (categoryFromDetail || brandFromCategoryDetail) break
     }
 
-    // 품절/재입고/단종 배지 텍스트 및 재고수량 문구를 탐색 (ld+json availability/상품정보고시 표가 없는 사이트 대비)
+    // 브레드크럼이 아예 없는 구형몰(신우 등)은 상세페이지 자체의 카테고리 표시 영역에서 상위 카테고리명을
+    // 가져오고, 그 하위 목록 중 지금 이 상품의 URL과 카테고리코드(cat_code)가 정확히 일치하는 링크가
+    // 있으면 그 텍스트를 하위 카테고리로 붙인다. 이름 자체에 "/"가 들어있는 경우가 있어(예: "뷰티＆샵
+    // /노을,누리,아름") 위 로직처럼 계층 구분자로 잘못 쪼개지 않도록 통째로 쓴다.
+    if (!categoryFromDetail) {
+      const parentName = (document.querySelector('.productCategory .state h3')?.textContent || '').trim()
+      if (parentName) {
+        let subName = ''
+        try {
+          const myCode = new URL(location.href).searchParams.get('cat_code')
+          if (myCode) {
+            const subLink = Array.from(document.querySelectorAll('.productCategory .detailCate a[href*="cat_code="]'))
+              .find(a => new URL(a.getAttribute('href') || '', location.href).searchParams.get('cat_code') === myCode)
+            subName = (subLink?.textContent || '').trim()
+          }
+        } catch { /* URL 파싱 실패 시 상위 카테고리명만 사용 */ }
+        categoryFromDetail = subName ? `${parentName} > ${subName}` : parentName
+      }
+    }
+
+    // 품절/재입고/단종 배지 텍스트 및 재고수량 문구를 탐색 (ld+json availability/상품정보고시 표가 없는 사이트 대비).
+    // display:none인 요소는 건너뛴다 — 사이트 전역 카테고리 드롭다운 메뉴가 흔히 "item_stock" 같은
+    // class를 그대로 갖고 있어(항상 숨김 상태), 걸러내지 않으면 지금 상품과 무관한 다른 카테고리의
+    // "품절" 문구를 이 상품 재고 상태로 잘못 집어온다(실제 발견된 사례).
     let stockText = ''
     let stockQtyText = ''
     const stockEls = Array.from(document.querySelectorAll(
       '[class*="soldout" i], [class*="sold-out" i], [class*="stock" i], [class*="status" i]',
-    ))
+    )).filter(el => (el as HTMLElement).offsetParent !== null)
     for (const el of stockEls) {
       const t = (el.textContent || '').trim()
       if (!stockText && /품절|재입고|단종|일시품절/.test(t)) stockText = t
@@ -192,7 +245,7 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     }
 
     return {
-      name, price, costPrice, shippingFee, categoryFromDetail,
+      name, price, costPrice, shippingFee, categoryFromDetail, brandFromCategoryDetail,
       brand, description, mainImages, mainImageNames, detailImages, detailImageNames, detailText,
       infoRows, sku, availability, stockText, stockQtyText,
     }
@@ -264,7 +317,9 @@ export async function extractProductRuleBased(
     sale_price: raw.price,
     cost_price: raw.costPrice,
     shipping_fee: raw.shippingFee,
-    brand: raw.brand || findInfoValue(raw.infoRows, /브랜드/i),
+    // "브랜드" 카테고리 노드에서 뽑은 값이 가장 확실하다(예: 브랜드 > 나이키) — ld+json의 brand는 상품별
+    // 브랜드를 안 채운 몰이 자기 몰 이름을 기본값으로 넣어두는 경우가 흔해 그보다 우선한다.
+    brand: raw.brandFromCategoryDetail || raw.brand || findInfoValue(raw.infoRows, /브랜드/i),
     manufacturer: findInfoValue(raw.infoRows, /제조사|제조자/i),
     origin: findInfoValue(raw.infoRows, /원산지|제조국/i),
     // 목록 페이지 브레드크럼 기반 카테고리는 lib/scraper.ts 오케스트레이션이 나중에 덮어쓴다
@@ -287,6 +342,7 @@ export async function extractProductRuleBased(
     stock_qty: resolveStockQty(raw.infoRows, raw.stockQtyText),
     stock_by_option: [], // scraper.ts의 extractStockByOption이 별도로 채운다 (클릭이 필요한 위젯이라 이 함수 범위 밖)
     mall_product_code: extractMallProductCode(url, raw.sku),
+    custom_fields: {},
   }
 
   if (overrides?.nameSelector) {
@@ -329,6 +385,9 @@ export async function extractProductRuleBased(
         else result.shipping_fee = n
       } else if (field === 'name' || field === 'brand' || field === 'manufacturer' || field === 'origin' || field === 'category') {
         result[field] = trimmed
+      } else {
+        // 8개 고정 필드 밖의 새 컬럼(사용자가 "스크랩 조정"으로 추가 요청한 것) — custom_fields에 담는다.
+        result.custom_fields[field] = trimmed
       }
     }
   }

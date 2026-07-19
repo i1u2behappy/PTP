@@ -152,8 +152,16 @@ export function requestStop(sessionId: number) {
   stopRequests.add(sessionId)
 }
 
-function isStopRequested(sessionId?: number) {
+/** 개발자모드(크롬 확장)는 이 서버가 아니라 사용자 브라우저에서 루프가 돌고 있어, 인메모리 Set을 직접
+ *  못 들여다본다 — 확장이 상품마다 이 함수를 거쳐 공개 API로 물어보게 한다(app/api/scrape/stop-requested). */
+export function isStopRequested(sessionId?: number) {
   return sessionId !== undefined && stopRequests.has(sessionId)
+}
+
+/** 중지 반영이 끝난 뒤 Set에서 지운다 — 안 지우면 세션 id가 계속 쌓여 다음에 같은 id가(이론상) 재사용될 때
+ *  엉뚱하게 즉시 중지된 것처럼 보일 수 있다. */
+export function clearStopRequest(sessionId: number) {
+  stopRequests.delete(sessionId)
 }
 
 /**
@@ -784,6 +792,27 @@ export async function fetchPageText(opts: ScrapeOptions & { url: string }): Prom
   })
 }
 
+/**
+ * "스크랩 조정" 기능(개발자모드)이 확장으로 캡처해온 HTML 문자열을 새 규칙으로 재추출해 미리보기를
+ * 만든다. 개발자모드 몰은 PC인증 등으로 Playwright가 직접 로그인/탐색을 못 해(withContext의
+ * isManualLoginSite 분기는 이 몰에서 이미 죽은 방식이라 쓸 수 없다) siteId 없이 완전히 새 헤드리스
+ * 브라우저를 하나 띄워, 이미 손에 있는 정적 HTML을 page.setContent로 그대로 렌더링만 시켜서 기존
+ * 규칙기반 추출 로직(extractProductRuleBased)을 그대로 재사용한다 — 실제 사이트 접속은 전혀 없다.
+ */
+export async function extractFromHtml(
+  html: string, url: string, extractionRules?: Record<string, ExtractionRule>,
+): Promise<ExtractedProduct> {
+  const browser = await chromium.launch({ headless: true, channel: 'chrome', chromiumSandbox: true })
+  try {
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await page.setContent(html, { waitUntil: 'domcontentloaded' })
+    return await extractProductRuleBased(page, url, undefined, extractionRules)
+  } finally {
+    await browser.close()
+  }
+}
+
 export type MallPlatform = 'cafe24' | 'makeshop' | 'godomall' | 'unknown'
 
 interface PlatformProfile {
@@ -819,26 +848,48 @@ export async function detectMallPlatform(page: Page): Promise<MallPlatform> {
   })
 }
 
+interface CategoryLabel {
+  category: string
+  /** 브레드크럼에 "브랜드"라는 카테고리 노드가 있으면(예: 브랜드 > 나이키), 그 바로 아래 항목은 상품
+   *  종류 구분이 아니라 실제 브랜드명이다 — 그 값을 따로 뽑아 카테고리에서는 뺀다. */
+  brand: string
+}
+
 // 목록 페이지의 카테고리 경로(예: "백팩 > 여행용 백팩")를 찾는다. .xans-product-headcategory는 카페24 표준 클래스인데,
 // 같은 클래스가 배너 이미지용으로도 쓰여 텍스트가 비어있을 수 있어 모든 매칭 요소 중 텍스트가 있는 것을 찾는다.
-async function detectCategoryLabel(page: Page): Promise<string> {
+async function detectCategoryLabel(page: Page): Promise<CategoryLabel> {
   return page.evaluate(() => {
     const candidates = ['.xans-product-headcategory', 'nav[aria-label*="breadcrumb" i]', '.breadcrumb', '.location']
     for (const sel of candidates) {
       for (const el of Array.from(document.querySelectorAll(sel))) {
-        const text = (el.textContent || '').split('/').map(s => s.trim()).filter(Boolean).join(' > ')
-        if (text) return text
+        // <li>로 계층이 명확히 나뉘어 있으면 그 경계를 그대로 쓴다 — "/" 기준으로 통째로 쪼개면
+        // "SANDAL/MULE"처럼 카테고리명 자체에 "/"가 들어있는 경우까지 잘못 쪼개진다(실제 발견된 사례).
+        // <li> 구조가 없는 단순 텍스트 브레드크럼만 예전처럼 "/" 기준으로 나눈다. 각 <li> 자체가 "/ 라벨"
+        // 처럼 구분자를 텍스트 안에 그대로 갖고 있는 몰도 있어(실제 발견된 사례) 앞뒤의 "/"·공백은 벗겨낸다.
+        const items = Array.from(el.querySelectorAll('li'))
+          .map(li => (li.textContent || '').replace(/^[\s/]+|[\s/]+$/g, '').trim())
+          .filter(Boolean)
+        if (!items.length) {
+          const text = (el.textContent || '').split('/').map(s => s.trim()).filter(Boolean).join(' > ')
+          if (text) return { category: text, brand: '' }
+          continue
+        }
+        const brandIdx = items.findIndex(t => t === '브랜드')
+        if (brandIdx !== -1 && brandIdx + 1 < items.length) {
+          return { category: items.slice(0, brandIdx).join(' > '), brand: items[brandIdx + 1] }
+        }
+        return { category: items.join(' > '), brand: '' }
       }
     }
-    return ''
+    return { category: '', brand: '' }
   })
 }
 
 interface CollectedLinks {
   urls: string[]
   platform: MallPlatform
-  /** 각 상품 URL이 발견된 목록 페이지의 카테고리 경로 */
-  categoryByUrl: Map<string, string>
+  /** 각 상품 URL이 발견된 목록 페이지의 카테고리 경로(및 "브랜드" 카테고리 노드 아래서 뽑은 브랜드명) */
+  categoryByUrl: Map<string, CategoryLabel>
   /** 목록 페이지에서 바로 얻을 수 있는 상품명/썸네일 (실제 상품 페이지를 열지 않아 빠른 미리보기용) */
   linkInfo: Map<string, { name: string; thumbnail: string }>
 }
@@ -906,7 +957,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
 
   const baseUrl = new URL(listingUrls[0]).origin
   const productUrlSet = new Set<string>()
-  const categoryByUrl = new Map<string, string>()
+  const categoryByUrl = new Map<string, CategoryLabel>()
   const linkInfo = new Map<string, { name: string; thumbnail: string }>()
 
   async function scanCurrentPage(): Promise<{ href: string; name: string; thumbnail: string }[]> {
@@ -963,7 +1014,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
 
       matched.forEach(item => {
         productUrlSet.add(item.href)
-        if (categoryLabel && !categoryByUrl.has(item.href)) categoryByUrl.set(item.href, categoryLabel)
+        if (categoryLabel.category && !categoryByUrl.has(item.href)) categoryByUrl.set(item.href, categoryLabel)
         if (!linkInfo.has(item.href) && (item.name || item.thumbnail)) linkInfo.set(item.href, { name: item.name, thumbnail: item.thumbnail })
       })
 
@@ -1038,7 +1089,8 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
     if (domOptions.length) product.options = domOptions
     await applyStockByOption(page, product)
     const category = categoryByUrl.get(firstUrl)
-    if (category) product.category = category
+    if (category?.category) product.category = category.category
+    if (category?.brand) product.brand = category.brand
 
     return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product }, items }
   })
@@ -1110,11 +1162,12 @@ export async function scrapeCatalogPage(
           lastProduct = product
           // 가격과 이미지가 둘 다 없으면 실제 상품 페이지가 아니라 봇 차단/오류 안내 페이지를 받았을 가능성이
           // 높다 (빠른 연속 요청을 감지해 안내 페이지로 대신 응답하는 몰이 있음) — 그대로 저장하지 않고 재시도한다.
-          if (product.price == null && !product.thumbnail_urls.length) {
+          if (product.price == null && product.cost_price == null && !product.thumbnail_urls.length) {
             throw new Error('가격/이미지를 모두 찾지 못함 (차단 또는 일시 오류로 추정)')
           }
           const category = categoryByUrl.get(pUrl)
-          if (category) product.category = category
+          if (category?.category) product.category = category.category
+          if (category?.brand) product.brand = category.brand
           return { sourceUrl: pUrl, product }
         } catch (err) {
           lastError = err
@@ -1125,7 +1178,8 @@ export async function scrapeCatalogPage(
         const aiProduct = await tryAiFallback(workerPage, lastProduct)
         if (aiProduct) {
           const category = categoryByUrl.get(pUrl)
-          if (category) aiProduct.category = category
+          if (category?.category) aiProduct.category = category.category
+          if (category?.brand) aiProduct.brand = category.brand
           return { sourceUrl: pUrl, product: aiProduct }
         }
       }

@@ -109,7 +109,6 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   const [mode, setMode]           = useState<'single' | 'catalog'>('catalog')
   const [scrapeMode, setScrapeMode] = useState<'full' | 'incremental'>('full')
-  const [hasPriorSession, setHasPriorSession] = useState(false)
   const [linkSel, setLinkSel]     = useState('')
   const [status, setStatus]       = useState<Status>('idle')
   const [sessionId, setSessionId] = useState<number | null>(null)
@@ -118,6 +117,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [itemLog, setItemLog]     = useState<ItemLogRow[]>([])
   const [retrying, setRetrying]   = useState(false)
   const [modeSaving, setModeSaving] = useState(false)
+  // 개발자모드는 실제 스크랩이 PTP가 아니라 사용자의 브라우저(확장)에서 일어나 "시작" 버튼이 원래 없었지만,
+  // 일반모드와 똑같이 몰을 고른 뒤 명시적으로 "스크래핑 개시"를 눌러야 방법 안내가 뜨도록 통일한다 —
+  // 몰만 골랐는데 안내가 바로 튀어나오면 "시작"이라는 행동 없이 화면이 저절로 바뀌어 헷갈릴 수 있다.
+  const [devModeStarted, setDevModeStarted] = useState(false)
+  const [urlCopied, setUrlCopied] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
@@ -198,7 +202,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     return () => clearInterval(timer)
   }, [selectedSite])
 
-  const failedUrls = itemLog.filter(r => r.status === 'failed').map(r => r.url)
+  const failedItems = itemLog.filter(r => r.status === 'failed')
+  const successItems = itemLog.filter(r => r.status === 'success')
+  const failedUrls = failedItems.map(r => r.url)
 
   // 이 몰이 "일반모드"(PTP 자동화) / "개발자모드"(크롬 확장) 중 무엇인지 — 아직 정해지지 않았으면(null)
   // 어느 흐름도 보여주지 않고 선택부터 받는다. PC인증 등으로 자동 로그인이 근본적으로 안 되는 몰인지는
@@ -207,6 +213,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const mallMode = !selectedSite ? null
     : selectedSite.manual_login_required === null ? 'undetermined'
     : selectedSite.manual_login_required ? 'devmode' : 'normal'
+
+  /** 개발자모드 몰 URL을 클립보드로 복사한다 — PTP를 보고 있는 브라우저가 몰 로그인/확장이 있는 그
+   *  브라우저와 다를 수 있어(별도 창 자동으로 띄워봐야 로그인 안 된 새 탭이 뜨는 경우가 많음), 새 창을
+   *  직접 띄우는 대신 URL만 복사해 사용자가 원하는 브라우저에 직접 붙여넣게 한다. */
+  async function handleCopyMallUrl(url: string) {
+    try {
+      await navigator.clipboard.writeText(url)
+      setUrlCopied(true)
+      setTimeout(() => setUrlCopied(false), 1500)
+    } catch { /* 클립보드 권한이 없으면 조용히 무시 */ }
+  }
 
   async function handleChooseScrapeMode(devMode: boolean) {
     if (!selectedSite) return
@@ -243,7 +260,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPreviewTotal(null)
     setPreviewItems([])
     setScrapeMode('full')
-    fetch(`/api/products?siteId=${siteId}`).then(r => r.json()).then((d: unknown[]) => setHasPriorSession(Array.isArray(d) && d.length > 0)).catch(() => setHasPriorSession(false))
+    setDevModeStarted(false)
+    // 다른 몰을 새로 고르는 것이므로, 이전 몰의 진행 상황("수집완료" 등)이 화면에 그대로 남아있으면 안
+    // 된다 — LAST_SESSION_KEY 복원(마운트 시 1회)과 별개로, 몰을 바꿀 때마다 항상 초기화한다.
+    setStatus('idle')
+    setSessionId(null)
+    setProgress({ saved: 0, total: 0 })
+    setItemLog([])
+    setStopping(false)
+    setRetrying(false)
+    localStorage.removeItem(LAST_SESSION_KEY)
     // 탭 전환 등으로 이 화면이 다시 마운트돼도, 로그인 창이 서버에 실제로 열려있으면 그 상태를 그대로 복원한다
     // (loginStep은 이 컴포넌트의 로컬 상태라 마운트될 때마다 초기화되지만, 실제 브라우저 세션은 서버에 계속 살아있을 수 있다)
     fetch(`/api/scrape/current-url?siteId=${siteId}`).then(r => r.json()).then((d: { url: string | null }) => {
@@ -617,7 +643,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
                 로그인 확인
               </button>
-              {loginStep === 'confirmed' && <span className="text-xs text-emerald-600 font-medium">✓ 로그인 확인됨 (스크래핑 시작 시 창은 자동으로 닫히고 백그라운드에서 진행됩니다)</span>}
+              {loginStep === 'confirmed' && <span className="text-xs text-emerald-600 font-medium">✓ 로그인 확인됨 (이 창을 열어두면 스크래핑도 이 창에서 이어서 진행되고, 닫으면 백그라운드에서 진행됩니다)</span>}
               {loginStep === 'opened' && (
                 <span className="text-xs text-gray-500">브라우저 창에서 로그인을 완료한 뒤 확인을 눌러주세요.</span>
               )}
@@ -631,10 +657,21 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       {/* 스크랩 대상 */}
       {selectedSite && mallMode === 'normal' && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-          {hasPriorSession && (
-            <>
+          <div className="flex flex-wrap items-start justify-between gap-6 mb-1">
+            <div>
+              <div className="text-sm font-semibold text-gray-700 mb-2">스크랩 모드</div>
+              <div className="flex gap-3">
+                {(['catalog', 'single'] as const).map(m => (
+                  <button key={m} onClick={() => { setMode(m); setPreviewResult(null); setPreviewTotal(null); setPreviewItems([]) }}
+                    className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${mode === m ? 'bg-teal-500 text-white border-teal-500' : 'bg-white text-gray-600 border-gray-300 hover:border-teal-400'}`}>
+                    {m === 'single' ? '단일 상품 페이지' : '카테고리/목록 페이지'}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
               <div className="text-sm font-semibold text-gray-700 mb-2">재스크랩 방식</div>
-              <div className="flex gap-3 mb-4">
+              <div className="flex gap-3">
                 {([
                   { id: 'full' as const, label: '전체 재스크랩' },
                   { id: 'incremental' as const, label: '증분 (변동사항만)' },
@@ -645,23 +682,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   </button>
                 ))}
               </div>
-              {scrapeMode === 'incremental' && (
-                <p className="text-xs text-gray-500 mb-4">
-                  이전에 스크랩된 상품 중 재고/가격이 바뀐 것만 이력에 남기고, 이번 회차에 안 보이는 기존 상품은 단종 추정으로 표시합니다.
-                </p>
-              )}
-            </>
-          )}
-          <div className="text-sm font-semibold text-gray-700 mb-2">스크랩 모드</div>
-          <div className="flex gap-3 mb-4">
-            {(['catalog', 'single'] as const).map(m => (
-              <button key={m} onClick={() => { setMode(m); setPreviewResult(null); setPreviewTotal(null); setPreviewItems([]) }}
-                className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${mode === m ? 'bg-teal-500 text-white border-teal-500' : 'bg-white text-gray-600 border-gray-300 hover:border-teal-400'}`}>
-                {m === 'single' ? '단일 상품 페이지' : '카테고리/목록 페이지'}
-              </button>
-            ))}
+            </div>
           </div>
-
+          {scrapeMode === 'incremental' && (
+            <p className="text-xs text-gray-500 mb-3">
+              이전에 스크랩된 상품 중 재고/가격이 바뀐 것만 이력에 남기고, 이번 회차에 안 보이는 기존 상품은 단종 추정으로 표시합니다.
+            </p>
+          )}
           <div className="flex gap-2 mb-1 items-end">
             <label className="flex-1 block">
               <span className="block text-xs text-gray-500 mb-1">
@@ -948,14 +975,34 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       )}
 
       {/* 실행 버튼 / 개발자모드 안내 */}
-      {mallMode === 'devmode' && selectedSite ? (
+      {mallMode === 'devmode' && selectedSite && status === 'running' ? (
+        <button onClick={handleStop} disabled={stopping}
+          className="w-full py-3 rounded-2xl bg-rose-500 text-white font-semibold text-sm hover:bg-rose-600 disabled:opacity-50 transition-colors">
+          {stopping ? '중지 처리 중...' : '⏸ 스크래핑 중지'}
+        </button>
+      ) : mallMode === 'devmode' && selectedSite && !devModeStarted ? (
+        <button onClick={() => { setDevModeStarted(true); handleCopyMallUrl(selectedSite.url) }}
+          className="w-full py-3 rounded-2xl bg-teal-500 text-white font-semibold text-sm hover:bg-teal-600 transition-colors">
+          🧩 스크래핑 Start (개발자모드 방법 보기 + 몰 URL 복사)
+        </button>
+      ) : mallMode === 'devmode' && selectedSite ? (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-          <div className="text-sm font-semibold text-gray-700 mb-3">🧩 개발자모드 스크랩 방법</div>
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-semibold text-gray-700">🧩 개발자모드 스크랩 방법</div>
+            <button onClick={() => handleCopyMallUrl(selectedSite.url)}
+              className="text-xs text-teal-500 hover:underline shrink-0">{urlCopied ? '✓ 복사됨' : '몰 URL 복사'}</button>
+          </div>
           <ol className="list-decimal list-inside text-sm text-gray-600 space-y-1">
             <li>{selectedSite.name || selectedSite.url}에 평소 쓰는 크롬으로 로그인한 상태로 상품 목록(카테고리) 페이지를 여세요.</li>
             <li>크롬 우측 상단의 확장 아이콘을 클릭하면 자동으로 상품을 순회하며 스크랩합니다.</li>
             <li>진행 상황은 아래에 자동으로 나타나며, 완료되면 &quot;스크랩 Raw 확인&quot;으로 바로 이동할 수 있습니다.</li>
           </ol>
+          {failedUrls.length > 0 && (
+            <p className="text-xs text-rose-500 mt-3 pt-3 border-t border-gray-100">
+              ⚠ 아래에 실패한 상품 {failedUrls.length}개가 있습니다 — 이미 성공한 상품은 다시 스크랩하지 않고,
+              이 몰의 아무 페이지에서나(로그인된 상태) 마우스 우클릭 → <b className="text-gray-600">PTP 실패 상품 재수집</b>을 실행하면 실패한 것만 다시 시도합니다.
+            </p>
+          )}
         </div>
       ) : mallMode !== 'normal' ? null : status === 'running' ? (
         <button onClick={handleStop} disabled={stopping}
@@ -995,15 +1042,33 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             {failedUrls.length > 0 && <span className="text-rose-500"> · 실패 {failedUrls.length}개</span>}
           </p>
 
-          {itemLog.length > 0 && (
+          {/* 실패한 상품만 따로 모아, 실패 사유가 (마우스를 올려야 보이는 툴팁이 아니라) 바로 눈에 보이게 표시한다. */}
+          {failedItems.length > 0 && (
+            <div className="mt-3 border border-rose-200 bg-rose-50 rounded-xl overflow-hidden">
+              <div className="px-3 py-2 text-xs font-semibold text-rose-600 border-b border-rose-200">
+                ❌ 수집 실패 ({failedItems.length}개) — 사유
+              </div>
+              <div className="max-h-40 overflow-y-auto divide-y divide-rose-100">
+                {failedItems.map(row => (
+                  <div key={row.id} className="px-3 py-1.5 text-xs">
+                    <p className="text-gray-600 truncate">{row.url}</p>
+                    <p className="text-rose-500 truncate">{row.error || '알 수 없는 오류'}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {successItems.length > 0 && (
             <div className="mt-3 border border-gray-100 rounded-xl overflow-hidden">
+              <div className="px-3 py-2 text-xs font-semibold text-gray-500 border-b border-gray-100">
+                ✓ 수집 성공 ({successItems.length}개)
+              </div>
               <div className="max-h-40 overflow-y-auto divide-y divide-gray-100">
-                {itemLog.map(row => (
+                {successItems.map(row => (
                   <div key={row.id} className="flex items-center gap-2 px-3 py-1.5 text-xs">
-                    <span className={row.status === 'success' ? 'text-emerald-600' : 'text-rose-500'}>
-                      {row.status === 'success' ? '✓' : '✗'}
-                    </span>
-                    <span className="text-gray-500 truncate flex-1" title={row.error || undefined}>{row.url}</span>
+                    <span className="text-emerald-600">✓</span>
+                    <span className="text-gray-500 truncate flex-1">{row.url}</span>
                   </div>
                 ))}
               </div>

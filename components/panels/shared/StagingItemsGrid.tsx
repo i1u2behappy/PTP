@@ -89,6 +89,17 @@ function formatMoneyOrRange(v: number | string): string {
   return hi ? `₩${Number(lo).toLocaleString()}~₩${Number(hi).toLocaleString()}` : `₩${Number(lo).toLocaleString()}`
 }
 
+/** [옵션1값, 옵션2값] 쌍을 옵션1별로 묶어 "레드: 100/105, 블루: 100" 형태로 보여준다. */
+function formatOptionCombinations(combos: string[][] | undefined): string {
+  if (!combos?.length) return ''
+  const byFirst = new Map<string, string[]>()
+  combos.forEach(([v1, v2]) => {
+    if (!byFirst.has(v1)) byFirst.set(v1, [])
+    byFirst.get(v1)!.push(v2)
+  })
+  return [...byFirst.entries()].map(([v1, v2s]) => `${v1}: ${v2s.join('/')}`).join(', ')
+}
+
 /** 옵션(옵션1/옵션2/...)은 상품마다 개수가 달라 고정 컬럼이 아니라, 로드된 데이터 중 실제 값이 있는 최대
  *  옵션 개수만큼만 상세이미지 뒤에 동적으로 끼워 넣는다 (컴포넌트 내부의 `columns` 계산 참고). */
 const COLUMNS_BEFORE_OPTIONS: ColumnDef[] = [
@@ -117,19 +128,7 @@ const COLUMNS_AFTER_OPTIONS: ColumnDef[] = [
   { key: 'stock_by_option', label: '옵션별 재고', getValue: p => (p.raw_data?.stock_by_option || []).map(r => `${r.option}: ${r.qty}개`).join(', ') },
   // 옵션1 값마다 옵션2가 다르게 채워지는 몰(신우 등)의 실제 조합 — [옵션1값, 옵션2값] 쌍을 옵션1별로 묶어
   // "레드: 100/105, 블루: 100" 형태로 보여준다(합쳐진 options 컬럼만으론 이 매칭이 안 보인다).
-  {
-    key: 'option_combinations', label: '옵션 조합(옵션1별 옵션2)',
-    getValue: p => {
-      const combos = p.raw_data?.option_combinations || []
-      if (!combos.length) return ''
-      const byFirst = new Map<string, string[]>()
-      combos.forEach(([v1, v2]) => {
-        if (!byFirst.has(v1)) byFirst.set(v1, [])
-        byFirst.get(v1)!.push(v2)
-      })
-      return [...byFirst.entries()].map(([v1, v2s]) => `${v1}: ${v2s.join('/')}`).join(', ')
-    },
-  },
+  { key: 'option_combinations', label: '옵션 조합(옵션1별 옵션2)', getValue: p => formatOptionCombinations(p.raw_data?.option_combinations) },
   { key: 'summary_info', label: '상품요약정보', getValue: p => p.raw_data?.summary_info || '' },
   { key: 'english_name', label: '영문상품명', getValue: p => p.raw_data?.english_name || '' },
   { key: 'detail_text', label: '상세페이지 텍스트', getValue: p => p.raw_data?.detail_text || '' },
@@ -709,6 +708,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
             {visibleItems.map(p => {
               const missing = missingFields(p)
               const stockByOptionText = (p.raw_data?.stock_by_option || []).map(r => `${r.option}: ${r.qty}개`).join(', ')
+              const optionCombinationsText = formatOptionCombinations(p.raw_data?.option_combinations)
               const extraInfoText = (p.raw_data?.extra_info || []).map(e => `${e.label}: ${e.value}`).join(' / ')
               const canOpen = !!p.matched_mall_product_id
               const statusLabel = STATUS_LABELS[p.status] || { text: p.status, cls: 'text-gray-400' }
@@ -767,6 +767,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
                 },
                 stock_qty: { node: p.stock_qty ?? '-' },
                 stock_by_option: { node: stockByOptionText || '-', title: stockByOptionText },
+                option_combinations: { node: optionCombinationsText || '-', title: optionCombinationsText },
                 summary_info: { node: p.raw_data?.summary_info || '-', title: p.raw_data?.summary_info || '' },
                 english_name: { node: p.raw_data?.english_name || '-', title: p.raw_data?.english_name || '' },
                 detail_text: { node: p.raw_data?.detail_text || '-', title: p.raw_data?.detail_text || '' },

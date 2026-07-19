@@ -21,6 +21,9 @@ export interface ExtractedProduct {
   category: string
   description: string
   options: { name: string; values: string[] }[]
+  /** 옵션1 값마다 옵션2가 다르게 채워지는 몰(예: 신우 — 색상별 구매 가능 사이즈가 다름)의 실제 유효
+   *  조합. [옵션1값, 옵션2값] 쌍의 목록 — 캐스케이딩이 없는 몰은 빈 배열. */
+  option_combinations?: string[][]
   thumbnail_urls: string[]
   thumbnail_names: string[]
   detail_image_urls: string[]

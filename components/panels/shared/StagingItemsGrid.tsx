@@ -11,6 +11,8 @@ interface RawExtra {
   english_name?: string
   extra_info?: { label: string; value: string }[]
   stock_by_option?: { option: string; qty: number }[]
+  /** [옵션1값, 옵션2값] 쌍 목록 — 옵션1마다 옵션2가 다르게 채워지는 몰(신우 등)의 실제 유효 조합 */
+  option_combinations?: string[][]
   cost_price?: number | null
   /** "3000~4000"처럼 범위 문자열로 올 수 있다(신우 등, 배송비가 무게/지역별로 차등) */
   shipping_fee?: number | string | null
@@ -113,6 +115,21 @@ const COLUMNS_AFTER_OPTIONS: ColumnDef[] = [
   { key: 'stock_status', label: '재고상태', getValue: p => p.stock_status },
   { key: 'stock_qty', label: '재고수량', getValue: p => p.stock_qty },
   { key: 'stock_by_option', label: '옵션별 재고', getValue: p => (p.raw_data?.stock_by_option || []).map(r => `${r.option}: ${r.qty}개`).join(', ') },
+  // 옵션1 값마다 옵션2가 다르게 채워지는 몰(신우 등)의 실제 조합 — [옵션1값, 옵션2값] 쌍을 옵션1별로 묶어
+  // "레드: 100/105, 블루: 100" 형태로 보여준다(합쳐진 options 컬럼만으론 이 매칭이 안 보인다).
+  {
+    key: 'option_combinations', label: '옵션 조합(옵션1별 옵션2)',
+    getValue: p => {
+      const combos = p.raw_data?.option_combinations || []
+      if (!combos.length) return ''
+      const byFirst = new Map<string, string[]>()
+      combos.forEach(([v1, v2]) => {
+        if (!byFirst.has(v1)) byFirst.set(v1, [])
+        byFirst.get(v1)!.push(v2)
+      })
+      return [...byFirst.entries()].map(([v1, v2s]) => `${v1}: ${v2s.join('/')}`).join(', ')
+    },
+  },
   { key: 'summary_info', label: '상품요약정보', getValue: p => p.raw_data?.summary_info || '' },
   { key: 'english_name', label: '영문상품명', getValue: p => p.raw_data?.english_name || '' },
   { key: 'detail_text', label: '상세페이지 텍스트', getValue: p => p.raw_data?.detail_text || '' },

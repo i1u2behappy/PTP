@@ -294,6 +294,10 @@ function buildExtractExpr(rules) {
   // 실제 동작으로 이어지는 onChange가 걸려있을 수 있어서).
   let cascadeStockKnown = false
   let cascadeHasStock = false
+  // 옵션1 값마다 옵션2 목록이 실제로 다른 몰(신우 등 — 색상별 구매 가능한 사이즈가 다름)을 위해, 합쳐진
+  // options와 별개로 [옵션1값, 옵션2값] 쌍을 그대로 남긴다 — collected(Set)로 합치면 어느 옵션1에 어느
+  // 옵션2가 실제로 딸려 나오는지 사라진다.
+  let optionCombinations = []
   for (let i = 0; i < selectEls.length - 1; i++) {
     const first = selectEls[i]
     const second = selectEls[i + 1]
@@ -311,6 +315,7 @@ function buildExtractExpr(rules) {
       }
       const afterValues = realValues(second)
       afterValues.forEach(v => collected.add(v))
+      afterValues.forEach(v => optionCombinations.push([val, v]))
       if (afterValues.length > 0) cascadeHasStock = true
     }
     if (collected.size > 0) {
@@ -343,7 +348,7 @@ function buildExtractExpr(rules) {
     // "브랜드" 카테고리 노드에서 뽑은 값이 가장 확실하다 — ld+json의 brand는 상품별 브랜드를 안 채운
     // 몰이 자기 몰 이름을 기본값으로 넣어두는 경우가 흔해 그보다 우선한다.
     brand: brandFromCategoryDetail || brand, manufacturer: '', origin: '', category: categoryFromDetail || '', description,
-    options, thumbnail_urls: mainImages, thumbnail_names: [], detail_image_urls: detailImages, detail_image_names: [],
+    options, option_combinations: optionCombinations, thumbnail_urls: mainImages, thumbnail_names: [], detail_image_urls: detailImages, detail_image_names: [],
     detail_text: (detailContainer?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 3000),
     summary_info: '', english_name: '', extra_info: [], stock_status: stockStatus, stock_qty: null,
     stock_by_option: [], mall_product_code: code, custom_fields: {},

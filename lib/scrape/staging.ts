@@ -85,6 +85,7 @@ function toScrapeResult(row: StagingRow): ScrapeResult {
     category: row.mall_category || '',
     description: row.description,
     options: row.options,
+    option_combinations: extra.option_combinations || [],
     thumbnail_urls: row.thumbnail_urls,
     thumbnail_names: extra.thumbnail_names || [],
     detail_image_urls: row.detail_image_urls,

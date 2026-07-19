@@ -567,7 +567,16 @@ async function scanSwatchOptions(page: Page): Promise<DomOption[]> {
  * 선택을 시도한다. 라디오/체크박스·클릭형 스와치 옵션은 보통 처음부터 전부 렌더되어 있어 클릭 없이 바로 읽는다.
  * ponytail: select는 1단계 캐스케이딩·최대 20개 값까지만 순회 — 3단계 이상 중첩 select는 지원하지 않음.
  */
-async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
+interface DomOptionsResult {
+  options: DomOption[]
+  /** 옵션1 값마다 옵션2 목록이 다르게 채워지는 몰(예: 신우 — 색상별 구매 가능한 사이즈가 다름)의 실제
+   *  유효 조합. [옵션1값, 옵션2값] 쌍의 목록 — options처럼 값을 통째로 합쳐버리면 어느 옵션1에 어느
+   *  옵션2가 실제로 딸려 나오는지 알 수 없어 별도로 남긴다. 옵션 그룹이 1개뿐이거나 캐스케이딩이 없는
+   *  몰(옵션2가 항상 고정)은 비워둔다. */
+  combinations: string[][]
+}
+
+async function extractOptionsFromDom(page: Page): Promise<DomOptionsResult> {
   const merged = new Map<string, Set<string>>()
   const mergeIn = (list: DomOption[]) => {
     list.forEach((o, i) => {
@@ -584,6 +593,7 @@ async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
   const initial = await scanSelectOptions(page, rootSelector)
   mergeIn(initial)
 
+  const combinations: string[][] = []
   if (initial.length > 0) {
     const values = initial[0].values.slice(0, 20)
     for (const value of values) {
@@ -596,7 +606,13 @@ async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
         // 기본 30초 대기 없이 짧게 시도하고 넘어간다 — 비활성화된(품절 등) option 하나가 스크랩 전체를 30초씩 붙잡는 것을 방지
         await firstSelect.selectOption({ label: value }, { timeout: 3_000 })
         await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {})
-        mergeIn(await scanSelectOptions(page, rootSelector))
+        const rescanned = await scanSelectOptions(page, rootSelector)
+        mergeIn(rescanned)
+        // rescanned[1]이 바로 이 옵션1 값을 선택했을 때 AJAX로 채워진 옵션2 목록 — 그 값들을 지금 선택한
+        // 옵션1 값과 짝지어 기록한다(캐스케이딩이 없는 몰은 매번 같은 값이 나와 그냥 전체 조합이 되고 만다).
+        if (rescanned.length > 1) {
+          for (const v2 of rescanned[1].values) combinations.push([value, v2])
+        }
       } catch { /* 개별 실패는 skip */ }
     }
   }
@@ -605,7 +621,10 @@ async function extractOptionsFromDom(page: Page): Promise<DomOption[]> {
   // (같은 페이지에서 무조건 병합하면 "COLOR"/"SIZE" 같은 라벨 텍스트를 별개 옵션으로 잘못 잡아내는 경우가 있었다.)
   if (merged.size === 0) mergeIn(await scanSwatchOptions(page))
 
-  return [...merged.entries()].map(([name, values]) => ({ name, values: [...values] }))
+  return {
+    options: [...merged.entries()].map(([name, values]) => ({ name, values: [...values] })),
+    combinations,
+  }
 }
 
 /**
@@ -719,7 +738,8 @@ async function sampleMallProfile(page: Page, startUrl: string): Promise<MallProf
       optionTypes.add(selectOptions.length ? 'select' : swatchOptions.length ? 'swatch' : 'none')
 
       const domOptions = await extractOptionsFromDom(page)
-      if (domOptions.length) product.options = domOptions
+      if (domOptions.options.length) product.options = domOptions.options
+      if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
       await applyStockByOption(page, product)
 
       signals.sampleCount++
@@ -760,7 +780,8 @@ export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeRe
         lastUrl = sourceUrl
         const product = await extractProductRuleBased(page, sourceUrl, selectorOverrides(opts), opts.extractionRules)
         const domOptions = await extractOptionsFromDom(page)
-        if (domOptions.length) product.options = domOptions
+        if (domOptions.options.length) product.options = domOptions.options
+        if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
         await applyStockByOption(page, product)
         lastProduct = product
         // 가격과 이미지가 둘 다 없으면 실제 상품 페이지가 아니라 봇 차단/오류 안내 페이지를 받았을 가능성이
@@ -1086,7 +1107,8 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
     await waitForExtractableContent(page)
     const product = await extractProductRuleBased(page, firstUrl, selectorOverrides(opts), opts.extractionRules)
     const domOptions = await extractOptionsFromDom(page)
-    if (domOptions.length) product.options = domOptions
+    if (domOptions.options.length) product.options = domOptions.options
+    if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
     await applyStockByOption(page, product)
     const category = categoryByUrl.get(firstUrl)
     if (category?.category) product.category = category.category
@@ -1125,7 +1147,8 @@ export async function scrapeCatalogPage(
       await waitForExtractableContent(page)
       const product = await extractProductRuleBased(page, singleUrl, selectorOverrides(opts), opts.extractionRules)
       const domOptions = await extractOptionsFromDom(page)
-      if (domOptions.length) product.options = domOptions
+      if (domOptions.options.length) product.options = domOptions.options
+      if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
       await applyStockByOption(page, product)
       if (product.price == null && !product.thumbnail_urls.length) {
         await onItem({ done: 0, total: 0, url: singleUrl, result: null, error: '상품 링크를 찾지 못함 (카테고리도 개별 상품도 아닌 것으로 추정)' })
@@ -1157,7 +1180,8 @@ export async function scrapeCatalogPage(
           await waitForExtractableContent(workerPage)
           const product = await extractProductRuleBased(workerPage, pUrl, selectorOverrides(opts), opts.extractionRules)
           const domOptions = await extractOptionsFromDom(workerPage)
-          if (domOptions.length) product.options = domOptions
+          if (domOptions.options.length) product.options = domOptions.options
+          if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
           await applyStockByOption(workerPage, product)
           lastProduct = product
           // 가격과 이미지가 둘 다 없으면 실제 상품 페이지가 아니라 봇 차단/오류 안내 페이지를 받았을 가능성이

@@ -205,8 +205,16 @@ function buildExtractExpr(rules) {
     const m = text.match(/[\\d,]{2,}(?=\\s*원)/)
     return m ? Number(m[0].replace(/,/g, '')) : null
   }
+  // 배송비는 범위 자체가 실제 정보(무게/지역별 차등)라 Raw 데이터에는 원문 그대로 "3000~4000"으로
+  // 남겨 사용자가 검수 화면에서 실제 페이지와 비교할 수 있게 한다 — product_master로 옮길 때만 계산
+  // 가능하도록 최저값 숫자로 바뀐다(lib/master/migrate.ts).
+  const firstNumberOrRange = (text) => {
+    const range = text.match(/([\\d,]{2,})\\s*~\\s*([\\d,]{2,})\\s*(?=원)/)
+    if (range) return range[1].replace(/,/g, '') + '~' + range[2].replace(/,/g, '')
+    return firstNumber(text)
+  }
   let costPrice = firstNumber(infoValue(/도매가|공급가/))
-  const shippingFee = firstNumber(infoValue(/배\\s*송\\s*비/))
+  const shippingFee = firstNumberOrRange(infoValue(/배\\s*송\\s*비/))
   const labeledRetailPrice = firstNumber(infoValue(/소비자가|시중가|오픈마켓|정상\\s*판매\\s*가|정상가/))
 
   // 라벨로 명시된 소비자가/정상판매가는 ld+json이 이미 값을 채워놨어도 항상 우선한다 — 사람이 페이지에

@@ -12,7 +12,8 @@ interface RawExtra {
   extra_info?: { label: string; value: string }[]
   stock_by_option?: { option: string; qty: number }[]
   cost_price?: number | null
-  shipping_fee?: number | null
+  /** "3000~4000"처럼 범위 문자열로 올 수 있다(신우 등, 배송비가 무게/지역별로 차등) */
+  shipping_fee?: number | string | null
   custom_fields?: Record<string, string>
 }
 
@@ -77,6 +78,13 @@ interface ColumnDef {
   key: string
   label: string
   getValue: (p: StagingRow) => string | number | null
+}
+
+/** 배송비는 "3000~4000"처럼 범위 문자열일 수 있다(신우 등) — 양쪽 다 콤마 포맷해 "₩3,000~₩4,000"으로 보여준다. */
+function formatMoneyOrRange(v: number | string): string {
+  if (typeof v === 'number') return `₩${v.toLocaleString()}`
+  const [lo, hi] = v.split('~')
+  return hi ? `₩${Number(lo).toLocaleString()}~₩${Number(hi).toLocaleString()}` : `₩${Number(lo).toLocaleString()}`
 }
 
 /** 옵션(옵션1/옵션2/...)은 상품마다 개수가 달라 고정 컬럼이 아니라, 로드된 데이터 중 실제 값이 있는 최대
@@ -349,7 +357,9 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
   function formatCompareValue(col: ColumnDef, p: StagingRow): string {
     const v = col.getValue(p)
     if (v == null || v === '') return '-'
-    if ((col.key === 'price' || col.key === 'cost_price' || col.key === 'shipping_fee') && typeof v === 'number') return `₩${v.toLocaleString()}`
+    if (col.key === 'price' || col.key === 'cost_price' || col.key === 'shipping_fee') {
+      if (typeof v === 'number' || (col.key === 'shipping_fee' && typeof v === 'string')) return formatMoneyOrRange(v)
+    }
     return String(v)
   }
 
@@ -709,7 +719,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
                 name_original: { node: p.name_original, title: p.name_original, className: 'px-2 py-2 text-xs text-gray-700 truncate' },
                 price: { node: p.price ? `₩${p.price.toLocaleString()}` : '-', className: 'px-2 py-2 text-xs text-gray-700 truncate' },
                 cost_price: { node: p.raw_data?.cost_price ? `₩${p.raw_data.cost_price.toLocaleString()}` : '-', className: 'px-2 py-2 text-xs text-gray-800 font-semibold truncate' },
-                shipping_fee: { node: p.raw_data?.shipping_fee ? `₩${p.raw_data.shipping_fee.toLocaleString()}` : '-', className: 'px-2 py-2 text-xs text-gray-700 truncate' },
+                shipping_fee: { node: p.raw_data?.shipping_fee != null ? formatMoneyOrRange(p.raw_data.shipping_fee) : '-', className: 'px-2 py-2 text-xs text-gray-700 truncate' },
                 brand: { node: p.brand || '-' },
                 manufacturer: { node: p.manufacturer || '-' },
                 origin: { node: p.origin || '-' },
@@ -876,7 +886,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
                   <p>상품명: {adjustPreview.name || '-'}</p>
                   <p>가격: {adjustPreview.price != null ? `₩${adjustPreview.price.toLocaleString()}` : '-'}</p>
                   <p>공급가(도매가): {adjustPreview.cost_price != null ? `₩${adjustPreview.cost_price.toLocaleString()}` : '-'}</p>
-                  <p>배송비: {adjustPreview.shipping_fee != null ? `₩${adjustPreview.shipping_fee.toLocaleString()}` : '-'}</p>
+                  <p>배송비: {adjustPreview.shipping_fee != null ? formatMoneyOrRange(adjustPreview.shipping_fee) : '-'}</p>
                   <p>카테고리: {adjustPreview.category || '-'}</p>
                   <p>브랜드/제조사/원산지: {[adjustPreview.brand, adjustPreview.manufacturer, adjustPreview.origin].filter(Boolean).join(' / ') || '-'}</p>
                   {Object.entries(adjustPreview.custom_fields || {}).map(([field, value]) => (

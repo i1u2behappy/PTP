@@ -65,9 +65,13 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
     const salePrice = mp.sale_price ?? mp.price
     // cost_price(공급가)/shipping_fee는 mall_products에 전용 컬럼이 없어, 스크랩 당시 전체를 담아둔
     // raw_data에서 꺼낸다(lib/scrape/incremental.ts의 upsertMallProduct가 저장해둔 것).
-    const rawData = (mp.raw_data || {}) as { cost_price?: number | null; shipping_fee?: number | null; custom_fields?: Record<string, string> }
+    const rawData = (mp.raw_data || {}) as { cost_price?: number | null; shipping_fee?: number | string | null; custom_fields?: Record<string, string> }
     const costPrice = rawData.cost_price ?? null
-    const shippingFee = rawData.shipping_fee ?? null
+    // shipping_fee는 Raw 데이터엔 "3000~4000"처럼 범위 문자열로 남아있을 수 있다(신우 등) — product_master는
+    // 가격 계산에 쓰이는 숫자 컬럼이라 범위의 최저값만 취한다.
+    const shippingFee = typeof rawData.shipping_fee === 'string'
+      ? Number(rawData.shipping_fee.split('~')[0]) || null
+      : rawData.shipping_fee ?? null
     // "스크랩 조정"으로 새로 추가된 컬럼들 — Transform 등이 이미 써둔 custom_fields를 덮어쓰지 않도록 병합한다.
     const scrapedCustomFields = rawData.custom_fields || {}
 

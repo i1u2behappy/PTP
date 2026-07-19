@@ -12,8 +12,9 @@ export interface ExtractedProduct {
   sale_price: number | null
   /** 도매가/공급가 — 소비자가(price)와 별도로 노출하는 몰에서만 채워짐(예: 신우). */
   cost_price: number | null
-  /** 배송비 — "3,000~4,000원"처럼 범위로 나오면 최저값. */
-  shipping_fee: number | null
+  /** 배송비 — "3,000~4,000원"처럼 범위로 나오면 "3000~4000" 문자열로, 단일 값이면 숫자로 채운다.
+   *  product_master로 옮길 때는 계산 가능하도록 최저값 숫자로 변환한다(lib/master/migrate.ts). */
+  shipping_fee: number | string | null
   brand: string
   manufacturer: string
   origin: string

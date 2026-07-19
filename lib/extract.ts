@@ -73,11 +73,11 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     }
     if (!mainImages.length) {
       // 대표이미지가 여러 장인 갤러리형 UI(예: 신우의 .img_small 썸네일 목록)를 먼저 시도하고,
-      // 없으면 큰 대표이미지 하나(#bigimage)만이라도 쓴다.
+      // 없으면 큰 대표이미지 하나(#bigimage 신우, #objImg/.img_big 고도몰 — 실제 페이지로 확인)만이라도 쓴다.
       const galleryImgs = Array.from(document.querySelectorAll<HTMLImageElement>('.img_small .small img')).map(img => img.src).filter(Boolean)
       if (galleryImgs.length) mainImages = galleryImgs
       else {
-        const bigImg = document.querySelector<HTMLImageElement>('#bigimage')
+        const bigImg = document.querySelector<HTMLImageElement>('#bigimage, #objImg, .img_big img')
         if (bigImg?.src) mainImages = [bigImg.src]
       }
     }
@@ -98,9 +98,10 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
 
     // ld+json/og의 대표 이미지 갤러리(여러 장일 수 있음)와는 별개로, 상세설명 영역에 판매자가 직접
     // 올린 상품별 상세 이미지(사이즈/소재 등 텍스트로는 안 남는 구분 정보)를 모은다. 카페24는 #prdDetail을
-    // 쓰고, 그게 없으면 다른 자체 제작 몰에서 흔한 .detail_con(예: 신우)을 대신 시도한다.
+    // 쓰고, 그게 없으면 다른 자체 제작 몰에서 흔한 .detail_con(예: 신우), .view_detail(예: 고도몰,
+    // 펫투비 — 실제 페이지로 확인)을 대신 시도한다.
     // /upload/appfiles/ 경로는 카페24 앱스토어 위젯이 심는 몰 공통 배너로, 상품마다 똑같이 끼어들어오므로 제외한다.
-    const detailContainer = document.querySelector('#prdDetail') || document.querySelector('.detail_con')
+    const detailContainer = document.querySelector('#prdDetail') || document.querySelector('.detail_con') || document.querySelector('.view_detail')
     const detailImageEls = Array.from(detailContainer?.querySelectorAll<HTMLImageElement>('img') || [])
       .filter(img => img.src && !mainImages.includes(img.src) && !img.src.includes('/upload/appfiles/'))
     const detailImages = detailImageEls.map(img => img.src)

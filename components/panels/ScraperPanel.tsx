@@ -81,6 +81,7 @@ interface MallProfileSignals {
   infoLabels: string[]
   categoryPaths: string[]
   categoryMaxDepth: number
+  categoryMenuNames: string[]
 }
 interface ProfileCheckResult {
   signals: MallProfileSignals
@@ -719,7 +720,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               )}
               <ul className="grid grid-cols-2 gap-x-4 gap-y-0.5">
                 <li>플랫폼: {profileResult.signals.platform}</li>
-                <li>카테고리: {profileResult.signals.categoryMaxDepth > 0 ? `${profileResult.signals.categoryMaxDepth}단계 (샘플 기준)` : '파악 안 됨'}</li>
+                <li>
+                  카테고리: {profileResult.signals.categoryMenuNames.length > 0
+                    ? `메뉴 전체 ${profileResult.signals.categoryMenuNames.length}개`
+                    : profileResult.signals.categoryMaxDepth > 0 ? `${profileResult.signals.categoryMaxDepth}단계 (샘플 기준)` : '파악 안 됨'}
+                </li>
                 <li>옵션 UI: {profileResult.signals.optionUiTypes.join('/') || '없음'}{profileResult.signals.hasCascadingOptions && ' (연쇄옵션)'}</li>
                 <li>대표/상세이미지: {profileResult.signals.hasMainImages ? '있음' : '없음'} / {profileResult.signals.hasDetailImages ? '있음' : '없음'}</li>
                 <li>재고수량 표시: {profileResult.signals.hasStockQty ? '있음' : '없음'}</li>
@@ -730,8 +735,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               {profileResult.signals.infoLabels.length > 0 && (
                 <p>상품정보 항목: {profileResult.signals.infoLabels.join(', ')}</p>
               )}
-              {profileResult.signals.categoryPaths.length > 0 && (
-                <p>확인된 카테고리 경로: {profileResult.signals.categoryPaths.join(', ')}</p>
+              {profileResult.signals.categoryMenuNames.length > 0 ? (
+                <p>카테고리 메뉴 전체: {profileResult.signals.categoryMenuNames.join(', ')}</p>
+              ) : profileResult.signals.categoryPaths.length > 0 && (
+                <p>확인된 카테고리 경로(샘플 기준): {profileResult.signals.categoryPaths.join(', ')}</p>
               )}
             </div>
           )}

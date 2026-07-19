@@ -688,6 +688,10 @@ export interface MallProfileSignals {
    *  샘플로 실제 확인된 경로만이라, 몰의 카테고리 구조가 몇 단계인지 정도의 근사치로 봐야 한다. */
   categoryPaths: string[]
   categoryMaxDepth: number
+  /** 상단 내비게이션 메뉴에 카테고리 전체가 노출되는 플랫폼(현재 고도몰만 지원)에서, 상품을 하나하나
+   *  열어보지 않고 메뉴에서 바로 얻은 대분류+중분류 카테고리명 전체. 지원 안 되는 플랫폼은 빈 배열 —
+   *  categoryPaths(샘플 기준 근사치)로 대신 가늠해야 한다. */
+  categoryMenuNames: string[]
 }
 
 const MALL_PROFILE_SAMPLE_SIZE = 6
@@ -741,11 +745,15 @@ async function sampleMallProfile(page: Page, startUrl: string): Promise<MallProf
   // 카탈로그로 인식되지 않아 platform이 못 잡혔으면(위 예외로 빠진 경우), 지금 보고 있는 페이지 자체에서
   // 다시 감지한다 — 상품 상세페이지도 플랫폼 감지에 필요한 generator/스크립트 태그는 대부분 그대로 갖고 있다.
   if (platform === 'unknown') platform = await detectMallPlatform(page).catch(() => 'unknown' as MallPlatform)
+  // 아직 상품 샘플로 이동하기 전(현재 page가 startUrl), 헤더 내비게이션에서 전체 카테고리 메뉴를 스캔한다 —
+  // 이동 후엔 이 몰의 헤더가 안 보일 수 있어 반드시 여기서 먼저 해야 한다.
+  const categoryMenuNames = await scanCategoryMenu(page, platform)
 
   const signals: MallProfileSignals = {
     sampleCount: 0, platform, sampleProductUrl: sampleUrls[0], hasMainImages: false, hasDetailImages: false,
     optionUiTypes: [], hasCascadingOptions: false, hasStockQty: false, hasStockStatusText: false,
     hasStockByOption: false, hasDetailText: false, infoLabels: [], categoryPaths: [], categoryMaxDepth: 0,
+    categoryMenuNames,
   }
   const optionTypes = new Set<'select' | 'swatch' | 'none'>()
   const infoLabelSet = new Set<string>()
@@ -896,6 +904,22 @@ export async function detectMallPlatform(page: Page): Promise<MallPlatform> {
   })
 }
 
+/** 고도몰(펫투비 등)은 헤더 내비게이션에 대분류(.cate)/중분류(.ovmenu) 카테고리 전체가 항상 박혀있다
+ *  (실제 페이지로 확인) — 상품을 하나하나 열어보며 카테고리를 유추하지 않아도 이 몰의 전체 카테고리
+ *  구조를 한 번에 알 수 있다. 다른 플랫폼은 아직 실제 마크업을 확인 못 해 지원하지 않는다(빈 배열).
+ *  ponytail: 플랫폼별 메뉴 셀렉터가 확인되는 대로 여기 분기를 하나씩 추가하면 된다. */
+async function scanCategoryMenu(page: Page, platform: MallPlatform): Promise<string[]> {
+  if (platform !== 'godomall') return []
+  return page.evaluate(() => {
+    const names = new Set<string>()
+    document.querySelectorAll('.cate a, .ovmenu a').forEach(a => {
+      const name = (a.textContent || '').trim()
+      if (name) names.add(name)
+    })
+    return [...names]
+  }).catch(() => [])
+}
+
 interface CategoryLabel {
   category: string
   /** 브레드크럼에 "브랜드"라는 카테고리 노드가 있으면(예: 브랜드 > 나이키), 그 바로 아래 항목은 상품
@@ -907,7 +931,9 @@ interface CategoryLabel {
 // 같은 클래스가 배너 이미지용으로도 쓰여 텍스트가 비어있을 수 있어 모든 매칭 요소 중 텍스트가 있는 것을 찾는다.
 async function detectCategoryLabel(page: Page): Promise<CategoryLabel> {
   return page.evaluate(() => {
-    const candidates = ['.xans-product-headcategory', 'nav[aria-label*="breadcrumb" i]', '.breadcrumb', '.location']
+    // .path는 고도몰(펫투비 등) 표준 브레드크럼 클래스 — <li> 없이 "HOME &gt; 강아지 &gt; 간식 &gt; 덴탈껌"
+    // 처럼 평문 텍스트+구분자로만 되어 있다(실제 페이지로 확인).
+    const candidates = ['.xans-product-headcategory', 'nav[aria-label*="breadcrumb" i]', '.breadcrumb', '.location', '.path']
     for (const sel of candidates) {
       for (const el of Array.from(document.querySelectorAll(sel))) {
         // <li>로 계층이 명확히 나뉘어 있으면 그 경계를 그대로 쓴다 — "/" 기준으로 통째로 쪼개면
@@ -918,7 +944,12 @@ async function detectCategoryLabel(page: Page): Promise<CategoryLabel> {
           .map(li => (li.textContent || '').replace(/^[\s/]+|[\s/]+$/g, '').trim())
           .filter(Boolean)
         if (!items.length) {
-          const text = (el.textContent || '').split('/').map(s => s.trim()).filter(Boolean).join(' > ')
+          // 고도몰의 .path는 <li> 없이 "HOME > 강아지 > 간식"처럼 ">" 구분자를 쓴다 — "/"만 보고 쪼개면
+          // 아예 안 쪼개져 "HOME > 강아지 > 간식" 전체가 카테고리명 한 덩어리로 잘못 들어간다. ">"가 있으면
+          // 그걸로, 없으면 기존처럼 "/"로 나누고, 맨 앞의 "HOME/홈" 같은 루트 라벨은 카테고리가 아니라 뺀다.
+          const raw = (el.textContent || '').trim()
+          const parts = (raw.includes('>') ? raw.split('>') : raw.split('/')).map(s => s.trim()).filter(Boolean)
+          const text = parts.filter(p => !/^(home|홈)$/i.test(p)).join(' > ')
           if (text) return { category: text, brand: '' }
           continue
         }

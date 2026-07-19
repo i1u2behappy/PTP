@@ -66,6 +66,22 @@
 백그라운드로 예약). 살아있는 세션은 화면과 실제 상태가 항상 일치하고, 죽은 세션은 20초 안에는
 반드시 풀린다.
 
+### 좀비 세션 자동 감지 — 사용자가 중지를 누르지 않아도 조용히 죽는 경우
+
+위 20초 폴백은 사용자가 실제로 "중지"를 눌렀을 때만 작동한다 — 그런데 개발자모드 확장은 아무도 중지를
+누르지 않아도 스스로 조용히 죽을 수 있다(MV3 서비스워커 종료, `chrome.debugger` 분리, 탭 새로고침/포커스
+아웃 등). 이 경우 `extension-ingest`로의 `POST`도, `stop-requested` 폴링도 전부 뚝 끊기고 아무 에러도
+남기지 않은 채(죽는 순간 실행 중이던 코드가 통째로 사라지므로) 세션이 `running`에 영원히 멈춘다 —
+사용자가 우연히 상태를 다시 볼 때까지 아무도 알아채지 못한다(실제 발견된 사례: 신우 세션이 마지막 활동
+후 4분 넘게 `running`으로 멈춰 있었는데 중지 요청 이력이 없었음).
+
+`app/api/scrape/status/route.ts`(PTP가 세션 진행 중 2초마다 자동 폴링하는 경로)에 감시 로직을 추가: 이
+세션의 마지막 `scrape_item_log` 활동 시각(없으면 세션 생성 시각)으로부터 90초(일반적인 상품 처리 주기
+보다 훨씬 긴 여유)가 지났는데도 `status='running'`이면, 폴링이 오는 그 순간 서버가 자동으로
+`'stopped'`로 확정한다. 별도 백그라운드 워커나 크론 없이, 이미 존재하는 폴링 경로에 얹은 것이라 추가
+인프라가 필요 없다 — 다만 아무도 그 세션의 상태를 더 이상 조회하지 않으면(패널을 떠난 뒤) 감지도 멈추고,
+나중에 다시 들여다볼 때(devmode 사이트 선택 시 `checkForRunningSession`이 재개) 그제서야 해소된다.
+
 ### 로그인 창 강제 종료 제거
 
 `lib/scrape/run.ts`의 `runScraping()` 시작부에서 `closeLoginWindow(siteId)`를 무조건 호출하던 코드를
@@ -84,6 +100,7 @@
   `scrape_item_log` 기록, bot-detection 오탐 방지(`cost_price`도 null 체크에 포함)
 - `lib/scrape/run.ts`: 시작 시 `closeLoginWindow` 강제 호출 제거
 - `app/api/scrape/stop-requested/route.ts`(신규), `app/api/scrape/failed-urls/route.ts`(신규)
+- `app/api/scrape/status/route.ts`: 좀비 세션(사용자 중지 없이 조용히 죽은 경우) 자동 감지·확정
 - `app/api/scrape/extension-ingest/route.ts`: 실패 로그 기록 분기 추가
 - `extension-poc/background.js`: `checkStopRequested`, `reportFailure`, `retryFailed`,
   컨텍스트 메뉴 `ptp-retry-failed`
@@ -93,6 +110,7 @@
 ## 상태
 
 **구현 완료.** 커밋 `3500f61` → `f5f9ce4`(좀비 세션 즉시 확정 추가, 이후 "화면과 실제 상태 불일치"
-문제의 원인이 됨) → 이번 커밋(즉시 확정 대신 20초 유예 폴백으로 수정). tsc/eslint 클린, 확장 런타임
-문자열(`buildExtractExpr` 등) 실제 처리된 값 기준으로 재검증 완료. 실사용(실제 CAPTCHA 상황에서의
-중지→재시도) 확인은 사용자 몫으로 남음.
+문제의 원인이 됨) → `8dc74cb`(즉시 확정 대신 20초 유예 폴백으로 수정) → 이번 커밋(중지 요청 없이
+조용히 죽는 세션까지 잡는 90초 상시 감시 추가). tsc/eslint 클린, 확장 런타임 문자열(`buildExtractExpr`
+등) 실제 처리된 값 기준으로 재검증 완료. 좀비 감지 로직은 실제로 멈춰있던 세션(신우 session 50)에
+대해 라이브로 자동 해소되는 것까지 확인함.

@@ -172,8 +172,11 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
   const [adjustPrompt, setAdjustPrompt] = useState('')
   const [adjustBusy, setAdjustBusy] = useState(false)
   const [adjustMessage, setAdjustMessage] = useState<string | null>(null)
-  const [adjustStarted, setAdjustStarted] = useState(false)
-  const [adjustDevPromptSaved, setAdjustDevPromptSaved] = useState(false)
+  // 몇 번이든 반복해서 조정할 수 있다 — 이 카운트가 1 이상이면(정상모드=최소 1건 테스트 성공,
+  // 개발자모드=최소 1번 재기동으로 규칙 확인 성공) "조정 확정"이 활성화된다.
+  const [adjustRoundCount, setAdjustRoundCount] = useState(0)
+  // 개발자모드는 백엔드가 재추출을 못 하니, "개발자모드 재기동"으로 확인한 최신 학습 규칙을 대신 보여준다.
+  const [adjustRules, setAdjustRules] = useState<Record<string, { type: string; value: string }> | null>(null)
 
   // 옵션1/옵션2/... 컬럼은 실제 값(values)이 있는 항목만 세고, 빈 옵션 슬롯만으로는 컬럼을 만들지 않는다.
   const maxOptionCount = items.reduce((max, p) => {
@@ -360,16 +363,16 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     setShowAdjust(true)
     setAdjustPrompt('')
     setAdjustMessage(null)
-    setAdjustStarted(false)
-    setAdjustDevPromptSaved(false)
+    setAdjustRoundCount(0)
+    setAdjustRules(null)
   }
 
-  /** "스크랩 조정 개시" — 속도를 위해 지금 그리드 맨 위에 보이는 상품 1건만 대상으로 규칙을 만들고
-   *  테스트해본다(일반모드). 개발자모드는 백엔드가 페이지를 못 열어보니 프롬프트만 저장해두고 사용자가
-   *  실제 상품 페이지에서 확장 우클릭 메뉴를 실행해야 한다. */
+  /** "스크랩 조정 개시" — 몇 번이든 반복 가능하다. 속도를 위해 지금 그리드 맨 위에 보이는 상품 1건만
+   *  대상으로 규칙을 만들고 테스트해본다(일반모드, 매번 실제로 재추출해 그리드에 반영). 개발자모드는
+   *  백엔드가 페이지를 못 열어보니 프롬프트만 저장해두고, 사용자가 실제 상품 페이지에서 확장 우클릭
+   *  메뉴를 실행한 뒤 "개발자모드 재기동"으로 결과를 확인해야 한다. */
   async function handleAdjustStart() {
     if (!siteId || !adjustPrompt.trim()) return
-    const target = visibleItems[0]
     setAdjustBusy(true)
     setAdjustMessage(null)
     try {
@@ -379,8 +382,10 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
           body: JSON.stringify({ prompt: adjustPrompt }),
         })
         if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
-        setAdjustDevPromptSaved(true)
+        setAdjustMessage(`✓ 프롬프트를 저장했습니다. 이제 ${siteName || '이 몰'} 상품 페이지(맨 위 상품 페이지 권장)를 열고 마우스 우클릭 → "PTP 조정 반영"을 실행한 뒤, 아래 "개발자모드 재기동"을 눌러 결과를 확인하세요.`)
+        setAdjustPrompt('')
       } else {
+        const target = visibleItems[0]
         if (!target) { setAdjustMessage('테스트할 상품이 없습니다.'); return }
         const res = await fetch(`/api/sites/${siteId}/adjust`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -389,8 +394,9 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
         const data = await res.json() as { updated?: number; failed?: { error: string }[]; error?: string }
         if (!res.ok) throw new Error(data.error || `서버 오류 (${res.status})`)
         if (data.failed?.length) throw new Error(data.failed[0].error)
-        setAdjustMessage('✓ 1개 상품에 테스트 적용했습니다 — 그리드 첫 줄에서 결과를 확인해보세요.')
-        setAdjustStarted(true)
+        setAdjustRoundCount(c => c + 1)
+        setAdjustMessage(`✓ ${adjustRoundCount + 1}번째 테스트 완료 — 아래 "현재 추출된 값"에서 확인하고, 더 고칠 부분이 있으면 다시 입력해 계속 조정하세요.`)
+        setAdjustPrompt('')
         loadItems()
       }
     } catch (e) {
@@ -400,15 +406,35 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     }
   }
 
-  /** "조정 확정" — 테스트해본 규칙을 이 세션의 미확정 상품 전체에 적용한다(일반모드). 개발자모드는
-   *  PTP가 그 결과(확장 캡처가 실제로 규칙을 만들었는지)를 알 방법이 없으니, 사용자가 우클릭 캡처를
-   *  실제로 마쳤는지 먼저 확인한 뒤 다음 단계(재스크랩)를 안내한다 — 안 했는데 눌러 헷갈리지 않도록. */
+  /** "개발자모드 재기동" — 사용자가 실제 브라우저에서 확장 우클릭("PTP 조정 반영")을 실행한 뒤 여기로
+   *  돌아와 누른다. PTP는 그 캡처가 실제로 언제 끝났는지 알 방법이 없어서(백엔드가 그 몰 페이지를
+   *  스스로 못 열어보는 게 개발자모드의 정의), 사용자가 명시적으로 "지금 확인해줘"라고 하는 이 버튼이
+   *  유일한 체크포인트다 — 그 몰의 최신 학습 규칙을 다시 불러와 보여준다. */
+  async function handleDevRestart() {
+    if (!siteId) return
+    setAdjustBusy(true)
+    setAdjustMessage(null)
+    try {
+      const res = await fetch(`/api/sites/${siteId}`)
+      if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
+      const data = await res.json() as { extraction_rules?: Record<string, { type: string; value: string }> }
+      setAdjustRules(data.extraction_rules || {})
+      setAdjustRoundCount(c => c + 1)
+      setAdjustMessage('✓ 최신 학습 규칙을 확인했습니다 — 아래에서 확인하고, 더 고칠 부분이 있으면 다시 입력해 계속 조정하세요.')
+    } catch (e) {
+      setAdjustMessage(`실패: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setAdjustBusy(false)
+    }
+  }
+
+  /** "조정 확정" — 지금까지 반복한 조정 결과를 이 세션의 미확정 상품 전체에 적용한다(일반모드). 개발자모드는
+   *  백엔드가 전체를 다시 스크랩할 수 없으니 확장을 다시 실행하라는 안내만 보여준다("개발자모드 재기동"으로
+   *  이미 규칙 확인을 거쳤으므로 여기서 다시 물어보지 않는다). */
   async function handleAdjustConfirm() {
     if (!siteId) return
     if (manualLoginRequired) {
-      const done = confirm(`${siteName || '이 몰'} 상품 페이지에서 마우스 우클릭 → "PTP 조정 반영"을 이미 실행하셨나요?\n\n아직이라면 취소를 누르고 먼저 그 단계를 진행해주세요.`)
-      if (!done) return
-      setAdjustMessage('좋습니다. 이제 카테고리 페이지에서 확장 아이콘을 다시 눌러 전체를 재스크랩해주세요 — 개발자모드는 기존 항목을 그 자리에서 못 고치고 새 세션으로 다시 수집합니다.')
+      setAdjustMessage('카테고리 페이지에서 확장 아이콘을 다시 눌러 전체를 재스크랩해주세요 — 개발자모드는 기존 항목을 그 자리에서 못 고치고 새 세션으로 다시 수집합니다.')
       return
     }
     if (!sessionId) return
@@ -681,18 +707,20 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
           </div>
 
           {/* 모드마다 절차가 완전히 다르므로(일반모드=자동, 개발자모드=브라우저 수동 조작 필요),
-              헷갈리지 않게 지금 몰의 모드에 맞는 안내만 번호 순서로 보여준다. */}
+              헷갈리지 않게 지금 몰의 모드에 맞는 안내만 번호 순서로 보여준다. 만족할 때까지 몇 번이든
+              반복해도 되고, 확정은 그 다음이라는 걸 명확히 한다. */}
           {manualLoginRequired ? (
             <ol className="text-xs text-gray-500 list-decimal list-inside space-y-1 mb-3">
               <li>아래에 조정 내용을 입력하고 <b className="text-gray-600">스크랩 조정 개시</b>를 누르면 프롬프트가 저장됩니다 (이 몰은 개발자모드라 PTP가 페이지를 직접 열어볼 수 없어요).</li>
-              <li><b className="text-gray-600">{siteName || '이 몰'}</b> 상품 페이지(맨 위 상품 페이지 권장)를 열고 마우스 우클릭 → <b className="text-gray-600">PTP 조정 반영</b>을 눌러 규칙을 만드세요.</li>
-              <li>규칙을 만들었으면 <b className="text-gray-600">조정 확정</b>을 눌러, 안내에 따라 카테고리 페이지에서 확장 아이콘을 다시 실행해 전체를 재스크랩하세요.</li>
+              <li><b className="text-gray-600">{siteName || '이 몰'}</b> 상품 페이지(맨 위 상품 페이지 권장)를 열고 마우스 우클릭 → <b className="text-gray-600">PTP 조정 반영</b>을 실행하세요.</li>
+              <li>PTP로 돌아와 <b className="text-gray-600">개발자모드 재기동</b>을 눌러 결과를 확인하세요. 만족스러울 때까지 1~3단계를 몇 번이든 반복해도 됩니다.</li>
+              <li>만족스러우면 <b className="text-gray-600">조정 확정</b>을 눌러, 안내에 따라 카테고리 페이지에서 확장 아이콘을 다시 실행해 전체를 재스크랩하세요.</li>
             </ol>
           ) : (
             <ol className="text-xs text-gray-500 list-decimal list-inside space-y-1 mb-3">
               <li>아래에 조정 내용을 입력하고 <b className="text-gray-600">스크랩 조정 개시</b>를 누르면, 맨 위 상품 1건으로 자동 테스트합니다.</li>
-              <li>그리드 첫 줄에서 결과가 맞는지 확인하세요.</li>
-              <li>맞으면 <b className="text-gray-600">조정 확정</b>을 눌러 이 세션의 전체 상품에 반영하세요.</li>
+              <li>아래 &quot;현재 추출된 값&quot;에서 결과를 확인하세요. 만족스러울 때까지 몇 번이든 다시 입력해 반복해도 됩니다.</li>
+              <li>만족스러우면 <b className="text-gray-600">조정 확정</b>을 눌러 이 세션의 전체 상품에 반영하세요.</li>
             </ol>
           )}
           <p className="text-[11px] text-gray-400 mb-4">확정한 내용은 앞으로 이 몰을 스크랩할 때도 계속 적용되는 규칙으로 저장됩니다.</p>
@@ -713,32 +741,43 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
             </div>
           )}
 
-          {manualLoginRequired && adjustDevPromptSaved ? (
-            <p className="text-sm text-gray-700 bg-teal-50 border border-teal-200 rounded-xl px-3 py-3 mb-3">
-              ✓ 1단계 완료(프롬프트 저장됨). 이제 2단계 — {siteName || '이 몰'} 상품 페이지(맨 위 상품 페이지
-              권장)를 열고 마우스 우클릭 → &quot;PTP 조정 반영&quot;을 눌러주세요. 끝나면 아래
-              &quot;조정 확정&quot;을 눌러 3단계로 넘어가세요.
-            </p>
-          ) : (
-            <textarea value={adjustPrompt} onChange={e => setAdjustPrompt(e.target.value)} rows={4}
-              placeholder="예: 가격은 도매가격이 아니라 소비자가에서 가져와야 해. 배송비도 배송비 라벨에서 가져와줘."
-              className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 mb-3" />
+          {manualLoginRequired && adjustRules && (
+            <div className="bg-gray-50 rounded-xl p-3 mb-4 text-xs text-gray-600 space-y-1">
+              <span className="font-semibold text-gray-700">지금까지 학습된 규칙</span>
+              {Object.keys(adjustRules).length === 0 ? (
+                <p className="text-gray-400">아직 만들어진 규칙이 없습니다.</p>
+              ) : (
+                Object.entries(adjustRules).map(([field, rule]) => (
+                  <p key={field}>{field}: {rule.type === 'label' ? `라벨 "${rule.value}"` : `셀렉터 "${rule.value}"`}</p>
+                ))
+              )}
+            </div>
           )}
+
+          <textarea value={adjustPrompt} onChange={e => setAdjustPrompt(e.target.value)} rows={4}
+            placeholder="예: 가격은 도매가격이 아니라 소비자가에서 가져와야 해. 배송비도 배송비 라벨에서 가져와줘."
+            className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 mb-3" />
 
           {adjustMessage && <p className="text-xs text-gray-600 mb-3">{adjustMessage}</p>}
 
-          <div className="flex gap-2">
-            <button onClick={handleAdjustStart} disabled={adjustBusy || !adjustPrompt.trim() || (manualLoginRequired ? adjustDevPromptSaved : false)}
+          <div className="flex gap-2 mb-2">
+            <button onClick={handleAdjustStart} disabled={adjustBusy || !adjustPrompt.trim()}
               className="flex-1 py-2.5 rounded-xl bg-teal-500 text-white text-sm font-semibold hover:bg-teal-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
               {adjustBusy ? '처리 중...' : '스크랩 조정 개시'}
             </button>
-            <button onClick={handleAdjustConfirm}
-              disabled={adjustBusy || (manualLoginRequired ? !adjustDevPromptSaved : !adjustStarted)}
-              title={manualLoginRequired && !adjustDevPromptSaved ? '먼저 "스크랩 조정 개시"로 프롬프트를 저장해주세요' : !manualLoginRequired && !adjustStarted ? '먼저 "스크랩 조정 개시"로 1건 테스트를 해주세요' : undefined}
-              className="flex-1 py-2.5 rounded-xl bg-white border border-gray-300 text-gray-700 text-sm font-semibold hover:border-teal-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-              조정 확정
-            </button>
+            {manualLoginRequired && (
+              <button onClick={handleDevRestart} disabled={adjustBusy}
+                className="flex-1 py-2.5 rounded-xl bg-white border border-gray-300 text-gray-700 text-sm font-semibold hover:border-teal-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                개발자모드 재기동
+              </button>
+            )}
           </div>
+          <button onClick={handleAdjustConfirm}
+            disabled={adjustBusy || adjustRoundCount === 0}
+            title={adjustRoundCount === 0 ? '먼저 "스크랩 조정 개시"로 최소 1번 조정해보세요' : undefined}
+            className="w-full py-2.5 rounded-xl bg-gray-800 text-white text-sm font-semibold hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+            조정 확정 (만족스러우면)
+          </button>
         </div>
       </div>
     )}

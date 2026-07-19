@@ -72,26 +72,34 @@ async function navigate(tabId, url) {
 }
 
 // 상품 링크/다음페이지 링크 수집 — 페이지 이동 없이 현재 문서만 읽는다. 몰마다 플랫폼이 달라(카페24
-// SEO형, 카페24 고전형, 신우 같은 구형 자체 솔루션 등) 여러 패턴을 다 시도한다:
+// SEO형, 카페24 고전형, 신우 같은 구형 자체 솔루션, 고도몰 등) 여러 패턴을 다 시도한다(lib/scraper.ts의
+// PLATFORM_PROFILES와 같은 패턴을 씀 — 두 구현이 갈라지지 않도록 플랫폼이 추가되면 항상 같이 반영):
 // - 카페24 SEO: /product/상품명/번호/category/분류/display/순서/
 // - 카페24 고전: /product/detail.html?product_no=...
 // - 구형 자체 솔루션(신우 등): detail.htm?brandcode=... 처럼 detail.htm(l) + 알려진 코드 파라미터
+// - 고도몰(펫투비 등): goods_view.php?goodsno=...
 const COLLECT_LINKS_EXPR = `(() => {
   const isProductLink = (href) => {
     if (/\\/product\\/.+\\/\\d+\\/category\\/\\d+\\/display\\/\\d+/.test(href)) return true
     if (/detail\\.html?/i.test(href) && /[?&](product_no|branduid|goodsno|goods_no|brandcode)=/i.test(href)) return true
+    if (/goods_view\\.php/i.test(href) && /[?&]goodsno=/i.test(href)) return true
     return false
   }
-  const links = Array.from(document.querySelectorAll('a[href*="/product/"], a[href*="detail.htm"]'))
+  const links = Array.from(document.querySelectorAll('a[href*="/product/"], a[href*="detail.htm"], a[href*="goods_view"]'))
     .map(a => a.href).filter(href => href && isProductLink(href))
   const uniqueLinks = [...new Set(links)]
 
   // 다음 페이지 — 카페24 표준 페이지네이션(.ec-base-paginate, 현재 페이지 a.this 다음 번호)을 먼저
-  // 시도하고, 없으면 "다음"/"next" 글자가 들어간 링크(신우 등 구형 몰은 화살표 이미지 대신 이 방식)를 찾는다.
+  // 시도하고, 없으면 고도몰 표준(.paginate a.next), 그래도 없으면 "다음"/"next" 글자가 들어간 링크
+  // (신우 등 구형 몰은 화살표 이미지 대신 이 방식)를 찾는다.
   let nextUrl = null
   const pageNumbers = Array.from(document.querySelectorAll('.ec-base-paginate ol li a'))
   const currentIdx = pageNumbers.findIndex(a => a.classList.contains('this'))
   if (currentIdx >= 0 && currentIdx + 1 < pageNumbers.length) nextUrl = pageNumbers[currentIdx + 1].href
+  if (!nextUrl) {
+    const godoNext = document.querySelector('.paginate a.next')
+    if (godoNext) nextUrl = godoNext.href
+  }
   if (!nextUrl) {
     const nextTextLink = Array.from(document.querySelectorAll('a')).find(a => /다음|next/i.test((a.textContent || '').trim()))
     if (nextTextLink) nextUrl = nextTextLink.href
@@ -282,7 +290,12 @@ function buildExtractExpr(rules) {
   const detailImages = Array.from(detailContainer?.querySelectorAll('img') || [])
     .map(img => img.src).filter(src => src && !mainImages.includes(src) && !src.includes('/upload/appfiles/'))
 
-  const selectEls = Array.from(document.querySelectorAll('select'))
+  // 신우는 상품 상세페이지 안에 "추가 구성 상품(연관 상품)"이라는, 완전히 다른 상품의 미니 주문폼을
+  // 그대로 끼워 넣는다(자기 코드/사이즈/색상 select까지 별도로 있음) — 이 블록은 항상 .item_option_2에,
+  // 지금 보고 있는 실제 상품의 옵션은 항상 .item_option에 들어있다. 컨테이너 없이 전체 문서에서 select를
+  // 찾으면 연관 상품의 옵션까지 섞여 들어와(옵션이 size/size_0처럼 중복되고 조합도 엉뚱하게 섞인다).
+  const optionRoot = document.querySelector('.item_option') || document
+  const selectEls = Array.from(optionRoot.querySelectorAll('select'))
   const realValues = (sel) => Array.from(sel.options).filter(o => o.value !== '').map(o => (o.textContent || '').trim()).filter(Boolean)
   const options = selectEls
     .map(sel => ({ name: sel.getAttribute('title') || sel.name || sel.id || '', values: realValues(sel) }))

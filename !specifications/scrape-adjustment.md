@@ -105,6 +105,39 @@ Raw 확인 화면에서 지금 스크랩된 값과 실제 몰 페이지를 비�
   `/adjust/confirm`로 전체 재추출, 개발자모드는 `confirm()` 대화상자 없이 "확장으로 다시 스크랩해달라"는
   안내 메시지만 띄운다(재기동이 이미 체크포인트 역할을 하므로 이중 확인이 불필요).
 
+### 정밀 타겟팅 — "방금 스크랩한 세션"을 정확히 조준
+
+기존엔 개발자모드 확장이 "이 몰에서 가장 최근에 스크랩된 미확정 상품"을 URL만으로 찾아 캡처 대상으로
+삼았는데, 같은 URL이 여러 세션에 걸쳐 재수집돼 있으면 어떤 걸 봐야 할지 모호했다(다른 세션이 그 사이에
+`running` 상태로 끼어들면 특히). `sites.pending_adjustment_item_id INT` 컬럼을 추가해, "조정 개시" 시점에
+화면(`StagingItemsGrid`)에 실제로 보이던 그리드 맨 위 상품(`visibleItems[0].id`)을 같이 저장한다.
+
+- `POST /api/sites/[id]/adjust/prompt` — body에 `itemId`도 받아 `pending_adjustment_item_id`로 저장.
+- `GET /api/sites/[id]/adjust/target` — 확장이 우클릭 전에 "어느 페이지로 이동해 캡처할지" 물어보는 라우트.
+  `pending_adjustment_item_id`가 있으면 그 정확한 행의 `source_url`을 반환하고, 없을 때만(예전 데이터·
+  API 직접 호출 등) 기존 방식(그 몰에서 가장 최근 `pending` 상품)으로 대체.
+- `POST /api/sites/[id]/adjust/capture` — `currentValues` 조회도 동일하게 `pending_adjustment_item_id`가
+  있으면 `WHERE id=$1 AND site_id=$2`로 그 행을 정확히 집어 우선 사용.
+
+live 검증: `pending_adjustment_item_id`를 다른(더 오래된) 세션의 항목으로 수동 지정한 뒤
+`curl /api/sites/4/adjust/target` 호출 → 그 세션이 실제로 `running` 상태인 다른 세션이 있는 상황에서도
+지정된 옛 항목의 URL을 정확히 반환하는 것을 확인.
+
+### 커스텀 필드 — 8개 고정 필드를 벗어난 새 컬럼 학습
+
+"스크랩 조정"으로 기존 8개 필드(name/price/cost_price/shipping_fee/category/brand/manufacturer/origin) 밖의
+새 필드(예: "품번" 같은 몰 고유 항목)를 프롬프트로("'품번' 필드 추가" 같은 형식) 지시하면, AI가
+`ExtractedProduct.custom_fields: Record<string,string>`에 담아 학습한다.
+
+- `generateExtractionRules`의 tool 스키마는 `rules`에 `additionalProperties: ruleSchema`를 둬 임의 필드명을
+  허용하되, 실사용 테스트 결과 `additionalProperties`만으로는 모델이 사용자가 지정한 정확한 필드명을
+  안정적으로 쓰지 않는 경우가 있었다 — 프롬프트가 `/^'([^']+)' 필드 추가/` 패턴과 일치하면 그 필드명을
+  스키마 `properties`에 직접 주입해 강제한다.
+- `lib/master/migrate.ts`가 `raw_data.custom_fields`를 `product_master.custom_fields`에
+  `COALESCE(...) || $N::jsonb`로 병합(Transform 기능의 기존 병합 컨벤션과 동일).
+- `StagingItemsGrid`가 `items`에서 등장하는 모든 custom_fields 키를 스캔해 `custom_${key}` 컬럼을 동적으로
+  그리드에 추가.
+
 ## 하지 않는 것 (알려진 한계)
 
 - 개발자모드의 "확정"은 새 세션으로 다시 스크랩하는 것이지 기존 행을 제자리에서 못 고친다(확장의 수집
@@ -115,25 +148,29 @@ Raw 확인 화면에서 지금 스크랩된 값과 실제 몰 페이지를 비�
 
 ## 관련 파일
 
-- `lib/db.ts`: `sites.extraction_rules`/`pending_adjustment_prompt`
-- `lib/ai.ts`: `ExtractedProduct.cost_price/shipping_fee`, `generateExtractionRules`
+- `lib/db.ts`: `sites.extraction_rules`/`pending_adjustment_prompt`/`pending_adjustment_item_id`
+- `lib/ai.ts`: `ExtractedProduct.cost_price/shipping_fee/custom_fields`, `generateExtractionRules`(동적 필드명
+  주입 포함)
 - `lib/extract.ts`: `infoRows`에 `<dl>` 스캔 추가, `extractionRules` 최우선 적용, cost_price/shipping_fee/
   category 폴백
 - `lib/scrape/adjustment.ts`(신규): `runAdjustment` 공용 계약
 - `lib/scrape/reextract.ts`(신규): `reExtractStagingItems`
-- `lib/scrape/run.ts`, `lib/scraper.ts`: `extractionRules` 스크랩 옵션에 threading, `fetchPageText`
-- `lib/master/migrate.ts`: `product_master.cost_price/shipping_fee` 반영(raw_data에서 꺼냄)
-- `app/api/sites/[id]/adjust/*`(신규 4개 라우트), `app/api/sites/resolve/route.ts`(extractionRules 포함),
-  `proxy.ts`(adjust/capture 공개 경로)
+- `lib/scrape/run.ts`, `lib/scraper.ts`: `extractionRules` 스크랩 옵션에 threading, `fetchPageText`,
+  `extractFromHtml`(개발자모드 캡처 미리보기용)
+- `lib/master/migrate.ts`: `product_master.cost_price/shipping_fee/custom_fields` 반영(raw_data에서 꺼냄)
+- `app/api/sites/[id]/adjust/*`(prompt/capture/target/confirm 4개 라우트), `app/api/sites/resolve/route.ts`
+  (extractionRules 포함), `proxy.ts`(adjust 하위 공개 경로)
 - `extension-poc/background.js`, `manifest.json`: 라벨/캐스케이드 추출, 우클릭 메뉴
-- `components/panels/shared/StagingItemsGrid.tsx`, `ProductsListPanel.tsx`
+- `components/panels/shared/StagingItemsGrid.tsx`(itemId 전달, custom_${key} 동적 컬럼), `ProductsListPanel.tsx`
 
 ## 상태
 
 **구현 완료.** 커밋 `56e71d2`(최초 2버튼 버전) → `c627f68`(반복 가능한 라운드 구조로 재설계: "개발자모드
 재기동" 추가, "조정 확정"을 `adjustRoundCount` 기반 게이팅으로 전환, `GET /api/sites/[id]`가
-`extraction_rules` 반환하도록 확장) → `bc7baac`(모달 드래그 이동 지원, 전체화면 백드롭 제거).
+`extraction_rules` 반환하도록 확장) → `bc7baac`(모달 드래그 이동 지원, 전체화면 백드롭 제거) → `a1fba3a`
+(커스텀 컬럼 학습 + itemId 정밀 타겟팅 + 공급가 반영).
 
 일반모드 라우트는 curl로 검증(대상 조회·에러 전파·확정 로직 정상 동작 확인 — 다만 테스트 시점에 시즌백
 사이트의 실제 Playwright 재추출 자체가 이 기능과 무관한 사유로 막혀있어 "성공" 케이스까지는 못 봄, 재확인
-필요). 개발자모드 우클릭 캡처 → 재기동 → 확정 전체 흐름은 사용자 실사용 확인 대기 중.
+필요). itemId 정밀 타겟팅은 다른 세션 항목을 수동 지정해 `/adjust/target`이 정확히 그 항목을 반환함을 curl로
+확인. 개발자모드 우클릭 캡처 → 재기동 → 확정 전체 흐름은 사용자 실사용 확인 대기 중.

@@ -320,6 +320,74 @@ ${contextText.slice(0, 20_000)}`
   }
 }
 
+const COURIER_NAMES = ['CJ대한통운', '한진택배', '로젠택배', '우체국택배', '롯데택배', '경동택배', '대신택배', '합동택배', '일양로지스', 'CU편의점택배', 'GS Postbox']
+const BANK_NAMES = ['국민은행', '신한은행', '우리은행', '하나은행', '기업은행', '농협', '카카오뱅크', '토스뱅크', 'SC제일은행', '씨티은행', '우체국']
+
+function findCourier(text: string): string {
+  // "CJ 대한통운"처럼 띄어쓰기가 섞인 표기가 실제로 있어(실사용 몰 확인됨) 공백을 지우고 비교한다.
+  const flat = text.replace(/\s+/g, '')
+  const found = COURIER_NAMES.filter(name => flat.includes(name.replace(/\s+/g, '')))
+  return found.length ? found.join(', ') : '확인 안됨'
+}
+
+function findPaymentAccount(text: string): string {
+  const bank = BANK_NAMES.find(b => text.includes(b))
+  if (!bank) return '확인 안됨'
+  const idx = text.indexOf(bank)
+  return text.slice(Math.max(0, idx - 20), idx + 80).replace(/\s+/g, ' ').trim()
+}
+
+function findContact(text: string): string {
+  const phone = text.match(/0\d{1,2}-\d{3,4}-\d{4}/)?.[0]
+  const email = text.match(/[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}/)?.[0]
+  return [phone, email].filter(Boolean).join(' / ') || '확인 안됨'
+}
+
+/**
+ * generateMallProfileReport의 AI 호출 없이(과금 없이) 같은 8개 항목을 채우는 대체 경로 — ANTHROPIC_API_KEY
+ * 크레딧이 없어도 "몰 구조 파악"이 동작해야 한다는 요구에 따른 것(월 정액 claude.ai/Claude Code 구독과
+ * Anthropic API 크레딧은 별개 — 이 앱의 API 호출은 구독으로 대체할 방법이 없어, 과금 자체를 안 쓰는 이
+ * 경로를 대신 마련했다). URL 계층/카테고리/재고/상품페이지 구조는 이미 확보된 구조적 신호를 그대로
+ * 문장으로 조립하고(신뢰도 높음), 결제계좌/택배사/연락처는 원문에서 알려진 은행명·택배사명·전화번호·
+ * 이메일 패턴을 찾는 키워드/정규식 매칭이다(AI보다 재현율은 낮지만 오탐은 적음). scrapingNeeds는 자유
+ * 서술이 필요한 항목이라 규칙 기반으로는 만들 수 없어 규칙 기반임을 알리는 문구로 대체한다.
+ */
+export function buildHeuristicMallReport(input: {
+  platform: string
+  categoryHints: string[]
+  sampleProductUrl: string
+  contextText: string
+  optionUiTypes: string[]
+  hasCascadingOptions: boolean
+  hasMainImages: boolean
+  hasDetailImages: boolean
+  hasDetailText: boolean
+  hasStockQty: boolean
+  hasStockStatusText: boolean
+  hasStockByOption: boolean
+}): MallStructureReport {
+  return {
+    urlHierarchy: input.sampleProductUrl ? `상품 상세 URL 예시: ${input.sampleProductUrl} (플랫폼: ${input.platform})` : '확인 안됨',
+    categoryStructure: input.categoryHints.length ? input.categoryHints.join(', ') : '확인 안됨',
+    paymentAccount: findPaymentAccount(input.contextText),
+    shippingCourier: findCourier(input.contextText),
+    stockManagementType: [
+      input.hasStockQty && '재고수량 표시',
+      input.hasStockStatusText && '재고상태 문구 표시',
+      input.hasStockByOption && '옵션별 재고 위젯',
+    ].filter(Boolean).join(', ') || '확인 안됨',
+    companyContact: findContact(input.contextText),
+    productPageStructure: [
+      input.hasMainImages && '대표이미지 있음',
+      input.hasDetailImages && '상세이미지 있음',
+      input.hasDetailText && '상세설명 텍스트 있음',
+      input.optionUiTypes.length && `옵션 UI: ${input.optionUiTypes.join('/')}`,
+      input.hasCascadingOptions && '연쇄옵션 있음',
+    ].filter(Boolean).join(', ') || '확인 안됨',
+    scrapingNeeds: 'AI 미사용(규칙 기반) 리포트 — 정확도가 AI 분석보다 낮을 수 있으니 실제 페이지와 대조 확인 권장',
+  }
+}
+
 export interface AiExtractedFallback {
   name: string | null
   price: number | null

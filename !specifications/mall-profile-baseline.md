@@ -258,6 +258,30 @@ URL)로 먼저 `page.goto` — 로그인 확인 시점에 사용자가 마이페
 - `app/api/scrape/login-confirm/route.ts`(자동): 호출부 변경 없음 — 원래부터 `runMallProfileCheck`를
   그대로 썼으므로 자동으로 가벼운 경로만 타게 됨.
 
+## AI 실패 시 규칙 기반 대체 (2026-07-20, 4차)
+
+플랫폼 감지 수정 후 재테스트에서 원문 수집까지는 전부 정상 동작했는데, 마지막 AI 호출이
+`"Your credit balance is too low to access the Anthropic API"`로 실패해 리포트가 계속 null이었다.
+사용자 확인: `ANTHROPIC_API_KEY`(console.anthropic.com API 크레딧)와 claude.ai/Claude Code **월 정액
+구독은 완전히 별개**라 구독 크레딧으로 이 앱의 API 호출을 대신할 방법이 없다. 사용자가 "크레딧 충전
+방식 외 다른 방법으로 해결해달라"고 요청 — 즉 이 기능이 API 과금 없이도 동작해야 한다는 것.
+
+- `lib/ai.ts`의 `buildHeuristicMallReport(input)`(신규, 동기 함수, API 호출 없음): 같은 8개 항목을
+  규칙 기반으로 채운다.
+  - `urlHierarchy`/`categoryStructure`/`stockManagementType`/`productPageStructure`는 이미 확보된
+    구조적 신호(플랫폼/카테고리 메뉴·경로/재고 표기 flag/옵션 UI/이미지·상세텍스트 유무)를 그대로
+    문장으로 조립 — AI 없이도 신뢰도가 높다(애초에 boolean 신호로 이미 검증된 값들이라).
+  - `paymentAccount`/`shippingCourier`/`companyContact`는 원문(`contextText`)에서 은행명/택배사명
+    키워드, 전화번호(`0\d{1,2}-\d{3,4}-\d{4}`), 이메일 패턴을 정규식/키워드 매칭으로 찾는다. 재현율은
+    AI보다 낮지만(목록에 없는 택배사·계좌 표기 형태는 못 찾음) 오탐은 적다. 택배사명은 "CJ 대한통운"처럼
+    띄어쓰기가 섞인 실제 표기가 있어(펫투비 사례) 공백을 지우고 비교한다.
+  - `scrapingNeeds`는 자유 서술이 필요해 규칙으로 못 만드므로, 규칙 기반 리포트임을 알리는 고정 문구로
+    대체(사용자가 화면에서 AI 분석과 구분할 수 있도록).
+- `lib/scraper.ts`의 `sampleMallProfile`(deep 블록): `generateMallProfileReport(...).catch(() => null) ??
+  buildHeuristicMallReport(...)` — AI 호출이 성공하면 AI 리포트를, 실패(크레딧 부족/키 없음/네트워크
+  오류 등 무엇이든)하면 규칙 기반 리포트를 대신 채운다. "몰 구조 파악"이 이제 API 크레딧 없이도 항상
+  결과를 낸다 — AI가 되면 더 정확한 리포트를, 안 되면 구조 신호+키워드 매칭 기반 리포트를 보여준다.
+
 ## 하지 않는 것 (2차 재설계 기준, 최종)
 
 - 8개 항목 리포트는 어디까지나 "실제로 모은 원문 안에서" 찾은 내용만 답한다 — 원문에 없는 정보(결제

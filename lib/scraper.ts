@@ -11,7 +11,7 @@ import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import { chromium, type BrowserContext, type Page } from 'playwright'
 import type { ExtractedProduct } from './ai'
-import { extractProductFieldsWithAI, generateMallProfileReport, type MallStructureReport } from './ai'
+import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, type MallStructureReport } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
@@ -832,9 +832,16 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
 
   if (deep) {
     const combinedContext = [contextText, productContextText].filter(Boolean).join('\n\n')
-    signals.report = await generateMallProfileReport(
-      mallName, platform, categoryMenuNames.length ? categoryMenuNames : signals.categoryPaths, signals.sampleProductUrl, combinedContext,
-    ).catch(() => null)
+    const categoryHints = categoryMenuNames.length ? categoryMenuNames : signals.categoryPaths
+    // ANTHROPIC_API_KEY 크레딧이 없어 AI 호출이 안 되는 경우(월 정액 구독으로는 대체 불가 — API 과금과는
+    // 별개)에도 "몰 구조 파악"이 결과 없이 끝나지 않도록, AI 실패 시 규칙 기반 리포트로 대체한다.
+    signals.report = await generateMallProfileReport(mallName, platform, categoryHints, signals.sampleProductUrl, combinedContext).catch(() => null)
+      ?? buildHeuristicMallReport({
+        platform, categoryHints, sampleProductUrl: signals.sampleProductUrl, contextText: combinedContext,
+        optionUiTypes: signals.optionUiTypes, hasCascadingOptions: signals.hasCascadingOptions,
+        hasMainImages: signals.hasMainImages, hasDetailImages: signals.hasDetailImages, hasDetailText: signals.hasDetailText,
+        hasStockQty: signals.hasStockQty, hasStockStatusText: signals.hasStockStatusText, hasStockByOption: signals.hasStockByOption,
+      })
   }
 
   await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})

@@ -65,6 +65,18 @@ interface PreviewItem {
   thumbnail: string
 }
 
+/** lib/ai.ts의 MallStructureReport와 같은 모양. */
+interface MallStructureReport {
+  urlHierarchy: string
+  categoryStructure: string
+  paymentAccount: string
+  shippingCourier: string
+  stockManagementType: string
+  companyContact: string
+  productPageStructure: string
+  scrapingNeeds: string
+}
+
 /** lib/scraper.ts의 MallProfileSignals와 같은 모양 — "몰 구조 파악" 버튼 결과 표시용. */
 interface MallProfileSignals {
   sampleCount: number
@@ -82,6 +94,7 @@ interface MallProfileSignals {
   categoryPaths: string[]
   categoryMaxDepth: number
   categoryMenuNames: string[]
+  report: MallStructureReport | null
 }
 interface ProfileCheckResult {
   signals: MallProfileSignals
@@ -710,36 +723,60 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
           {profileError && <p className="text-xs text-rose-500 mt-3">{profileError}</p>}
           {profileResult && (
-            <div className="mt-3 pt-3 border-t border-gray-100 text-xs text-gray-600 space-y-1">
-              <p className="font-semibold text-gray-700">
-                {profileResult.isFirstTime ? '🔍 몰 구조 파악 완료' : profileResult.diffs.length ? '⚠ 이전과 구조가 달라졌습니다' : '✓ 이전과 구조 동일'}
-                <span className="font-normal text-gray-400"> (상품 {profileResult.signals.sampleCount}건 샘플 기준)</span>
-              </p>
+            <div className="mt-4 pt-4 border-t border-gray-100">
+              <div className="flex items-center gap-2 mb-3">
+                <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
+                  profileResult.isFirstTime ? 'bg-teal-100 text-teal-700'
+                  : profileResult.diffs.length ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'
+                }`}>
+                  {profileResult.isFirstTime ? '🔍 몰 구조 파악 완료' : profileResult.diffs.length ? '⚠ 이전과 구조가 달라짐' : '✓ 이전과 구조 동일'}
+                </span>
+                <span className="text-xs text-gray-400">상품 {profileResult.signals.sampleCount}건 샘플 기준</span>
+              </div>
               {profileResult.diffs.length > 0 && (
-                <p className="text-amber-600">{profileResult.diffs.join(' / ')}</p>
+                <ul className="mb-3 text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2 space-y-0.5">
+                  {profileResult.diffs.map(d => <li key={d}>· {d}</li>)}
+                </ul>
               )}
-              <ul className="grid grid-cols-2 gap-x-4 gap-y-0.5">
-                <li>플랫폼: {profileResult.signals.platform}</li>
-                <li>
-                  카테고리: {profileResult.signals.categoryMenuNames.length > 0
-                    ? `메뉴 전체 ${profileResult.signals.categoryMenuNames.length}개`
-                    : profileResult.signals.categoryMaxDepth > 0 ? `${profileResult.signals.categoryMaxDepth}단계 (샘플 기준)` : '파악 안 됨'}
-                </li>
-                <li>옵션 UI: {profileResult.signals.optionUiTypes.join('/') || '없음'}{profileResult.signals.hasCascadingOptions && ' (연쇄옵션)'}</li>
-                <li>대표/상세이미지: {profileResult.signals.hasMainImages ? '있음' : '없음'} / {profileResult.signals.hasDetailImages ? '있음' : '없음'}</li>
-                <li>재고수량 표시: {profileResult.signals.hasStockQty ? '있음' : '없음'}</li>
-                <li>재고상태 문구: {profileResult.signals.hasStockStatusText ? '있음' : '없음'}</li>
-                <li>옵션별 재고 위젯: {profileResult.signals.hasStockByOption ? '있음' : '없음'}</li>
-                <li>상세페이지 텍스트: {profileResult.signals.hasDetailText ? '있음' : '없음'}</li>
-              </ul>
-              {profileResult.signals.infoLabels.length > 0 && (
-                <p>상품정보 항목: {profileResult.signals.infoLabels.join(', ')}</p>
+              {profileResult.signals.report ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {([
+                    ['🔗', 'URL 계층', profileResult.signals.report.urlHierarchy],
+                    ['🗂️', '카테고리 구조', profileResult.signals.report.categoryStructure],
+                    ['💳', '결제계좌 정보', profileResult.signals.report.paymentAccount],
+                    ['🚚', '배송 택배사', profileResult.signals.report.shippingCourier],
+                    ['📦', '재고 관리 형태', profileResult.signals.report.stockManagementType],
+                    ['☎️', '업체 연락처', profileResult.signals.report.companyContact],
+                    ['🧩', '상품페이지 구조', profileResult.signals.report.productPageStructure],
+                    ['⚠️', '스크래핑 유의사항', profileResult.signals.report.scrapingNeeds],
+                  ] as const).map(([icon, label, value]) => {
+                    const notFound = !value || value === '확인 안됨'
+                    return (
+                      <div key={label} className="bg-gray-50 rounded-xl px-3 py-2.5 border border-gray-100">
+                        <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-0.5">{icon} {label}</p>
+                        <p className={`text-xs leading-relaxed ${notFound ? 'text-gray-400 italic' : 'text-gray-700'}`}>
+                          {value || '확인 안됨'}
+                        </p>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <p className="text-xs text-amber-600">AI 리포트를 만들지 못했습니다 (ANTHROPIC_API_KEY 미설정이거나 홈/게시판 원문을 못 모았습니다) — 아래 참고정보만 확인됩니다.</p>
               )}
-              {profileResult.signals.categoryMenuNames.length > 0 ? (
-                <p>카테고리 메뉴 전체: {profileResult.signals.categoryMenuNames.join(', ')}</p>
-              ) : profileResult.signals.categoryPaths.length > 0 && (
-                <p>확인된 카테고리 경로(샘플 기준): {profileResult.signals.categoryPaths.join(', ')}</p>
-              )}
+              <div className="flex flex-wrap gap-1.5 mt-3">
+                <span className="text-[11px] bg-white border border-gray-200 text-gray-500 rounded-full px-2 py-0.5">플랫폼 {profileResult.signals.platform}</span>
+                {profileResult.signals.optionUiTypes.length > 0 && (
+                  <span className="text-[11px] bg-white border border-gray-200 text-gray-500 rounded-full px-2 py-0.5">
+                    옵션 UI {profileResult.signals.optionUiTypes.join('/')}{profileResult.signals.hasCascadingOptions && ' (연쇄옵션)'}
+                  </span>
+                )}
+                {profileResult.signals.categoryMenuNames.length > 0 && (
+                  <span className="text-[11px] bg-white border border-gray-200 text-gray-500 rounded-full px-2 py-0.5">
+                    카테고리 메뉴 {profileResult.signals.categoryMenuNames.length}개: {profileResult.signals.categoryMenuNames.join(', ')}
+                  </span>
+                )}
+              </div>
             </div>
           )}
         </div>

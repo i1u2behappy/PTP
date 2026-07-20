@@ -11,7 +11,7 @@ import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import { chromium, type BrowserContext, type Page } from 'playwright'
 import type { ExtractedProduct } from './ai'
-import { extractProductFieldsWithAI } from './ai'
+import { extractProductFieldsWithAI, generateMallProfileReport, type MallStructureReport } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
@@ -696,6 +696,10 @@ export interface MallProfileSignals {
    *  열어보지 않고 메뉴에서 바로 얻은 대분류+중분류 카테고리명 전체. 지원 안 되는 플랫폼은 빈 배열 —
    *  categoryPaths(샘플 기준 근사치)로 대신 가늠해야 한다. */
   categoryMenuNames: string[]
+  /** URL 계층/카테고리/결제계좌/택배사/재고관리형태/업체연락처/상품페이지구조/스크래핑 유의사항을 실제로
+   *  수집한 원문(홈 하단 회사정보 + 이용안내·공지 등 게시판 + 상품페이지) 기반으로 AI가 요약한 리포트.
+   *  ANTHROPIC_API_KEY 미설정이거나 원문을 하나도 못 모았으면 null. */
+  report: MallStructureReport | null
 }
 
 const MALL_PROFILE_SAMPLE_SIZE = 6
@@ -706,18 +710,30 @@ const MALL_PROFILE_SAMPLE_SIZE = 6
  * "자세히" 클릭형 옵션별 재고), 상세페이지 텍스트 유무, 상품정보고시 표에 실제로 어떤 라벨들이 있는지까지.
  * 새 몰을 처음 스크랩하기 전에 그 몰 상품마다 달라질 수 있는 부분을 미리 다 찾아두기 위한 것으로, 이후
  * 실제 스크랩 코드가 무엇을 놓치고 있는지 새 라벨/구조가 나올 때마다 알 수 있게 한다(사용자 보고에 의존하지
- * 않고 매번 스스로 다시 점검). 로그인 창이 열려있어야 하며(로그인 확인 직후 호출), 현재 보고 있는 페이지를
- * 목록으로 간주해 상품 몇 개를 샘플링하고, 목록이 아니면 그 페이지 자체를 상품 1건으로 취급한다. 실패해도
- * 전체 로그인 확인 흐름을 막지 않도록 호출부에서 백그라운드로 실행한다.
+ * 않고 매번 스스로 다시 점검). 로그인 창이 열려있어야 하며(로그인 확인 직후 호출), 항상 이 몰에 등록된
+ * 정식 시작 URL(sites.url)로 먼저 이동한 뒤 그 페이지를 목록으로 간주해 상품 몇 개를 샘플링한다 — 사용자가
+ * 로그인 확인 시점에 마이페이지 등 다른 화면을 보고 있어도 엉뚱한 페이지가 기준이 되지 않도록 하기 위함
+ * (실사용 중 마이페이지가 기준이 돼 platform 오감지→카테고리/상품 스캔이 전부 틀어지는 문제가 실제 발견됨).
+ * sites.url이 없으면 지금 열려있는 페이지를 그대로 쓴다. 실패해도 전체 로그인 확인 흐름을 막지 않도록
+ * 호출부에서 백그라운드로 실행한다.
  */
 export async function profileMallStructure(siteId: number): Promise<MallProfileSignals | null> {
   const context = openSessions.get(siteId)
   if (!context) return null
   const pages = context.pages()
   const page = pages.length ? pages[pages.length - 1] : await context.newPage()
+  const site = await siteInfo(siteId)
+  if (site.url) {
+    await page.goto(site.url, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+  }
   const startUrl = page.url()
   if (!startUrl || startUrl === 'about:blank') return null
-  return sampleMallProfile(page, startUrl)
+  return sampleMallProfile(page, startUrl, site.name)
+}
+
+async function siteInfo(siteId: number): Promise<{ name: string; url: string }> {
+  const res = await pool.query<{ name: string; url: string }>('SELECT name, url FROM sites WHERE id = $1', [siteId])
+  return { name: res.rows[0]?.name || `site${siteId}`, url: res.rows[0]?.url || '' }
 }
 
 /**
@@ -732,10 +748,11 @@ export async function profileMallStructureForScrape(opts: ScrapeOptions): Promis
   // about:blank를 그대로 시작점으로 쓰지 않도록 productUrls의 첫 항목을 대신 사용한다.
   const startUrlHint = opts.url || opts.categoryUrls?.[0] || opts.productUrls?.[0]
   if (!startUrlHint) return null
-  return withContext(opts, page => sampleMallProfile(page, startUrlHint))
+  const site = await siteInfo(opts.siteId)
+  return withContext(opts, page => sampleMallProfile(page, startUrlHint, site.name))
 }
 
-async function sampleMallProfile(page: Page, startUrl: string): Promise<MallProfileSignals | null> {
+async function sampleMallProfile(page: Page, startUrl: string, mallName: string): Promise<MallProfileSignals | null> {
   let sampleUrls: string[] = []
   let platform: MallPlatform = 'unknown'
   let categoryByUrl = new Map<string, CategoryLabel>()
@@ -752,16 +769,21 @@ async function sampleMallProfile(page: Page, startUrl: string): Promise<MallProf
   // 아직 상품 샘플로 이동하기 전(현재 page가 startUrl), 헤더 내비게이션에서 전체 카테고리 메뉴를 스캔한다 —
   // 이동 후엔 이 몰의 헤더가 안 보일 수 있어 반드시 여기서 먼저 해야 한다.
   const categoryMenuNames = await scanCategoryMenu(page, platform)
+  // 같은 이유로, 상품 샘플로 이동하기 전에 지금 페이지(홈/목록)의 하단 회사정보와 이용안내·공지 등
+  // 게시판 링크를 먼저 훑어 원문을 모아둔다 — 결제계좌/택배사/연락처는 상품페이지가 아니라 이런 정적
+  // 페이지에 있다(실사용 몰 확인됨). 페이지 이동이 있어 시간이 들 수 있어 실패해도 나머지 흐름은 계속한다.
+  const contextText = await gatherMallContextText(page).catch(() => '')
 
   const signals: MallProfileSignals = {
     sampleCount: 0, platform, sampleProductUrl: sampleUrls[0], hasMainImages: false, hasDetailImages: false,
     optionUiTypes: [], hasCascadingOptions: false, hasStockQty: false, hasStockStatusText: false,
     hasStockByOption: false, hasDetailText: false, infoLabels: [], categoryPaths: [], categoryMaxDepth: 0,
-    categoryMenuNames,
+    categoryMenuNames, report: null,
   }
   const optionTypes = new Set<'select' | 'swatch' | 'none'>()
   const infoLabelSet = new Set<string>()
   const categoryPathSet = new Set<string>()
+  let productContextText = ''
 
   for (const url of sampleUrls) {
     const category = categoryByUrl.get(url)?.category
@@ -788,6 +810,11 @@ async function sampleMallProfile(page: Page, startUrl: string): Promise<MallProf
       if (product.stock_by_option.length > 0) signals.hasStockByOption = true
       if (product.options.length > 1) signals.hasCascadingOptions = true
       product.extra_info.forEach(({ label }) => infoLabelSet.add(label))
+      // AI 리포트용 원문은 상품 1건만 있으면 충분해(토큰 절약) 첫 성공 샘플에서만 모은다.
+      if (!productContextText) {
+        const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '')
+        productContextText = `[샘플 상품페이지: ${url}]\n${bodyText.replace(/\s+/g, ' ').trim().slice(0, 4_000)}`
+      }
     } catch { /* 개별 샘플 실패는 건너뛰고 다음 샘플로 */ }
   }
   signals.optionUiTypes = [...optionTypes]
@@ -795,8 +822,56 @@ async function sampleMallProfile(page: Page, startUrl: string): Promise<MallProf
   signals.categoryPaths = [...categoryPathSet].sort()
   signals.categoryMaxDepth = signals.categoryPaths.reduce((max, p) => Math.max(max, p.split(' > ').length), 0)
 
+  const combinedContext = [contextText, productContextText].filter(Boolean).join('\n\n')
+  signals.report = await generateMallProfileReport(
+    mallName, platform, categoryMenuNames.length ? categoryMenuNames : signals.categoryPaths, signals.sampleProductUrl, combinedContext,
+  ).catch(() => null)
+
   await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
   return signals.sampleCount > 0 ? signals : null
+}
+
+/** 고도몰 등에서 결제계좌/택배사/업체연락처가 있는 곳은 상품페이지가 아니라 하단 회사정보와 이용안내·
+ *  공지사항 같은 정적 게시판이다(실사용 몰 확인됨). 지금 페이지의 footer와, 안내성 키워드가 붙은 링크
+ *  몇 개를 실제로 열어 텍스트를 모아온다 — "몰 구조 파악"의 AI 리포트가 근거로 삼을 원문. */
+async function gatherMallContextText(page: Page): Promise<string> {
+  const sections: string[] = []
+  const footerText = await page.evaluate(() => {
+    const el = document.querySelector('footer, #footer, .footer, .company_info, .footer_info')
+    return (el?.textContent || '').replace(/\s+/g, ' ').trim()
+  }).catch(() => '')
+  if (footerText) sections.push(`[하단 회사정보]\n${footerText.slice(0, 1_500)}`)
+
+  const baseUrl = new URL(page.url()).origin
+  const links = await findInfoPageLinks(page)
+  for (const link of links) {
+    if (!link.href.startsWith(baseUrl)) continue
+    try {
+      await page.goto(link.href, { waitUntil: 'load', timeout: 15_000 })
+      const text = await page.evaluate(() => document.body.innerText).catch(() => '')
+      if (text.trim()) sections.push(`[${link.text}]\n${text.replace(/\s+/g, ' ').trim().slice(0, 2_500)}`)
+    } catch { /* 게시판 접근 실패(로그인 필요 등)는 건너뛰고 다음 링크로 */ }
+  }
+  return sections.join('\n\n')
+}
+
+const INFO_PAGE_KEYWORDS = /배송|반품|교환|환불|이용안내|이용약관|회사소개|공지|고객센터|무통장|계좌|입금안내/
+
+/** 현재 페이지의 링크 중 배송/결제/공지 등 안내성 키워드가 붙은 것만 최대 4개 골라온다. */
+async function findInfoPageLinks(page: Page): Promise<{ text: string; href: string }[]> {
+  return page.evaluate((pattern: string) => {
+    const re = new RegExp(pattern)
+    const seen = new Set<string>()
+    const result: { text: string; href: string }[] = []
+    document.querySelectorAll('a[href]').forEach(a => {
+      const text = (a.textContent || '').trim()
+      const href = (a as HTMLAnchorElement).href
+      if (!text || !href.startsWith('http') || !re.test(text) || seen.has(href)) return
+      seen.add(href)
+      result.push({ text, href })
+    })
+    return result.slice(0, 4)
+  }, INFO_PAGE_KEYWORDS.source).catch(() => [])
 }
 
 /** 단일 상품 페이지 스크랩 (url 생략 시 현재 열려있는 페이지를 그대로 사용) */

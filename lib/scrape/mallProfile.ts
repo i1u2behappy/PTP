@@ -41,6 +41,7 @@ function describeDiff(prev: MallProfileSignals, next: MallProfileSignals): strin
   const droppedLabels = prev.infoLabels.filter(l => !nextLabels.has(l))
   if (newLabels.length) diffs.push(`상품정보 항목 추가됨: ${newLabels.join(', ')}`)
   if (droppedLabels.length) diffs.push(`상품정보 항목 사라짐: ${droppedLabels.join(', ')}`)
+  if (JSON.stringify(prev.report) !== JSON.stringify(next.report)) diffs.push('몰 구조 리포트(결제계좌/택배사/연락처 등) 내용이 달라졌습니다 — 다시 확인 필요')
   return diffs
 }
 

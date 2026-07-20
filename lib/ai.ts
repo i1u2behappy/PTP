@@ -245,6 +245,80 @@ origin)에 없는 완전히 새로운 종류의 정보라도 상관없다. 그 �
   }
 }
 
+export interface MallStructureReport {
+  urlHierarchy: string
+  categoryStructure: string
+  paymentAccount: string
+  shippingCourier: string
+  stockManagementType: string
+  companyContact: string
+  productPageStructure: string
+  scrapingNeeds: string
+}
+
+const MALL_REPORT_FIELDS: { key: keyof MallStructureReport; label: string; hint: string }[] = [
+  { key: 'urlHierarchy', label: 'URL 계층', hint: '목록/상세 페이지 URL 패턴, 페이지네이션 방식' },
+  { key: 'categoryStructure', label: '카테고리 구조', hint: '대분류/중분류 등 실제 카테고리 트리' },
+  { key: 'paymentAccount', label: '결제계좌 정보', hint: '무통장입금 은행/계좌번호 등' },
+  { key: 'shippingCourier', label: '배송 택배사 정보', hint: '이용하는 택배사명' },
+  { key: 'stockManagementType', label: '재고 관리 형태', hint: '수량 노출/품절 문구/옵션별 재고 등 실제 표기 방식' },
+  { key: 'companyContact', label: '업체 연락처', hint: '전화번호, 이메일, 사업자 주소 등' },
+  { key: 'productPageStructure', label: '상품페이지 주요 구조', hint: '대표이미지/옵션/상세설명이 어떤 요소에 있는지' },
+  { key: 'scrapingNeeds', label: '스크래핑 필요 데이터', hint: '이 몰에서 스크랩 시 특별히 놓치기 쉬운 데이터나 주의할 점' },
+]
+
+/**
+ * "몰 구조 파악" 기능 — 실제로 수집한 원문(홈/게시판/상품페이지 텍스트)만 근거로 사용자가 알고 싶어하는
+ * 8개 항목(URL 계층/카테고리/결제계좌/택배사/재고관리/연락처/상품페이지 구조/스크래핑 유의사항)을 채운다.
+ * 원문에 없는 내용을 추측하지 않도록 프롬프트에서 명시적으로 금지하고, 확인 못한 항목은 "확인 안됨"으로
+ * 답하게 한다. ANTHROPIC_API_KEY가 없거나 원문을 하나도 못 모았으면 null(호출부가 report 없이 진행).
+ */
+export async function generateMallProfileReport(
+  mallName: string,
+  platform: string,
+  categoryHints: string[],
+  sampleProductUrl: string,
+  contextText: string,
+): Promise<MallStructureReport | null> {
+  if (!process.env.ANTHROPIC_API_KEY || !contextText.trim()) return null
+
+  const properties: Record<string, { type: string; description: string }> = {}
+  MALL_REPORT_FIELDS.forEach(f => {
+    properties[f.key] = { type: 'string', description: `${f.label} — ${f.hint}. 아래 원문에서 확인할 수 없으면 반드시 "확인 안됨"이라고만 답한다(추측 금지).` }
+  })
+
+  const prompt = `몰 '${mallName}'(플랫폼: ${platform})의 실제 페이지에서 수집한 원문이다. 이 내용만 근거로 아래 항목들을 조사하라.
+추측이나 일반적인 쇼핑몰 상식으로 채우지 말고, 원문에 실제로 있는 내용만 답하라. 원문에 없으면 그 항목은 정확히 "확인 안됨"이라고만 답한다.
+
+[샘플 상품 URL]
+${sampleProductUrl}
+
+[카테고리 메뉴/경로]
+${categoryHints.join(', ') || '(확인 안됨)'}
+
+[수집한 원문]
+${contextText.slice(0, 20_000)}`
+
+  try {
+    const response = await getClient().messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1500,
+      tools: [{
+        name: 'set_mall_report',
+        description: '조사한 8개 항목을 각각 문자열로 채운다. 원문에서 확인 못한 항목은 반드시 "확인 안됨"으로 채운다.',
+        input_schema: { type: 'object', properties, required: MALL_REPORT_FIELDS.map(f => f.key) },
+      }],
+      tool_choice: { type: 'tool', name: 'set_mall_report' },
+      messages: [{ role: 'user', content: prompt }],
+    })
+    const toolUse = response.content.find(b => b.type === 'tool_use')
+    if (!toolUse || toolUse.type !== 'tool_use') return null
+    return toolUse.input as MallStructureReport
+  } catch {
+    return null
+  }
+}
+
 export interface AiExtractedFallback {
   name: string | null
   price: number | null

@@ -119,9 +119,12 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     // ld+json/og의 대표 이미지 갤러리(여러 장일 수 있음)와는 별개로, 상세설명 영역에 판매자가 직접
     // 올린 상품별 상세 이미지(사이즈/소재 등 텍스트로는 안 남는 구분 정보)를 모은다. 카페24는 #prdDetail을
     // 쓰고, 그게 없으면 다른 자체 제작 몰에서 흔한 .detail_con(예: 신우), .view_detail(예: 고도몰,
-    // 펫투비 — 실제 페이지로 확인)을 대신 시도한다.
+    // 펫투비 — 실제 페이지로 확인), .detail_cont/#detail(예: 고도몰 다른 스킨, 가방쟁이 — 실제 페이지로
+    // 확인. 같은 페이지의 "관련상품" 탭과는 별개 컨테이너라 관련상품 이미지가 섞여 들어오지 않는다)을
+    // 대신 시도한다.
     // /upload/appfiles/ 경로는 카페24 앱스토어 위젯이 심는 몰 공통 배너로, 상품마다 똑같이 끼어들어오므로 제외한다.
-    const detailContainer = document.querySelector('#prdDetail') || document.querySelector('.detail_con') || document.querySelector('.view_detail')
+    const detailContainer = document.querySelector('#prdDetail') || document.querySelector('.detail_con')
+      || document.querySelector('.view_detail') || document.querySelector('.detail_cont') || document.querySelector('#detail')
     const detailImageEls = Array.from(detailContainer?.querySelectorAll<HTMLImageElement>('img') || [])
       .filter(img => img.src && !mainImages.includes(img.src) && !img.src.includes('/upload/appfiles/'))
     const detailImages = detailImageEls.map(img => img.src)
@@ -387,6 +390,17 @@ export async function extractProductRuleBased(
   if (expiry) result.custom_fields['유통기한'] = expiry
   // 주문단위(묶음/박스 단위 구매 버튼)는 몰마다 마크업이 다를 수 있어 아직 고도몰(.btn_set_ea)만 지원.
   if (raw.orderUnit) result.custom_fields['주문단위'] = raw.orderUnit
+
+  // "상품필수정보"(상품정보제공고시) 표에는 브랜드/제조사/원산지처럼 이미 전용 필드로 뽑아낸 라벨 외에도
+  // 몰·카테고리마다 소재/색상/치수/무게 등 다른 라벨이 계속 나온다(실제 페이지로 확인 — 가방쟁이는 제품
+  // 소재/색상/수입여부/종류/KC안전인증/가로세로높이/무게 등). 이런 나머지 라벨을 하나의 뭉친 extra_info로만
+  // 두지 않고 라벨마다 별도 컬럼(custom_fields)으로도 정리해, 스크랩 Raw 확인 화면에서 바로 구분해 볼 수
+  // 있게 한다(사용자 요청). 이미 전용 필드로 뽑은 라벨과, 몰마다 표기가 달라 site별 extraction_rules로
+  // 처리하는 상품코드/가격/배송비류 라벨은 중복 노출을 피하기 위해 제외한다.
+  const CLAIMED_INFO_LABEL_RE = /브랜드|제조사|제조자|원산지|제조국|상품요약정보|영문상품명|유통기한|소비기한|상품코드|정가|판매가|소비자가|시중가|정상가|공급가|도매가|배송비|택배비/i
+  raw.infoRows.forEach(([label, value]) => {
+    if (value && !CLAIMED_INFO_LABEL_RE.test(label)) result.custom_fields[label] = value
+  })
 
   if (overrides?.nameSelector) {
     const text = await page.locator(overrides.nameSelector).first().textContent({ timeout: 3_000 }).catch(() => null)

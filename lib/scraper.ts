@@ -526,7 +526,11 @@ async function scanSelectOptions(page: Page, rootSelector?: string): Promise<Dom
           .filter(o => o.value !== '')
           // 고도몰은 <option> 텍스트에 "민트: 37,810원"처럼 가격까지 같이 넣어두고, 실제 깨끗한 값은
           // data-so_name 속성에 따로 둔다(실제 페이지로 확인) — 있으면 그걸 우선한다.
-          .map(o => (o.getAttribute('data-so_name') || o.textContent || '').trim())
+          .map(o => (o.getAttribute('data-so_name') || o.textContent || '').replace(/\s+/g, ' ').trim())
+          // 품절 옵션은 "베이지(카키) -- [일시품절/재입고미정]"처럼 상태 문구가 값 자체에 섞여 들어온다
+          // (실제 페이지로 확인, 가방쟁이) — 끝에 붙는 대괄호 상태문구와 그 앞의 "--" 구분자를 걷어내
+          // 옵션값을 깨끗하게 만든다.
+          .map(v => v.replace(/\s*\[[^\]]*\]\s*$/, '').replace(/\s*--+\s*$/, '').trim())
           .filter(v => v && !placeholderRe.test(v))
         return { name, values }
       })

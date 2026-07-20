@@ -1,8 +1,9 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useTabs } from '../shell/TabsContext'
-import { MemoLog } from './MemoLog'
 import { SITES_LIST_TAB } from '../shell/menuTabs'
+
+const MEMO_TEMPLATE = '택배사: \n배송비: \n배송/반품 주소지: \n연락처: \n은행: \n계좌번호: '
 
 interface Props {
   params?: Record<string, unknown>
@@ -63,6 +64,7 @@ export function SiteDetailPanel({ params }: Props) {
   const [justSaved, setJustSaved] = useState(false)
   const [mallReport, setMallReport] = useState<MallReport | null>(null)
   const [mallReportUpdatedAt, setMallReportUpdatedAt] = useState<string | null>(null)
+  const [memo, setMemo] = useState('')
 
   useEffect(() => {
     fetch('/api/clients').then(r => r.json()).then((d: ClientOption[]) => { if (Array.isArray(d)) setClients(d) }).catch(() => {})
@@ -74,7 +76,7 @@ export function SiteDetailPanel({ params }: Props) {
       name: string | null; url: string; login_url: string | null; login_id: string | null; login_pw: string | null; client_id: number | null
       custom_name_selector: string | null; custom_price_selector: string | null; custom_thumbnail_selector: string | null
       auto_scrape_enabled: boolean; auto_scrape_hour: number | null; manual_login_required: boolean | null; main_items: string | null
-      mall_report: MallReport | null; mall_report_updated_at: string | null
+      mall_report: MallReport | null; mall_report_updated_at: string | null; memo: string | null
     }) => {
       setName(d.name || ''); setMainItems(d.main_items || ''); setUrl(d.url); setLoginUrl(d.login_url || ''); setLoginId(d.login_id || ''); setLoginPw(d.login_pw || '')
       setClientId(d.client_id ?? '')
@@ -83,6 +85,7 @@ export function SiteDetailPanel({ params }: Props) {
       setAutoScrapeEnabled(!!d.auto_scrape_enabled); setAutoScrapeHour(d.auto_scrape_hour ?? 3)
       setManualLoginRequired(d.manual_login_required)
       setMallReport(d.mall_report); setMallReportUpdatedAt(d.mall_report_updated_at)
+      setMemo(d.memo || '')
     }).finally(() => setLoading(false))
   }, [siteId, isNew])
 
@@ -97,6 +100,7 @@ export function SiteDetailPanel({ params }: Props) {
       autoScrapeEnabled: manualLoginRequired ? false : autoScrapeEnabled,
       autoScrapeHour: !manualLoginRequired && autoScrapeEnabled ? autoScrapeHour : null,
       manualLoginRequired,
+      memo: memo || undefined,
     })
     try {
       const res = isNew
@@ -266,11 +270,19 @@ export function SiteDetailPanel({ params }: Props) {
       </div>
 
       {!isNew && (
-        <MemoLog baseUrl={`/api/sites/${siteId}/memos`}
-          title="운영 메모"
-          description="스크래핑 작업 시 파악해두어야 하는 이 몰만의 거래 정보입니다 — 택배사, 배송비, 배송/반품 주소지, 연락처, 은행, 계좌번호 등을 항목별로 구분해 적어주세요. 아래 '몰 구조 분석' 참고 내용을 보고 직접 옮겨 적으시면 됩니다."
-          placeholder="메모 내용"
-          template={'택배사: \n배송비: \n배송/반품 주소지: \n연락처: \n은행: \n계좌번호: '} />
+        <div className="bg-white rounded-2xl border border-gray-200 p-6">
+          <h2 className="text-sm font-semibold text-gray-700 mb-1">운영 메모</h2>
+          <p className="text-xs text-gray-400 mb-3">
+            스크래핑 작업 시 파악해두어야 하는 이 몰만의 거래 정보입니다 — 택배사, 배송비, 배송/반품 주소지, 연락처, 은행, 계좌번호 등을 항목별로 구분해 적어주세요.
+            아래 &apos;몰 구조 분석&apos; 참고 내용을 보고 직접 옮겨 적으시면 됩니다. 여기 적은 내용은 위 &quot;수정 저장&quot; 버튼으로 저장되고, Mall 목록의 &quot;메모&quot; 컬럼에 그대로 노출됩니다.
+          </p>
+          <div className="flex justify-end mb-1">
+            <button onClick={() => (!memo.trim() || confirm('입력 중이던 내용을 템플릿으로 덮어쓸까요?')) && setMemo(MEMO_TEMPLATE)}
+              className="text-xs text-teal-600 hover:underline">📋 템플릿 채우기</button>
+          </div>
+          <textarea value={memo} onChange={e => setMemo(e.target.value)} placeholder="메모 내용" rows={6}
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+        </div>
       )}
 
       {!isNew && mallReport && (

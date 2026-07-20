@@ -1072,7 +1072,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500">
                 나머지 {previewItems.length}개 (목록 페이지 기준 정보만 — 직접 열어보지 않아 빠릅니다)
               </div>
-              <div className="max-h-72 overflow-y-auto">
+              {/* 아래 내용(상세 정보 등)이 더 잘 보이도록 목록은 2개 높이만 보여주고 나머지는 스크롤 처리 */}
+              <div className="max-h-[124px] overflow-y-auto">
                 <table className="w-full text-xs border-collapse">
                   <thead className="sticky top-0 z-10 bg-gray-50">
                     <tr className="border-b border-gray-200 text-gray-500 font-semibold">

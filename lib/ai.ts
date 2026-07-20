@@ -350,7 +350,9 @@ function findAccountNumber(text: string, bank: string): string {
 }
 
 function findShippingFee(text: string): string {
-  const m = text.match(/(배송비|택배비)[:\s]{0,10}[^\n]{0,40}/)
+  // "기본배송료는 3,500원 입니다"처럼 "배송료"(료)로 쓰는 몰도 있다(실사용 몰 확인됨) — "배송비"만
+  // 찾으면 뒤에 나오는 "도서산간 추가배송비" 같은 부차적인 문장에 매칭돼 정작 기본요금을 놓친다.
+  const m = text.match(/(배송비|배송료|택배비)[:\s]{0,10}[^\n]{0,60}/)
   return m ? m[0].replace(/\s+/g, ' ').trim() : '확인 안됨'
 }
 

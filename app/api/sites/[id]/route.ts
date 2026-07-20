@@ -8,7 +8,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     `SELECT id, name, url, login_url, login_id, login_pw_encrypted, login_pw_iv, client_id,
             custom_name_selector, custom_price_selector, custom_thumbnail_selector,
             auto_scrape_enabled, auto_scrape_hour, manual_login_required, main_items, extraction_rules,
-            last_adjustment_preview, scrape_profile, scrape_profile_updated_at
+            last_adjustment_preview, scrape_profile, scrape_profile_updated_at, memo
      FROM sites WHERE id = $1`,
     [id],
   )
@@ -25,6 +25,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     auto_scrape_hour: site.auto_scrape_hour,
     manual_login_required: site.manual_login_required,
     main_items: site.main_items,
+    memo: site.memo,
     extraction_rules: site.extraction_rules,
     last_adjustment_preview: site.last_adjustment_preview,
     // "몰 구조 파악"의 거래정보 리포트(있으면) — SiteDetailPanel이 운영 메모 아래 참고용으로 표시한다.
@@ -48,6 +49,7 @@ interface SiteBody {
   autoScrapeHour?: number | null
   manualLoginRequired?: boolean | null
   mainItems?: string
+  memo?: string
 }
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -60,11 +62,11 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   await pool.query(
     `UPDATE sites SET name=$1, url=$2, login_url=$3, login_id=$4, login_pw_encrypted=$5, login_pw_iv=$6, client_id=$7,
        custom_name_selector=$8, custom_price_selector=$9, custom_thumbnail_selector=$10,
-       auto_scrape_enabled=$11, auto_scrape_hour=$12, manual_login_required=$13, main_items=$14
-     WHERE id=$15`,
+       auto_scrape_enabled=$11, auto_scrape_hour=$12, manual_login_required=$13, main_items=$14, memo=$15
+     WHERE id=$16`,
     [b.name, b.url, b.loginUrl || null, b.loginId || null, encrypted, iv, b.clientId || null,
       b.customNameSelector || null, b.customPriceSelector || null, b.customThumbnailSelector || null,
-      !!b.autoScrapeEnabled, b.autoScrapeHour ?? null, b.manualLoginRequired ?? null, b.mainItems || null, id],
+      !!b.autoScrapeEnabled, b.autoScrapeHour ?? null, b.manualLoginRequired ?? null, b.mainItems || null, b.memo || null, id],
   )
   return NextResponse.json({ ok: true })
 }

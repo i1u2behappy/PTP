@@ -134,6 +134,9 @@ export async function initDb() {
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS manual_login_required BOOLEAN DEFAULT false;
     -- Mall 등록 시 기입하는 주요 판매 품목 (자유 텍스트)
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS main_items TEXT;
+    -- "운영 메모" — 택배사/배송비/계좌 등 이 몰만의 거래정보를 사용자가 직접 기록하는 단일 메모(여러 건
+    -- 쌓는 로그가 아니라 항상 최신 값 1개만 유지). Mall 목록의 "메모" 컬럼에 그대로 노출된다.
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS memo TEXT;
     ALTER TABLE sites ALTER COLUMN name SET NOT NULL;
     -- "스크랩 조정" 기능이 AI로 학습해 저장하는 이 몰 전용 영구 추출 규칙
     -- { [field]: { type: 'label', pattern: string } | { type: 'selector', value: string } }

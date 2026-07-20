@@ -21,6 +21,9 @@ interface RawPageData {
   availability: string
   stockText: string
   stockQtyText: string
+  /** "한 묶음(8개)", "한 박스(40개)"처럼 도매몰이 묶음/박스 단위로 주문 수량을 정하는 버튼 텍스트를
+   *  쉼표로 이어붙인 것(예: 펫투비) — 없는 몰은 빈 문자열. */
+  orderUnit: string
 }
 
 async function scrapePageData(page: Page): Promise<RawPageData> {
@@ -66,7 +69,13 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
 
     // 일부 몰은 상품명을 표준 위치(ld+json/og:title)에 안 두고, 장바구니 제출용 hidden input에만
     // 실제 상품명을 담아둔다(예: 신우) — document.title(사이트 공통 타이틀)보다 우선한다.
-    if (!name) name = ogContent('og:title') || document.querySelector<HTMLInputElement>('input[name="brandname"]')?.value || document.title || ''
+    // 고도몰(펫투비 등)은 og:title/ld+json이 아예 없는 스킨이 있어(실제 페이지로 확인), 그런 경우
+    // document.title(사이트 전체에 공통인 "OO 도매 플랫폼" 같은 문구)로 잘못 빠지는 문제가 실제 발견됨 —
+    // .info_name(상품 폼 안의 실제 상품명 div)을 document.title보다 먼저 시도한다.
+    if (!name) {
+      name = ogContent('og:title') || document.querySelector<HTMLInputElement>('input[name="brandname"]')?.value
+        || document.querySelector('.info_name')?.textContent?.trim() || document.title || ''
+    }
     if (!mainImages.length) {
       const ogImg = ogContent('og:image')
       if (ogImg) mainImages = [ogImg]
@@ -264,10 +273,17 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       if (stockText && stockQtyText) break
     }
 
+    // 고도몰 도매몰(펫투비 등)은 "한 묶음(8개)"/"한 박스(40개)"처럼 버튼(.btn_set_ea)으로 주문 단위를
+    // 고르게 한다(실제 페이지로 확인, data-ea-unit 속성에 개수가 숫자로도 들어있음). 옵션 select와는
+    // 별개의 위젯이라 scanSelectOptions로는 안 잡힌다.
+    const orderUnit = Array.from(document.querySelectorAll('.btn_set_ea'))
+      .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean).join(', ')
+
     return {
       name, price, costPrice, shippingFee, categoryFromDetail, brandFromCategoryDetail,
       brand, description, mainImages, mainImageNames, detailImages, detailImageNames, detailText,
-      infoRows, sku, availability, stockText, stockQtyText,
+      infoRows, sku, availability, stockText, stockQtyText, orderUnit,
     }
   })
 }
@@ -364,6 +380,13 @@ export async function extractProductRuleBased(
     mall_product_code: extractMallProductCode(url, raw.sku),
     custom_fields: {},
   }
+
+  // 유통기한은 "상품정보제공고시" 표에 실려있으면 라벨이 어느 몰이든 거의 항상 "유통기한"/"소비기한"이라
+  // brand/manufacturer처럼 몰별 규칙 없이도 일반화해 뽑을 수 있다. 없는 상품(식품이 아닌 경우 등)은 빈 값.
+  const expiry = findInfoValue(raw.infoRows, /유통기한|소비기한/i)
+  if (expiry) result.custom_fields['유통기한'] = expiry
+  // 주문단위(묶음/박스 단위 구매 버튼)는 몰마다 마크업이 다를 수 있어 아직 고도몰(.btn_set_ea)만 지원.
+  if (raw.orderUnit) result.custom_fields['주문단위'] = raw.orderUnit
 
   if (overrides?.nameSelector) {
     const text = await page.locator(overrides.nameSelector).first().textContent({ timeout: 3_000 }).catch(() => null)

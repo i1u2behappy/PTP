@@ -13,15 +13,12 @@ export async function GET(req: NextRequest) {
     `SELECT s.id, s.name, s.url, s.login_id, s.login_pw_encrypted, s.login_pw_iv, s.client_id, c.name AS client_name, s.created_at,
             s.manual_login_required, s.main_items,
             COALESCE(latest.status = 'error' AND latest.error ILIKE '%차단%', false) AS blocked,
-            memo.content AS latest_memo
+            s.memo AS latest_memo
      FROM sites s
      LEFT JOIN supply_clients c ON c.id = s.client_id
      LEFT JOIN LATERAL (
        SELECT status, error FROM scrape_sessions WHERE site_id = s.id ORDER BY created_at DESC LIMIT 1
      ) latest ON true
-     LEFT JOIN LATERAL (
-       SELECT content FROM site_memos WHERE site_id = s.id ORDER BY memo_at DESC LIMIT 1
-     ) memo ON true
      WHERE s.name ILIKE $1 OR s.url ILIKE $1 OR s.login_id ILIKE $1 OR c.name ILIKE $1
      ORDER BY s.created_at DESC`,
     [`%${q}%`],

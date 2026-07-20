@@ -41,7 +41,6 @@ function describeDiff(prev: MallProfileSignals, next: MallProfileSignals): strin
   const droppedLabels = prev.infoLabels.filter(l => !nextLabels.has(l))
   if (newLabels.length) diffs.push(`상품정보 항목 추가됨: ${newLabels.join(', ')}`)
   if (droppedLabels.length) diffs.push(`상품정보 항목 사라짐: ${droppedLabels.join(', ')}`)
-  if (JSON.stringify(prev.report) !== JSON.stringify(next.report)) diffs.push('몰 구조 리포트(결제계좌/택배사/연락처 등) 내용이 달라졌습니다 — 다시 확인 필요')
   return diffs
 }
 
@@ -53,12 +52,16 @@ export interface ProfileCheckResult {
 }
 
 /** 새로 샘플링한 프로파일을 기준정보와 비교해 DB에 반영한다. 기준정보가 없으면 이번 결과를 기준으로
- * 저장하고, 있으면 달라진 점만 site_memos에 메모로 남긴다(Mall 목록의 "최신 메모" 컬럼에 그대로 노출). */
-async function applyProfileResult(siteId: number, next: MallProfileSignals): Promise<ProfileCheckResult> {
+ * 저장하고, 있으면 달라진 점만 site_memos에 메모로 남긴다(Mall 목록의 "최신 메모" 컬럼에 그대로 노출).
+ * deep=false(로그인 확인/스크랩 시작 — 구조 변화 감지 전용)는 report를 만들지 않는데, 그렇다고 이전에
+ * "몰 구조 파악" 버튼(deep=true)이 만들어둔 거래정보 리포트를 지워버리면 안 되므로 prev.report를 그대로
+ * 이어받는다. */
+async function applyProfileResult(siteId: number, next: MallProfileSignals, deep: boolean): Promise<ProfileCheckResult> {
   const res = await pool.query<{ scrape_profile: MallProfileSignals | null }>(
     `SELECT scrape_profile FROM sites WHERE id = $1`, [siteId],
   )
   const prev = res.rows[0]?.scrape_profile || null
+  if (!next.report && prev?.report) next.report = prev.report
 
   await pool.query(
     `UPDATE sites SET scrape_profile = $1, scrape_profile_updated_at = NOW() WHERE id = $2`,
@@ -68,10 +71,16 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals): Pro
   if (!prev) {
     await pool.query(
       `INSERT INTO site_memos (site_id, content) VALUES ($1, $2)`,
-      [siteId, `🔍 상품페이지 구조 파악 완료 (샘플 ${next.sampleCount}건): ${summarizeProfile(next)}`],
+      [siteId, deep
+        ? '🔍 몰 거래정보 분석 완료 (결제계좌/택배사/연락처 등 — "몰 구조 파악" 결과 화면 참고)'
+        : `🔍 상품페이지 구조 파악 완료 (샘플 ${next.sampleCount}건): ${summarizeProfile(next)}`],
     )
     return { signals: next, diffs: [], isFirstTime: true }
   }
+
+  // "몰 구조 파악"(deep)은 그 자리에서 결과 화면으로 바로 보여주므로(ScraperPanel), 로그인 확인 전용인
+  // "구조 변경 감지" 메모와 용도가 섞이지 않도록 별도 변경 알림은 남기지 않는다.
+  if (deep) return { signals: next, diffs: [], isFirstTime: false }
 
   const diffs = describeDiff(prev, next)
   if (diffs.length) {
@@ -84,14 +93,26 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals): Pro
 }
 
 /**
- * 로그인 확인마다 백그라운드로 호출한다. 로그인 창(openSessions)이 열려있어야 동작한다 — 직접로그인
+ * 로그인 확인마다 백그라운드로 호출한다 — 상품/홈페이지 "구조 변화 감지" 전용(deep=false 고정, 결제계좌·
+ * 택배사 같은 거래정보 분석은 하지 않는다). 로그인 창(openSessions)이 열려있어야 동작한다 — 직접로그인
  * 필수 몰처럼 추적되는 세션이 없으면 아무 일도 하지 않으므로, 그 경우를 위해 runMallProfileCheckForScrape가 있다.
- * "몰 구조 파악" 버튼(app/api/sites/[id]/profile)도 이 함수를 그대로 재사용해 즉시 실행+결과 확인이 가능하다.
+ * "몰 구조 파악" 버튼은 용도가 다른(거래정보 분석) runMallStructureReport를 대신 쓴다.
  */
 export async function runMallProfileCheck(siteId: number): Promise<ProfileCheckResult | null> {
-  const next = await profileMallStructure(siteId)
+  const next = await profileMallStructure(siteId, false)
   if (!next) return null
-  return applyProfileResult(siteId, next)
+  return applyProfileResult(siteId, next, false)
+}
+
+/**
+ * "몰 구조 파악" 버튼 전용 — 결제계좌/택배사/업체연락처/URL 계층 등 거래정보를 AI로 분석한다(deep=true).
+ * runMallProfileCheck(로그인 확인 자동 체크, 구조 변화 감지 전용)와는 용도가 다르다: 사용자가 직접
+ * "각각 다른 용도로 파악하고 리포팅"하도록 분리해달라고 확정함.
+ */
+export async function runMallStructureReport(siteId: number): Promise<ProfileCheckResult | null> {
+  const next = await profileMallStructure(siteId, true)
+  if (!next) return null
+  return applyProfileResult(siteId, next, true)
 }
 
 /**
@@ -102,5 +123,5 @@ export async function runMallProfileCheckForScrape(opts: ScrapeOptions): Promise
   if (!opts.siteId) return null
   const next = await profileMallStructureForScrape(opts)
   if (!next) return null
-  return applyProfileResult(opts.siteId, next)
+  return applyProfileResult(opts.siteId, next, false)
 }

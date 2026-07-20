@@ -222,6 +222,42 @@ URL)로 먼저 `page.goto` — 로그인 확인 시점에 사용자가 마이페
 않는다. `sites.url`이 비어있으면(드묾) 기존처럼 지금 페이지를 그대로 쓴다. `siteInfo(siteId)`가
 `name`과 `url`을 한 번에 조회하도록 기존 `siteName` 헬퍼를 대체.
 
+## 용도 분리 (2026-07-20, 3차) — "로그인 확인"과 "몰 구조 파악"은 서로 다른 기능
+
+2차 재설계 직후, 사용자가 실제로 "로그인 확인"을 눌렀더니 브라우저가 홈→안내페이지 여러 개→상품
+샘플까지 우르르 열어보는 걸 보고 "무슨 작업을 한 거냐"고 물었다. 원인: `login-confirm` 라우트가 매번
+자동으로 부르는 `runMallProfileCheck`와, "몰 구조 파악" 버튼이 부르는 함수가 **완전히 같은 경로**라
+2차 재설계의 무거운 작업(하단 회사정보/안내 게시판 크롤링 + AI 8개 항목 리포트)이 로그인 확인 시점마다
+매번 같이 돌고 있었던 것.
+
+사용자 지시로 용도를 명확히 분리:
+- **"로그인 확인"**(자동, 조용히) = 상품페이지/홈페이지 **구조 변화 감지 전용**. 대표/상세이미지 유무,
+  옵션 UI 형태, 재고 표기 방식, 카테고리 등 기존 boolean 신호만 다시 확인하고 달라진 점만 site_memos에
+  알린다 — 하단 회사정보/안내 게시판을 훑거나 AI 리포트를 만드는 무거운 작업은 하지 않는다.
+- **"몰 구조 파악" 버튼**(수동) = 결제계좌/택배사/업체연락처/URL 계층 등 **거래정보 분석 전용**. 안내
+  게시판 크롤링 + AI 8개 항목 리포트는 이제 여기서만 돈다.
+
+### 구현
+
+- `lib/scraper.ts`: `sampleMallProfile`에 `deep: boolean` 파라미터 추가 — `gatherMallContextText`/
+  `generateMallProfileReport` 호출은 `deep === true`일 때만 실행한다. `profileMallStructure(siteId, deep
+  = false)`가 그대로 전달, `profileMallStructureForScrape`(스크랩 시작 자동 체크)는 항상 `false` 고정
+  (구조 변화 감지와 같은 용도라 계속 가벼워야 함).
+- `lib/scrape/mallProfile.ts`: 기존 `runMallProfileCheck(siteId)`는 그대로 두되 내부적으로
+  `profileMallStructure(siteId, false)`만 쓰도록 고정 — 로그인 확인 전용으로 남는다. 신규
+  `runMallStructureReport(siteId)`가 `profileMallStructure(siteId, true)`를 불러 "몰 구조 파악" 버튼
+  전용 경로가 됐다. `applyProfileResult(siteId, next, deep)`에 `deep` 인자를 추가해:
+  - `deep=false`인데 `next.report`가 비어 있으면 `prev.report`(예전에 딥 리포트를 만들어둔 적 있으면)를
+    그대로 이어받는다 — 로그인 확인이 매번 돌면서 예전 거래정보 리포트를 지워버리지 않도록.
+  - `deep=true`일 때는 "구조 변경 감지" site_memos 알림을 남기지 않는다 — 버튼 클릭 시 결과 화면에
+    바로 보여주므로 별도 알림과 용도가 섞이지 않게.
+  - 최초 1회 메모 문구도 `deep` 여부에 따라 "상품페이지 구조 파악 완료"/"몰 거래정보 분석 완료"로 구분.
+- `describeDiff`의 report-변경 diff 라인은 제거 — deep 호출은 diff 자체를 안 남기고, light 호출은
+  report를 그대로 이어받아 절대 달라지지 않으므로 도달 불가능한 코드였다.
+- `app/api/sites/[id]/profile/route.ts`(버튼): `runMallProfileCheck` 대신 `runMallStructureReport` 호출.
+- `app/api/scrape/login-confirm/route.ts`(자동): 호출부 변경 없음 — 원래부터 `runMallProfileCheck`를
+  그대로 썼으므로 자동으로 가벼운 경로만 타게 됨.
+
 ## 하지 않는 것 (2차 재설계 기준, 최종)
 
 - 8개 항목 리포트는 어디까지나 "실제로 모은 원문 안에서" 찾은 내용만 답한다 — 원문에 없는 정보(결제

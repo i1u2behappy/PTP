@@ -716,8 +716,13 @@ const MALL_PROFILE_SAMPLE_SIZE = 6
  * (실사용 중 마이페이지가 기준이 돼 platform 오감지→카테고리/상품 스캔이 전부 틀어지는 문제가 실제 발견됨).
  * sites.url이 없으면 지금 열려있는 페이지를 그대로 쓴다. 실패해도 전체 로그인 확인 흐름을 막지 않도록
  * 호출부에서 백그라운드로 실행한다.
+ *
+ * deep(기본 false)는 "몰 구조 파악" 버튼 전용 — true면 하단 회사정보/이용안내·공지 게시판까지 훑어
+ * 결제계좌·택배사·연락처 등을 AI로 분석하는 무거운 작업까지 추가로 한다(MallProfileSignals.report).
+ * 로그인 확인/스크랩 시작마다 자동으로 도는 가벼운 구조 변화 감지(false)와는 용도가 다르다 — 사용자가
+ * 직접 "이 둘은 서로 다른 용도"라고 확정함: 로그인 확인=구조 변화 감지 전용, 몰 구조 파악=거래정보 분석 전용.
  */
-export async function profileMallStructure(siteId: number): Promise<MallProfileSignals | null> {
+export async function profileMallStructure(siteId: number, deep = false): Promise<MallProfileSignals | null> {
   const context = openSessions.get(siteId)
   if (!context) return null
   const pages = context.pages()
@@ -728,7 +733,7 @@ export async function profileMallStructure(siteId: number): Promise<MallProfileS
   }
   const startUrl = page.url()
   if (!startUrl || startUrl === 'about:blank') return null
-  return sampleMallProfile(page, startUrl, site.name)
+  return sampleMallProfile(page, startUrl, site.name, deep)
 }
 
 async function siteInfo(siteId: number): Promise<{ name: string; url: string }> {
@@ -749,10 +754,11 @@ export async function profileMallStructureForScrape(opts: ScrapeOptions): Promis
   const startUrlHint = opts.url || opts.categoryUrls?.[0] || opts.productUrls?.[0]
   if (!startUrlHint) return null
   const site = await siteInfo(opts.siteId)
-  return withContext(opts, page => sampleMallProfile(page, startUrlHint, site.name))
+  // 스크랩 시작 시점의 자동 체크도 로그인 확인과 같은 용도(구조 변화 감지)라 항상 가벼운(deep=false) 쪽만 쓴다.
+  return withContext(opts, page => sampleMallProfile(page, startUrlHint, site.name, false))
 }
 
-async function sampleMallProfile(page: Page, startUrl: string, mallName: string): Promise<MallProfileSignals | null> {
+async function sampleMallProfile(page: Page, startUrl: string, mallName: string, deep: boolean): Promise<MallProfileSignals | null> {
   let sampleUrls: string[] = []
   let platform: MallPlatform = 'unknown'
   let categoryByUrl = new Map<string, CategoryLabel>()
@@ -771,8 +777,10 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string)
   const categoryMenuNames = await scanCategoryMenu(page, platform)
   // 같은 이유로, 상품 샘플로 이동하기 전에 지금 페이지(홈/목록)의 하단 회사정보와 이용안내·공지 등
   // 게시판 링크를 먼저 훑어 원문을 모아둔다 — 결제계좌/택배사/연락처는 상품페이지가 아니라 이런 정적
-  // 페이지에 있다(실사용 몰 확인됨). 페이지 이동이 있어 시간이 들 수 있어 실패해도 나머지 흐름은 계속한다.
-  const contextText = await gatherMallContextText(page).catch(() => '')
+  // 페이지에 있다(실사용 몰 확인됨). deep(=="몰 구조 파악" 버튼)에서만 하는 무거운 작업이라 로그인
+  // 확인/스크랩 시작마다 도는 가벼운 체크에서는 건너뛴다. 페이지 이동이 있어 시간이 들 수 있어 실패해도
+  // 나머지 흐름은 계속한다.
+  const contextText = deep ? await gatherMallContextText(page).catch(() => '') : ''
 
   const signals: MallProfileSignals = {
     sampleCount: 0, platform, sampleProductUrl: sampleUrls[0], hasMainImages: false, hasDetailImages: false,
@@ -810,8 +818,8 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string)
       if (product.stock_by_option.length > 0) signals.hasStockByOption = true
       if (product.options.length > 1) signals.hasCascadingOptions = true
       product.extra_info.forEach(({ label }) => infoLabelSet.add(label))
-      // AI 리포트용 원문은 상품 1건만 있으면 충분해(토큰 절약) 첫 성공 샘플에서만 모은다.
-      if (!productContextText) {
+      // AI 리포트용 원문은 상품 1건만 있으면 충분해(토큰 절약) 첫 성공 샘플에서만 모은다. deep 전용.
+      if (deep && !productContextText) {
         const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '')
         productContextText = `[샘플 상품페이지: ${url}]\n${bodyText.replace(/\s+/g, ' ').trim().slice(0, 4_000)}`
       }
@@ -822,10 +830,12 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string)
   signals.categoryPaths = [...categoryPathSet].sort()
   signals.categoryMaxDepth = signals.categoryPaths.reduce((max, p) => Math.max(max, p.split(' > ').length), 0)
 
-  const combinedContext = [contextText, productContextText].filter(Boolean).join('\n\n')
-  signals.report = await generateMallProfileReport(
-    mallName, platform, categoryMenuNames.length ? categoryMenuNames : signals.categoryPaths, signals.sampleProductUrl, combinedContext,
-  ).catch(() => null)
+  if (deep) {
+    const combinedContext = [contextText, productContextText].filter(Boolean).join('\n\n')
+    signals.report = await generateMallProfileReport(
+      mallName, platform, categoryMenuNames.length ? categoryMenuNames : signals.categoryPaths, signals.sampleProductUrl, combinedContext,
+    ).catch(() => null)
+  }
 
   await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
   return signals.sampleCount > 0 ? signals : null

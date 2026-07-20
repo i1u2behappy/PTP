@@ -1,25 +1,5 @@
 import pool from '../db'
 import { profileMallStructure, profileMallStructureForScrape, type MallProfileSignals, type ScrapeOptions } from '../scraper'
-import type { MallStructureReport } from '../ai'
-
-/** "몰 구조 파악" 자동분석 메모를 식별하는 접두문구 — 사용자가 직접 쓴 메모나 "구조 변경 감지" 등
- * 다른 자동 메모와 구분해, 이 접두문구로 시작하는 메모만 재실행 시 이전 것을 지우고 최신 1건만 남긴다. */
-const MALL_INFO_MEMO_PREFIX = '🔍 몰 기본정보 자동 분석'
-
-/** SiteDetailPanel의 수동 메모 템플릿(택배사/배송비/배송·반품 주소지/연락처/은행/계좌번호)과 같은
- * 순서로 "몰 구조 파악" 결과를 채운다 — 사용자가 그동안 직접 입력해온 메모와 같은 형태로 남겨,
- * Mall 관리 메모 컬럼만 봐도 거래정보를 바로 알 수 있게 한다. */
-function formatMallInfoMemo(report: MallStructureReport): string {
-  return [
-    `${MALL_INFO_MEMO_PREFIX} (규칙 기반일 수 있음 — 실제와 다르면 직접 수정)`,
-    `택배사: ${report.shippingCourier}`,
-    `배송비: ${report.shippingFeeInfo}`,
-    `배송/반품 주소지: ${report.returnAddress}`,
-    `연락처: ${report.companyContact}`,
-    `은행: ${report.bankName}`,
-    `계좌번호: ${report.accountNumber}`,
-  ].join('\n')
-}
 
 function summarizeProfile(p: MallProfileSignals): string {
   return [
@@ -88,22 +68,11 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
     [JSON.stringify(next), siteId],
   )
 
-  if (deep) {
-    // "몰 구조 파악"은 그 자리에서 결과 화면으로도 보여주지만(ScraperPanel), 사용자 요청에 따라 결제계좌/
-    // 택배사/연락처 등 거래정보는 매번 Mall 관리 메모("운영 메모")에도 요약해 남긴다 — SiteDetailPanel의
-    // 수동 메모 템플릿과 같은 형태라 메모 화면만 봐도 바로 알아볼 수 있다. 로그인 확인 전용 "구조 변경
-    // 감지" 메모나 사용자가 직접 쓴 메모와는 완전히 별개 항목이라 그건 건드리지 않되, 버튼을 다시 눌러
-    // 재실행할 때마다 자동분석 메모가 계속 쌓이지 않도록 이전 자동분석 메모(같은 접두문구)만 지우고
-    // 최신 1건만 남긴다 — "운영 메모"가 사용자 자신의 기록 공간으로 계속 쓰이도록 하기 위함.
-    if (next.report) {
-      await pool.query(`DELETE FROM site_memos WHERE site_id = $1 AND content LIKE $2`, [siteId, `${MALL_INFO_MEMO_PREFIX}%`])
-      await pool.query(
-        `INSERT INTO site_memos (site_id, content) VALUES ($1, $2)`,
-        [siteId, formatMallInfoMemo(next.report)],
-      )
-    }
-    return { signals: next, diffs: [], isFirstTime: !prev }
-  }
+  // "몰 구조 파악"(deep)은 site_memos("운영 메모")에 아무것도 쓰지 않는다 — 운영 메모는 사용자가 직접
+  // 기록·수정하는 공간으로 두고, 이 결과는 SiteDetailPanel이 sites.scrape_profile에서 직접 읽어 운영
+  // 메모 아래에 "최근 1건"짜리 참고용 표시로만 보여준다(사용자가 그 내용을 보고 필요한 걸 운영 메모에
+  // 직접 옮겨 적는 용도). 로그인 확인 전용 "구조 변경 감지" 메모와도 완전히 분리된다.
+  if (deep) return { signals: next, diffs: [], isFirstTime: !prev }
 
   if (!prev) {
     await pool.query(

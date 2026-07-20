@@ -8,7 +8,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     `SELECT id, name, url, login_url, login_id, login_pw_encrypted, login_pw_iv, client_id,
             custom_name_selector, custom_price_selector, custom_thumbnail_selector,
             auto_scrape_enabled, auto_scrape_hour, manual_login_required, main_items, extraction_rules,
-            last_adjustment_preview
+            last_adjustment_preview, scrape_profile, scrape_profile_updated_at
      FROM sites WHERE id = $1`,
     [id],
   )
@@ -27,6 +27,9 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     main_items: site.main_items,
     extraction_rules: site.extraction_rules,
     last_adjustment_preview: site.last_adjustment_preview,
+    // "몰 구조 파악"의 거래정보 리포트(있으면) — SiteDetailPanel이 운영 메모 아래 참고용으로 표시한다.
+    mall_report: site.scrape_profile?.report ?? null,
+    mall_report_updated_at: site.scrape_profile_updated_at,
     profile_dir: profileDir(site.id),
   })
 }

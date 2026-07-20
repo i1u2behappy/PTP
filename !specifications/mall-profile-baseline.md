@@ -331,6 +331,25 @@ URL)로 먼저 `page.goto` — 로그인 확인 시점에 사용자가 마이페
 - `components/panels/SiteDetailPanel.tsx`: "운영 메모" 설명 문구에 "몰 구조 파악을 실행하면 자동분석
   메모가 최신 1건으로 자동 추가/교체되고, 직접 남긴 메모는 그대로 유지된다"는 안내를 추가.
 
+## 정정 (2026-07-20, 7차) — 운영 메모는 site_memos에 안 씀, 참고용 별도 표시로 교체
+
+6차에서 "몰 구조 파악" 결과를 `site_memos`(운영 메모)에 INSERT+이전 것 자동삭제하는 방식으로 구현했는데,
+사용자가 의도를 다시 정정: "운영 메모"는 **사용자가 직접 기록·수정하는 순수한 공간**이어야 하고, "몰
+구조 분석" 결과는 운영 메모와 섞이지 않는 **별도의 참고용 표시(최근 1건, 일시+내용)**로 그 아래 보여줘야
+한다 — 사용자가 그 내용을 보고 필요한 걸 운영 메모에 직접 옮겨 적는 것이 목적이다. 6차의 site_memos
+INSERT/DELETE 방식은 폐기.
+
+- `lib/scrape/mallProfile.ts`: `applyProfileResult`의 deep 분기에서 site_memos INSERT/DELETE 로직
+  전부 제거(`formatMallInfoMemo`/`MALL_INFO_MEMO_PREFIX`도 삭제) — deep 호출은 이제 `sites.scrape_profile`
+  갱신만 하고 site_memos는 전혀 건드리지 않는다.
+- `app/api/sites/[id]/route.ts`: GET 응답에 `mall_report`(`scrape_profile.report`)와
+  `mall_report_updated_at`(`scrape_profile_updated_at`) 추가.
+- `components/panels/SiteDetailPanel.tsx`: "운영 메모"(`MemoLog`) 아래에 별도 카드로 "🔍 몰 구조 분석
+  (참고용, 최근 1건)"을 추가 — `mall_report_updated_at` 기준 일시 + 6개 항목(택배사/배송비/주소지/
+  연락처/은행/계좌번호)을 읽기 전용으로 보여준다. `mallReport`가 없으면(아직 "몰 구조 파악"을 실행한
+  적 없음) 카드 자체를 렌더링하지 않는다. 운영 메모 설명 문구도 "아래 참고 내용을 보고 직접 옮겨
+  적으라"는 안내로 되돌림.
+
 ## 하지 않는 것 (2차 재설계 기준, 최종)
 
 - 8개 항목 리포트는 어디까지나 "실제로 모은 원문 안에서" 찾은 내용만 답한다 — 원문에 없는 정보(결제

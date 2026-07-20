@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { useTabs } from '../shell/TabsContext'
 import { SITES_LIST_TAB } from '../shell/menuTabs'
 
@@ -17,12 +17,69 @@ interface Site {
   created_at: string
 }
 
+interface ColumnDef {
+  key: string
+  label: string
+  getValue: (s: Site) => string
+  render: (s: Site) => React.ReactNode
+  className?: string
+}
+
+const COLUMNS: ColumnDef[] = [
+  { key: 'name', label: 'Mall 이름', getValue: s => s.name || '', className: 'text-gray-800 font-medium', render: s => (
+    <>
+      {s.name || '(이름 없음)'}
+      {s.manual_login_required === true && (
+        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold whitespace-nowrap" title="Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 안 되는 몰 — 크롬 확장(개발자모드)으로 스크랩">
+          🧩 개발자모드
+        </span>
+      )}
+      {s.manual_login_required === null && (
+        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold whitespace-nowrap" title="아직 스크랩 방식이 정해지지 않았습니다 — 스크래핑 화면에서 처음 스크랩할 때 선택하세요">
+          ❔ 미정
+        </span>
+      )}
+    </>
+  ) },
+  { key: 'main_items', label: '메인 품목', getValue: s => s.main_items || '', render: s => s.main_items || '-', className: 'text-gray-500' },
+  { key: 'url', label: 'URL', getValue: s => s.url, render: s => s.url, className: 'text-gray-500' },
+  { key: 'login_id', label: '로그인ID', getValue: s => s.login_id || '', render: s => s.login_id || '-', className: 'text-gray-500' },
+  { key: 'login_pw_masked', label: '비밀번호', getValue: s => s.login_pw_masked || '', render: s => s.login_pw_masked || '-', className: 'text-gray-500 font-mono' },
+  { key: 'client_name', label: '거래처', getValue: s => s.client_name || '', render: s => s.client_name || '-', className: 'text-teal-600' },
+  { key: 'blocked', label: '상태', getValue: s => s.blocked ? '차단' : '정상',
+    render: s => s.blocked ? <span className="font-semibold text-rose-500">차단</span> : <span className="text-emerald-600">정상</span> },
+  { key: 'latest_memo', label: '메모', getValue: s => s.latest_memo || '', render: s => s.latest_memo || '-', className: 'text-gray-500 max-w-xs' },
+  { key: 'created_at', label: '등록일', getValue: s => s.created_at, render: s => new Date(s.created_at).toLocaleDateString(), className: 'text-gray-400' },
+]
+
+const DEFAULT_COL_WIDTH: Record<string, number> = {
+  name: 160, main_items: 140, url: 220, login_id: 110, login_pw_masked: 100,
+  client_name: 110, blocked: 70, latest_memo: 220, created_at: 100,
+}
+const MIN_COL_WIDTH = 50
+function widthFor(key: string): number {
+  return DEFAULT_COL_WIDTH[key] ?? 120
+}
+
+function compareValues(a: string, b: string): number {
+  return a.localeCompare(b, 'ko')
+}
+
+type SortDir = 'asc' | 'desc'
+interface SortKey { key: string; dir: SortDir }
+
 export function SitesListPanel() {
   const { openTab, refreshSignals, bumpRefresh } = useTabs()
   const [sites, setSites] = useState<Site[]>([])
   const [q, setQ] = useState('')
   const [loadError, setLoadError] = useState(false)
   const [rescrapingAll, setRescrapingAll] = useState(false)
+  const [sortKeys, setSortKeys] = useState<SortKey[]>([])
+  const [filters, setFilters] = useState<Record<string, string>>({})
+  const [showFilters, setShowFilters] = useState(false)
+  const [colWidths, setColWidths] = useState<Record<string, number>>({})
+  const [colOrder, setColOrder] = useState<string[]>([])
+  const [dragKey, setDragKey] = useState<string | null>(null)
 
   const load = useCallback((query: string) => {
     fetch(`/api/sites?q=${encodeURIComponent(query)}`).then(r => {
@@ -34,6 +91,75 @@ export function SitesListPanel() {
   }, [])
 
   useEffect(() => { load(q) }, [load, q, refreshSignals.sites])
+
+  // 컬럼 구성은 고정이지만, 렌더링 시점에 "기존 순서 + 아직 안 담긴 새 키"를 계산해 useEffect로 state를
+  // 동기화하지 않는다 (state-sync 이펙트 없이 항상 최신 컬럼 목록과 일치시키기 위함).
+  const effectiveOrder = useMemo(() => {
+    const keys = COLUMNS.map(c => c.key)
+    const known = colOrder.filter(k => keys.includes(k))
+    const missing = keys.filter(k => !known.includes(k))
+    return [...known, ...missing]
+  }, [colOrder])
+  const orderedColumns = effectiveOrder.map(k => COLUMNS.find(c => c.key === k)).filter((c): c is ColumnDef => !!c)
+
+  function handleColDrop(targetKey: string) {
+    if (!dragKey || dragKey === targetKey) return
+    const next = effectiveOrder.filter(k => k !== dragKey)
+    next.splice(next.indexOf(targetKey), 0, dragKey)
+    setColOrder(next)
+    setDragKey(null)
+  }
+
+  function startResize(key: string, e: { clientX: number; preventDefault: () => void }) {
+    e.preventDefault()
+    const startX = e.clientX
+    const startWidth = colWidths[key] ?? widthFor(key)
+    function onMove(ev: MouseEvent) {
+      setColWidths(w => ({ ...w, [key]: Math.max(MIN_COL_WIDTH, startWidth + (ev.clientX - startX)) }))
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
+
+  function handleSort(key: string, e: { shiftKey: boolean }) {
+    setSortKeys(prev => {
+      const idx = prev.findIndex(s => s.key === key)
+      if (e.shiftKey) {
+        if (idx === -1) return [...prev, { key, dir: 'asc' }]
+        const next = [...prev]
+        next[idx] = { key, dir: next[idx].dir === 'asc' ? 'desc' : 'asc' }
+        return next
+      }
+      if (prev.length === 1 && prev[0].key === key) {
+        return [{ key, dir: prev[0].dir === 'asc' ? 'desc' : 'asc' }]
+      }
+      return [{ key, dir: 'asc' }]
+    })
+  }
+
+  const hasFilters = Object.values(filters).some(Boolean)
+  const filteredSites = sites.filter(s => COLUMNS.every(col => {
+    const f = filters[col.key]
+    if (!f) return true
+    return col.getValue(s).toLowerCase().includes(f.toLowerCase())
+  }))
+  const visibleSites = sortKeys.length
+    ? [...filteredSites].sort((a, b) => {
+        for (const { key, dir } of sortKeys) {
+          const col = COLUMNS.find(c => c.key === key)
+          if (!col) continue
+          const cmp = compareValues(col.getValue(a), col.getValue(b))
+          if (cmp !== 0) return dir === 'asc' ? cmp : -cmp
+        }
+        return 0
+      })
+    : filteredSites
+
+  const tableWidth = orderedColumns.reduce((sum, col) => sum + (colWidths[col.key] ?? widthFor(col.key)), 0) + 100
 
   function openDetail(site?: Site) {
     openTab({ ...SITES_LIST_TAB, type: 'site-detail', params: site ? { siteId: site.id } : undefined })
@@ -96,47 +222,70 @@ export function SitesListPanel() {
         <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-sm text-gray-400">등록된 Mall이 없습니다.</div>
       ) : (
         <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-0 flex flex-col">
+          <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-gray-100 bg-gray-50 shrink-0">
+            <button onClick={() => setShowFilters(v => !v)}
+              className={`px-3 py-1 text-xs font-semibold rounded-full transition-colors ${showFilters ? 'bg-teal-500 text-white hover:bg-teal-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+              🔍 필터
+            </button>
+            {(hasFilters || sortKeys.length > 0) && (
+              <button onClick={() => { setFilters({}); setSortKeys([]) }}
+                className="px-3 py-1 bg-gray-100 text-gray-600 text-xs font-semibold rounded-full hover:bg-gray-200 transition-colors">
+                필터/정렬 초기화
+              </button>
+            )}
+          </div>
           <div className="overflow-auto flex-1 min-h-0">
-            <table className="text-xs border-collapse whitespace-nowrap">
+            <table className="text-xs border-collapse" style={{ tableLayout: 'fixed', width: tableWidth }}>
+              <colgroup>
+                {orderedColumns.map(col => <col key={col.key} style={{ width: colWidths[col.key] ?? widthFor(col.key) }} />)}
+                <col style={{ width: 100 }} />
+              </colgroup>
               <thead className="sticky top-0 z-10 bg-gray-50">
                 <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                  <th className="px-3 py-2 text-left sticky left-0 bg-gray-50 z-20">Mall 이름</th>
-                  <th className="px-3 py-2 text-left">메인 품목</th>
-                  <th className="px-3 py-2 text-left">URL</th>
-                  <th className="px-3 py-2 text-left">로그인ID</th>
-                  <th className="px-3 py-2 text-left">비밀번호</th>
-                  <th className="px-3 py-2 text-left">거래처</th>
-                  <th className="px-3 py-2 text-left">상태</th>
-                  <th className="px-3 py-2 text-left">메모</th>
-                  <th className="px-3 py-2 text-left">등록일</th>
-                  <th className="px-3 py-2 text-left">관리</th>
+                  {orderedColumns.map(col => {
+                    const idx = sortKeys.findIndex(s => s.key === col.key)
+                    const active = idx !== -1
+                    return (
+                      <th key={col.key} draggable
+                        onDragStart={() => setDragKey(col.key)}
+                        onDragOver={e => e.preventDefault()}
+                        onDrop={() => handleColDrop(col.key)}
+                        onDragEnd={() => setDragKey(null)}
+                        className={`relative px-3 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${dragKey === col.key ? 'opacity-40' : ''}`}
+                        onClick={e => handleSort(col.key, e)} title="드래그: 컬럼 순서 이동 · 클릭: 정렬 · Shift+클릭: 복합 정렬 추가">
+                        <span className={active ? 'text-gray-800' : ''}>{col.label}</span>
+                        {active && <span className="ml-1 text-teal-500">{sortKeys[idx].dir === 'asc' ? '▲' : '▼'}{sortKeys.length > 1 ? idx + 1 : ''}</span>}
+                        <div onMouseDown={e => { e.stopPropagation(); startResize(col.key, e) }} onClick={e => e.stopPropagation()} draggable={false}
+                          className="absolute top-0 right-0 bottom-0 w-1.5 cursor-col-resize hover:bg-teal-400 active:bg-teal-500" />
+                      </th>
+                    )
+                  })}
+                  <th className="px-3 py-2 text-left whitespace-nowrap">관리</th>
                 </tr>
+                {showFilters && (
+                  <tr className="border-b border-gray-200 bg-white">
+                    {orderedColumns.map(col => (
+                      <th key={col.key} className="px-2 py-1.5 font-normal">
+                        <input value={filters[col.key] || ''} onChange={e => setFilters(f => ({ ...f, [col.key]: e.target.value }))}
+                          placeholder="필터..." onClick={e => e.stopPropagation()}
+                          className="w-full border border-gray-200 rounded px-1.5 py-1 text-xs font-normal focus:outline-none focus:ring-1 focus:ring-teal-300" />
+                      </th>
+                    ))}
+                    <th className="px-2 py-1.5"></th>
+                  </tr>
+                )}
               </thead>
               <tbody>
-                {sites.map(s => (
+                {visibleSites.length === 0 ? (
+                  <tr><td colSpan={orderedColumns.length + 1} className="px-3 py-3 text-center text-gray-400">필터에 맞는 Mall이 없습니다.</td></tr>
+                ) : visibleSites.map(s => (
                   <tr key={s.id} onClick={() => openScraper(s)} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
-                    <td className="px-3 py-2 text-gray-800 font-medium sticky left-0 bg-white">
-                      {s.name || '(이름 없음)'}
-                      {s.manual_login_required === true && (
-                        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold whitespace-nowrap" title="Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 안 되는 몰 — 크롬 확장(개발자모드)으로 스크랩">
-                          🧩 개발자모드
-                        </span>
-                      )}
-                      {s.manual_login_required === null && (
-                        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold whitespace-nowrap" title="아직 스크랩 방식이 정해지지 않았습니다 — 스크래핑 화면에서 처음 스크랩할 때 선택하세요">
-                          ❔ 미정
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2 text-gray-500 max-w-[200px] truncate" title={s.main_items || ''}>{s.main_items || '-'}</td>
-                    <td className="px-3 py-2 text-gray-500 max-w-[280px] truncate" title={s.url}>{s.url}</td>
-                    <td className="px-3 py-2 text-gray-500">{s.login_id || '-'}</td>
-                    <td className="px-3 py-2 text-gray-500 font-mono">{s.login_pw_masked || '-'}</td>
-                    <td className="px-3 py-2 text-teal-600">{s.client_name || '-'}</td>
-                    <td className="px-3 py-2">{s.blocked ? <span className="font-semibold text-rose-500">차단</span> : <span className="text-emerald-600">정상</span>}</td>
-                    <td className="px-3 py-2 text-gray-500 max-w-xs truncate" title={s.latest_memo || ''}>{s.latest_memo || '-'}</td>
-                    <td className="px-3 py-2 text-gray-400">{new Date(s.created_at).toLocaleDateString()}</td>
-                    <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
+                    {orderedColumns.map(col => (
+                      <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''}`} title={col.key === 'url' || col.key === 'latest_memo' || col.key === 'main_items' ? col.getValue(s) : undefined}>
+                        {col.render(s)}
+                      </td>
+                    ))}
+                    <td className="px-3 py-2 whitespace-nowrap" onClick={e => e.stopPropagation()}>
                       <button onClick={() => openDetail(s)} className="text-teal-500 hover:underline mr-2">수정</button>
                       <button onClick={() => handleDelete(s.id)} className="text-rose-500 hover:underline">삭제</button>
                     </td>

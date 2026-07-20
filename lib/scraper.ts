@@ -516,13 +516,17 @@ async function scanSelectOptions(page: Page, rootSelector?: string): Promise<Dom
     return Array.from(root.querySelectorAll('select'))
       .filter(sel => !navOnchangeRe.test(sel.getAttribute('onchange') || ''))
       .map(sel => {
-        const name = sel.getAttribute('title') || sel.name || sel.id || ''
+        // data-soptionnm은 고도몰(펫투비 등)이 옵션 그룹명을 담아두는 속성 — title/name/id가 다 없는
+        // select(예: id="el-sOption")도 이걸로 진짜 이름("옵션")을 얻는다(실제 페이지로 확인).
+        const name = sel.getAttribute('title') || sel.getAttribute('data-soptionnm') || sel.name || sel.id || ''
         // value=""인 <option>은 "사이즈"/"색상" 같은 안내용 placeholder인 경우가 흔하다(플레이스홀더
         // 문구가 "선택하세요" 류가 아니어도 마찬가지라 텍스트 패턴만으론 못 걸러낸다) — 실제 선택 가능한
         // 옵션이라면 value가 비어있을 이유가 없으므로 텍스트 패턴 필터와 별개로 항상 제외한다.
         const values = Array.from((sel as HTMLSelectElement).options)
           .filter(o => o.value !== '')
-          .map(o => (o.textContent || '').trim())
+          // 고도몰은 <option> 텍스트에 "민트: 37,810원"처럼 가격까지 같이 넣어두고, 실제 깨끗한 값은
+          // data-so_name 속성에 따로 둔다(실제 페이지로 확인) — 있으면 그걸 우선한다.
+          .map(o => (o.getAttribute('data-so_name') || o.textContent || '').trim())
           .filter(v => v && !placeholderRe.test(v))
         return { name, values }
       })

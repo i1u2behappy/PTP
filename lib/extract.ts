@@ -72,21 +72,32 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       if (ogImg) mainImages = [ogImg]
     }
     if (!mainImages.length) {
-      // 대표이미지가 여러 장인 갤러리형 UI(예: 신우의 .img_small 썸네일 목록)를 먼저 시도하고,
-      // 없으면 큰 대표이미지 하나(#bigimage 신우, #objImg/.img_big 고도몰 — 실제 페이지로 확인)만이라도 쓴다.
+      // 대표이미지가 여러 장인 갤러리형 UI(예: 신우의 .img_small 썸네일 목록)를 먼저 시도한다.
       const galleryImgs = Array.from(document.querySelectorAll<HTMLImageElement>('.img_small .small img')).map(img => img.src).filter(Boolean)
       if (galleryImgs.length) mainImages = galleryImgs
       else {
-        const bigImg = document.querySelector<HTMLImageElement>('#bigimage, #objImg, .img_big img')
-        if (bigImg?.src) mainImages = [bigImg.src]
+        // 고도몰(펫투비 등)은 .view_img 안 .imgs 썸네일 목록이 실제 갤러리다(옵션이 없어도 여러 장일
+        // 수 있음 — 실제 페이지로 확인). src의 "?rsz=50"은 표시용 리사이즈 파라미터일 뿐이라 떼어내면
+        // #objImg가 쓰는 것과 같은 원본 크기 이미지 URL이 된다.
+        const godoGalleryImgs = [...new Set(
+          Array.from(document.querySelectorAll<HTMLImageElement>('.view_img .imgs')).map(img => img.src.replace(/\?rsz=\d+$/, '')).filter(Boolean),
+        )]
+        if (godoGalleryImgs.length) mainImages = godoGalleryImgs
+        else {
+          // 갤러리가 없으면 큰 대표이미지 하나(#bigimage 신우, #objImg/.img_big 고도몰)만이라도 쓴다.
+          const bigImg = document.querySelector<HTMLImageElement>('#bigimage, #objImg, .img_big img')
+          if (bigImg?.src) mainImages = [bigImg.src]
+        }
       }
     }
 
     // ld+json/og 이미지는 URL만 있고 alt 텍스트가 없으니, 페이지의 실제 <img> 태그에서 src 기준으로 alt를 찾아 붙인다.
-    // alt가 없는 이미지는 파일명(URL 마지막 경로)을 이름으로 대신 쓴다.
+    // 상세설명 에디터(Froala 등, 고도몰 계열에서 흔함)는 alt 대신 data-fileorinm에 업로드 당시 원본
+    // 파일명(예: "벨버드 초대형.jpg")을 남겨두는 경우가 있어(실제 페이지로 확인) alt 다음으로 시도한다.
+    // 둘 다 없는 이미지는 파일명(URL 마지막 경로, 보통 의미 없는 해시)을 이름으로 대신 쓴다.
     const imgAltBySrc = new Map<string, string>()
     document.querySelectorAll('img').forEach(img => {
-      const alt = img.getAttribute('alt')?.trim()
+      const alt = img.getAttribute('alt')?.trim() || img.getAttribute('data-fileorinm')?.trim()
       if (alt && img.src) imgAltBySrc.set(img.src, alt)
     })
     const nameForImage = (src: string) => {

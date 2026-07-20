@@ -985,10 +985,16 @@ export async function detectMallPlatform(page: Page): Promise<MallPlatform> {
       .map(el => (el.getAttribute('src') || el.getAttribute('href') || '').toLowerCase())
     const hasHost = (h: string) => hosts.some(s => s.includes(h))
     const url = location.href.toLowerCase()
+    // 홈/목록 페이지는 자기 자신의 URL이 상품 상세 패턴과 무관해 generator 메타/호스트 단서가 전혀 없는
+    // 몰(펫투비 실사용 확인됨 — 커스텀 스킨이라 generator 태그도, godomall 관련 호스트 문자열도 없음)에서
+    // platform을 못 잡는다. 페이지 안 링크들의 href도 같이 훑어 상품 상세 URL 패턴이 하나라도 있으면
+    // 그걸로 판정한다 — 홈페이지에도 베스트/신상품 위젯 등으로 실제 상품 링크는 대부분 존재한다.
+    const linkHrefs = Array.from(document.querySelectorAll('a[href]')).map(a => (a as HTMLAnchorElement).href.toLowerCase())
+    const anyLinkMatches = (re: RegExp) => linkHrefs.some(h => re.test(h))
 
-    if (generator.includes('cafe24') || hasHost('cafe24.com') || /\/product\/(list|detail)\.html/.test(url)) return 'cafe24'
-    if (generator.includes('makeshop') || hasHost('makeshop.co.kr') || /shopdetail\.html\?branduid=/.test(url)) return 'makeshop'
-    if (generator.includes('godo') || hasHost('godomall') || /goods_view\.php\?goodsno=/.test(url)) return 'godomall'
+    if (generator.includes('cafe24') || hasHost('cafe24.com') || /\/product\/(list|detail)\.html/.test(url) || anyLinkMatches(/\/product\/detail\.html/)) return 'cafe24'
+    if (generator.includes('makeshop') || hasHost('makeshop.co.kr') || /shopdetail\.html\?branduid=/.test(url) || anyLinkMatches(/shopdetail\.html\?branduid=/)) return 'makeshop'
+    if (generator.includes('godo') || hasHost('godomall') || /goods_view\.php\?goodsno=/.test(url) || anyLinkMatches(/goods_view\.php\?goodsno=/)) return 'godomall'
     return 'unknown'
   })
 }

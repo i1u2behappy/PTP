@@ -762,7 +762,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   })}
                 </div>
               ) : (
-                <p className="text-xs text-amber-600">AI 리포트를 만들지 못했습니다 (ANTHROPIC_API_KEY 미설정이거나 홈/게시판 원문을 못 모았습니다) — 아래 참고정보만 확인됩니다.</p>
+                <p className="text-xs text-amber-600">AI 리포트를 만들지 못했습니다 (ANTHROPIC_API_KEY 미설정·크레딧 부족 등 API 호출 실패이거나 홈/게시판 원문을 못 모았습니다 — 서버 콘솔 로그 확인) — 아래 참고정보만 확인됩니다.</p>
               )}
               <div className="flex flex-wrap gap-1.5 mt-3">
                 <span className="text-[11px] bg-white border border-gray-200 text-gray-500 rounded-full px-2 py-0.5">플랫폼 {profileResult.signals.platform}</span>

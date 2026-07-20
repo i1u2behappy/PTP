@@ -314,7 +314,8 @@ ${contextText.slice(0, 20_000)}`
     const toolUse = response.content.find(b => b.type === 'tool_use')
     if (!toolUse || toolUse.type !== 'tool_use') return null
     return toolUse.input as MallStructureReport
-  } catch {
+  } catch (e) {
+    console.error('[generateMallProfileReport] API call failed:', e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : e)
     return null
   }
 }

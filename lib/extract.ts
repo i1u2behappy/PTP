@@ -137,11 +137,21 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       description = ogContent('og:description') || document.querySelector('meta[name="description"]')?.getAttribute('content') || ''
     }
 
+    // 배송비 dt/dd 안에 "지역별 추가배송비" 클릭 시 뜨는 숨겨진 팝업 레이어(도서산간 등 지역별 추가금액
+    // 목록)가 같이 들어있는 경우가 있다(실제 페이지로 확인, 가방쟁이) — textContent는 display:none이어도
+    // 그대로 다 이어붙여, 값이 그 지역 목록으로 오염된다(예: "3,500원 지역별배송비 전라남도... 7,000원...").
+    // 라벨/값을 읽기 전에 숨겨진 하위 요소를 걷어낸 사본에서 읽어 이런 팝업 내용을 제외한다.
+    const cleanText = (el: Element) => {
+      const clone = el.cloneNode(true) as Element
+      clone.querySelectorAll('.layer_area, [style*="display:none" i], [style*="display: none" i]').forEach(n => n.remove())
+      return (clone.textContent || '').trim()
+    }
+
     // 국내 쇼핑몰은 전자상거래법상 "상품정보제공고시" 표를 의무 게시하므로, 라벨-값 쌍에서 부가 정보를 찾는다.
     // 카페24 등은 <table>(th/td)로, 신우 같은 구형 자체 솔루션은 <dl><dt>/<dd>로 같은 걸 표현하니 둘 다 본다.
     const infoRows: [string, string][] = []
     document.querySelectorAll('table tr').forEach(tr => {
-      const cells = Array.from(tr.querySelectorAll('th,td')).map(c => (c.textContent || '').trim())
+      const cells = Array.from(tr.querySelectorAll('th,td')).map(cleanText)
       if (cells.length === 2 && cells[0] && cells[1]) infoRows.push([cells[0], cells[1]])
     })
     document.querySelectorAll('dl').forEach(dl => {
@@ -151,8 +161,8 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
         let sib = dt.nextElementSibling
         while (sib && sib.tagName !== 'DD' && sib.tagName !== 'DT') sib = sib.nextElementSibling
         if (sib && sib.tagName === 'DD') {
-          const label = (dt.textContent || '').trim()
-          const value = (sib.textContent || '').trim()
+          const label = cleanText(dt)
+          const value = cleanText(sib)
           if (label && value) infoRows.push([label, value])
         }
       })
@@ -213,7 +223,16 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     // 호출부(스크랩 오케스트레이션)가 목록 기반 카테고리 유무에 따라 결정한다.
     let categoryFromDetail = ''
     let brandFromCategoryDetail = ''
-    for (const sel of ['.xans-product-headcategory', 'nav[aria-label*="breadcrumb" i]', '.breadcrumb', '.location']) {
+
+    // 고도몰의 또 다른 스킨(가방쟁이, 실제 페이지로 확인)은 브레드크럼 각 단계를 .location_select로 감싸,
+    // 그 안에 "현재 선택된 이름"(.location_tit)과 그 옆 다른 카테고리로 바로 갈 수 있는 숨겨진 <ul> 드롭다운을
+    // 같이 둔다. 아래 범용 로직처럼 <li>를 그대로 다 훑으면 그 드롭다운 대안 목록까지 섞여 카테고리가
+    // 완전히 틀어지므로, 이 구조는 .location_tit만 콕 집어 먼저 처리한다.
+    const locationTits = Array.from(document.querySelectorAll('.location_wrap .location_select > .location_tit'))
+      .map(el => (el.textContent || '').trim()).filter(Boolean)
+    if (locationTits.length) categoryFromDetail = locationTits.join(' > ')
+
+    for (const sel of categoryFromDetail ? [] : ['.xans-product-headcategory', 'nav[aria-label*="breadcrumb" i]', '.breadcrumb', '.location']) {
       for (const el of Array.from(document.querySelectorAll(sel))) {
         // <li>로 계층이 명확히 나뉘어 있으면 그 경계를 그대로 쓴다 — "/" 기준으로 통째로 쪼개면
         // "SANDAL/MULE"처럼 카테고리명 자체에 "/"가 들어있는 경우까지 잘못 쪼개진다(실제 발견된 사례).
@@ -348,6 +367,15 @@ export interface ExtractSelectorOverrides {
 export async function extractProductRuleBased(
   page: Page, url: string, overrides?: ExtractSelectorOverrides, extractionRules?: Record<string, ExtractionRule>,
 ): Promise<ExtractedProduct> {
+  // .location_wrap 브레드크럼(가방쟁이 등)은 페이지 로드 직후엔 비어있다가 JS로 뒤늦게 채워진다(실제
+  // 페이지로 확인) — scrapePageData가 안의 categoryFromDetail을 읽기 전에 짧게 기다린다. 이 위젯이 없는
+  // 몰은 즉시 통과해 지연이 없다.
+  await page.waitForFunction(() => {
+    const wrap = document.querySelector('.location_wrap')
+    if (!wrap) return true
+    return !!wrap.querySelector('.location_select > .location_tit')?.textContent?.trim()
+  }, { timeout: 3_000 }).catch(() => {})
+
   const raw = await scrapePageData(page)
 
   const result: ExtractedProduct = {

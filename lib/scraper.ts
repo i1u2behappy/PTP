@@ -1044,7 +1044,24 @@ interface CategoryLabel {
 // 목록 페이지의 카테고리 경로(예: "백팩 > 여행용 백팩")를 찾는다. .xans-product-headcategory는 카페24 표준 클래스인데,
 // 같은 클래스가 배너 이미지용으로도 쓰여 텍스트가 비어있을 수 있어 모든 매칭 요소 중 텍스트가 있는 것을 찾는다.
 async function detectCategoryLabel(page: Page): Promise<CategoryLabel> {
+  // .location_wrap 브레드크럼(가방쟁이 등)은 페이지 로드 직후엔 비어있다가 JS로 뒤늦게 채워진다(실제
+  // 페이지로 확인 — 채워지기 전에 읽으면 빈 배열이 나와 카테고리를 통째로 놓친다). 이 위젯이 있는
+  // 페이지에서만 짧게 기다리고, 없는 몰은 곧장 진행해 불필요한 지연이 없게 한다.
+  await page.waitForFunction(() => {
+    const wrap = document.querySelector('.location_wrap')
+    if (!wrap) return true
+    return !!wrap.querySelector('.location_select > .location_tit')?.textContent?.trim()
+  }, { timeout: 3_000 }).catch(() => {})
+
   return page.evaluate(() => {
+    // 고도몰의 또 다른 스킨(가방쟁이, 실제 페이지로 확인)은 브레드크럼 각 단계를 .location_select로 감싸,
+    // 그 안에 "현재 선택된 이름"(.location_tit)과 그 옆 다른 카테고리로 바로 갈 수 있는 숨겨진 <ul> 드롭다운을
+    // 같이 둔다. 아래 범용 로직처럼 <li>를 그대로 다 훑으면 그 드롭다운 대안 목록까지 섞여 카테고리가
+    // 완전히 틀어지므로, 이 구조는 .location_tit만 콕 집어 먼저 처리한다.
+    const locationTits = Array.from(document.querySelectorAll('.location_wrap .location_select > .location_tit'))
+      .map(el => (el.textContent || '').trim()).filter(Boolean)
+    if (locationTits.length) return { category: locationTits.join(' > '), brand: '' }
+
     // .path는 고도몰(펫투비 등) 표준 브레드크럼 클래스 — <li> 없이 "HOME &gt; 강아지 &gt; 간식 &gt; 덴탈껌"
     // 처럼 평문 텍스트+구분자로만 되어 있다(실제 페이지로 확인).
     const candidates = ['.xans-product-headcategory', 'nav[aria-label*="breadcrumb" i]', '.breadcrumb', '.location', '.path']

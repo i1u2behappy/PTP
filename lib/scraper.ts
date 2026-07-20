@@ -873,22 +873,27 @@ async function gatherMallContextText(page: Page): Promise<string> {
 }
 
 const INFO_PAGE_KEYWORDS = /배송|반품|교환|환불|이용안내|이용약관|회사소개|공지|고객센터|무통장|계좌|입금안내/
+// 메뉴/푸터의 안내 링크는 보통 짧은 라벨("이용안내", "배송/교환/환불")이다 — 길이 제한 없이 매칭하면
+// "GE_5645 28인치캐리어/배송비별도"처럼 "배송"을 우연히 포함한 홈페이지 추천상품 링크가 걸려, 그 4개
+// 한도를 상품 링크가 다 채워버려 정작 진짜 안내 페이지(이용안내 등)를 못 찾는 문제가 실제 발견됐다
+// (가방쟁이). 안내 링크 라벨은 길어야 15자 안팎이라 그보다 긴 텍스트는 제외한다.
+const INFO_PAGE_MAX_TEXT_LEN = 15
 
 /** 현재 페이지의 링크 중 배송/결제/공지 등 안내성 키워드가 붙은 것만 최대 4개 골라온다. */
 async function findInfoPageLinks(page: Page): Promise<{ text: string; href: string }[]> {
-  return page.evaluate((pattern: string) => {
+  return page.evaluate(({ pattern, maxLen }: { pattern: string; maxLen: number }) => {
     const re = new RegExp(pattern)
     const seen = new Set<string>()
     const result: { text: string; href: string }[] = []
     document.querySelectorAll('a[href]').forEach(a => {
       const text = (a.textContent || '').trim()
       const href = (a as HTMLAnchorElement).href
-      if (!text || !href.startsWith('http') || !re.test(text) || seen.has(href)) return
+      if (!text || text.length > maxLen || !href.startsWith('http') || !re.test(text) || seen.has(href)) return
       seen.add(href)
       result.push({ text, href })
     })
     return result.slice(0, 4)
-  }, INFO_PAGE_KEYWORDS.source).catch(() => [])
+  }, { pattern: INFO_PAGE_KEYWORDS.source, maxLen: INFO_PAGE_MAX_TEXT_LEN }).catch(() => [])
 }
 
 /** 단일 상품 페이지 스크랩 (url 생략 시 현재 열려있는 페이지를 그대로 사용) */
@@ -1008,15 +1013,18 @@ export async function detectMallPlatform(page: Page): Promise<MallPlatform> {
 
 /** 고도몰(펫투비 등)은 헤더 내비게이션에 대분류(.cate)/중분류(.ovmenu) 카테고리 전체가 항상 박혀있다
  *  (실제 페이지로 확인) — 상품을 하나하나 열어보며 카테고리를 유추하지 않아도 이 몰의 전체 카테고리
- *  구조를 한 번에 알 수 있다. 다른 플랫폼은 아직 실제 마크업을 확인 못 해 지원하지 않는다(빈 배열).
- *  ponytail: 플랫폼별 메뉴 셀렉터가 확인되는 대로 여기 분기를 하나씩 추가하면 된다. */
+ *  구조를 한 번에 알 수 있다. 스킨마다 클래스가 달라 "카테고리 전체보기" 플라이아웃이 .lnb인 스킨도
+ *  있다(가방쟁이, 실제 페이지로 확인). 다른 플랫폼은 아직 실제 마크업을 확인 못 해 지원하지 않는다(빈 배열).
+ *  ponytail: 플랫폼별/스킨별 메뉴 셀렉터가 확인되는 대로 여기 분기를 하나씩 추가하면 된다. */
 async function scanCategoryMenu(page: Page, platform: MallPlatform): Promise<string[]> {
   if (platform !== 'godomall') return []
   return page.evaluate(() => {
     const names = new Set<string>()
-    document.querySelectorAll('.cate a, .ovmenu a').forEach(a => {
+    document.querySelectorAll('.cate a, .ovmenu a, .lnb a').forEach(a => {
       const name = (a.textContent || '').trim()
-      if (name) names.add(name)
+      // .lnb 안에는 닫기 버튼("×") 같은 카테고리가 아닌 링크도 섞여 있어(가방쟁이 실제 확인), 글자/숫자가
+      // 하나도 없는 텍스트는 제외한다.
+      if (name && /[가-힣a-zA-Z0-9]/.test(name)) names.add(name)
     })
     return [...names]
   }).catch(() => [])

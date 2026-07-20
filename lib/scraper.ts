@@ -1151,7 +1151,10 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
 
   async function scanCurrentPage(): Promise<{ href: string; name: string; thumbnail: string }[]> {
     const items: { href: string; name: string; thumbnail: string }[] = await page.evaluate(({ userSel, platformSel, detailPatternSrc }) => {
-      const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc) : null
+      // 대소문자 무시 — 같은 고도몰이라도 몰마다 실제 URL의 쿼리파라미터 표기가 "goodsno"/"goodsNo"처럼
+      // 다를 수 있다(실제 발견된 사례: 가방쟁이는 goodsNo). 대소문자를 그대로 두면 이 필터에 상품 링크가
+      // 전부 걸러져 카테고리에서 상품을 하나도 못 찾는 문제가 있었다.
+      const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc, 'i') : null
       const pick = (sel: string, requireImg: boolean, applyDetailFilter: boolean) => Array.from(document.querySelectorAll(sel))
         .filter(a => !requireImg || a.querySelector('img'))
         .map(a => {

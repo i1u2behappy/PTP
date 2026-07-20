@@ -69,11 +69,10 @@ type SortDir = 'asc' | 'desc'
 interface SortKey { key: string; dir: SortDir }
 
 export function SitesListPanel() {
-  const { openTab, refreshSignals, bumpRefresh } = useTabs()
+  const { openTab, refreshSignals } = useTabs()
   const [sites, setSites] = useState<Site[]>([])
   const [q, setQ] = useState('')
   const [loadError, setLoadError] = useState(false)
-  const [rescrapingAll, setRescrapingAll] = useState(false)
   const [sortKeys, setSortKeys] = useState<SortKey[]>([])
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [showFilters, setShowFilters] = useState(false)
@@ -180,30 +179,11 @@ export function SitesListPanel() {
     }
   }
 
-  async function handleRescrapeAll() {
-    if (!confirm('마지막으로 스크랩 설정이 저장된 모든 Mall을 증분 재스크랩할까요? 각 Mall은 백그라운드에서 실행됩니다.')) return
-    setRescrapingAll(true)
-    try {
-      const res = await fetch('/api/scrape/all', { method: 'POST' })
-      const d = await res.json() as { started: number; skipped: number }
-      alert(`${d.started}개 Mall 재스크랩을 시작했습니다${d.skipped > 0 ? ` (스크랩 설정이 없어 ${d.skipped}개는 건너뜀)` : ''}. 스크랩 검토 화면에서 결과를 확인하세요.`)
-      bumpRefresh('staging')
-    } catch (e) {
-      alert(`전체 재스크랩 실행에 실패했습니다: ${e instanceof Error ? e.message : e}`)
-    } finally {
-      setRescrapingAll(false)
-    }
-  }
-
   return (
     <div className="h-full flex flex-col">
       <div className="flex items-center justify-between mb-6 shrink-0">
         <h1 className="text-2xl font-bold text-gray-800">🏬 Mall 관리</h1>
         <div className="flex gap-2">
-          <button onClick={handleRescrapeAll} disabled={rescrapingAll}
-            className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
-            {rescrapingAll ? '실행 중...' : '🔄 전체 Mall 재스크랩'}
-          </button>
           <button onClick={() => openDetail()}
             className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full transition-colors">
             ➕ 새 Mall 등록

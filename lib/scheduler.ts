@@ -58,15 +58,3 @@ async function triggerScheduledScrape(site: DueSite) {
     pool.query(`UPDATE scrape_sessions SET status='error', error=$1 WHERE id=$2`, [String(err), sessionId])
   })
 }
-
-/** "전체 Mall 재스크랩" — 마지막으로 사용한 스크랩 설정이 저장된 Mall을 전부 증분 재스크랩한다. */
-export async function scrapeAllSites(): Promise<{ started: number; skipped: number }> {
-  const sites = await pool.query<DueSite>(
-    `SELECT id, login_id, login_pw_encrypted, login_pw_iv, last_scrape_config FROM sites WHERE last_scrape_config IS NOT NULL`,
-  )
-  for (const site of sites.rows) {
-    triggerScheduledScrape(site).catch(() => {})
-  }
-  const totalRes = await pool.query(`SELECT COUNT(*) FROM sites`)
-  return { started: sites.rows.length, skipped: Number(totalRes.rows[0].count) - sites.rows.length }
-}

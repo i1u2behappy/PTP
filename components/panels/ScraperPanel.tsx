@@ -69,8 +69,11 @@ interface PreviewItem {
 interface MallStructureReport {
   urlHierarchy: string
   categoryStructure: string
-  paymentAccount: string
+  bankName: string
+  accountNumber: string
   shippingCourier: string
+  shippingFeeInfo: string
+  returnAddress: string
   stockManagementType: string
   companyContact: string
   productPageStructure: string
@@ -743,8 +746,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   {([
                     ['🔗', 'URL 계층', profileResult.signals.report.urlHierarchy],
                     ['🗂️', '카테고리 구조', profileResult.signals.report.categoryStructure],
-                    ['💳', '결제계좌 정보', profileResult.signals.report.paymentAccount],
+                    ['🏦', '은행명', profileResult.signals.report.bankName],
+                    ['🔢', '계좌번호', profileResult.signals.report.accountNumber],
                     ['🚚', '배송 택배사', profileResult.signals.report.shippingCourier],
+                    ['💰', '택배비/배송비', profileResult.signals.report.shippingFeeInfo],
+                    ['📮', '배송/반품 주소지', profileResult.signals.report.returnAddress],
                     ['📦', '재고 관리 형태', profileResult.signals.report.stockManagementType],
                     ['☎️', '업체 연락처', profileResult.signals.report.companyContact],
                     ['🧩', '상품페이지 구조', profileResult.signals.report.productPageStructure],

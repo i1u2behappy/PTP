@@ -282,6 +282,55 @@ URL)로 먼저 `page.goto` — 로그인 확인 시점에 사용자가 마이페
   오류 등 무엇이든)하면 규칙 기반 리포트를 대신 채운다. "몰 구조 파악"이 이제 API 크레딧 없이도 항상
   결과를 낸다 — AI가 되면 더 정확한 리포트를, 안 되면 구조 신호+키워드 매칭 기반 리포트를 보여준다.
 
+## 항목 확장 + Mall 관리 메모 자동 요약 (2026-07-20, 5차)
+
+사용자 확인: "몰구조파악은 얼추 된 것 같아" — 이어서 두 가지 요청:
+1. (확인 차원) 파악된 내용이 스크래핑 시 카테고리명 등 참고 자료로 쓰이는 것이 맞는지 — 기존 "AI
+   컨텍스트 주입"(3차 확장, `lib/scrape/adjustment.ts`가 `scrape_profile`을 `generateExtractionRules`에
+   전달)이 이미 이 역할을 한다. 별도 추가 구현 없음.
+2. (신규) 결제계좌/은행정보, 배송 택배사, 택배비, 업체 연락처, 업체 이메일, 반품 주소지 같은 "몰 기본정보"를
+   Mall 관리 화면의 "메모" 컬럼에 요약해서 남겨달라는 것 — 확인해보니 `components/panels/SiteDetailPanel.tsx`
+   에 이미 이 정확한 용도의 **수동 메모 템플릿**이 있었다: `택배사: / 배송비: / 배송/반품 주소지: /
+   연락처: / 은행: / 계좌번호: ` (MemoLog의 `template` prop). "몰 구조 파악"이 이 템플릿을 그대로
+   자동으로 채워 넣도록 구현 — 별도 메모 포맷을 새로 만들지 않고 기존 것과 통일.
+
+### 리포트 항목 확장 (8→11개)
+
+`MallStructureReport`(`lib/ai.ts`): 기존 `paymentAccount`(뭉뚱그린 한 필드)를 `bankName`+`accountNumber`
+2개로 분리하고, `shippingFeeInfo`(택배비/배송비)·`returnAddress`(배송/반품 주소지)를 신규 추가 — 위
+메모 템플릿의 6개 항목(택배사/배송비/배송·반품주소지/연락처/은행/계좌번호)과 1:1로 대응시키기 위함
+(사후에 정규식으로 쪼개는 것보다 애초에 AI/규칙 기반 양쪽 모두 분리된 필드로 뽑는 게 더 정확함).
+`generateMallProfileReport`(AI)와 `buildHeuristicMallReport`(규칙 기반) 둘 다 갱신 — `findBankName`/
+`findAccountNumber`(은행명 주변 60자에서 계좌번호 패턴)/`findShippingFee`("배송비"/"택배비" 키워드
+주변)/`findReturnAddress`("반품"/"교환" 키워드 주변) 신규 헬퍼. `components/panels/ScraperPanel.tsx`의
+카드 그리드도 8개→11개 항목으로 갱신.
+
+### Mall 관리 메모 자동 기록
+
+`lib/scrape/mallProfile.ts`의 `formatMallInfoMemo(report)`(신규): SiteDetailPanel의 수동 템플릿과 같은
+순서로 6줄 텍스트를 만든다(맨 앞에 "🔍 몰 기본정보 자동 분석(규칙 기반일 수 있음...)" 안내줄 추가 —
+사용자가 직접 입력한 메모와 자동 분석 메모를 구분할 수 있도록). `applyProfileResult`가 `deep === true`
+(=="몰 구조 파악" 버튼)일 때마다 이 메모를 `site_memos`에 새로 INSERT한다 — 이전 4차 확장에서는 deep
+호출이 별도 메모를 아예 안 남기기로 했었는데, 이번 요청으로 그 결정을 뒤집었다: 로그인 확인 전용의
+"구조 변경 감지" 메모와는 완전히 별개 항목이라 서로 섞이지 않는다.
+
+## 운영 메모는 사용자 공간, 자동분석 메모는 최신 1건만 유지 (2026-07-20, 6차)
+
+5차에서 "몰 구조 파악"이 매번 새 메모를 INSERT하도록 만들었는데, 사용자가 재실행할 때마다 계속 쌓이면
+`SiteDetailPanel`의 "운영 메모"(`site_memos`, 원래 사용자가 직접 택배사/계좌 등을 적어두는 수동 공간)가
+자동분석 기록으로 도배될 수 있다는 문제 제기 — "운영메모 란은 사용자가 직접 기록·수정·관리하는 공간으로
+유지하고, '몰 구조 파악' 메모는 화면에 계속 남기되 그 이전 것만 자동삭제해달라."
+
+- `lib/scrape/mallProfile.ts`: `MALL_INFO_MEMO_PREFIX = '🔍 몰 기본정보 자동 분석'` 상수 도입.
+  `applyProfileResult`의 deep 분기가 새 자동분석 메모를 INSERT하기 전에 `DELETE FROM site_memos WHERE
+  site_id=$1 AND content LIKE '${MALL_INFO_MEMO_PREFIX}%'`로 이전 자동분석 메모만 지운다 — 사용자가 직접
+  쓴 메모나 로그인 확인의 "구조 변경 감지"/"상품페이지 구조 파악 완료" 메모는 접두문구가 달라 전혀
+  영향받지 않는다. 결과적으로 이 화면에는 자동분석 메모가 항상 최신 1건만 존재한다.
+- Mall 목록의 "메모" 컬럼(`app/api/sites/route.ts`의 `latest_memo`, `site_memos ORDER BY memo_at DESC
+  LIMIT 1`)은 이미 site_memos의 최신 행을 그대로 노출하고 있어 별도 수정 없이 자동으로 반영된다.
+- `components/panels/SiteDetailPanel.tsx`: "운영 메모" 설명 문구에 "몰 구조 파악을 실행하면 자동분석
+  메모가 최신 1건으로 자동 추가/교체되고, 직접 남긴 메모는 그대로 유지된다"는 안내를 추가.
+
 ## 하지 않는 것 (2차 재설계 기준, 최종)
 
 - 8개 항목 리포트는 어디까지나 "실제로 모은 원문 안에서" 찾은 내용만 답한다 — 원문에 없는 정보(결제

@@ -248,8 +248,11 @@ origin)에 없는 완전히 새로운 종류의 정보라도 상관없다. 그 �
 export interface MallStructureReport {
   urlHierarchy: string
   categoryStructure: string
-  paymentAccount: string
+  bankName: string
+  accountNumber: string
   shippingCourier: string
+  shippingFeeInfo: string
+  returnAddress: string
   stockManagementType: string
   companyContact: string
   productPageStructure: string
@@ -259,19 +262,23 @@ export interface MallStructureReport {
 const MALL_REPORT_FIELDS: { key: keyof MallStructureReport; label: string; hint: string }[] = [
   { key: 'urlHierarchy', label: 'URL 계층', hint: '목록/상세 페이지 URL 패턴, 페이지네이션 방식' },
   { key: 'categoryStructure', label: '카테고리 구조', hint: '대분류/중분류 등 실제 카테고리 트리' },
-  { key: 'paymentAccount', label: '결제계좌 정보', hint: '무통장입금 은행/계좌번호 등' },
+  { key: 'bankName', label: '은행명', hint: '무통장입금 시 사용하는 은행명' },
+  { key: 'accountNumber', label: '계좌번호', hint: '무통장입금 계좌번호' },
   { key: 'shippingCourier', label: '배송 택배사 정보', hint: '이용하는 택배사명' },
+  { key: 'shippingFeeInfo', label: '택배비/배송비 정보', hint: '기본 배송비, 도서산간 추가비용, 무료배송 기준 등' },
+  { key: 'returnAddress', label: '배송/반품 주소지', hint: '반품·교환 시 보내는 주소' },
   { key: 'stockManagementType', label: '재고 관리 형태', hint: '수량 노출/품절 문구/옵션별 재고 등 실제 표기 방식' },
-  { key: 'companyContact', label: '업체 연락처', hint: '전화번호, 이메일, 사업자 주소 등' },
+  { key: 'companyContact', label: '업체 연락처', hint: '전화번호, 이메일 등' },
   { key: 'productPageStructure', label: '상품페이지 주요 구조', hint: '대표이미지/옵션/상세설명이 어떤 요소에 있는지' },
   { key: 'scrapingNeeds', label: '스크래핑 필요 데이터', hint: '이 몰에서 스크랩 시 특별히 놓치기 쉬운 데이터나 주의할 점' },
 ]
 
 /**
  * "몰 구조 파악" 기능 — 실제로 수집한 원문(홈/게시판/상품페이지 텍스트)만 근거로 사용자가 알고 싶어하는
- * 8개 항목(URL 계층/카테고리/결제계좌/택배사/재고관리/연락처/상품페이지 구조/스크래핑 유의사항)을 채운다.
- * 원문에 없는 내용을 추측하지 않도록 프롬프트에서 명시적으로 금지하고, 확인 못한 항목은 "확인 안됨"으로
- * 답하게 한다. ANTHROPIC_API_KEY가 없거나 원문을 하나도 못 모았으면 null(호출부가 report 없이 진행).
+ * 11개 항목(URL 계층/카테고리/은행명/계좌번호/택배사/택배비/반품주소/재고관리/연락처/상품페이지 구조/
+ * 스크래핑 유의사항)을 채운다. 원문에 없는 내용을 추측하지 않도록 프롬프트에서 명시적으로 금지하고,
+ * 확인 못한 항목은 "확인 안됨"으로 답하게 한다. ANTHROPIC_API_KEY가 없거나 원문을 하나도 못 모았으면
+ * null(호출부가 report 없이 진행).
  */
 export async function generateMallProfileReport(
   mallName: string,
@@ -305,7 +312,7 @@ ${contextText.slice(0, 20_000)}`
       max_tokens: 1500,
       tools: [{
         name: 'set_mall_report',
-        description: '조사한 8개 항목을 각각 문자열로 채운다. 원문에서 확인 못한 항목은 반드시 "확인 안됨"으로 채운다.',
+        description: '조사한 11개 항목을 각각 문자열로 채운다. 원문에서 확인 못한 항목은 반드시 "확인 안됨"으로 채운다.',
         input_schema: { type: 'object', properties, required: MALL_REPORT_FIELDS.map(f => f.key) },
       }],
       tool_choice: { type: 'tool', name: 'set_mall_report' },
@@ -330,11 +337,27 @@ function findCourier(text: string): string {
   return found.length ? found.join(', ') : '확인 안됨'
 }
 
-function findPaymentAccount(text: string): string {
-  const bank = BANK_NAMES.find(b => text.includes(b))
-  if (!bank) return '확인 안됨'
-  const idx = text.indexOf(bank)
-  return text.slice(Math.max(0, idx - 20), idx + 80).replace(/\s+/g, ' ').trim()
+function findBankName(text: string): string {
+  return BANK_NAMES.find(b => text.includes(b)) || '확인 안됨'
+}
+
+function findAccountNumber(text: string, bank: string): string {
+  const idx = bank === '확인 안됨' ? -1 : text.indexOf(bank)
+  // 은행명을 찾았으면 그 주변(계좌번호가 보통 바로 붙어 나옴)에서, 못 찾았으면 원문 전체에서 계좌번호
+  // 형태(2~6자리-2~6자리-2~10자리)를 정규식으로 찾는다.
+  const around = idx === -1 ? text : text.slice(idx, idx + 60)
+  return around.match(/\d{2,6}-\d{2,6}-?\d{2,10}/)?.[0] || '확인 안됨'
+}
+
+function findShippingFee(text: string): string {
+  const m = text.match(/(배송비|택배비)[:\s]{0,10}[^\n]{0,40}/)
+  return m ? m[0].replace(/\s+/g, ' ').trim() : '확인 안됨'
+}
+
+function findReturnAddress(text: string): string {
+  const idx = text.search(/반품\s*(주소|받는\s*곳|보내는\s*곳)?|교환\s*(주소|반품)/)
+  if (idx === -1) return '확인 안됨'
+  return text.slice(idx, idx + 100).replace(/\s+/g, ' ').trim()
 }
 
 function findContact(text: string): string {
@@ -344,13 +367,14 @@ function findContact(text: string): string {
 }
 
 /**
- * generateMallProfileReport의 AI 호출 없이(과금 없이) 같은 8개 항목을 채우는 대체 경로 — ANTHROPIC_API_KEY
+ * generateMallProfileReport의 AI 호출 없이(과금 없이) 같은 11개 항목을 채우는 대체 경로 — ANTHROPIC_API_KEY
  * 크레딧이 없어도 "몰 구조 파악"이 동작해야 한다는 요구에 따른 것(월 정액 claude.ai/Claude Code 구독과
  * Anthropic API 크레딧은 별개 — 이 앱의 API 호출은 구독으로 대체할 방법이 없어, 과금 자체를 안 쓰는 이
  * 경로를 대신 마련했다). URL 계층/카테고리/재고/상품페이지 구조는 이미 확보된 구조적 신호를 그대로
- * 문장으로 조립하고(신뢰도 높음), 결제계좌/택배사/연락처는 원문에서 알려진 은행명·택배사명·전화번호·
- * 이메일 패턴을 찾는 키워드/정규식 매칭이다(AI보다 재현율은 낮지만 오탐은 적음). scrapingNeeds는 자유
- * 서술이 필요한 항목이라 규칙 기반으로는 만들 수 없어 규칙 기반임을 알리는 문구로 대체한다.
+ * 문장으로 조립하고(신뢰도 높음), 은행명/계좌번호/택배사/택배비/반품주소/연락처는 원문에서 알려진
+ * 은행명·택배사명·전화번호·이메일·"배송비"/"반품" 키워드 주변 텍스트를 찾는 정규식/키워드 매칭이다
+ * (AI보다 재현율은 낮지만 오탐은 적음). scrapingNeeds는 자유 서술이 필요한 항목이라 규칙 기반으로는
+ * 만들 수 없어 규칙 기반임을 알리는 문구로 대체한다.
  */
 export function buildHeuristicMallReport(input: {
   platform: string
@@ -366,11 +390,15 @@ export function buildHeuristicMallReport(input: {
   hasStockStatusText: boolean
   hasStockByOption: boolean
 }): MallStructureReport {
+  const bankName = findBankName(input.contextText)
   return {
     urlHierarchy: input.sampleProductUrl ? `상품 상세 URL 예시: ${input.sampleProductUrl} (플랫폼: ${input.platform})` : '확인 안됨',
     categoryStructure: input.categoryHints.length ? input.categoryHints.join(', ') : '확인 안됨',
-    paymentAccount: findPaymentAccount(input.contextText),
+    bankName,
+    accountNumber: findAccountNumber(input.contextText, bankName),
     shippingCourier: findCourier(input.contextText),
+    shippingFeeInfo: findShippingFee(input.contextText),
+    returnAddress: findReturnAddress(input.contextText),
     stockManagementType: [
       input.hasStockQty && '재고수량 표시',
       input.hasStockStatusText && '재고상태 문구 표시',

@@ -423,7 +423,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   async function selectSite(siteId: number) {
     const res = await fetch(`/api/sites/${siteId}`)
     if (!res.ok) { alert(`Mall 정보를 불러오지 못했습니다 (${res.status})`); return }
-    const full = await res.json() as Site & { login_pw: string | null }
+    const full = await res.json() as Site & { login_pw: string | null; extraction_rules?: Record<string, { type: string; value: string }> }
     setSelectedSite({
       id: full.id, name: full.name, url: full.url, login_url: full.login_url, login_id: full.login_id,
       manual_login_required: full.manual_login_required, profile_dir: full.profile_dir,
@@ -431,6 +431,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setLoginId(full.login_id || '')
     setLoginPw(full.login_pw || '')
     setLoginStep('none')
+    // 이 몰에 예전에 "스크랩 대상 직접지정"으로 등록해둔 컬럼이 있으면, 피커를 켜지 않은 채 바로 미리보기만
+    // 해도 그리드에 컬럼으로 나오도록 미리 채워둔다(그리드는 이 목록에 있는 필드만 컬럼으로 보여준다).
+    const rules = full.extraction_rules || {}
+    setPickerRules(rules)
+    pickerRulesJsonRef.current = JSON.stringify(rules)
     setSiteQuery('')
     setTargetUrl(full.url)
     setCategoryUrlsText('') // 이전 사이트의 카테고리 목록이 남아 시작 URL을 무시하는 것을 방지
@@ -490,8 +495,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       setProfileResult(null)
       setProfileError('')
       setPickerActive(false)
-      setPickerRules({})
-      pickerRulesJsonRef.current = ''
+      await refreshPickerRules()
     } finally {
       setLoginBusy(false)
     }
@@ -1339,6 +1343,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       {previewResult.product.options.map(o => (
                         <th key={o.name} className="px-3 py-2 text-left">{o.name}</th>
                       ))}
+                      {Object.keys(previewResult.product.custom_fields || {})
+                        .filter(label => label in pickerRules)
+                        .map(label => <th key={label} className="px-3 py-2 text-left">🎯 {label}</th>)}
                     </tr>
                   </thead>
                   <tbody>
@@ -1378,6 +1385,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                           {o.values.join(', ')}
                         </td>
                       ))}
+                      {Object.entries(previewResult.product.custom_fields || {})
+                        .filter(([label]) => label in pickerRules)
+                        .map(([label, value]) => (
+                          <td key={label} className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={value}>
+                            {value}
+                          </td>
+                        ))}
                     </tr>
                   </tbody>
                 </table>
@@ -1394,10 +1408,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   {previewResult.product.extra_info.map(({ label, value }) => `${label}: ${value}`).join(' / ')}
                 </div>
               )}
-              {Object.keys(previewResult.product.custom_fields || {}).length > 0 && (
+              {Object.entries(previewResult.product.custom_fields || {}).filter(([label]) => !(label in pickerRules)).length > 0 && (
                 <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-500">
-                  <span className="text-gray-400">직접 지정한 컬럼: </span>
-                  {Object.entries(previewResult.product.custom_fields).map(([label, value]) => `${label}: ${value}`).join(' / ')}
+                  <span className="text-gray-400">그 외 자동 스캔된 정보: </span>
+                  {Object.entries(previewResult.product.custom_fields)
+                    .filter(([label]) => !(label in pickerRules))
+                    .map(([label, value]) => `${label}: ${value}`).join(' / ')}
                 </div>
               )}
             </div>

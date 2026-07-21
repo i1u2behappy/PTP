@@ -456,7 +456,13 @@ export async function extractProductRuleBased(
       if (rule.type === 'label') {
         try { text = findInfoValue(raw.infoRows, new RegExp(rule.value)) || null } catch { text = null }
       } else {
-        text = await page.locator(rule.value).first().textContent({ timeout: 3_000 }).catch(() => null)
+        // textContent를 그대로 읽으면 가방쟁이 배송비처럼 display:none 팝업(지역별 추가배송비 목록 등)이
+        // 값에 섞여든다 — 라벨 방식(infoRows)이 이미 받는 cleanText 처리를 셀렉터 방식에도 동일하게 적용.
+        text = await page.locator(rule.value).first().evaluate((el: Element) => {
+          const clone = el.cloneNode(true) as Element
+          clone.querySelectorAll('.layer_area, [style*="display:none" i], [style*="display: none" i]').forEach(n => n.remove())
+          return (clone.textContent || '').trim()
+        }, null, { timeout: 3_000 }).catch(() => null)
       }
       const trimmed = text?.trim()
       if (!trimmed) continue

@@ -453,7 +453,9 @@ export async function extractProductRuleBased(
   if (extractionRules) {
     for (const [field, rule] of Object.entries(extractionRules)) {
       let text: string | null = null
-      if (rule.type === 'label') {
+      if (rule.type === 'fixed') {
+        text = rule.value
+      } else if (rule.type === 'label') {
         try { text = findInfoValue(raw.infoRows, new RegExp(rule.value)) || null } catch { text = null }
       } else {
         // textContent를 그대로 읽으면 가방쟁이 배송비처럼 display:none 팝업(지역별 추가배송비 목록 등)이

@@ -154,7 +154,9 @@ ${columns.map(c => `- ${c.name}: ${c.instruction || '(지시문 없음, 예시 �
 }
 
 export interface ExtractionRule {
-  type: 'label' | 'selector'
+  /** 'fixed'는 페이지에서 읽지 않고 value를 모든 상품에 그대로 채운다 — 택배사처럼 페이지에 아예 안
+   *  나오지만 이 몰은 항상 같은 값인 필드용(스크랩 대상 직접지정에서 "화면에 없는 값" 입력으로 생성). */
+  type: 'label' | 'selector' | 'fixed'
   value: string
 }
 

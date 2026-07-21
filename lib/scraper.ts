@@ -745,6 +745,210 @@ async function siteInfo(siteId: number): Promise<{ name: string; url: string }> 
   return { name: res.rows[0]?.name || `site${siteId}`, url: res.rows[0]?.url || '' }
 }
 
+// page.exposeFunction은 같은 Page 인스턴스에 같은 이름으로 두 번 부르면 에러가 난다 — "요소 지정 시작"을
+// 여러 번 눌러도 안전하도록 이미 노출한 Page를 기억해둔다.
+const pickerExposedPages = new WeakSet<Page>()
+
+/**
+ * "요소 지정" 기능 — 실제로 열려있는 몰 페이지(로그인 확인된 openSessions 창)에 클릭식 엘리먼트 피커를
+ * 주입한다. 사용자가 페이지에서 값을 클릭하면(예: 가격 텍스트) 그 요소가 라벨-값 구조(dt/dd, th/td) 안에
+ * 있는지 먼저 확인해 있으면 라벨 텍스트를, 없으면 CSS 셀렉터를 계산해 후보로 보여주고, 컬럼명을 입력해
+ * 저장하면 그 자리에서 sites.extraction_rules에 반영된다 — "스크랩 조정"이 AI로 추측해 만들던 것과 같은
+ * 데이터(type:'label'|'selector')를 사용자가 직접 클릭으로 확정하는 대체 경로다. 반복 클릭-입력으로 한
+ * 페이지에서 여러 컬럼을 계속 지정할 수 있다. 정확도가 더 높은 것이 목적이라, 라벨을 우선하고(같은 몰의
+ * 다른 상품에서도 라벨 텍스트는 대체로 그대로라 셀렉터보다 안정적) 라벨 구조가 없을 때만 셀렉터로 대체한다.
+ */
+export async function startElementPicker(siteId: number): Promise<boolean> {
+  const context = openSessions.get(siteId)
+  if (!context) return false
+  const pages = context.pages()
+  const page = pages.length ? pages[pages.length - 1] : await context.newPage()
+
+  if (!pickerExposedPages.has(page)) {
+    await page.exposeFunction('ptpSavePick', async (payload: { field: string; type: 'label' | 'selector'; value: string }) => {
+      if (!payload.field?.trim()) return
+      const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(
+        'SELECT extraction_rules FROM sites WHERE id=$1', [siteId],
+      )
+      const merged = { ...(res.rows[0]?.extraction_rules || {}), [payload.field]: { type: payload.type, value: payload.value } }
+      await pool.query('UPDATE sites SET extraction_rules=$1 WHERE id=$2', [JSON.stringify(merged), siteId])
+    })
+    pickerExposedPages.add(page)
+  }
+
+  await page.evaluate(injectElementPicker)
+  return true
+}
+
+/** "완료" — 주입된 피커의 하이라이트/클릭 리스너와 안내 패널을 제거한다. */
+export async function stopElementPicker(siteId: number): Promise<boolean> {
+  const context = openSessions.get(siteId)
+  if (!context) return false
+  const pages = context.pages()
+  const page = pages[pages.length - 1]
+  if (!page) return false
+  await page.evaluate(() => (window as unknown as { __ptpPickerTeardown?: () => void }).__ptpPickerTeardown?.()).catch(() => {})
+  return true
+}
+
+/** 실제 몰 페이지 안에서 실행되는 함수 — page.evaluate로 그대로 주입된다(문자열이 아니라 함수 자체를
+ *  Playwright가 직렬화). 이미 켜져 있으면 다시 켜지 않는다(같은 페이지에서 "요소 지정 시작"을 또 눌러도
+ *  리스너가 중복 등록되지 않도록). */
+function injectElementPicker() {
+  const w = window as unknown as {
+    __ptpPickerActive?: boolean
+    __ptpPickerTeardown?: () => void
+    ptpSavePick: (payload: { field: string; type: 'label' | 'selector'; value: string }) => Promise<void>
+  }
+  if (w.__ptpPickerActive) return
+  w.__ptpPickerActive = true
+
+  const CANONICAL_FIELDS: [string, string][] = [
+    ['name', '상품명'], ['price', '가격(소비자가)'], ['cost_price', '공급가/원가'], ['shipping_fee', '배송비'],
+    ['category', '카테고리'], ['brand', '브랜드'], ['manufacturer', '제조사'], ['origin', '원산지'],
+  ]
+
+  let hovered: HTMLElement | null = null
+  const HOVER_OUTLINE = '2px solid #14b8a6'
+
+  function onMouseOver(e: MouseEvent) {
+    const el = e.target as HTMLElement
+    if (el === panel || panel.contains(el)) return
+    if (hovered && hovered !== el) hovered.style.outline = ''
+    hovered = el
+    hovered.style.outline = HOVER_OUTLINE
+  }
+
+  // dt/dd, th/td 라벨-값 구조 안에 있으면 라벨 텍스트를 우선 쓴다 — 같은 몰의 다른 상품에서도 텍스트가
+  // 대체로 그대로라 CSS 셀렉터보다 안정적이다(실사용 확인된 패턴).
+  function detectLabel(target: HTMLElement): string | null {
+    let el: HTMLElement | null = target
+    for (let i = 0; i < 4 && el; i++, el = el.parentElement) {
+      if (el.tagName === 'DD') {
+        const dt = el.previousElementSibling
+        if (dt && dt.tagName === 'DT') return (dt.textContent || '').trim()
+      }
+      if (el.tagName === 'TD') {
+        const tr = el.closest('tr')
+        const th = tr?.querySelector('th')
+        if (th) return (th.textContent || '').trim()
+      }
+    }
+    return null
+  }
+
+  function computeSelector(target: HTMLElement): string {
+    if (target.id) return '#' + CSS.escape(target.id)
+    const parts: string[] = []
+    let node: HTMLElement | null = target
+    let depth = 0
+    while (node && node.tagName !== 'BODY' && depth < 6) {
+      let sel = node.tagName.toLowerCase()
+      if (node.className && typeof node.className === 'string' && node.className.trim()) {
+        const cls = node.className.trim().split(/\s+/).filter(Boolean).slice(0, 2)
+        if (cls.length) sel += '.' + cls.map(c => CSS.escape(c)).join('.')
+      }
+      const parent: HTMLElement | null = node.parentElement
+      if (parent) {
+        const siblings = Array.from(parent.children).filter(s => s.tagName === node!.tagName)
+        if (siblings.length > 1) sel += `:nth-of-type(${siblings.indexOf(node) + 1})`
+      }
+      parts.unshift(sel)
+      const candidate = parts.join(' > ')
+      if (document.querySelectorAll(candidate).length === 1) return candidate
+      node = parent
+      depth++
+    }
+    return parts.join(' > ')
+  }
+
+  // 안내 패널 — 몰 페이지 자체 CSS와 충돌하지 않도록 인라인 스타일만 쓴다.
+  const panel = document.createElement('div')
+  panel.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483647;background:#fff;border:2px solid #14b8a6;'
+    + 'border-radius:12px;padding:12px;width:280px;font:12px/1.4 -apple-system,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);color:#333'
+  panel.innerHTML = `
+    <div style="font-weight:600;margin-bottom:6px">🎯 PTP 요소 지정</div>
+    <div id="ptp-picker-status" style="color:#666;margin-bottom:8px">값을 클릭하세요</div>
+    <div id="ptp-picker-form" style="display:none">
+      <div id="ptp-picker-preview" style="background:#f3f4f6;border-radius:6px;padding:6px;margin-bottom:6px;word-break:break-all;max-height:60px;overflow:auto"></div>
+      <select id="ptp-picker-select" style="width:100%;margin-bottom:6px;padding:4px;border:1px solid #ccc;border-radius:6px">
+        ${CANONICAL_FIELDS.map(([k, label]) => `<option value="${k}">${label}</option>`).join('')}
+        <option value="__custom__">직접 입력...</option>
+      </select>
+      <input id="ptp-picker-custom" placeholder="컬럼명 입력" style="display:none;width:100%;margin-bottom:6px;padding:4px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box" />
+      <div style="display:flex;gap:6px">
+        <button id="ptp-picker-save" style="flex:1;background:#14b8a6;color:#fff;border:0;border-radius:6px;padding:6px;cursor:pointer">저장</button>
+        <button id="ptp-picker-cancel" style="background:#e5e7eb;border:0;border-radius:6px;padding:6px 10px;cursor:pointer">취소</button>
+      </div>
+    </div>
+    <div id="ptp-picker-log" style="margin-top:8px;color:#0d9488;max-height:60px;overflow:auto"></div>
+    <button id="ptp-picker-close" style="margin-top:8px;width:100%;background:#f43f5e;color:#fff;border:0;border-radius:6px;padding:6px;cursor:pointer">피커 종료</button>
+  `
+  document.body.appendChild(panel)
+
+  const statusEl = panel.querySelector('#ptp-picker-status') as HTMLElement
+  const formEl = panel.querySelector('#ptp-picker-form') as HTMLElement
+  const previewEl = panel.querySelector('#ptp-picker-preview') as HTMLElement
+  const selectEl = panel.querySelector('#ptp-picker-select') as HTMLSelectElement
+  const customEl = panel.querySelector('#ptp-picker-custom') as HTMLInputElement
+  const logEl = panel.querySelector('#ptp-picker-log') as HTMLElement
+
+  let pending: { type: 'label' | 'selector'; value: string } | null = null
+
+  selectEl.addEventListener('change', () => {
+    customEl.style.display = selectEl.value === '__custom__' ? 'block' : 'none'
+  })
+
+  function resetForm() {
+    pending = null
+    formEl.style.display = 'none'
+    statusEl.style.display = 'block'
+    statusEl.textContent = '값을 클릭하세요'
+    customEl.value = ''
+    selectEl.value = CANONICAL_FIELDS[0][0]
+    customEl.style.display = 'none'
+    if (hovered) { hovered.style.outline = ''; hovered = null }
+  }
+
+  function onClick(e: MouseEvent) {
+    const el = e.target as HTMLElement
+    if (el === panel || panel.contains(el)) return // 안내 패널 자체 클릭은 무시(버튼 클릭이 정상 동작하도록)
+    e.preventDefault()
+    e.stopPropagation()
+
+    const label = detectLabel(el)
+    pending = label ? { type: 'label', value: label } : { type: 'selector', value: computeSelector(el) }
+    previewEl.textContent = (pending.type === 'label' ? '📋 라벨: ' : '🔗 셀렉터: ') + pending.value
+    statusEl.style.display = 'none'
+    formEl.style.display = 'block'
+  }
+
+  panel.querySelector('#ptp-picker-save')!.addEventListener('click', () => {
+    if (!pending) return
+    const field = selectEl.value === '__custom__' ? customEl.value.trim() : selectEl.value
+    if (!field) { customEl.focus(); return }
+    void w.ptpSavePick({ field, type: pending.type, value: pending.value })
+    const line = document.createElement('div')
+    line.textContent = `✓ ${field}`
+    logEl.prepend(line)
+    resetForm()
+  })
+  panel.querySelector('#ptp-picker-cancel')!.addEventListener('click', resetForm)
+  panel.querySelector('#ptp-picker-close')!.addEventListener('click', () => w.__ptpPickerTeardown?.())
+
+  document.addEventListener('mouseover', onMouseOver, true)
+  document.addEventListener('click', onClick, true)
+
+  w.__ptpPickerTeardown = () => {
+    document.removeEventListener('mouseover', onMouseOver, true)
+    document.removeEventListener('click', onClick, true)
+    if (hovered) hovered.style.outline = ''
+    panel.remove()
+    w.__ptpPickerActive = false
+    w.__ptpPickerTeardown = undefined
+  }
+}
+
 /**
  * profileMallStructure와 같은 프로파일링을, "로그인 확인" 시 열려있던 화면(openSessions)이 아니라
  * 실제 스크래핑이 이번에 쓸 브라우저 컨텍스트를 그대로 재사용해 수행한다. 직접로그인 필수 몰처럼

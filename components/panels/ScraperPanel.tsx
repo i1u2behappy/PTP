@@ -21,6 +21,48 @@ interface Site {
 
 interface Client { id: number; name: string }
 
+interface SitePickerColumnDef {
+  key: string
+  label: string
+  getValue: (s: Site) => string
+  render: (s: Site) => React.ReactNode
+  className?: string
+}
+
+// Mall 관리(SitesListPanel) 그리드와 같은 정렬/필터/너비조절/순서변경을 이 Mall 선택 그리드에도 맞춰
+// 넣은 것 — 컬럼 구성만 다르고 나머지 로직은 그대로 포팅.
+const SITE_PICKER_COLUMNS: SitePickerColumnDef[] = [
+  { key: 'name', label: 'Mall 이름', getValue: s => s.name || '', className: 'text-gray-800 font-medium whitespace-nowrap', render: s => (
+    <>
+      {s.name || '(이름 없음)'}
+      {s.manual_login_required === true && (
+        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold whitespace-nowrap" title="Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 안 되는 몰 — 크롬 확장(개발자모드)으로 스크랩">
+          🧩 개발자모드
+        </span>
+      )}
+      {s.manual_login_required === null && (
+        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold whitespace-nowrap" title="아직 스크랩 방식이 정해지지 않았습니다 — 선택하면 처음 스크랩할 때 물어봅니다">
+          ❔ 미정
+        </span>
+      )}
+    </>
+  ) },
+  { key: 'main_items', label: '메인 품목', getValue: s => s.main_items || '', render: s => s.main_items || '-', className: 'text-gray-500' },
+  { key: 'client_name', label: '거래처', getValue: s => s.client_name || '', render: s => s.client_name || '-', className: 'text-teal-600 whitespace-nowrap' },
+  { key: 'url', label: 'URL', getValue: s => s.url, render: s => s.url, className: 'text-gray-500' },
+]
+
+const SITE_PICKER_DEFAULT_COL_WIDTH: Record<string, number> = { name: 160, main_items: 140, client_name: 110, url: 260 }
+const SITE_PICKER_MIN_COL_WIDTH = 50
+function sitePickerWidthFor(key: string): number {
+  return SITE_PICKER_DEFAULT_COL_WIDTH[key] ?? 120
+}
+function compareSitePickerValues(a: string, b: string): number {
+  return a.localeCompare(b, 'ko')
+}
+type SitePickerSortDir = 'asc' | 'desc'
+interface SitePickerSortKey { key: string; dir: SitePickerSortDir }
+
 const PLATFORM_LABELS: Record<string, string> = {
   cafe24: '카페24', makeshop: '메이크샵', godomall: '고도몰', unknown: '알 수 없음 (범용 방식 사용)',
 }
@@ -125,6 +167,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [clientFilter, setClientFilter] = useState<number | ''>(initialClientId ?? '')
   const [siteQuery, setSiteQuery] = useState('')
   const [selectedSite, setSelectedSite] = useState<Site | null>(null)
+  const [siteSortKeys, setSiteSortKeys] = useState<SitePickerSortKey[]>([])
+  const [siteColFilters, setSiteColFilters] = useState<Record<string, string>>({})
+  const [siteShowFilters, setSiteShowFilters] = useState(false)
+  const [siteColWidths, setSiteColWidths] = useState<Record<string, number>>({})
+  const [siteColOrder, setSiteColOrder] = useState<string[]>([])
+  const [siteDragKey, setSiteDragKey] = useState<string | null>(null)
 
   const [loginId, setLoginId]     = useState('')
   const [loginPw, setLoginPw]     = useState('')
@@ -134,6 +182,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [profileResult, setProfileResult] = useState<ProfileCheckResult | null>(null)
   const [profileLoading, setProfileLoading] = useState(false)
   const [profileError, setProfileError] = useState('')
+
+  const [pickerActive, setPickerActive] = useState(false)
+  const [pickerBusy, setPickerBusy] = useState(false)
+  const [pickerRules, setPickerRules] = useState<Record<string, { type: string; value: string }>>({})
 
   const [targetUrl, setTargetUrl]           = useState('')
   const [categoryUrlsText, setCategoryUrlsText] = useState('')
@@ -203,6 +255,74 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       return (s.name || '').toLowerCase().includes(q) || s.url.toLowerCase().includes(q) || (s.main_items || '').toLowerCase().includes(q)
     })
   }, [sites, siteQuery, clientFilter])
+
+  // 컬럼 구성은 고정이지만, 렌더링 시점에 "기존 순서 + 아직 안 담긴 새 키"를 계산해 useEffect로 state를
+  // 동기화하지 않는다 (state-sync 이펙트 없이 항상 최신 컬럼 목록과 일치시키기 위함).
+  const siteEffectiveOrder = useMemo(() => {
+    const keys = SITE_PICKER_COLUMNS.map(c => c.key)
+    const known = siteColOrder.filter(k => keys.includes(k))
+    const missing = keys.filter(k => !known.includes(k))
+    return [...known, ...missing]
+  }, [siteColOrder])
+  const siteOrderedColumns = siteEffectiveOrder.map(k => SITE_PICKER_COLUMNS.find(c => c.key === k)).filter((c): c is SitePickerColumnDef => !!c)
+
+  function handleSiteColDrop(targetKey: string) {
+    if (!siteDragKey || siteDragKey === targetKey) return
+    const next = siteEffectiveOrder.filter(k => k !== siteDragKey)
+    next.splice(next.indexOf(targetKey), 0, siteDragKey)
+    setSiteColOrder(next)
+    setSiteDragKey(null)
+  }
+
+  function startSiteResize(key: string, e: { clientX: number; preventDefault: () => void }) {
+    e.preventDefault()
+    const startX = e.clientX
+    const startWidth = siteColWidths[key] ?? sitePickerWidthFor(key)
+    function onMove(ev: MouseEvent) {
+      setSiteColWidths(w => ({ ...w, [key]: Math.max(SITE_PICKER_MIN_COL_WIDTH, startWidth + (ev.clientX - startX)) }))
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
+
+  function handleSiteSort(key: string, e: { shiftKey: boolean }) {
+    setSiteSortKeys(prev => {
+      const idx = prev.findIndex(s => s.key === key)
+      if (e.shiftKey) {
+        if (idx === -1) return [...prev, { key, dir: 'asc' }]
+        const next = [...prev]
+        next[idx] = { key, dir: next[idx].dir === 'asc' ? 'desc' : 'asc' }
+        return next
+      }
+      if (prev.length === 1 && prev[0].key === key) {
+        return [{ key, dir: prev[0].dir === 'asc' ? 'desc' : 'asc' }]
+      }
+      return [{ key, dir: 'asc' }]
+    })
+  }
+
+  const siteHasColFilters = Object.values(siteColFilters).some(Boolean)
+  const colFilteredSites = filteredSites.filter(s => SITE_PICKER_COLUMNS.every(col => {
+    const f = siteColFilters[col.key]
+    if (!f) return true
+    return col.getValue(s).toLowerCase().includes(f.toLowerCase())
+  }))
+  const visibleSites = siteSortKeys.length
+    ? [...colFilteredSites].sort((a, b) => {
+        for (const { key, dir } of siteSortKeys) {
+          const col = SITE_PICKER_COLUMNS.find(c => c.key === key)
+          if (!col) continue
+          const cmp = compareSitePickerValues(col.getValue(a), col.getValue(b))
+          if (cmp !== 0) return dir === 'asc' ? cmp : -cmp
+        }
+        return 0
+      })
+    : colFilteredSites
+  const siteTableWidth = siteOrderedColumns.reduce((sum, col) => sum + (siteColWidths[col.key] ?? sitePickerWidthFor(col.key)), 0)
 
   useEffect(() => {
     if (!sessionId || status !== 'running') return
@@ -353,6 +473,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       setLoginStep('confirmed')
       setProfileResult(null)
       setProfileError('')
+      setPickerActive(false)
+      setPickerRules({})
     } finally {
       setLoginBusy(false)
     }
@@ -377,6 +499,58 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       setProfileLoading(false)
     }
   }
+
+  /** "요소 지정" — 로그인 창에 클릭식 엘리먼트 피커를 주입한다. 사용자가 실제 몰 페이지에서 값을 클릭하고
+   *  컬럼명을 입력하면 그 자리에서 sites.extraction_rules에 저장되므로, 여기서는 시작/종료와 "지금까지
+   *  지정된 컬럼" 목록 표시만 맡는다(폴링으로 갱신 — 몰 페이지 안에서 저장하는 거라 이 화면과 직접 연결돼
+   *  있지 않음). */
+  async function handleStartPicker() {
+    if (!selectedSite) return
+    setPickerBusy(true)
+    try {
+      const res = await fetch(`/api/sites/${selectedSite.id}/picker/start`, { method: 'POST' })
+      const d = await res.json()
+      if (!res.ok) { alert(d.error || '요소 지정을 시작하지 못했습니다'); return }
+      setPickerActive(true)
+      await refreshPickerRules()
+    } finally {
+      setPickerBusy(false)
+    }
+  }
+
+  async function handleStopPicker() {
+    if (!selectedSite) return
+    setPickerBusy(true)
+    try {
+      await fetch(`/api/sites/${selectedSite.id}/picker/stop`, { method: 'POST' })
+      setPickerActive(false)
+    } finally {
+      setPickerBusy(false)
+    }
+  }
+
+  async function refreshPickerRules() {
+    if (!selectedSite) return
+    const res = await fetch(`/api/sites/${selectedSite.id}`)
+    const d = await res.json() as { extraction_rules?: Record<string, { type: string; value: string }> }
+    setPickerRules(d.extraction_rules || {})
+  }
+
+  async function handleDeleteRule(field: string) {
+    if (!selectedSite) return
+    await fetch(`/api/sites/${selectedSite.id}/picker/rule`, {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ field }),
+    })
+    refreshPickerRules()
+  }
+
+  // 피커가 켜져있는 동안 몰 페이지에서 저장한 컬럼이 이 화면에도 곧바로 보이도록 짧게 폴링한다.
+  useEffect(() => {
+    if (!pickerActive) return
+    const id = setInterval(refreshPickerRules, 2_000)
+    return () => clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refreshPickerRules는 selectedSite를 클로저로 참조, 매번 새로 만들어도 되는 인터벌 콜백이라 의존성 경고는 무시
+  }, [pickerActive, selectedSite])
 
   async function handleRefreshCurrentUrl() {
     if (!selectedSite) return
@@ -619,44 +793,75 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 <div className="text-xs text-gray-500">{selectedSite.url}</div>
               </div>
             )}
-            <div className="border border-gray-100 rounded-xl max-h-64 overflow-y-auto">
-              {filteredSites.length === 0 ? (
-                <div className="px-3 py-3 text-xs text-gray-400 text-center">검색 결과가 없습니다.</div>
-              ) : (
-                <table className="w-full text-xs border-collapse">
-                  <thead className="sticky top-0 z-10 bg-gray-50">
-                    <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                      <th className="px-3 py-2 text-left whitespace-nowrap">Mall 이름</th>
-                      <th className="px-3 py-2 text-left whitespace-nowrap">메인 품목</th>
-                      <th className="px-3 py-2 text-left whitespace-nowrap">거래처</th>
-                      <th className="px-3 py-2 text-left">URL</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredSites.map(s => (
-                      <tr key={s.id} onClick={() => selectSite(s.id)}
-                        className="border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors">
-                        <td className="px-3 py-2 text-gray-800 font-medium whitespace-nowrap">
-                          {s.name || '(이름 없음)'}
-                          {s.manual_login_required === true && (
-                            <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold whitespace-nowrap" title="Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 안 되는 몰 — 크롬 확장(개발자모드)으로 스크랩">
-                              🧩 개발자모드
-                            </span>
-                          )}
-                          {s.manual_login_required === null && (
-                            <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold whitespace-nowrap" title="아직 스크랩 방식이 정해지지 않았습니다 — 선택하면 처음 스크랩할 때 물어봅니다">
-                              ❔ 미정
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 text-gray-500 max-w-[160px] truncate" title={s.main_items || ''}>{s.main_items || '-'}</td>
-                        <td className="px-3 py-2 text-teal-600 whitespace-nowrap">{s.client_name || '-'}</td>
-                        <td className="px-3 py-2 text-gray-500 max-w-[240px] truncate" title={s.url}>{s.url}</td>
+            <div className="border border-gray-100 rounded-xl overflow-hidden">
+              <div className="flex items-center justify-end gap-2 px-3 py-1.5 border-b border-gray-100 bg-gray-50">
+                <button onClick={() => setSiteShowFilters(v => !v)}
+                  className={`px-3 py-1 text-xs font-semibold rounded-full transition-colors ${siteShowFilters ? 'bg-teal-500 text-white hover:bg-teal-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                  🔍 필터
+                </button>
+                {(siteHasColFilters || siteSortKeys.length > 0) && (
+                  <button onClick={() => { setSiteColFilters({}); setSiteSortKeys([]) }}
+                    className="px-3 py-1 bg-gray-100 text-gray-600 text-xs font-semibold rounded-full hover:bg-gray-200 transition-colors">
+                    필터/정렬 초기화
+                  </button>
+                )}
+              </div>
+              <div className="max-h-64 overflow-y-auto">
+                {visibleSites.length === 0 ? (
+                  <div className="px-3 py-3 text-xs text-gray-400 text-center">검색 결과가 없습니다.</div>
+                ) : (
+                  <table className="text-xs border-collapse" style={{ tableLayout: 'fixed', width: siteTableWidth }}>
+                    <colgroup>
+                      {siteOrderedColumns.map(col => <col key={col.key} style={{ width: siteColWidths[col.key] ?? sitePickerWidthFor(col.key) }} />)}
+                    </colgroup>
+                    <thead className="sticky top-0 z-10 bg-gray-50">
+                      <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+                        {siteOrderedColumns.map(col => {
+                          const idx = siteSortKeys.findIndex(s => s.key === col.key)
+                          const active = idx !== -1
+                          return (
+                            <th key={col.key} draggable
+                              onDragStart={() => setSiteDragKey(col.key)}
+                              onDragOver={e => e.preventDefault()}
+                              onDrop={() => handleSiteColDrop(col.key)}
+                              onDragEnd={() => setSiteDragKey(null)}
+                              className={`relative px-3 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${siteDragKey === col.key ? 'opacity-40' : ''}`}
+                              onClick={e => handleSiteSort(col.key, e)} title="드래그: 컬럼 순서 이동 · 클릭: 정렬 · Shift+클릭: 복합 정렬 추가">
+                              <span className={active ? 'text-gray-800' : ''}>{col.label}</span>
+                              {active && <span className="ml-1 text-teal-500">{siteSortKeys[idx].dir === 'asc' ? '▲' : '▼'}{siteSortKeys.length > 1 ? idx + 1 : ''}</span>}
+                              <div onMouseDown={e => { e.stopPropagation(); startSiteResize(col.key, e) }} onClick={e => e.stopPropagation()} draggable={false}
+                                className="absolute top-0 right-0 bottom-0 w-1.5 cursor-col-resize hover:bg-teal-400 active:bg-teal-500" />
+                            </th>
+                          )
+                        })}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
+                      {siteShowFilters && (
+                        <tr className="border-b border-gray-200 bg-white">
+                          {siteOrderedColumns.map(col => (
+                            <th key={col.key} className="px-2 py-1.5 font-normal">
+                              <input value={siteColFilters[col.key] || ''} onChange={e => setSiteColFilters(f => ({ ...f, [col.key]: e.target.value }))}
+                                placeholder="필터..." onClick={e => e.stopPropagation()}
+                                className="w-full border border-gray-200 rounded px-1.5 py-1 text-xs font-normal focus:outline-none focus:ring-1 focus:ring-teal-300" />
+                            </th>
+                          ))}
+                        </tr>
+                      )}
+                    </thead>
+                    <tbody>
+                      {visibleSites.map(s => (
+                        <tr key={s.id} onClick={() => selectSite(s.id)}
+                          className="border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors">
+                          {siteOrderedColumns.map(col => (
+                            <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''}`} title={col.key === 'url' || col.key === 'main_items' ? col.getValue(s) : undefined}>
+                              {col.render(s)}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -715,6 +920,19 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   {profileLoading ? '몰 구조 파악 중...' : '🔍 몰 구조 파악'}
                 </button>
               )}
+              {loginStep === 'confirmed' && (
+                pickerActive ? (
+                  <button onClick={handleStopPicker} disabled={pickerBusy}
+                    className="px-4 py-2 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+                    🎯 요소 지정 종료
+                  </button>
+                ) : (
+                  <button onClick={handleStartPicker} disabled={pickerBusy}
+                    className="px-4 py-2 bg-white border border-teal-400 text-teal-600 hover:bg-teal-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+                    🎯 요소 지정
+                  </button>
+                )
+              )}
               {loginStep === 'confirmed' && <span className="text-xs text-emerald-600 font-medium">✓ 로그인 확인됨 (이 창을 열어두면 스크래핑도 이 창에서 이어서 진행되고, 닫으면 백그라운드에서 진행됩니다)</span>}
               {loginStep === 'opened' && (
                 <span className="text-xs text-gray-500">브라우저 창에서 로그인을 완료한 뒤 확인을 눌러주세요.</span>
@@ -722,6 +940,25 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </div>
           ) : (
             <p className="text-xs text-gray-400">아이디를 입력하지 않으면 로그인 없이 바로 스크래핑을 시작할 수 있습니다.</p>
+          )}
+
+          {pickerActive && (
+            <div className="mt-3 pt-3 border-t border-gray-100">
+              <p className="text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2 mb-2">
+                🎯 로그인 창에서 원하는 값을 클릭하고 컬럼명을 입력해 저장하세요 — 여러 개를 계속 지정할 수 있습니다. 다 되면 위 &quot;요소 지정 종료&quot;를 누르세요.
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {Object.keys(pickerRules).length === 0 ? (
+                  <span className="text-xs text-gray-400">아직 지정된 컬럼이 없습니다.</span>
+                ) : Object.entries(pickerRules).map(([field, rule]) => (
+                  <span key={field} className="inline-flex items-center gap-1 text-xs bg-white border border-gray-200 rounded-full pl-2.5 pr-1 py-1">
+                    <span className="font-medium text-gray-700">{field}</span>
+                    <span className="text-gray-400 max-w-[160px] truncate" title={rule.value}>({rule.type === 'label' ? '라벨' : '셀렉터'}: {rule.value})</span>
+                    <button onClick={() => handleDeleteRule(field)} className="text-rose-400 hover:text-rose-600 px-1">✕</button>
+                  </span>
+                ))}
+              </div>
+            </div>
           )}
 
           {profileError && <p className="text-xs text-rose-500 mt-3">{profileError}</p>}

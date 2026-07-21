@@ -905,42 +905,51 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </label>
           </div>
 
-          {needsLogin ? (
-            <div className="flex items-center gap-3 flex-wrap">
-              <button onClick={handleOpenLogin} disabled={loginBusy}
-                className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
-                {loginStep === 'opened' || loginStep === 'confirmed' ? '로그인 창 다시 열기' : '로그인 창 열기'}
+          <div className="flex items-center gap-3 flex-wrap">
+            <button onClick={handleOpenLogin} disabled={loginBusy}
+              className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+              {needsLogin
+                ? (loginStep === 'opened' || loginStep === 'confirmed' ? '로그인 창 다시 열기' : '로그인 창 열기')
+                : (loginStep === 'opened' || loginStep === 'confirmed' ? '몰 페이지 다시 열기' : '몰 페이지 열기')}
+            </button>
+            <button onClick={handleConfirmLogin} disabled={loginBusy || loginStep === 'none'}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+              {needsLogin ? '로그인 확인' : '확인'}
+            </button>
+            {loginStep === 'confirmed' && (
+              <button onClick={handleProfileMall} disabled={profileLoading}
+                className="px-4 py-2 bg-white border border-teal-400 text-teal-600 hover:bg-teal-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+                {profileLoading ? '몰 구조 파악 중...' : '🔍 몰 구조 파악'}
               </button>
-              <button onClick={handleConfirmLogin} disabled={loginBusy || loginStep === 'none'}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-                로그인 확인
-              </button>
-              {loginStep === 'confirmed' && (
-                <button onClick={handleProfileMall} disabled={profileLoading}
-                  className="px-4 py-2 bg-white border border-teal-400 text-teal-600 hover:bg-teal-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
-                  {profileLoading ? '몰 구조 파악 중...' : '🔍 몰 구조 파악'}
+            )}
+            {loginStep === 'confirmed' && (
+              pickerActive ? (
+                <button onClick={handleStopPicker} disabled={pickerBusy}
+                  className="px-4 py-2 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+                  🎯 요소 지정 종료
                 </button>
-              )}
-              {loginStep === 'confirmed' && (
-                pickerActive ? (
-                  <button onClick={handleStopPicker} disabled={pickerBusy}
-                    className="px-4 py-2 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
-                    🎯 요소 지정 종료
-                  </button>
-                ) : (
-                  <button onClick={handleStartPicker} disabled={pickerBusy}
-                    className="px-4 py-2 bg-white border border-teal-400 text-teal-600 hover:bg-teal-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
-                    🎯 요소 지정
-                  </button>
-                )
-              )}
-              {loginStep === 'confirmed' && <span className="text-xs text-emerald-600 font-medium">✓ 로그인 확인됨 (이 창을 열어두면 스크래핑도 이 창에서 이어서 진행되고, 닫으면 백그라운드에서 진행됩니다)</span>}
-              {loginStep === 'opened' && (
-                <span className="text-xs text-gray-500">브라우저 창에서 로그인을 완료한 뒤 확인을 눌러주세요.</span>
-              )}
-            </div>
-          ) : (
-            <p className="text-xs text-gray-400">아이디를 입력하지 않으면 로그인 없이 바로 스크래핑을 시작할 수 있습니다.</p>
+              ) : (
+                <button onClick={handleStartPicker} disabled={pickerBusy}
+                  className="px-4 py-2 bg-white border border-teal-400 text-teal-600 hover:bg-teal-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+                  🎯 요소 지정
+                </button>
+              )
+            )}
+            {loginStep === 'confirmed' && (
+              <span className="text-xs text-emerald-600 font-medium">
+                {needsLogin
+                  ? '✓ 로그인 확인됨 (이 창을 열어두면 스크래핑도 이 창에서 이어서 진행되고, 닫으면 백그라운드에서 진행됩니다)'
+                  : '✓ 확인됨 (이 창을 열어두면 스크래핑도 이 창에서 이어서 진행되고, 닫으면 백그라운드에서 진행됩니다)'}
+              </span>
+            )}
+            {loginStep === 'opened' && (
+              <span className="text-xs text-gray-500">
+                {needsLogin ? '브라우저 창에서 로그인을 완료한 뒤 확인을 눌러주세요.' : '브라우저 창이 열리면 확인을 눌러주세요.'}
+              </span>
+            )}
+          </div>
+          {!needsLogin && (
+            <p className="text-xs text-gray-400 mt-2">아이디를 입력하지 않으면 로그인 없이 바로 스크래핑을 시작할 수 있습니다. 몰 구조 파악·요소 지정을 쓰려면 위에서 몰 페이지를 먼저 열고 확인을 눌러주세요.</p>
           )}
 
           {pickerActive && (

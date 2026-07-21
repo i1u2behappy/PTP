@@ -18,6 +18,7 @@ interface Client {
   contact_phone: string | null
   contact_email: string | null
   memo: string | null
+  payment_accounts: { payerName: string; paymentMethod: string; bankAccount: string }[] | null
   created_at: string
 }
 
@@ -44,6 +45,10 @@ const COLUMNS: ColumnDef[] = [
   { key: 'contact_name', label: '담당자명', getValue: c => c.contact_name || '', render: c => c.contact_name || '-', className: 'text-gray-600' },
   { key: 'contact_phone', label: '연락처', getValue: c => c.contact_phone || '', render: c => c.contact_phone || '-', className: 'text-gray-500' },
   { key: 'contact_email', label: '이메일', getValue: c => c.contact_email || '', render: c => c.contact_email || '-', className: 'text-gray-500' },
+  { key: 'payment_accounts', label: '결제 정보',
+    getValue: c => (c.payment_accounts || []).map(p => [p.payerName, p.paymentMethod, p.bankAccount].filter(Boolean).join('/')).join(', '),
+    render: c => (c.payment_accounts || []).map(p => [p.payerName, p.paymentMethod, p.bankAccount].filter(Boolean).join('/')).join(', ') || '-',
+    className: 'text-gray-500 max-w-[220px] truncate' },
   { key: 'memo', label: '메모', getValue: c => c.memo || '', render: c => c.memo || '-', className: 'text-gray-400 max-w-[160px] truncate' },
   { key: 'created_at', label: '등록일', getValue: c => c.created_at, render: c => new Date(c.created_at).toLocaleDateString(), className: 'text-gray-400' },
 ]
@@ -51,7 +56,7 @@ const COLUMNS: ColumnDef[] = [
 const DEFAULT_COL_WIDTH: Record<string, number> = {
   name: 140, code: 100, business_reg_no: 130, business_reg_doc_path: 90, representative_name: 100,
   business_type: 90, business_item: 90, business_address: 220, contact_name: 100, contact_phone: 120,
-  contact_email: 160, memo: 160, created_at: 100,
+  contact_email: 160, payment_accounts: 220, memo: 160, created_at: 100,
 }
 const MIN_COL_WIDTH = 50
 function widthFor(key: string): number {
@@ -258,7 +263,7 @@ export function ClientsListPanel() {
                     ) : visibleClients.map(c => (
                       <tr key={c.id} onClick={() => openScraper(c)} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
                         {orderedColumns.map(col => (
-                          <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''}`} title={col.key === 'business_address' || col.key === 'memo' ? col.getValue(c) : undefined}>
+                          <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''}`} title={col.key === 'business_address' || col.key === 'memo' || col.key === 'payment_accounts' ? col.getValue(c) : undefined}>
                             {col.render(c)}
                           </td>
                         ))}

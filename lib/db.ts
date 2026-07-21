@@ -179,6 +179,9 @@ export async function initDb() {
     ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS contact_name TEXT;
     ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS contact_phone TEXT;
     ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS contact_email TEXT;
+    -- 결제(정산) 계좌 목록 — 한 거래처가 여러 결제자/통장을 등록할 수 있어 배열로 둔다.
+    -- [{ payerName, paymentMethod, bankAccount }]
+    ALTER TABLE supply_clients ADD COLUMN IF NOT EXISTS payment_accounts JSONB DEFAULT '[]';
 
     ALTER TABLE sites DROP COLUMN IF EXISTS client_name;
     ALTER TABLE sites DROP COLUMN IF EXISTS client_contact;

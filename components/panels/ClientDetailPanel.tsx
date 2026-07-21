@@ -15,6 +15,12 @@ interface Mall {
   login_id: string | null
 }
 
+interface PaymentAccount {
+  payerName: string
+  paymentMethod: string
+  bankAccount: string
+}
+
 interface ClientDetail {
   id: number
   name: string
@@ -31,8 +37,11 @@ interface ClientDetail {
   contact_name: string | null
   contact_phone: string | null
   contact_email: string | null
+  payment_accounts: PaymentAccount[] | null
   malls: Mall[]
 }
+
+const EMPTY_PAYMENT_ACCOUNT: PaymentAccount = { payerName: '', paymentMethod: '', bankAccount: '' }
 
 const FIELDS: { key: keyof ClientDetail; label: string }[] = [
   { key: 'name', label: '거래처명 *' },
@@ -60,6 +69,7 @@ export function ClientDetailPanel({ params }: Props) {
   const [existingDoc, setExistingDoc] = useState<{ path: string; name: string } | null>(null)
   const [docFile, setDocFile] = useState<File | null>(null)
   const [existingCode, setExistingCode] = useState<string | null>(null)
+  const [paymentAccounts, setPaymentAccounts] = useState<PaymentAccount[]>([])
 
   const load = useCallback(() => {
     fetch(`/api/clients/${clientId}`).then(r => r.json()).then((d: ClientDetail) => {
@@ -70,6 +80,7 @@ export function ClientDetailPanel({ params }: Props) {
       setMalls(d.malls || [])
       setExistingDoc(d.business_reg_doc_path ? { path: d.business_reg_doc_path, name: d.business_reg_doc_name || '사업자등록증' } : null)
       setExistingCode(d.code)
+      setPaymentAccounts(d.payment_accounts?.length ? d.payment_accounts : [EMPTY_PAYMENT_ACCOUNT])
     }).finally(() => setLoading(false))
   }, [clientId])
 
@@ -83,6 +94,7 @@ export function ClientDetailPanel({ params }: Props) {
       businessRegNo: form.business_reg_no, representativeName: form.representative_name,
       businessAddress: form.business_address, businessType: form.business_type, businessItem: form.business_item,
       contactName: form.contact_name, contactPhone: form.contact_phone, contactEmail: form.contact_email,
+      paymentAccounts,
     })
     try {
       const res = await fetch(`/api/clients/${clientId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body })
@@ -124,6 +136,21 @@ export function ClientDetailPanel({ params }: Props) {
     await fetch(`/api/sites/${id}`, { method: 'DELETE' })
     setMalls(prev => prev.filter(m => m.id !== id))
     bumpRefresh('sites')
+  }
+
+  function updatePaymentAccount(idx: number, field: keyof PaymentAccount, value: string) {
+    setPaymentAccounts(prev => prev.map((p, i) => i === idx ? { ...p, [field]: value } : p))
+  }
+
+  function addPaymentAccount() {
+    setPaymentAccounts(prev => [...prev, EMPTY_PAYMENT_ACCOUNT])
+  }
+
+  function removePaymentAccount(idx: number) {
+    setPaymentAccounts(prev => {
+      const next = prev.filter((_, i) => i !== idx)
+      return next.length ? next : [EMPTY_PAYMENT_ACCOUNT]
+    })
   }
 
   if (loading) return <div className="text-center text-sm text-gray-400 py-12">불러오는 중...</div>
@@ -188,6 +215,29 @@ export function ClientDetailPanel({ params }: Props) {
             <span className="block text-xs text-gray-400">상품마스터 가공 시 거래처 코드 기반 사내 관리코드를 자동으로 발급합니다 (거래처 코드가 설정된 경우)</span>
           </span>
         </label>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-gray-700">결제 정보</h2>
+          <button onClick={addPaymentAccount} className="text-xs text-teal-600 hover:underline shrink-0">➕ 결제 정보 추가</button>
+        </div>
+        <div className="space-y-2">
+          {paymentAccounts.map((p, idx) => (
+            <div key={idx} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-center">
+              <input value={p.payerName} onChange={e => updatePaymentAccount(idx, 'payerName', e.target.value)}
+                placeholder="결제자 이름"
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+              <input value={p.paymentMethod} onChange={e => updatePaymentAccount(idx, 'paymentMethod', e.target.value)}
+                placeholder="결제 수단 (예: 카드, 계좌이체)"
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+              <input value={p.bankAccount} onChange={e => updatePaymentAccount(idx, 'bankAccount', e.target.value)}
+                placeholder="결제 통장 (은행/계좌번호)"
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+              <button onClick={() => removePaymentAccount(idx)} className="text-rose-500 hover:underline text-xs px-1 shrink-0">삭제</button>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div className="bg-white rounded-2xl border border-gray-200 p-4 mb-4 flex items-center justify-between">

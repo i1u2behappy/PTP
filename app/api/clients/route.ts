@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams.get('q') || ''
   const res = await pool.query(
     `SELECT id, name, code, memo, business_reg_no, business_reg_doc_path, representative_name, business_address, business_type, business_item,
-            contact_name, contact_phone, contact_email, created_at
+            contact_name, contact_phone, contact_email, payment_accounts, created_at
      FROM supply_clients
      WHERE id <> 1
        AND (name ILIKE $1 OR memo ILIKE $1 OR business_reg_no ILIKE $1 OR representative_name ILIKE $1

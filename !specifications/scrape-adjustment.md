@@ -219,6 +219,24 @@ live 검증: `pending_adjustment_item_id`를 다른(더 오래된) 세션의 항
 - **대상은 미리보기의 대표 상품 1건(`previewResult`)만** — 목록의 나머지 상품(`previewItems`, 상세
   페이지를 열어보지 않은 얕은 정보)은 대상에서 제외.
 
+### 버그 수정 — 저장 한 번 하면 피커 패널이 사라지던 문제
+
+위 "저장 시 미리보기 자동 재실행"이 그 자리에서 새 버그를 만들었다: 미리보기 재실행은 피커가 주입된
+바로 그 탭을 다시 `page.goto`(리로드)하는데, 인젝션된 패널/리스너는 `page.evaluate`로 그 문서에만
+심어져 있어 새 문서로 넘어가면(네비게이션마다) 통째로 사라진다(`exposeFunction`은 Playwright가
+페이지 이동에도 유지해주지만 DOM 상태는 아님) — 즉 값 하나 저장하면 미리보기가 재실행→페이지
+리로드→피커 소멸까지 이어져 추가 지정이 불가능했다. `startElementPicker`가 그 페이지에
+`page.on('load', ...)` 리스너를 등록해두고, 페이지가 새로 로드될 때마다 `injectElementPicker`를 다시
+실행하도록 고쳤다(`stopElementPicker`에서 리스너도 같이 정리). 격리된 브라우저로 가방쟁이 실제
+페이지에서 리로드 전/후 모두 패널이 살아있는 것을 확인.
+
+### 버그 수정 — "직접 입력" 커스텀 컬럼이 미리보기에 안 보이던 문제
+
+인젝션 패널의 "직접 입력..." 옵션으로 만든 커스텀 컬럼은 저장되면 `ExtractedProduct.custom_fields`에
+담기는데, 스크랩 미리보기 화면(`PreviewProduct`)은 `extra_info`만 표시하고 `custom_fields`는 아예
+읽지 않고 있었다 — 새로 만든 컬럼이 저장은 되지만 미리보기엔 안 보이는 상태였다. `PreviewProduct`
+인터페이스에 `custom_fields`를 추가하고, "직접 지정한 컬럼: " 줄로 표시하도록 수정.
+
 ## 하지 않는 것 (알려진 한계, 요소 지정 1단계 기준)
 
 - 개발자모드(크롬 확장, `chrome.debugger`)는 아직 지원하지 않는다 — 일반모드(Playwright `openSessions`)만.

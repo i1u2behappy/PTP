@@ -99,6 +99,7 @@ interface PreviewProduct {
   stock_qty: number | null
   stock_by_option: { option: string; qty: number }[]
   extra_info: { label: string; value: string }[]
+  custom_fields: Record<string, string>
 }
 
 interface PreviewItem {
@@ -1336,6 +1337,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-500">
                   <span className="text-gray-400">상품정보고시 전체: </span>
                   {previewResult.product.extra_info.map(({ label, value }) => `${label}: ${value}`).join(' / ')}
+                </div>
+              )}
+              {Object.keys(previewResult.product.custom_fields || {}).length > 0 && (
+                <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-500">
+                  <span className="text-gray-400">직접 지정한 컬럼: </span>
+                  {Object.entries(previewResult.product.custom_fields).map(([label, value]) => `${label}: ${value}`).join(' / ')}
                 </div>
               )}
             </div>

@@ -748,6 +748,10 @@ async function siteInfo(siteId: number): Promise<{ name: string; url: string }> 
 // page.exposeFunction은 같은 Page 인스턴스에 같은 이름으로 두 번 부르면 에러가 난다 — "요소 지정 시작"을
 // 여러 번 눌러도 안전하도록 이미 노출한 Page를 기억해둔다.
 const pickerExposedPages = new WeakSet<Page>()
+// 미리보기 자동 재실행(refreshPreviewSingle)처럼 같은 탭이 다시 navigate되면 주입된 패널/리스너가
+// 통째로 사라진다(page.evaluate는 그 문서에만 심어지고, 새 문서로 넘어가면 초기화됨) — 페이지가 새로
+// 로드될 때마다 자동으로 다시 주입해, 값 하나 저장한 뒤에도 계속 이어서 지정할 수 있게 한다.
+const pickerNavHandlers = new WeakMap<Page, () => void>()
 
 /**
  * "요소 지정" 기능 — 실제로 열려있는 몰 페이지(로그인 확인된 openSessions 창)에 클릭식 엘리먼트 피커를
@@ -776,6 +780,12 @@ export async function startElementPicker(siteId: number): Promise<boolean> {
     pickerExposedPages.add(page)
   }
 
+  if (!pickerNavHandlers.has(page)) {
+    const onLoad = () => { page.evaluate(injectElementPicker).catch(() => {}) }
+    page.on('load', onLoad)
+    pickerNavHandlers.set(page, onLoad)
+  }
+
   await page.evaluate(injectElementPicker)
   return true
 }
@@ -787,6 +797,8 @@ export async function stopElementPicker(siteId: number): Promise<boolean> {
   const pages = context.pages()
   const page = pages[pages.length - 1]
   if (!page) return false
+  const onLoad = pickerNavHandlers.get(page)
+  if (onLoad) { page.off('load', onLoad); pickerNavHandlers.delete(page) }
   await page.evaluate(() => (window as unknown as { __ptpPickerTeardown?: () => void }).__ptpPickerTeardown?.()).catch(() => {})
   return true
 }

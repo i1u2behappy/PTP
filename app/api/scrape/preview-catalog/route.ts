@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
   if (!resolvedUrl) return NextResponse.json({ error: 'url required' }, { status: 400 })
 
   try {
-    // "요소 지정"으로 저장한 그 몰 전용 규칙을 미리보기에도 동일하게 적용한다 (app/api/scrape/preview 참고).
+    // "스크랩 대상 직접지정"으로 저장한 그 몰 전용 규칙을 미리보기에도 동일하게 적용한다 (app/api/scrape/preview 참고).
     let extractionRules: Record<string, ExtractionRule> | undefined
     if (body.siteId) {
       const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(

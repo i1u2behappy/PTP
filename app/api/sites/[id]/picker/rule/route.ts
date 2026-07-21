@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 
-/** "요소 지정"으로 저장한 컬럼 하나를 지운다 — 나머지 규칙은 그대로 둔다. */
+/** "스크랩 대상 직접지정"으로 저장한 컬럼 하나를 지운다 — 나머지 규칙은 그대로 둔다. */
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const siteId = Number(id)

@@ -745,7 +745,7 @@ async function siteInfo(siteId: number): Promise<{ name: string; url: string }> 
   return { name: res.rows[0]?.name || `site${siteId}`, url: res.rows[0]?.url || '' }
 }
 
-// page.exposeFunction은 같은 Page 인스턴스에 같은 이름으로 두 번 부르면 에러가 난다 — "요소 지정 시작"을
+// page.exposeFunction은 같은 Page 인스턴스에 같은 이름으로 두 번 부르면 에러가 난다 — "스크랩 대상 직접지정 시작"을
 // 여러 번 눌러도 안전하도록 이미 노출한 Page를 기억해둔다.
 const pickerExposedPages = new WeakSet<Page>()
 // 미리보기 자동 재실행(refreshPreviewSingle)처럼 같은 탭이 다시 navigate되면 주입된 패널/리스너가
@@ -754,7 +754,7 @@ const pickerExposedPages = new WeakSet<Page>()
 const pickerNavHandlers = new WeakMap<Page, () => void>()
 
 /**
- * "요소 지정" 기능 — 실제로 열려있는 몰 페이지(로그인 확인된 openSessions 창)에 클릭식 엘리먼트 피커를
+ * "스크랩 대상 직접지정" 기능 — 실제로 열려있는 몰 페이지(로그인 확인된 openSessions 창)에 클릭식 엘리먼트 피커를
  * 주입한다. 사용자가 페이지에서 값을 클릭하면(예: 가격 텍스트) 그 요소가 라벨-값 구조(dt/dd, th/td) 안에
  * 있는지 먼저 확인해 있으면 라벨 텍스트를, 없으면 CSS 셀렉터를 계산해 후보로 보여주고, 컬럼명을 입력해
  * 저장하면 그 자리에서 sites.extraction_rules에 반영된다 — "스크랩 조정"이 AI로 추측해 만들던 것과 같은
@@ -804,7 +804,7 @@ export async function stopElementPicker(siteId: number): Promise<boolean> {
 }
 
 /** 실제 몰 페이지 안에서 실행되는 함수 — page.evaluate로 그대로 주입된다(문자열이 아니라 함수 자체를
- *  Playwright가 직렬화). 이미 켜져 있으면 다시 켜지 않는다(같은 페이지에서 "요소 지정 시작"을 또 눌러도
+ *  Playwright가 직렬화). 이미 켜져 있으면 다시 켜지 않는다(같은 페이지에서 "스크랩 대상 직접지정 시작"을 또 눌러도
  *  리스너가 중복 등록되지 않도록). */
 function injectElementPicker() {
   const w = window as unknown as {
@@ -880,7 +880,7 @@ function injectElementPicker() {
   panel.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483647;background:#fff;border:2px solid #14b8a6;'
     + 'border-radius:12px;padding:12px;width:280px;font:12px/1.4 -apple-system,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);color:#333'
   panel.innerHTML = `
-    <div style="font-weight:600;margin-bottom:6px">🎯 PTP 요소 지정</div>
+    <div style="font-weight:600;margin-bottom:6px">🎯 PTP 스크랩 대상 직접지정</div>
     <div id="ptp-picker-status" style="color:#666;margin-bottom:8px">값을 클릭하세요</div>
     <div id="ptp-picker-form" style="display:none">
       <div id="ptp-picker-preview" style="background:#f3f4f6;border-radius:6px;padding:6px;margin-bottom:6px;word-break:break-all;max-height:60px;overflow:auto"></div>

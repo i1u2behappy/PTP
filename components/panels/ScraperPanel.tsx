@@ -505,7 +505,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     }
   }
 
-  /** "요소 지정" — 로그인 창에 클릭식 엘리먼트 피커를 주입한다. 사용자가 실제 몰 페이지에서 값을 클릭하고
+  /** "스크랩 대상 직접지정" — 로그인 창에 클릭식 엘리먼트 피커를 주입한다. 사용자가 실제 몰 페이지에서 값을 클릭하고
    *  컬럼명을 입력하면 그 자리에서 sites.extraction_rules에 저장되므로, 여기서는 시작/종료와 "지금까지
    *  지정된 컬럼" 목록 표시만 맡는다(폴링으로 갱신 — 몰 페이지 안에서 저장하는 거라 이 화면과 직접 연결돼
    *  있지 않음). 미리보기를 이미 돌려본 상태면, 그 미리보기가 열어본 바로 그 상품 페이지를 로그인 창에
@@ -517,7 +517,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       if (previewResult) await handleOpenItem(previewResult.sourceUrl)
       const res = await fetch(`/api/sites/${selectedSite.id}/picker/start`, { method: 'POST' })
       const d = await res.json()
-      if (!res.ok) { alert(d.error || '요소 지정을 시작하지 못했습니다'); return }
+      if (!res.ok) { alert(d.error || '스크랩 대상 직접지정을 시작하지 못했습니다'); return }
       setPickerActive(true)
       await refreshPickerRules()
     } finally {
@@ -525,7 +525,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     }
   }
 
-  /** 미리보기로 열어본 그 상품 하나만 다시 추출해 previewResult를 갱신한다 — 요소 지정으로 규칙을 새로
+  /** 미리보기로 열어본 그 상품 하나만 다시 추출해 previewResult를 갱신한다 — 스크랩 대상 직접지정으로 규칙을 새로
    *  저장했을 때, 고친 값이 미리보기 테이블에 곧바로 반영되도록. */
   async function refreshPreviewSingle() {
     if (!selectedSite || !previewResultRef.current) return
@@ -951,19 +951,6 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               </button>
             )}
             {loginStep === 'confirmed' && (
-              pickerActive ? (
-                <button onClick={handleStopPicker} disabled={pickerBusy}
-                  className="px-4 py-2 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
-                  🎯 요소 지정 종료
-                </button>
-              ) : (
-                <button onClick={handleStartPicker} disabled={pickerBusy}
-                  className="px-4 py-2 bg-white border border-teal-400 text-teal-600 hover:bg-teal-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
-                  🎯 요소 지정
-                </button>
-              )
-            )}
-            {loginStep === 'confirmed' && (
               <span className="text-xs text-emerald-600 font-medium">
                 {needsLogin
                   ? '✓ 로그인 확인됨 (이 창을 열어두면 스크래핑도 이 창에서 이어서 진행되고, 닫으면 백그라운드에서 진행됩니다)'
@@ -977,26 +964,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             )}
           </div>
           {!needsLogin && (
-            <p className="text-xs text-gray-400 mt-2">아이디를 입력하지 않으면 로그인 없이 바로 스크래핑을 시작할 수 있습니다. 몰 구조 파악·요소 지정을 쓰려면 위에서 몰 페이지를 먼저 열고 확인을 눌러주세요.</p>
-          )}
-
-          {pickerActive && (
-            <div className="mt-3 pt-3 border-t border-gray-100">
-              <p className="text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2 mb-2">
-                🎯 로그인 창에서 원하는 값을 클릭하고 컬럼명을 입력해 저장하세요 — 여러 개를 계속 지정할 수 있습니다. 다 되면 위 &quot;요소 지정 종료&quot;를 누르세요.
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {Object.keys(pickerRules).length === 0 ? (
-                  <span className="text-xs text-gray-400">아직 지정된 컬럼이 없습니다.</span>
-                ) : Object.entries(pickerRules).map(([field, rule]) => (
-                  <span key={field} className="inline-flex items-center gap-1 text-xs bg-white border border-gray-200 rounded-full pl-2.5 pr-1 py-1">
-                    <span className="font-medium text-gray-700">{field}</span>
-                    <span className="text-gray-400 max-w-[160px] truncate" title={rule.value}>({rule.type === 'label' ? '라벨' : '셀렉터'}: {rule.value})</span>
-                    <button onClick={() => handleDeleteRule(field)} className="text-rose-400 hover:text-rose-600 px-1">✕</button>
-                  </span>
-                ))}
-              </div>
-            </div>
+            <p className="text-xs text-gray-400 mt-2">아이디를 입력하지 않으면 로그인 없이 바로 스크래핑을 시작할 수 있습니다. 몰 구조 파악을 쓰려면 위에서 몰 페이지를 먼저 열고 확인을 눌러주세요.</p>
           )}
 
           {profileError && <p className="text-xs text-rose-500 mt-3">{profileError}</p>}
@@ -1210,13 +1178,47 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       {/* 상품 페이지 미리보기 */}
       {selectedSite && mallMode === 'normal' && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-          <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
             <label className="block text-sm font-semibold text-gray-700">상품 페이지 미리보기</label>
-            <button type="button" onClick={handlePreview} disabled={previewLoading || !canPreview}
-              className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0">
-              {previewLoading ? '확인 중...' : '🔍 스크랩 미리보기'}
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button type="button" onClick={handlePreview} disabled={previewLoading || !canPreview}
+                className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                {previewLoading ? '확인 중...' : '🔍 스크랩 미리보기'}
+              </button>
+              {loginStep === 'confirmed' && (
+                pickerActive ? (
+                  <button onClick={handleStopPicker} disabled={pickerBusy}
+                    className="px-4 py-2 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+                    🎯 스크랩 대상 직접지정 종료
+                  </button>
+                ) : (
+                  <button onClick={handleStartPicker} disabled={pickerBusy}
+                    className="px-4 py-2 bg-white border border-teal-400 text-teal-600 hover:bg-teal-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+                    🎯 스크랩 대상 직접지정
+                  </button>
+                )
+              )}
+            </div>
           </div>
+
+          {pickerActive && (
+            <div className="mb-3">
+              <p className="text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2 mb-2">
+                🎯 로그인 창에서 원하는 값을 클릭하고 컬럼명을 입력해 저장하세요 — 여러 개를 계속 지정할 수 있습니다. 다 되면 위 &quot;스크랩 대상 직접지정 종료&quot;를 누르세요.
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {Object.keys(pickerRules).length === 0 ? (
+                  <span className="text-xs text-gray-400">아직 지정된 컬럼이 없습니다.</span>
+                ) : Object.entries(pickerRules).map(([field, rule]) => (
+                  <span key={field} className="inline-flex items-center gap-1 text-xs bg-white border border-gray-200 rounded-full pl-2.5 pr-1 py-1">
+                    <span className="font-medium text-gray-700">{field}</span>
+                    <span className="text-gray-400 max-w-[160px] truncate" title={rule.value}>({rule.type === 'label' ? '라벨' : '셀렉터'}: {rule.value})</span>
+                    <button onClick={() => handleDeleteRule(field)} className="text-rose-400 hover:text-rose-600 px-1">✕</button>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
 
           {mode === 'catalog' && !canPreview && (
             <p className="text-xs text-gray-400">시작 URL 또는 카테고리 목록을 입력하면 카테고리 내 상품 개수와 첫 상품 페이지를 바로 확인할 수 있습니다.</p>

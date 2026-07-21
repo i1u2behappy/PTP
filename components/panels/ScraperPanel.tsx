@@ -1339,9 +1339,6 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       {previewResult.product.options.map(o => (
                         <th key={o.name} className="px-3 py-2 text-left">{o.name}</th>
                       ))}
-                      {Object.keys(previewResult.product.custom_fields || {}).map(label => (
-                        <th key={label} className="px-3 py-2 text-left">{label}</th>
-                      ))}
                     </tr>
                   </thead>
                   <tbody>
@@ -1381,11 +1378,6 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                           {o.values.join(', ')}
                         </td>
                       ))}
-                      {Object.entries(previewResult.product.custom_fields || {}).map(([label, value]) => (
-                        <td key={label} className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={value}>
-                          {value}
-                        </td>
-                      ))}
                     </tr>
                   </tbody>
                 </table>
@@ -1400,6 +1392,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-500">
                   <span className="text-gray-400">상품정보고시 전체: </span>
                   {previewResult.product.extra_info.map(({ label, value }) => `${label}: ${value}`).join(' / ')}
+                </div>
+              )}
+              {Object.keys(previewResult.product.custom_fields || {}).length > 0 && (
+                <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-500">
+                  <span className="text-gray-400">직접 지정한 컬럼: </span>
+                  {Object.entries(previewResult.product.custom_fields).map(([label, value]) => `${label}: ${value}`).join(' / ')}
                 </div>
               )}
             </div>

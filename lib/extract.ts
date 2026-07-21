@@ -474,7 +474,11 @@ export async function extractProductRuleBased(
         if (field === 'price') { result.price = n; result.sale_price = n }
         else if (field === 'cost_price') result.cost_price = n
         else result.shipping_fee = n
-      } else if (field === 'name' || field === 'brand' || field === 'manufacturer' || field === 'origin' || field === 'category') {
+      } else if (field === 'stock_qty') {
+        const m = trimmed.match(/[\d,]+/)
+        if (m) result.stock_qty = Number(m[0].replace(/,/g, ''))
+      } else if (field === 'name' || field === 'brand' || field === 'manufacturer' || field === 'origin' || field === 'category'
+        || field === 'stock_status' || field === 'english_name' || field === 'summary_info') {
         result[field] = trimmed
       } else {
         // 8개 고정 필드 밖의 새 컬럼(사용자가 "스크랩 조정"으로 추가 요청한 것) — custom_fields에 담는다.

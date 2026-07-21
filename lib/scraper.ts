@@ -806,6 +806,7 @@ function injectElementPicker() {
   const CANONICAL_FIELDS: [string, string][] = [
     ['name', '상품명'], ['price', '가격(소비자가)'], ['cost_price', '공급가/원가'], ['shipping_fee', '배송비'],
     ['category', '카테고리'], ['brand', '브랜드'], ['manufacturer', '제조사'], ['origin', '원산지'],
+    ['stock_status', '재고상태'], ['stock_qty', '재고수량'], ['english_name', '영문상품명'], ['summary_info', '상품요약정보'],
   ]
 
   let hovered: HTMLElement | null = null

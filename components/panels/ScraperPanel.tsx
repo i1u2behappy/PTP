@@ -186,6 +186,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [pickerActive, setPickerActive] = useState(false)
   const [pickerBusy, setPickerBusy] = useState(false)
   const [pickerRules, setPickerRules] = useState<Record<string, { type: string; value: string }>>({})
+  const pickerRulesJsonRef = useRef('')
 
   const [targetUrl, setTargetUrl]           = useState('')
   const [categoryUrlsText, setCategoryUrlsText] = useState('')
@@ -199,6 +200,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [detectedPlatform, setDetectedPlatform] = useState<string | null>(null)
 
   const [previewResult, setPreviewResult]   = useState<{ sourceUrl: string; product: PreviewProduct } | null>(null)
+  const previewResultRef = useRef(previewResult)
+  useEffect(() => { previewResultRef.current = previewResult }, [previewResult])
   const [previewTotal, setPreviewTotal]     = useState<number | null>(null)
   const [previewItems, setPreviewItems]     = useState<PreviewItem[]>([])
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -475,6 +478,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       setProfileError('')
       setPickerActive(false)
       setPickerRules({})
+      pickerRulesJsonRef.current = ''
     } finally {
       setLoginBusy(false)
     }
@@ -503,11 +507,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   /** "요소 지정" — 로그인 창에 클릭식 엘리먼트 피커를 주입한다. 사용자가 실제 몰 페이지에서 값을 클릭하고
    *  컬럼명을 입력하면 그 자리에서 sites.extraction_rules에 저장되므로, 여기서는 시작/종료와 "지금까지
    *  지정된 컬럼" 목록 표시만 맡는다(폴링으로 갱신 — 몰 페이지 안에서 저장하는 거라 이 화면과 직접 연결돼
-   *  있지 않음). */
+   *  있지 않음). 미리보기를 이미 돌려본 상태면, 그 미리보기가 열어본 바로 그 상품 페이지를 로그인 창에
+   *  먼저 띄운다 — 화면에 보이는 미리보기 값과 로그인 창에서 클릭할 요소가 같은 상품이어야 의미가 있다. */
   async function handleStartPicker() {
     if (!selectedSite) return
     setPickerBusy(true)
     try {
+      if (previewResult) await handleOpenItem(previewResult.sourceUrl)
       const res = await fetch(`/api/sites/${selectedSite.id}/picker/start`, { method: 'POST' })
       const d = await res.json()
       if (!res.ok) { alert(d.error || '요소 지정을 시작하지 못했습니다'); return }
@@ -516,6 +522,22 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     } finally {
       setPickerBusy(false)
     }
+  }
+
+  /** 미리보기로 열어본 그 상품 하나만 다시 추출해 previewResult를 갱신한다 — 요소 지정으로 규칙을 새로
+   *  저장했을 때, 고친 값이 미리보기 테이블에 곧바로 반영되도록. */
+  async function refreshPreviewSingle() {
+    if (!selectedSite || !previewResultRef.current) return
+    const res = await fetch('/api/scrape/preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: previewResultRef.current.sourceUrl, siteId: selectedSite.id,
+        loginId: loginId || undefined, loginPw: loginPw || undefined,
+      }),
+    })
+    if (!res.ok) return
+    const d = await res.json() as { sourceUrl: string; product: PreviewProduct }
+    setPreviewResult(d)
   }
 
   async function handleStopPicker() {
@@ -533,7 +555,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (!selectedSite) return
     const res = await fetch(`/api/sites/${selectedSite.id}`)
     const d = await res.json() as { extraction_rules?: Record<string, { type: string; value: string }> }
-    setPickerRules(d.extraction_rules || {})
+    const rules = d.extraction_rules || {}
+    const json = JSON.stringify(rules)
+    const changed = pickerRulesJsonRef.current !== '' && json !== pickerRulesJsonRef.current
+    pickerRulesJsonRef.current = json
+    setPickerRules(rules)
+    if (changed) await refreshPreviewSingle()
   }
 
   async function handleDeleteRule(field: string) {

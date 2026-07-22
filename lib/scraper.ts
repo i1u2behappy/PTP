@@ -938,13 +938,43 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
   panel.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483647;background:#fff;border:2px solid #14b8a6;'
     + 'border-radius:12px;padding:12px;width:320px;font:12px/1.4 -apple-system,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);color:#333'
   panel.innerHTML = `
-    <div style="font-weight:600;margin-bottom:6px">🎯 PTP 스크랩 대상 직접지정</div>
-    <div id="ptp-picker-status" style="color:#666;margin-bottom:8px">아래 목록에서 지정할 필드를 먼저 선택하세요</div>
+    <div id="ptp-picker-drag" style="margin-bottom:6px;cursor:move;user-select:none">
+      <div style="font-size:9px;color:#999;letter-spacing:.02em">PTP 직접지정 패널</div>
+      <div style="font-weight:600">⠿ 🎯 스크랩 대상 직접지정</div>
+    </div>
+    <div style="font-size:10px;color:#888;margin-bottom:6px;line-height:1.5">① 필드 선택 → ② 몰 화면에서 값 클릭 → ③ 자동 저장 — 반복하세요</div>
+    <div id="ptp-picker-status" style="color:#2563eb;font-weight:600;margin-bottom:8px;display:none"></div>
     <div id="ptp-picker-fieldlist" style="max-height:320px;overflow-y:auto;border-top:1px solid #eee;border-bottom:1px solid #eee;margin:8px 0;padding:4px 0"></div>
     <div id="ptp-picker-log" style="margin-top:4px;color:#0d9488;max-height:50px;overflow:auto"></div>
-    <button id="ptp-picker-close" style="margin-top:8px;width:100%;background:#f43f5e;color:#fff;border:0;border-radius:6px;padding:6px;cursor:pointer">피커 종료</button>
+    <button id="ptp-picker-close" style="margin-top:8px;width:100%;background:#14b8a6;color:#fff;border:0;border-radius:6px;padding:6px;cursor:pointer">💾 피커 저장</button>
   `
   document.body.appendChild(panel)
+
+  // 패널 위치를 드래그로 옮길 수 있게 한다 — 몰 페이지의 값을 가리는 경우 옆으로 치울 수 있어야 한다.
+  // 처음엔 top/right로 고정돼 있으니, 드래그가 시작되는 순간 현재 화면 위치를 left/top 절대값으로
+  // 바꿔치기해야 마우스를 따라 자연스럽게 움직인다(right를 그대로 두면 반대 방향으로 계산해야 해서 헷갈림).
+  const dragHandle = panel.querySelector('#ptp-picker-drag') as HTMLElement
+  let dragOffsetX = 0
+  let dragOffsetY = 0
+  function onDragMove(e: MouseEvent) {
+    const maxLeft = window.innerWidth - panel.offsetWidth
+    const maxTop = window.innerHeight - panel.offsetHeight
+    panel.style.left = Math.min(Math.max(0, e.clientX - dragOffsetX), Math.max(0, maxLeft)) + 'px'
+    panel.style.top = Math.min(Math.max(0, e.clientY - dragOffsetY), Math.max(0, maxTop)) + 'px'
+    panel.style.right = 'auto'
+  }
+  function onDragEnd() {
+    document.removeEventListener('mousemove', onDragMove)
+    document.removeEventListener('mouseup', onDragEnd)
+  }
+  dragHandle.addEventListener('mousedown', (e: MouseEvent) => {
+    const rect = panel.getBoundingClientRect()
+    dragOffsetX = e.clientX - rect.left
+    dragOffsetY = e.clientY - rect.top
+    document.addEventListener('mousemove', onDragMove)
+    document.addEventListener('mouseup', onDragEnd)
+    e.preventDefault()
+  })
 
   const statusEl = panel.querySelector('#ptp-picker-status') as HTMLElement
   const logEl = panel.querySelector('#ptp-picker-log') as HTMLElement
@@ -959,9 +989,11 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
   function updateStatus() {
     if (armedField) {
       const label = (CANONICAL_FIELDS.find(([k]) => k === armedField)?.[1]) || armedField
-      statusEl.textContent = `🎯 "${label}" 필드에 지정할 요소를 몰 페이지에서 클릭하세요 (취소하려면 목록에서 다시 누르세요)`
+      statusEl.textContent = `👉 "${label}" 지정 중 — 몰 화면에서 값을 클릭하세요`
+      statusEl.style.display = 'block'
     } else {
-      statusEl.textContent = '아래 목록에서 지정할 필드를 먼저 선택하세요'
+      statusEl.textContent = ''
+      statusEl.style.display = 'none'
     }
   }
 
@@ -1002,37 +1034,42 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
       const delBtn = rule
         ? `<button class="ptp-row-del" data-field="${esc(key)}" title="삭제" style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">✕</button>`
         : ''
+      const armBtnStyle = armed
+        ? 'flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb'
+        : rule
+          ? 'background:#fff;color:#2563eb;border:1px solid #2563eb'
+          : 'flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb'
       const inputRow = expanded ? `
-          <div style="display:flex;gap:4px;margin-top:4px">
+          <div style="display:flex;gap:4px;margin-top:5px">
             <input class="ptp-row-input" data-field="${esc(key)}" placeholder="값 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
             <button class="ptp-row-save" data-field="${esc(key)}" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">저장</button>
           </div>` : ''
       return `
-        <div style="padding:6px 6px;margin:2px 0;border:1px solid ${rowBorder};background:${rowBg};border-radius:8px">
+        <div style="padding:7px 7px;margin:3px 0;border:1px solid ${rowBorder};background:${rowBg};border-radius:8px">
           <div style="display:flex;justify-content:space-between;gap:4px;align-items:baseline">
-            <span style="font-weight:600;font-size:11px">${esc(label)}</span>
+            <span style="font-size:11px">${rule ? '✅' : '⬜'} <b style="font-size:11px">${esc(label)}</b></span>
             ${badge}
           </div>
           ${valueLine}
-          <div style="display:flex;gap:4px">
+          <div style="display:flex;gap:4px;align-items:center;margin-top:2px">
             <button class="ptp-row-arm" data-field="${esc(key)}"
-              style="flex:1;background:${armed ? '#2563eb' : '#fff'};color:${armed ? '#fff' : '#2563eb'};border:1px solid #2563eb;border-radius:5px;padding:3px 6px;font-size:10px;cursor:pointer">
-              ${armed ? '❌ 클릭 대기 취소' : '🎯 요소로 지정'}
-            </button>
-            <button class="ptp-row-toggle" data-field="${esc(key)}"
-              style="background:#fff;color:#666;border:1px solid #ccc;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">
-              ✏️ 직접 입력
+              style="${armBtnStyle};border-radius:5px;padding:4px 6px;font-size:10px;cursor:pointer">
+              ${armed ? '❌ 클릭 대기 취소' : rule ? '🎯 다시 지정' : '🎯 클릭해서 지정하기'}
             </button>
             ${delBtn}
           </div>
+          <a class="ptp-row-toggle" data-field="${esc(key)}" style="display:inline-block;margin-top:4px;font-size:10px;color:#888;text-decoration:underline;cursor:pointer">
+            ${expanded ? '접기' : '값 직접 입력하기'}
+          </a>
           ${inputRow}
         </div>
       `
     }).join('') + `
-      <div style="padding:6px 6px;margin:2px 0;border:1px dashed #ccc;border-radius:8px">
-        <input id="ptp-new-field-name" placeholder="새 컬럼명" style="width:100%;margin-bottom:4px;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px;box-sizing:border-box" />
+      <div style="padding:7px 7px;margin:3px 0;border:1px dashed #ccc;border-radius:8px">
+        <div style="font-size:10px;color:#888;margin-bottom:4px">새 컬럼 만들기</div>
+        <input id="ptp-new-field-name" placeholder="컬럼명 (예: 택배사)" style="width:100%;margin-bottom:4px;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px;box-sizing:border-box" />
         <div style="display:flex;gap:4px">
-          <button id="ptp-new-field-arm" style="flex:1;background:#fff;color:#2563eb;border:1px solid #2563eb;border-radius:5px;padding:3px 6px;font-size:10px;cursor:pointer">🎯 요소로 지정</button>
+          <button id="ptp-new-field-arm" style="flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb;border-radius:5px;padding:4px 6px;font-size:10px;cursor:pointer">🎯 클릭해서 지정하기</button>
         </div>
         <div style="display:flex;gap:4px;margin-top:4px">
           <input id="ptp-new-field-value" placeholder="또는 값 직접 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
@@ -1051,7 +1088,7 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
         updateStatus()
       })
     })
-    fieldListEl.querySelectorAll<HTMLButtonElement>('.ptp-row-toggle').forEach(btn => {
+    fieldListEl.querySelectorAll<HTMLElement>('.ptp-row-toggle').forEach(btn => {
       btn.addEventListener('click', () => {
         const field = btn.dataset.field!
         if (expandedInputs.has(field)) expandedInputs.delete(field); else expandedInputs.add(field)
@@ -1115,7 +1152,20 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
     if (hovered) { hovered.style.outline = ''; hovered = null }
   }
 
-  panel.querySelector('#ptp-picker-close')!.addEventListener('click', () => w.__ptpPickerTeardown?.())
+  // "피커 저장" — 각 줄에 열어둔 채 저장 버튼을 안 누른 입력값(직접 입력 칸, 새 컬럼 이름/값)이 있으면
+  // 닫기 전에 마저 저장한다 — 타이핑만 하고 저장을 안 누른 채 닫아서 값이 유실되는 걸 막는다.
+  panel.querySelector('#ptp-picker-close')!.addEventListener('click', () => {
+    fieldListEl.querySelectorAll<HTMLInputElement>('.ptp-row-input').forEach(input => {
+      const value = input.value.trim()
+      if (value) saveField(input.dataset.field!, 'fixed', value, value)
+    })
+    const newNameEl = fieldListEl.querySelector<HTMLInputElement>('#ptp-new-field-name')
+    const newValueEl = fieldListEl.querySelector<HTMLInputElement>('#ptp-new-field-value')
+    if (newNameEl?.value.trim() && newValueEl?.value.trim()) {
+      saveField(newNameEl.value.trim(), 'fixed', newValueEl.value.trim(), newValueEl.value.trim())
+    }
+    w.__ptpPickerTeardown?.()
+  })
 
   document.addEventListener('mouseover', onMouseOver, true)
   document.addEventListener('click', onClick, true)
@@ -1123,6 +1173,7 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
   w.__ptpPickerTeardown = () => {
     document.removeEventListener('mouseover', onMouseOver, true)
     document.removeEventListener('click', onClick, true)
+    onDragEnd() // 드래그 도중 종료를 눌렀을 수도 있어 남아있을 수 있는 리스너를 정리
     if (hovered) hovered.style.outline = ''
     panel.remove()
     w.__ptpPickerActive = false

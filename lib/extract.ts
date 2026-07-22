@@ -147,14 +147,24 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
       return (clone.textContent || '').trim()
     }
 
+    // document 전체에서 table/dl을 훑다 보면 이 상품과 무관한 표까지 섞여 들어간다 — 사이트 공통 영역
+    // (header/footer/nav — 회사정보, 관련상품 배너 등)이나 완전히 숨겨진 조상 안의 표가 대표적이다
+    // (cleanText는 셀 "안쪽"의 숨은 자손만 걷어내므로, 행/목록 자체가 숨은 조상 안에 있는 경우는 따로
+    // 걸러야 한다). 상품마다 실제 정보제공고시 표 위치가 달라 특정 컨테이너로 좁히긴 어렵지만, 이 두
+    // 경우는 어떤 몰이든 "이 상품 자체의 정보"가 아니라고 안전하게 판단할 수 있다.
+    const isIrrelevantRegion = (el: Element) =>
+      !!el.closest('header, footer, nav, [style*="display:none" i], [style*="display: none" i], [hidden]')
+
     // 국내 쇼핑몰은 전자상거래법상 "상품정보제공고시" 표를 의무 게시하므로, 라벨-값 쌍에서 부가 정보를 찾는다.
     // 카페24 등은 <table>(th/td)로, 신우 같은 구형 자체 솔루션은 <dl><dt>/<dd>로 같은 걸 표현하니 둘 다 본다.
     const infoRows: [string, string][] = []
     document.querySelectorAll('table tr').forEach(tr => {
+      if (isIrrelevantRegion(tr)) return
       const cells = Array.from(tr.querySelectorAll('th,td')).map(cleanText)
       if (cells.length === 2 && cells[0] && cells[1]) infoRows.push([cells[0], cells[1]])
     })
     document.querySelectorAll('dl').forEach(dl => {
+      if (isIrrelevantRegion(dl)) return
       Array.from(dl.querySelectorAll('dt')).forEach(dt => {
         // 인덱스로 dt[i]/dd[i]를 짝짓지 않는다 — 중간에 짝 없는 dd가 끼면 그 뒤로 전부 밀린다.
         // 대신 각 dt에서 다음 dt를 만나기 전 첫 dd를 직접 찾는다.
@@ -452,6 +462,25 @@ export async function extractProductRuleBased(
 
   if (extractionRules) {
     for (const [field, rule] of Object.entries(extractionRules)) {
+      // 대표/상세이미지는 값 하나가 아니라 URL 배열이라 텍스트 기반 나머지 필드와 다르게 다룬다 —
+      // 셀렉터는 갤러리 전체를 가리키는 컨테이너(예: ".thumb_area img")로 저장돼 있어 매칭되는 모든
+      // img의 src를 모으고, 고정값은 쉼표/줄바꿈으로 구분한 URL 목록으로 취급한다.
+      if (field === 'thumbnail_urls' || field === 'detail_image_urls') {
+        let urls: string[] = []
+        if (rule.type === 'fixed') {
+          urls = rule.value.split(/[,\n]/).map(s => s.trim()).filter(Boolean)
+        } else {
+          urls = await page.locator(rule.value).evaluateAll(
+            (els: HTMLImageElement[]) => els.map(el => el.src).filter(Boolean),
+          ).catch(() => [])
+        }
+        if (!urls.length) continue
+        const names = urls.map(u => { try { return decodeURIComponent(u.split('/').pop() || '') } catch { return u } })
+        if (field === 'thumbnail_urls') { result.thumbnail_urls = urls; result.thumbnail_names = names }
+        else { result.detail_image_urls = urls; result.detail_image_names = names }
+        continue
+      }
+
       let text: string | null = null
       if (rule.type === 'fixed') {
         text = rule.value

@@ -852,7 +852,11 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
     ['name', '상품명'], ['price', '가격(소비자가)'], ['cost_price', '공급가/원가'], ['shipping_fee', '배송비'],
     ['category', '카테고리'], ['brand', '브랜드'], ['manufacturer', '제조사'], ['origin', '원산지'],
     ['stock_status', '재고상태'], ['stock_qty', '재고수량'], ['english_name', '영문상품명'], ['summary_info', '상품요약정보'],
+    ['thumbnail_urls', '대표이미지'], ['detail_image_urls', '상세이미지'],
   ]
+  // 대표/상세이미지는 이미지가 여러 장이라 클릭한 요소 하나만이 아니라 그 갤러리 전체(같은 부모 아래
+  // img들)를 가리키는 셀렉터가 필요하다 — 일반 텍스트 필드와 다른 값 하나=요소 하나 모델이라 별도 취급.
+  const IMAGE_FIELDS = new Set(['thumbnail_urls', 'detail_image_urls'])
 
   function esc(s: unknown): string {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string))
@@ -867,6 +871,8 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
       case 'cost_price': return p.cost_price != null ? `₩${Number(p.cost_price).toLocaleString()}` : ''
       case 'shipping_fee': return p.shipping_fee != null ? String(p.shipping_fee) : ''
       case 'stock_qty': return p.stock_qty != null ? String(p.stock_qty) : ''
+      case 'thumbnail_urls': return Array.isArray(p.thumbnail_urls) && p.thumbnail_urls.length ? `이미지 ${p.thumbnail_urls.length}장` : ''
+      case 'detail_image_urls': return Array.isArray(p.detail_image_urls) && p.detail_image_urls.length ? `이미지 ${p.detail_image_urls.length}장` : ''
       case 'name': case 'category': case 'brand': case 'manufacturer': case 'origin':
       case 'stock_status': case 'english_name': case 'summary_info':
         return (p[field] as string) || ''
@@ -930,6 +936,13 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
       depth++
     }
     return parts.join(' > ')
+  }
+
+  // 대표/상세이미지 지정용 — 클릭한 게 <img> 자체면 그 부모를(형제 img들도 같이 잡히도록), 이미지를 담은
+  // 컨테이너를 클릭했으면 그 컨테이너를 기준으로 "... img"를 셀렉터에 붙여 갤러리 전체를 가리키게 한다.
+  function computeGallerySelector(target: HTMLElement): string {
+    const container = target.tagName === 'IMG' ? (target.parentElement || target) : target
+    return computeSelector(container) + ' img'
   }
 
   // 안내 패널 — 몰 페이지 자체 CSS와 충돌하지 않도록 인라인 스타일만 쓴다.
@@ -1143,18 +1156,31 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
     e.preventDefault()
     e.stopPropagation()
 
-    const label = detectLabel(el)
-    const rule = label ? { type: 'label' as const, value: label } : { type: 'selector' as const, value: computeSelector(el) }
-    saveField(armedField, rule.type, rule.value, elementDisplayText(el))
+    if (IMAGE_FIELDS.has(armedField)) {
+      const selector = computeGallerySelector(el)
+      const count = document.querySelectorAll(selector).length
+      saveField(armedField, 'selector', selector, count ? `이미지 ${count}장` : '(이미지를 찾지 못함)')
+    } else {
+      const label = detectLabel(el)
+      const rule = label ? { type: 'label' as const, value: label } : { type: 'selector' as const, value: computeSelector(el) }
+      saveField(armedField, rule.type, rule.value, elementDisplayText(el))
+    }
     armedField = null
     renderFieldList()
     updateStatus()
     if (hovered) { hovered.style.outline = ''; hovered = null }
   }
 
-  // "피커 저장" — 각 줄에 열어둔 채 저장 버튼을 안 누른 입력값(직접 입력 칸, 새 컬럼 이름/값)이 있으면
-  // 닫기 전에 마저 저장한다 — 타이핑만 하고 저장을 안 누른 채 닫아서 값이 유실되는 걸 막는다.
-  panel.querySelector('#ptp-picker-close')!.addEventListener('click', () => {
+  panel.querySelector('#ptp-picker-close')!.addEventListener('click', () => w.__ptpPickerTeardown?.())
+
+  document.addEventListener('mouseover', onMouseOver, true)
+  document.addEventListener('click', onClick, true)
+
+  w.__ptpPickerTeardown = () => {
+    // 각 줄에 열어둔 채 저장 버튼을 안 누른 입력값(직접 입력 칸, 새 컬럼 이름/값)이 있으면 닫기 전에
+    // 마저 저장한다 — 타이핑만 하고 저장을 안 누른 채 닫아서 값이 유실되는 걸 막는다. 패널의 "피커
+    // 저장" 버튼과, PTP 화면의 "스크랩 대상 직접지정 종료"(stopElementPicker가 이 함수를 원격으로
+    // 호출) 둘 다 같은 teardown을 타므로, 여기 한 곳에 둬야 어느 쪽으로 끝내도 동일하게 동작한다.
     fieldListEl.querySelectorAll<HTMLInputElement>('.ptp-row-input').forEach(input => {
       const value = input.value.trim()
       if (value) saveField(input.dataset.field!, 'fixed', value, value)
@@ -1164,13 +1190,6 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
     if (newNameEl?.value.trim() && newValueEl?.value.trim()) {
       saveField(newNameEl.value.trim(), 'fixed', newValueEl.value.trim(), newValueEl.value.trim())
     }
-    w.__ptpPickerTeardown?.()
-  })
-
-  document.addEventListener('mouseover', onMouseOver, true)
-  document.addEventListener('click', onClick, true)
-
-  w.__ptpPickerTeardown = () => {
     document.removeEventListener('mouseover', onMouseOver, true)
     document.removeEventListener('click', onClick, true)
     onDragEnd() // 드래그 도중 종료를 눌렀을 수도 있어 남아있을 수 있는 리스너를 정리

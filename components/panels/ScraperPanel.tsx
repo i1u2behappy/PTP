@@ -91,6 +91,8 @@ interface PreviewProduct {
   category: string
   price: number | null
   sale_price: number | null
+  cost_price: number | null
+  shipping_fee: number | string | null
   brand: string
   manufacturer: string
   origin: string
@@ -196,9 +198,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [pickerBusy, setPickerBusy] = useState(false)
   const [pickerRules, setPickerRules] = useState<Record<string, { type: string; value: string }>>({})
   const pickerRulesJsonRef = useRef('')
-  const [fixedField, setFixedField] = useState(FIXED_VALUE_FIELDS[0][0])
+  const [fixedInputs, setFixedInputs] = useState<Record<string, string>>({})
   const [fixedCustomField, setFixedCustomField] = useState('')
-  const [fixedValue, setFixedValue] = useState('')
+  const [fixedCustomValue, setFixedCustomValue] = useState('')
   const [fixedSaving, setFixedSaving] = useState(false)
 
   const [targetUrl, setTargetUrl]           = useState('')
@@ -588,23 +590,53 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     refreshPickerRules()
   }
 
-  /** 택배사처럼 페이지 어디에도 값이 없는 필드를 위한 등록 — 요소를 클릭하는 대신 컬럼명과 고정 값을
-   *  직접 입력해 모든 상품에 그대로 채워 넣는다. */
-  async function handleAddFixedRule() {
-    if (!selectedSite) return
-    const field = fixedField === '__custom__' ? fixedCustomField.trim() : fixedField
-    if (!field || !fixedValue.trim()) return
+  /** 택배사처럼 페이지 어디에도 값이 없는 필드, 또는 이미 추출된 값이 틀린 필드를 위한 등록 — 요소를
+   *  클릭하는 대신 컬럼명과 고정 값을 직접 입력해 모든 상품에 그대로 채워 넣는다. */
+  async function saveFixedRule(field: string, value: string) {
+    if (!selectedSite || !field.trim() || !value.trim()) return
     setFixedSaving(true)
     try {
       await fetch(`/api/sites/${selectedSite.id}/picker/rule`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ field, value: fixedValue.trim() }),
+        body: JSON.stringify({ field: field.trim(), value: value.trim() }),
       })
-      setFixedValue('')
-      setFixedCustomField('')
       await refreshPickerRules()
     } finally {
       setFixedSaving(false)
+    }
+  }
+
+  async function handleSaveFieldInput(field: string) {
+    const value = fixedInputs[field] || ''
+    await saveFixedRule(field, value)
+    setFixedInputs(prev => ({ ...prev, [field]: '' }))
+  }
+
+  async function handleAddCustomField() {
+    await saveFixedRule(fixedCustomField, fixedCustomValue)
+    setFixedCustomField('')
+    setFixedCustomValue('')
+  }
+
+  /** 미리보기 그리드에 지금 나와있는 값 — 피커 화면에 "현재 값"으로 나란히 보여줘서, 뭘 고쳐야 할지
+   *  한눈에 보고 그 자리에서 입력할 수 있게 한다. */
+  function currentPreviewValue(field: string): string {
+    const p = previewResult?.product
+    if (!p) return ''
+    switch (field) {
+      case 'name': return p.name
+      case 'price': return p.price != null ? `₩${p.price.toLocaleString()}` : ''
+      case 'cost_price': return p.cost_price != null ? `₩${p.cost_price.toLocaleString()}` : ''
+      case 'shipping_fee': return p.shipping_fee != null ? String(p.shipping_fee) : ''
+      case 'category': return p.category
+      case 'brand': return p.brand
+      case 'manufacturer': return p.manufacturer
+      case 'origin': return p.origin
+      case 'stock_status': return p.stock_status
+      case 'stock_qty': return p.stock_qty != null ? String(p.stock_qty) : ''
+      case 'english_name': return p.english_name
+      case 'summary_info': return p.summary_info
+      default: return p.custom_fields?.[field] || ''
     }
   }
 
@@ -1240,39 +1272,53 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           {pickerActive && (
             <div className="mb-3">
               <p className="text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2 mb-2">
-                🎯 로그인 창에서 원하는 값을 클릭하고 컬럼명을 입력해 저장하세요 — 여러 개를 계속 지정할 수 있습니다. 화면에 클릭할 값이 없으면 아래에서 직접 등록할 수도 있습니다. 다 되면 위 &quot;스크랩 대상 직접지정 종료&quot;를 누르세요.
+                🎯 로그인 창에서 원하는 값을 클릭해도 되고, 아래 목록에서 현재 값을 보면서 옆 칸에 바로
+                지정할 값을 입력해도 됩니다 — 여러 개를 계속 지정할 수 있습니다. 다 되면 위 &quot;스크랩
+                대상 직접지정 종료&quot;를 누르세요.
               </p>
-              <div className="flex flex-wrap gap-1.5">
-                {Object.keys(pickerRules).length === 0 ? (
-                  <span className="text-xs text-gray-400">아직 지정된 컬럼이 없습니다.</span>
-                ) : Object.entries(pickerRules).map(([field, rule]) => (
-                  <span key={field} className="inline-flex items-center gap-1 text-xs bg-white border border-gray-200 rounded-full pl-2.5 pr-1 py-1">
-                    <span className="font-medium text-gray-700">{field}</span>
-                    <span className="text-gray-400 max-w-[160px] truncate" title={rule.value}>
-                      ({rule.type === 'label' ? '라벨' : rule.type === 'fixed' ? '고정값' : '셀렉터'}: {rule.value})
-                    </span>
-                    <button onClick={() => handleDeleteRule(field)} className="text-rose-400 hover:text-rose-600 px-1">✕</button>
-                  </span>
-                ))}
-              </div>
-
-              <div className="mt-2 pt-2 border-t border-gray-100 flex items-center gap-2 flex-wrap">
-                <span className="text-xs text-gray-500 shrink-0">화면에 클릭할 값이 없으면 직접 등록:</span>
-                <select value={fixedField} onChange={e => setFixedField(e.target.value)}
-                  className="border border-gray-300 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400">
-                  {FIXED_VALUE_FIELDS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
-                  <option value="__custom__">직접 입력...</option>
-                </select>
-                {fixedField === '__custom__' && (
-                  <input value={fixedCustomField} onChange={e => setFixedCustomField(e.target.value)} placeholder="컬럼명"
-                    className="border border-gray-300 rounded-lg px-2 py-1 text-xs w-24 focus:outline-none focus:ring-2 focus:ring-teal-400" />
-                )}
-                <input value={fixedValue} onChange={e => setFixedValue(e.target.value)} placeholder="고정 값 (예: CJ대한통운)"
-                  className="border border-gray-300 rounded-lg px-2 py-1 text-xs w-36 focus:outline-none focus:ring-2 focus:ring-teal-400" />
-                <button onClick={handleAddFixedRule} disabled={fixedSaving || !fixedValue.trim() || (fixedField === '__custom__' && !fixedCustomField.trim())}
-                  className="px-3 py-1 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
-                  추가
-                </button>
+              <div className="border border-gray-200 rounded-xl divide-y divide-gray-100 overflow-hidden">
+                {[
+                  ...FIXED_VALUE_FIELDS.map(([key, label]) => ({ key, label })),
+                  ...Object.keys(pickerRules)
+                    .filter(key => !FIXED_VALUE_FIELDS.some(([k]) => k === key))
+                    .map(key => ({ key, label: key })),
+                ].map(({ key, label }) => {
+                  const rule = pickerRules[key]
+                  return (
+                    <div key={key} className="flex items-center gap-2 px-3 py-1.5">
+                      <span className="w-24 shrink-0 text-xs font-medium text-gray-700 truncate" title={label}>{label}</span>
+                      <span className="flex-1 min-w-0 text-xs text-gray-400 truncate" title={currentPreviewValue(key)}>
+                        {currentPreviewValue(key) || '-'}
+                      </span>
+                      {rule && (
+                        <span className="shrink-0 text-xs text-teal-600 bg-teal-50 rounded-full px-2 py-0.5">
+                          {rule.type === 'label' ? '라벨' : rule.type === 'fixed' ? '고정값' : '셀렉터'}
+                        </span>
+                      )}
+                      <input value={fixedInputs[key] || ''} onChange={e => setFixedInputs(prev => ({ ...prev, [key]: e.target.value }))}
+                        placeholder="지정할 값"
+                        className="w-32 shrink-0 border border-gray-300 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+                      <button onClick={() => handleSaveFieldInput(key)} disabled={fixedSaving || !(fixedInputs[key] || '').trim()}
+                        className="shrink-0 px-2.5 py-1 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+                        저장
+                      </button>
+                      {rule && (
+                        <button onClick={() => handleDeleteRule(key)} className="shrink-0 text-rose-400 hover:text-rose-600 px-1">✕</button>
+                      )}
+                    </div>
+                  )
+                })}
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50">
+                  <input value={fixedCustomField} onChange={e => setFixedCustomField(e.target.value)} placeholder="새 컬럼명"
+                    className="w-24 shrink-0 border border-gray-300 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+                  <span className="flex-1" />
+                  <input value={fixedCustomValue} onChange={e => setFixedCustomValue(e.target.value)} placeholder="지정할 값"
+                    className="w-32 shrink-0 border border-gray-300 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+                  <button onClick={handleAddCustomField} disabled={fixedSaving || !fixedCustomField.trim() || !fixedCustomValue.trim()}
+                    className="shrink-0 px-2.5 py-1 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+                    추가
+                  </button>
+                </div>
               </div>
             </div>
           )}

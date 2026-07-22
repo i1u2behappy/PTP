@@ -842,6 +842,11 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
   // 지금 "요소로 지정" 모드로 선택해둔 필드 — null이 아니면 다음 클릭이 이 필드에 저장된다. 목록에서
   // 컬럼을 먼저 고르고(선택) 화면에서 요소를 클릭 → 저장하는 순서를 반복할 수 있게 한다.
   let armedField: string | null = null
+  // 방금 지정한(클릭했거나 직접 입력한) "실제 값" — 규칙 자체(라벨/셀렉터 패턴)와 달리 화면에 곧바로
+  // 보여줄 목적으로만 쓴다. 지정하는 순간 그 자리에서 확인할 수 있어야 한다는 요청으로 추가.
+  const lastValueLocal: Record<string, string> = {}
+  // "직접 입력" 칸을 펼쳐둔 필드 집합 — 평소엔 접어둬 목록이 덜 복잡해 보이게 한다.
+  const expandedInputs = new Set<string>()
 
   const CANONICAL_FIELDS: [string, string][] = [
     ['name', '상품명'], ['price', '가격(소비자가)'], ['cost_price', '공급가/원가'], ['shipping_fee', '배송비'],
@@ -929,6 +934,7 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
 
   // 안내 패널 — 몰 페이지 자체 CSS와 충돌하지 않도록 인라인 스타일만 쓴다.
   const panel = document.createElement('div')
+  panel.id = 'ptp-picker-panel'
   panel.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483647;background:#fff;border:2px solid #14b8a6;'
     + 'border-radius:12px;padding:12px;width:320px;font:12px/1.4 -apple-system,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);color:#333'
   panel.innerHTML = `
@@ -959,54 +965,76 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
     }
   }
 
-  function saveField(field: string, type: 'label' | 'selector' | 'fixed', value: string) {
+  function saveField(field: string, type: 'label' | 'selector' | 'fixed', value: string, displayValue: string) {
     rulesLocal[field] = { type, value }
+    lastValueLocal[field] = displayValue
     void w.ptpSavePick({ field, type, value })
     logLine(field)
   }
 
+  // 클릭한 요소 자체의 텍스트 — 저장되는 규칙(라벨/셀렉터 패턴)과 별개로, "방금 뭘 지정했는지" 그
+  // 자리에서 바로 보여주기 위한 값이다.
+  function elementDisplayText(el: HTMLElement): string {
+    const clone = el.cloneNode(true) as HTMLElement
+    clone.querySelectorAll('.layer_area, [style*="display:none" i], [style*="display: none" i], #ptp-picker-panel').forEach(n => n.remove())
+    return (clone.textContent || '').trim().slice(0, 60)
+  }
+
   // 미리보기 그리드에 대응하는 필드들을 세로로 나열 — 컬럼을 먼저 선택("요소로 지정")한 뒤 화면에서
-  // 관련 요소를 클릭해 저장하고, 이어서 다음 컬럼도 같은 순서로 반복할 수 있다. 요소가 화면에 없는
-  // 필드는 입력칸에 값을 직접 타이핑해 저장하는 것도 그대로 지원한다.
+  // 관련 요소를 클릭해 저장하고, 이어서 다음 컬럼도 같은 순서로 반복할 수 있다. 지정한 값은 그 줄에
+  // 바로 표시되고(지정 전엔 미리보기 스냅샷을 참고용으로만 흐리게 보여줌), 요소가 화면에 없는 필드는
+  // "✏️ 직접 입력"으로 펼쳐지는 입력칸에 값을 타이핑해 저장할 수 있다.
   function renderFieldList() {
     const extraFields = Object.keys(rulesLocal).filter(k => !CANONICAL_FIELDS.some(([key]) => key === k))
     const allFields = [...CANONICAL_FIELDS.map(([k, l]) => ({ key: k, label: l })), ...extraFields.map(k => ({ key: k, label: k }))]
     const rowsHtml = allFields.map(({ key, label }) => {
       const rule = rulesLocal[key]
       const armed = armedField === key
+      const expanded = expandedInputs.has(key)
+      const rowBg = armed ? '#eff6ff' : rule ? '#f0fdfa' : '#fff'
+      const rowBorder = armed ? '#60a5fa' : rule ? '#5eead4' : '#eee'
       const badge = rule
-        ? `<span style="font-size:10px;background:#f0fdfa;color:#0d9488;border-radius:8px;padding:1px 6px;white-space:nowrap">${rule.type === 'label' ? '라벨' : rule.type === 'fixed' ? '고정값' : '셀렉터'}</span>`
+        ? `<span style="font-size:10px;background:#fff;color:#0d9488;border:1px solid #5eead4;border-radius:8px;padding:1px 6px;white-space:nowrap">${rule.type === 'label' ? '📋 라벨' : rule.type === 'fixed' ? '✏️ 고정값' : '🔗 셀렉터'}</span>`
         : ''
+      const valueLine = rule
+        ? `<div style="font-size:12px;color:#0d9488;font-weight:600;margin:3px 0;word-break:break-all">${esc(lastValueLocal[key] ?? currentValue(key)) || '(값 없음)'}</div>`
+        : `<div style="font-size:10px;color:#bbb;margin:3px 0">미지정${currentValue(key) ? ` — 현재 스크랩 값: ${esc(currentValue(key))}` : ''}</div>`
       const delBtn = rule
-        ? `<button class="ptp-row-del" data-field="${esc(key)}" style="background:#fee2e2;color:#e11d48;border:0;border-radius:5px;padding:3px 6px;font-size:11px;cursor:pointer">✕</button>`
+        ? `<button class="ptp-row-del" data-field="${esc(key)}" title="삭제" style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">✕</button>`
         : ''
+      const inputRow = expanded ? `
+          <div style="display:flex;gap:4px;margin-top:4px">
+            <input class="ptp-row-input" data-field="${esc(key)}" placeholder="값 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
+            <button class="ptp-row-save" data-field="${esc(key)}" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">저장</button>
+          </div>` : ''
       return `
-        <div style="padding:5px 2px;border-bottom:1px solid #f5f5f5;${armed ? 'background:#ecfdf5;border-radius:6px' : ''}">
+        <div style="padding:6px 6px;margin:2px 0;border:1px solid ${rowBorder};background:${rowBg};border-radius:8px">
           <div style="display:flex;justify-content:space-between;gap:4px;align-items:baseline">
             <span style="font-weight:600;font-size:11px">${esc(label)}</span>
             ${badge}
           </div>
-          <div style="font-size:10px;color:#999;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:2px 0 3px">${esc(currentValue(key)) || '-'}</div>
-          <div style="display:flex;gap:4px;margin-bottom:3px">
+          ${valueLine}
+          <div style="display:flex;gap:4px">
             <button class="ptp-row-arm" data-field="${esc(key)}"
-              style="flex:1;background:${armed ? '#0d9488' : '#fff'};color:${armed ? '#fff' : '#0d9488'};border:1px solid #0d9488;border-radius:5px;padding:3px 6px;font-size:10px;cursor:pointer">
-              ${armed ? '❌ 지정 취소' : '🎯 요소로 지정'}
+              style="flex:1;background:${armed ? '#2563eb' : '#fff'};color:${armed ? '#fff' : '#2563eb'};border:1px solid #2563eb;border-radius:5px;padding:3px 6px;font-size:10px;cursor:pointer">
+              ${armed ? '❌ 클릭 대기 취소' : '🎯 요소로 지정'}
+            </button>
+            <button class="ptp-row-toggle" data-field="${esc(key)}"
+              style="background:#fff;color:#666;border:1px solid #ccc;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">
+              ✏️ 직접 입력
             </button>
             ${delBtn}
           </div>
-          <div style="display:flex;gap:4px">
-            <input class="ptp-row-input" data-field="${esc(key)}" placeholder="또는 값 직접 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
-            <button class="ptp-row-save" data-field="${esc(key)}" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">저장</button>
-          </div>
+          ${inputRow}
         </div>
       `
     }).join('') + `
-      <div style="padding:6px 2px">
+      <div style="padding:6px 6px;margin:2px 0;border:1px dashed #ccc;border-radius:8px">
         <input id="ptp-new-field-name" placeholder="새 컬럼명" style="width:100%;margin-bottom:4px;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px;box-sizing:border-box" />
-        <div style="display:flex;gap:4px;margin-bottom:4px">
-          <button id="ptp-new-field-arm" style="flex:1;background:#fff;color:#0d9488;border:1px solid #0d9488;border-radius:5px;padding:3px 6px;font-size:10px;cursor:pointer">🎯 요소로 지정</button>
-        </div>
         <div style="display:flex;gap:4px">
+          <button id="ptp-new-field-arm" style="flex:1;background:#fff;color:#2563eb;border:1px solid #2563eb;border-radius:5px;padding:3px 6px;font-size:10px;cursor:pointer">🎯 요소로 지정</button>
+        </div>
+        <div style="display:flex;gap:4px;margin-top:4px">
           <input id="ptp-new-field-value" placeholder="또는 값 직접 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
           <button id="ptp-new-field-add" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">저장</button>
         </div>
@@ -1023,13 +1051,21 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
         updateStatus()
       })
     })
+    fieldListEl.querySelectorAll<HTMLButtonElement>('.ptp-row-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const field = btn.dataset.field!
+        if (expandedInputs.has(field)) expandedInputs.delete(field); else expandedInputs.add(field)
+        renderFieldList()
+      })
+    })
     fieldListEl.querySelectorAll<HTMLButtonElement>('.ptp-row-save').forEach(btn => {
       btn.addEventListener('click', () => {
         const field = btn.dataset.field!
         const input = fieldListEl.querySelector<HTMLInputElement>(`.ptp-row-input[data-field="${CSS.escape(field)}"]`)
         const value = input?.value.trim()
         if (!value) return
-        saveField(field, 'fixed', value)
+        saveField(field, 'fixed', value, value)
+        expandedInputs.delete(field)
         renderFieldList()
       })
     })
@@ -1037,6 +1073,7 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
       btn.addEventListener('click', () => {
         const field = btn.dataset.field!
         delete rulesLocal[field]
+        delete lastValueLocal[field]
         void w.ptpDeletePick(field)
         renderFieldList()
       })
@@ -1056,7 +1093,7 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
       const field = nameEl.value.trim()
       const value = valueEl.value.trim()
       if (!field || !value) return
-      saveField(field, 'fixed', value)
+      saveField(field, 'fixed', value, value)
       renderFieldList()
     })
   }
@@ -1071,7 +1108,7 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
 
     const label = detectLabel(el)
     const rule = label ? { type: 'label' as const, value: label } : { type: 'selector' as const, value: computeSelector(el) }
-    saveField(armedField, rule.type, rule.value)
+    saveField(armedField, rule.type, rule.value, elementDisplayText(el))
     armedField = null
     renderFieldList()
     updateStatus()
@@ -1389,6 +1426,17 @@ interface CategoryLabel {
   brand: string
 }
 
+/** 목록 페이지 브레드크럼에서 뽑은 카테고리/브랜드를 상품 상세페이지 추출 결과에 덮어쓴다 — 상세페이지
+ *  자체엔 카테고리가 없는 몰이 많아 기본은 이 폴백이 맞다. 다만 "스크랩 대상 직접지정"으로 그 필드를
+ *  이미 명시적으로 등록해뒀으면 사용자가 직접 고른 값이 항상 이겨야 하므로 덮어쓰지 않는다 — 이 체크가
+ *  없으면 피커로 카테고리/브랜드를 지정해도 다음 스크랩/미리보기에서 자동 감지값으로 되돌아간다. */
+function applyCategoryOverride(
+  product: ExtractedProduct, category: CategoryLabel | undefined, extractionRules?: Record<string, ExtractionRule>,
+) {
+  if (category?.category && !extractionRules?.category) product.category = category.category
+  if (category?.brand && !extractionRules?.brand) product.brand = category.brand
+}
+
 // 목록 페이지의 카테고리 경로(예: "백팩 > 여행용 백팩")를 찾는다. .xans-product-headcategory는 카페24 표준 클래스인데,
 // 같은 클래스가 배너 이미지용으로도 쓰여 텍스트가 비어있을 수 있어 모든 매칭 요소 중 텍스트가 있는 것을 찾는다.
 async function detectCategoryLabel(page: Page): Promise<CategoryLabel> {
@@ -1650,9 +1698,7 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
     if (domOptions.options.length) product.options = domOptions.options
     if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
     await applyStockByOption(page, product)
-    const category = categoryByUrl.get(firstUrl)
-    if (category?.category) product.category = category.category
-    if (category?.brand) product.brand = category.brand
+    applyCategoryOverride(product, categoryByUrl.get(firstUrl), opts.extractionRules)
 
     return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product }, items }
   })
@@ -1729,9 +1775,7 @@ export async function scrapeCatalogPage(
           if (product.price == null && product.cost_price == null && !product.thumbnail_urls.length) {
             throw new Error('가격/이미지를 모두 찾지 못함 (차단 또는 일시 오류로 추정)')
           }
-          const category = categoryByUrl.get(pUrl)
-          if (category?.category) product.category = category.category
-          if (category?.brand) product.brand = category.brand
+          applyCategoryOverride(product, categoryByUrl.get(pUrl), opts.extractionRules)
           return { sourceUrl: pUrl, product }
         } catch (err) {
           lastError = err
@@ -1741,9 +1785,7 @@ export async function scrapeCatalogPage(
       if (lastProduct) {
         const aiProduct = await tryAiFallback(workerPage, lastProduct)
         if (aiProduct) {
-          const category = categoryByUrl.get(pUrl)
-          if (category?.category) aiProduct.category = category.category
-          if (category?.brand) aiProduct.brand = category.brand
+          applyCategoryOverride(aiProduct, categoryByUrl.get(pUrl), opts.extractionRules)
           return { sourceUrl: pUrl, product: aiProduct }
         }
       }

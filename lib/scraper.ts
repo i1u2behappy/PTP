@@ -762,14 +762,14 @@ const pickerNavHandlers = new WeakMap<Page, () => void>()
  * 페이지에서 여러 컬럼을 계속 지정할 수 있다. 정확도가 더 높은 것이 목적이라, 라벨을 우선하고(같은 몰의
  * 다른 상품에서도 라벨 텍스트는 대체로 그대로라 셀렉터보다 안정적) 라벨 구조가 없을 때만 셀렉터로 대체한다.
  */
-export async function startElementPicker(siteId: number): Promise<boolean> {
+export async function startElementPicker(siteId: number, previewProduct?: Record<string, unknown> | null): Promise<boolean> {
   const context = openSessions.get(siteId)
   if (!context) return false
   const pages = context.pages()
   const page = pages.length ? pages[pages.length - 1] : await context.newPage()
 
   if (!pickerExposedPages.has(page)) {
-    await page.exposeFunction('ptpSavePick', async (payload: { field: string; type: 'label' | 'selector'; value: string }) => {
+    await page.exposeFunction('ptpSavePick', async (payload: { field: string; type: 'label' | 'selector' | 'fixed'; value: string }) => {
       if (!payload.field?.trim()) return
       const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(
         'SELECT extraction_rules FROM sites WHERE id=$1', [siteId],
@@ -777,16 +777,35 @@ export async function startElementPicker(siteId: number): Promise<boolean> {
       const merged = { ...(res.rows[0]?.extraction_rules || {}), [payload.field]: { type: payload.type, value: payload.value } }
       await pool.query('UPDATE sites SET extraction_rules=$1 WHERE id=$2', [JSON.stringify(merged), siteId])
     })
+    await page.exposeFunction('ptpDeletePick', async (field: string) => {
+      const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(
+        'SELECT extraction_rules FROM sites WHERE id=$1', [siteId],
+      )
+      const rules = { ...(res.rows[0]?.extraction_rules || {}) }
+      delete rules[field]
+      await pool.query('UPDATE sites SET extraction_rules=$1 WHERE id=$2', [JSON.stringify(rules), siteId])
+    })
     pickerExposedPages.add(page)
   }
 
+  // 재주입(페이지 리로드) 때마다 최신 extraction_rules를 다시 읽어 넘긴다 — 저장 직후 미리보기 자동
+  // 재실행이 이 페이지를 리로드시키므로, 목록의 "등록됨" 표시가 항상 DB 상태와 맞도록.
+  // previewProduct(미리보기 값)는 "스크랩 대상 직접지정" 시작 시점의 스냅샷을 그대로 재사용한다 —
+  // 다시 최신화하려면 종료 후 다시 시작하면 된다(그때 새 미리보기 값을 다시 넘겨받음).
+  async function inject() {
+    const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(
+      'SELECT extraction_rules FROM sites WHERE id=$1', [siteId],
+    )
+    await page.evaluate(injectElementPicker, { previewProduct: previewProduct || null, extractionRules: res.rows[0]?.extraction_rules || {} })
+  }
+
   if (!pickerNavHandlers.has(page)) {
-    const onLoad = () => { page.evaluate(injectElementPicker).catch(() => {}) }
+    const onLoad = () => { inject().catch(() => {}) }
     page.on('load', onLoad)
     pickerNavHandlers.set(page, onLoad)
   }
 
-  await page.evaluate(injectElementPicker)
+  await inject()
   return true
 }
 
@@ -806,14 +825,23 @@ export async function stopElementPicker(siteId: number): Promise<boolean> {
 /** 실제 몰 페이지 안에서 실행되는 함수 — page.evaluate로 그대로 주입된다(문자열이 아니라 함수 자체를
  *  Playwright가 직렬화). 이미 켜져 있으면 다시 켜지 않는다(같은 페이지에서 "스크랩 대상 직접지정 시작"을 또 눌러도
  *  리스너가 중복 등록되지 않도록). */
-function injectElementPicker() {
+function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | null; extractionRules: Record<string, { type: string; value: string }> }) {
   const w = window as unknown as {
     __ptpPickerActive?: boolean
     __ptpPickerTeardown?: () => void
-    ptpSavePick: (payload: { field: string; type: 'label' | 'selector'; value: string }) => Promise<void>
+    ptpSavePick: (payload: { field: string; type: 'label' | 'selector' | 'fixed'; value: string }) => Promise<void>
+    ptpDeletePick: (field: string) => Promise<void>
   }
   if (w.__ptpPickerActive) return
   w.__ptpPickerActive = true
+
+  const previewProduct = seed?.previewProduct || null
+  // 재주입될 때마다 최신값으로 갱신되지만(다음 값들 참고), 저장/삭제 직후에는 로컬에서 즉시 반영해 화면이
+  // 리로드를 기다리지 않고 바로 "등록됨" 표시를 보여주도록 한다.
+  const rulesLocal: Record<string, { type: string; value: string }> = { ...(seed?.extractionRules || {}) }
+  // 지금 "요소로 지정" 모드로 선택해둔 필드 — null이 아니면 다음 클릭이 이 필드에 저장된다. 목록에서
+  // 컬럼을 먼저 고르고(선택) 화면에서 요소를 클릭 → 저장하는 순서를 반복할 수 있게 한다.
+  let armedField: string | null = null
 
   const CANONICAL_FIELDS: [string, string][] = [
     ['name', '상품명'], ['price', '가격(소비자가)'], ['cost_price', '공급가/원가'], ['shipping_fee', '배송비'],
@@ -821,10 +849,34 @@ function injectElementPicker() {
     ['stock_status', '재고상태'], ['stock_qty', '재고수량'], ['english_name', '영문상품명'], ['summary_info', '상품요약정보'],
   ]
 
+  function esc(s: unknown): string {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string))
+  }
+
+  // 미리보기 그리드에 나온 값을 필드별로 그대로 보여준다 — "스크랩 대상 직접지정" 시작 시점의 스냅샷.
+  function currentValue(field: string): string {
+    if (!previewProduct) return ''
+    const p = previewProduct as Record<string, unknown>
+    switch (field) {
+      case 'price': return p.price != null ? `₩${Number(p.price).toLocaleString()}` : ''
+      case 'cost_price': return p.cost_price != null ? `₩${Number(p.cost_price).toLocaleString()}` : ''
+      case 'shipping_fee': return p.shipping_fee != null ? String(p.shipping_fee) : ''
+      case 'stock_qty': return p.stock_qty != null ? String(p.stock_qty) : ''
+      case 'name': case 'category': case 'brand': case 'manufacturer': case 'origin':
+      case 'stock_status': case 'english_name': case 'summary_info':
+        return (p[field] as string) || ''
+      default: {
+        const custom = p.custom_fields as Record<string, string> | undefined
+        return custom?.[field] || ''
+      }
+    }
+  }
+
   let hovered: HTMLElement | null = null
   const HOVER_OUTLINE = '2px solid #14b8a6'
 
   function onMouseOver(e: MouseEvent) {
+    if (!armedField) return // 필드를 선택해 "지정 모드"일 때만 하이라이트해 무엇을 클릭할지 헷갈리지 않게 한다
     const el = e.target as HTMLElement
     if (el === panel || panel.contains(el)) return
     if (hovered && hovered !== el) hovered.style.outline = ''
@@ -878,75 +930,154 @@ function injectElementPicker() {
   // 안내 패널 — 몰 페이지 자체 CSS와 충돌하지 않도록 인라인 스타일만 쓴다.
   const panel = document.createElement('div')
   panel.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483647;background:#fff;border:2px solid #14b8a6;'
-    + 'border-radius:12px;padding:12px;width:280px;font:12px/1.4 -apple-system,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);color:#333'
+    + 'border-radius:12px;padding:12px;width:320px;font:12px/1.4 -apple-system,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);color:#333'
   panel.innerHTML = `
     <div style="font-weight:600;margin-bottom:6px">🎯 PTP 스크랩 대상 직접지정</div>
-    <div id="ptp-picker-status" style="color:#666;margin-bottom:8px">값을 클릭하세요</div>
-    <div id="ptp-picker-form" style="display:none">
-      <div id="ptp-picker-preview" style="background:#f3f4f6;border-radius:6px;padding:6px;margin-bottom:6px;word-break:break-all;max-height:60px;overflow:auto"></div>
-      <select id="ptp-picker-select" style="width:100%;margin-bottom:6px;padding:4px;border:1px solid #ccc;border-radius:6px">
-        ${CANONICAL_FIELDS.map(([k, label]) => `<option value="${k}">${label}</option>`).join('')}
-        <option value="__custom__">직접 입력...</option>
-      </select>
-      <input id="ptp-picker-custom" placeholder="컬럼명 입력" style="display:none;width:100%;margin-bottom:6px;padding:4px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box" />
-      <div style="display:flex;gap:6px">
-        <button id="ptp-picker-save" style="flex:1;background:#14b8a6;color:#fff;border:0;border-radius:6px;padding:6px;cursor:pointer">저장</button>
-        <button id="ptp-picker-cancel" style="background:#e5e7eb;border:0;border-radius:6px;padding:6px 10px;cursor:pointer">취소</button>
-      </div>
-    </div>
-    <div id="ptp-picker-log" style="margin-top:8px;color:#0d9488;max-height:60px;overflow:auto"></div>
+    <div id="ptp-picker-status" style="color:#666;margin-bottom:8px">아래 목록에서 지정할 필드를 먼저 선택하세요</div>
+    <div id="ptp-picker-fieldlist" style="max-height:320px;overflow-y:auto;border-top:1px solid #eee;border-bottom:1px solid #eee;margin:8px 0;padding:4px 0"></div>
+    <div id="ptp-picker-log" style="margin-top:4px;color:#0d9488;max-height:50px;overflow:auto"></div>
     <button id="ptp-picker-close" style="margin-top:8px;width:100%;background:#f43f5e;color:#fff;border:0;border-radius:6px;padding:6px;cursor:pointer">피커 종료</button>
   `
   document.body.appendChild(panel)
 
   const statusEl = panel.querySelector('#ptp-picker-status') as HTMLElement
-  const formEl = panel.querySelector('#ptp-picker-form') as HTMLElement
-  const previewEl = panel.querySelector('#ptp-picker-preview') as HTMLElement
-  const selectEl = panel.querySelector('#ptp-picker-select') as HTMLSelectElement
-  const customEl = panel.querySelector('#ptp-picker-custom') as HTMLInputElement
   const logEl = panel.querySelector('#ptp-picker-log') as HTMLElement
+  const fieldListEl = panel.querySelector('#ptp-picker-fieldlist') as HTMLElement
 
-  let pending: { type: 'label' | 'selector'; value: string } | null = null
-
-  selectEl.addEventListener('change', () => {
-    customEl.style.display = selectEl.value === '__custom__' ? 'block' : 'none'
-  })
-
-  function resetForm() {
-    pending = null
-    formEl.style.display = 'none'
-    statusEl.style.display = 'block'
-    statusEl.textContent = '값을 클릭하세요'
-    customEl.value = ''
-    selectEl.value = CANONICAL_FIELDS[0][0]
-    customEl.style.display = 'none'
-    if (hovered) { hovered.style.outline = ''; hovered = null }
+  function logLine(field: string) {
+    const line = document.createElement('div')
+    line.textContent = `✓ ${field}`
+    logEl.prepend(line)
   }
+
+  function updateStatus() {
+    if (armedField) {
+      const label = (CANONICAL_FIELDS.find(([k]) => k === armedField)?.[1]) || armedField
+      statusEl.textContent = `🎯 "${label}" 필드에 지정할 요소를 몰 페이지에서 클릭하세요 (취소하려면 목록에서 다시 누르세요)`
+    } else {
+      statusEl.textContent = '아래 목록에서 지정할 필드를 먼저 선택하세요'
+    }
+  }
+
+  function saveField(field: string, type: 'label' | 'selector' | 'fixed', value: string) {
+    rulesLocal[field] = { type, value }
+    void w.ptpSavePick({ field, type, value })
+    logLine(field)
+  }
+
+  // 미리보기 그리드에 대응하는 필드들을 세로로 나열 — 컬럼을 먼저 선택("요소로 지정")한 뒤 화면에서
+  // 관련 요소를 클릭해 저장하고, 이어서 다음 컬럼도 같은 순서로 반복할 수 있다. 요소가 화면에 없는
+  // 필드는 입력칸에 값을 직접 타이핑해 저장하는 것도 그대로 지원한다.
+  function renderFieldList() {
+    const extraFields = Object.keys(rulesLocal).filter(k => !CANONICAL_FIELDS.some(([key]) => key === k))
+    const allFields = [...CANONICAL_FIELDS.map(([k, l]) => ({ key: k, label: l })), ...extraFields.map(k => ({ key: k, label: k }))]
+    const rowsHtml = allFields.map(({ key, label }) => {
+      const rule = rulesLocal[key]
+      const armed = armedField === key
+      const badge = rule
+        ? `<span style="font-size:10px;background:#f0fdfa;color:#0d9488;border-radius:8px;padding:1px 6px;white-space:nowrap">${rule.type === 'label' ? '라벨' : rule.type === 'fixed' ? '고정값' : '셀렉터'}</span>`
+        : ''
+      const delBtn = rule
+        ? `<button class="ptp-row-del" data-field="${esc(key)}" style="background:#fee2e2;color:#e11d48;border:0;border-radius:5px;padding:3px 6px;font-size:11px;cursor:pointer">✕</button>`
+        : ''
+      return `
+        <div style="padding:5px 2px;border-bottom:1px solid #f5f5f5;${armed ? 'background:#ecfdf5;border-radius:6px' : ''}">
+          <div style="display:flex;justify-content:space-between;gap:4px;align-items:baseline">
+            <span style="font-weight:600;font-size:11px">${esc(label)}</span>
+            ${badge}
+          </div>
+          <div style="font-size:10px;color:#999;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:2px 0 3px">${esc(currentValue(key)) || '-'}</div>
+          <div style="display:flex;gap:4px;margin-bottom:3px">
+            <button class="ptp-row-arm" data-field="${esc(key)}"
+              style="flex:1;background:${armed ? '#0d9488' : '#fff'};color:${armed ? '#fff' : '#0d9488'};border:1px solid #0d9488;border-radius:5px;padding:3px 6px;font-size:10px;cursor:pointer">
+              ${armed ? '❌ 지정 취소' : '🎯 요소로 지정'}
+            </button>
+            ${delBtn}
+          </div>
+          <div style="display:flex;gap:4px">
+            <input class="ptp-row-input" data-field="${esc(key)}" placeholder="또는 값 직접 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
+            <button class="ptp-row-save" data-field="${esc(key)}" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">저장</button>
+          </div>
+        </div>
+      `
+    }).join('') + `
+      <div style="padding:6px 2px">
+        <input id="ptp-new-field-name" placeholder="새 컬럼명" style="width:100%;margin-bottom:4px;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px;box-sizing:border-box" />
+        <div style="display:flex;gap:4px;margin-bottom:4px">
+          <button id="ptp-new-field-arm" style="flex:1;background:#fff;color:#0d9488;border:1px solid #0d9488;border-radius:5px;padding:3px 6px;font-size:10px;cursor:pointer">🎯 요소로 지정</button>
+        </div>
+        <div style="display:flex;gap:4px">
+          <input id="ptp-new-field-value" placeholder="또는 값 직접 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
+          <button id="ptp-new-field-add" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">저장</button>
+        </div>
+      </div>
+    `
+    fieldListEl.innerHTML = rowsHtml
+
+    fieldListEl.querySelectorAll<HTMLButtonElement>('.ptp-row-arm').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const field = btn.dataset.field!
+        armedField = armedField === field ? null : field
+        if (hovered) { hovered.style.outline = ''; hovered = null }
+        renderFieldList()
+        updateStatus()
+      })
+    })
+    fieldListEl.querySelectorAll<HTMLButtonElement>('.ptp-row-save').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const field = btn.dataset.field!
+        const input = fieldListEl.querySelector<HTMLInputElement>(`.ptp-row-input[data-field="${CSS.escape(field)}"]`)
+        const value = input?.value.trim()
+        if (!value) return
+        saveField(field, 'fixed', value)
+        renderFieldList()
+      })
+    })
+    fieldListEl.querySelectorAll<HTMLButtonElement>('.ptp-row-del').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const field = btn.dataset.field!
+        delete rulesLocal[field]
+        void w.ptpDeletePick(field)
+        renderFieldList()
+      })
+    })
+    fieldListEl.querySelector('#ptp-new-field-arm')!.addEventListener('click', () => {
+      const nameEl = fieldListEl.querySelector<HTMLInputElement>('#ptp-new-field-name')!
+      const field = nameEl.value.trim()
+      if (!field) { nameEl.focus(); return }
+      armedField = armedField === field ? null : field
+      if (hovered) { hovered.style.outline = ''; hovered = null }
+      renderFieldList()
+      updateStatus()
+    })
+    fieldListEl.querySelector('#ptp-new-field-add')!.addEventListener('click', () => {
+      const nameEl = fieldListEl.querySelector<HTMLInputElement>('#ptp-new-field-name')!
+      const valueEl = fieldListEl.querySelector<HTMLInputElement>('#ptp-new-field-value')!
+      const field = nameEl.value.trim()
+      const value = valueEl.value.trim()
+      if (!field || !value) return
+      saveField(field, 'fixed', value)
+      renderFieldList()
+    })
+  }
+  renderFieldList()
 
   function onClick(e: MouseEvent) {
     const el = e.target as HTMLElement
     if (el === panel || panel.contains(el)) return // 안내 패널 자체 클릭은 무시(버튼 클릭이 정상 동작하도록)
+    if (!armedField) return // 아직 목록에서 필드를 선택하지 않았으면 페이지 클릭은 그냥 통과시킨다
     e.preventDefault()
     e.stopPropagation()
 
     const label = detectLabel(el)
-    pending = label ? { type: 'label', value: label } : { type: 'selector', value: computeSelector(el) }
-    previewEl.textContent = (pending.type === 'label' ? '📋 라벨: ' : '🔗 셀렉터: ') + pending.value
-    statusEl.style.display = 'none'
-    formEl.style.display = 'block'
+    const rule = label ? { type: 'label' as const, value: label } : { type: 'selector' as const, value: computeSelector(el) }
+    saveField(armedField, rule.type, rule.value)
+    armedField = null
+    renderFieldList()
+    updateStatus()
+    if (hovered) { hovered.style.outline = ''; hovered = null }
   }
 
-  panel.querySelector('#ptp-picker-save')!.addEventListener('click', () => {
-    if (!pending) return
-    const field = selectEl.value === '__custom__' ? customEl.value.trim() : selectEl.value
-    if (!field) { customEl.focus(); return }
-    void w.ptpSavePick({ field, type: pending.type, value: pending.value })
-    const line = document.createElement('div')
-    line.textContent = `✓ ${field}`
-    logEl.prepend(line)
-    resetForm()
-  })
-  panel.querySelector('#ptp-picker-cancel')!.addEventListener('click', resetForm)
   panel.querySelector('#ptp-picker-close')!.addEventListener('click', () => w.__ptpPickerTeardown?.())
 
   document.addEventListener('mouseover', onMouseOver, true)

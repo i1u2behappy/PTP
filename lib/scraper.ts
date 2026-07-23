@@ -790,7 +790,7 @@ export async function startElementPicker(
     // 다른 저장이 끼어들어 먼저 저장한 필드가 통째로 사라지는 lost-update가 생긴다(신우 몰에서 실제
     // 보고됨: 상품명 등 여러 개를 연속 지정하니 지정한 것들이 사라짐). Postgres의 jsonb `||`(병합)/
     // `-`(키 제거) 연산자로 한 SQL 문 안에서 원자적으로 처리해 이 경쟁을 없앤다.
-    await page.exposeFunction('ptpSavePick', async (payload: { field: string; type: 'label' | 'selector' | 'fixed'; value: string }) => {
+    await page.exposeFunction('ptpSavePick', async (payload: { field: string; type: 'label' | 'selector' | 'fixed' | 'multi'; value: string }) => {
       if (!payload.field?.trim()) return
       await pool.query(
         `UPDATE sites SET extraction_rules = COALESCE(extraction_rules, '{}'::jsonb) || jsonb_build_object($1::text, $2::jsonb) WHERE id=$3`,
@@ -840,11 +840,14 @@ export async function stopElementPicker(siteId: number): Promise<boolean> {
 /** 실제 몰 페이지 안에서 실행되는 함수 — page.evaluate로 그대로 주입된다(문자열이 아니라 함수 자체를
  *  Playwright가 직렬화). 이미 켜져 있으면 다시 켜지 않는다(같은 페이지에서 "스크랩 대상 직접지정 시작"을 또 눌러도
  *  리스너가 중복 등록되지 않도록). */
-function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | null; extractionRules: Record<string, { type: string; value: string }> }) {
+function injectElementPicker(seed?: {
+  previewProduct: Record<string, unknown> | null
+  extractionRules: Record<string, { type: 'label' | 'selector' | 'fixed' | 'multi'; value: string }>
+}) {
   const w = window as unknown as {
     __ptpPickerActive?: boolean
     __ptpPickerTeardown?: () => void
-    ptpSavePick: (payload: { field: string; type: 'label' | 'selector' | 'fixed'; value: string }) => Promise<void>
+    ptpSavePick: (payload: { field: string; type: 'label' | 'selector' | 'fixed' | 'multi'; value: string }) => Promise<void>
     ptpDeletePick: (field: string) => Promise<void>
   }
   if (w.__ptpPickerActive) return
@@ -853,7 +856,7 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
   const previewProduct = seed?.previewProduct || null
   // 재주입될 때마다 최신값으로 갱신되지만(다음 값들 참고), 저장/삭제 직후에는 로컬에서 즉시 반영해 화면이
   // 리로드를 기다리지 않고 바로 "등록됨" 표시를 보여주도록 한다.
-  const rulesLocal: Record<string, { type: string; value: string }> = { ...(seed?.extractionRules || {}) }
+  const rulesLocal: Record<string, { type: 'label' | 'selector' | 'fixed' | 'multi'; value: string }> = { ...(seed?.extractionRules || {}) }
   // 지금 "요소로 지정" 모드로 선택해둔 필드 — null이 아니면 다음 클릭이 이 필드에 저장된다. 목록에서
   // 컬럼을 먼저 고르고(선택) 화면에서 요소를 클릭 → 저장하는 순서를 반복할 수 있게 한다.
   let armedField: string | null = null
@@ -1025,11 +1028,32 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
     }
   }
 
-  function saveField(field: string, type: 'label' | 'selector' | 'fixed', value: string, displayValue: string) {
+  function saveField(field: string, type: 'label' | 'selector' | 'fixed' | 'multi', value: string, displayValue: string) {
     rulesLocal[field] = { type, value }
     lastValueLocal[field] = displayValue
     void w.ptpSavePick({ field, type, value })
     logLine(field)
+  }
+
+  // 이미 지정돼 있는 필드를 클릭식으로 다시 지정하면(예: 상품명이 브랜드+모델명 두 요소로 나뉜 몰),
+  // 기존 값을 덮어쓰지 않고 새 요소를 이어붙인다 — 한 컬럼에 여러 요소를 지정할 수 있게 해달라는 요청.
+  // 값 하나로 대체하고 싶으면 먼저 ✕로 지워 새로 지정하면 된다. 대표/상세이미지(갤러리 셀렉터 하나로
+  // 전체를 잡는 방식)는 이 결합 대상에서 제외 — 별도의 갤러리 지정 방식을 그대로 쓴다.
+  function appendOrSaveField(field: string, part: { type: 'label' | 'selector'; value: string }, displayValue: string) {
+    const existing = rulesLocal[field]
+    if (!existing || existing.type === 'fixed' || IMAGE_FIELDS.has(field)) {
+      saveField(field, part.type, part.value, displayValue)
+      return
+    }
+    let parts: { type: 'label' | 'selector'; value: string }[]
+    if (existing.type === 'multi') {
+      try { parts = JSON.parse(existing.value) } catch { parts = [] }
+    } else {
+      parts = [{ type: existing.type, value: existing.value }]
+    }
+    parts.push(part)
+    const combinedDisplay = [lastValueLocal[field], displayValue].filter(Boolean).join(' ')
+    saveField(field, 'multi', JSON.stringify(parts), combinedDisplay)
   }
 
   // 클릭한 요소 자체의 텍스트 — 저장되는 규칙(라벨/셀렉터 패턴)과 별개로, "방금 뭘 지정했는지" 그
@@ -1053,8 +1077,18 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
       const expanded = expandedInputs.has(key)
       const rowBg = armed ? '#eff6ff' : rule ? '#f0fdfa' : '#fff'
       const rowBorder = armed ? '#60a5fa' : rule ? '#5eead4' : '#eee'
+      let badgeText = ''
+      if (rule) {
+        if (rule.type === 'label') badgeText = '📋 라벨'
+        else if (rule.type === 'fixed') badgeText = '✏️ 고정값'
+        else if (rule.type === 'multi') {
+          let partCount = 0
+          try { partCount = JSON.parse(rule.value).length } catch { partCount = 0 }
+          badgeText = `🧩 ${partCount}개 결합`
+        } else badgeText = '🔗 셀렉터'
+      }
       const badge = rule
-        ? `<span style="font-size:10px;background:#fff;color:#0d9488;border:1px solid #5eead4;border-radius:8px;padding:1px 6px;white-space:nowrap">${rule.type === 'label' ? '📋 라벨' : rule.type === 'fixed' ? '✏️ 고정값' : '🔗 셀렉터'}</span>`
+        ? `<span style="font-size:10px;background:#fff;color:#0d9488;border:1px solid #5eead4;border-radius:8px;padding:1px 6px;white-space:nowrap">${badgeText}</span>`
         : ''
       const valueLine = rule
         ? `<div style="font-size:12px;color:#0d9488;font-weight:600;margin:3px 0;word-break:break-all">${esc(lastValueLocal[key] ?? currentValue(key)) || '(값 없음)'}</div>`
@@ -1081,8 +1115,9 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
           ${valueLine}
           <div style="display:flex;gap:4px;align-items:center;margin-top:2px">
             <button class="ptp-row-arm" data-field="${esc(key)}"
+              title="${rule && !IMAGE_FIELDS.has(key) ? '이미 지정된 값에 새 요소를 이어붙입니다 — 바꾸려면 먼저 ✕로 지우세요' : ''}"
               style="${armBtnStyle};border-radius:5px;padding:4px 6px;font-size:10px;cursor:pointer">
-              ${armed ? '❌ 클릭 대기 취소' : rule ? '🎯 다시 지정' : '🎯 클릭해서 지정하기'}
+              ${armed ? '❌ 클릭 대기 취소' : !rule ? '🎯 클릭해서 지정하기' : IMAGE_FIELDS.has(key) ? '🎯 다시 지정' : '🎯 요소 추가'}
             </button>
             ${delBtn}
           </div>
@@ -1178,7 +1213,7 @@ function injectElementPicker(seed?: { previewProduct: Record<string, unknown> | 
     } else {
       const label = detectLabel(el)
       const rule = label ? { type: 'label' as const, value: label } : { type: 'selector' as const, value: computeSelector(el) }
-      saveField(armedField, rule.type, rule.value, elementDisplayText(el))
+      appendOrSaveField(armedField, rule, elementDisplayText(el))
     }
     armedField = null
     renderFieldList()

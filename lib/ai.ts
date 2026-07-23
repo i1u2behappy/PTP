@@ -155,8 +155,17 @@ ${columns.map(c => `- ${c.name}: ${c.instruction || '(지시문 없음, 예시 �
 
 export interface ExtractionRule {
   /** 'fixed'는 페이지에서 읽지 않고 value를 모든 상품에 그대로 채운다 — 택배사처럼 페이지에 아예 안
-   *  나오지만 이 몰은 항상 같은 값인 필드용(스크랩 대상 직접지정에서 "화면에 없는 값" 입력으로 생성). */
-  type: 'label' | 'selector' | 'fixed'
+   *  나오지만 이 몰은 항상 같은 값인 필드용(스크랩 대상 직접지정에서 "화면에 없는 값" 입력으로 생성).
+   *  'multi'는 한 컬럼의 값이 페이지 여러 곳에 나뉘어 있을 때(예: 상품명이 브랜드+모델명 두 요소로
+   *  분리된 몰) 여러 요소를 지정해 하나로 합친다 — value는 ExtractionRulePart[]를 JSON으로 담는다. */
+  type: 'label' | 'selector' | 'fixed' | 'multi'
+  value: string
+}
+
+/** 'multi' 규칙의 value에 JSON으로 담기는 각 조각 — 라벨/셀렉터만 가능(고정값은 조각으로 안 씀,
+ *  고정값 자체가 이미 값 전체를 대신하므로 여러 개를 합칠 이유가 없다). */
+export interface ExtractionRulePart {
+  type: 'label' | 'selector'
   value: string
 }
 

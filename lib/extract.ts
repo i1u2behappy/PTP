@@ -366,6 +366,23 @@ export interface ExtractSelectorOverrides {
   thumbnailSelector?: string
 }
 
+/** 라벨(dt/dd, th/td) 또는 셀렉터 하나를 실제 값 텍스트로 풀어낸다 — 단일 규칙과 'multi' 규칙의 각
+ *  조각이 공유하는 로직이라 하나로 뺐다. */
+async function resolveLabelOrSelector(
+  page: Page, infoRows: [string, string][], part: { type: 'label' | 'selector'; value: string },
+): Promise<string | null> {
+  if (part.type === 'label') {
+    try { return findInfoValue(infoRows, new RegExp(part.value)) || null } catch { return null }
+  }
+  // textContent를 그대로 읽으면 가방쟁이 배송비처럼 display:none 팝업(지역별 추가배송비 목록 등)이
+  // 값에 섞여든다 — 라벨 방식(infoRows)이 이미 받는 cleanText 처리를 셀렉터 방식에도 동일하게 적용.
+  return page.locator(part.value).first().evaluate((el: Element) => {
+    const clone = el.cloneNode(true) as Element
+    clone.querySelectorAll('.layer_area, [style*="display:none" i], [style*="display: none" i]').forEach(n => n.remove())
+    return (clone.textContent || '').trim()
+  }, null, { timeout: 3_000 }).catch(() => null)
+}
+
 /**
  * AI 호출 없이 페이지의 구조화 데이터(schema.org, og 메타태그)와 상품정보고시 표를 읽어 상품 정보를 추출한다.
  * ld+json Product가 없는 사이트에서는 og 메타태그/가격 텍스트 패턴으로 대체하지만, brand/manufacturer/origin/category처럼
@@ -484,16 +501,19 @@ export async function extractProductRuleBased(
       let text: string | null = null
       if (rule.type === 'fixed') {
         text = rule.value
-      } else if (rule.type === 'label') {
-        try { text = findInfoValue(raw.infoRows, new RegExp(rule.value)) || null } catch { text = null }
+      } else if (rule.type === 'multi') {
+        // 한 컬럼 값이 페이지 여러 곳에 나뉘어 있는 경우(예: 브랜드+모델명 두 요소가 합쳐져 상품명이
+        // 되는 몰) — 저장된 조각들을 순서대로 각각 풀어낸 뒤 공백으로 이어붙인다.
+        let parts: { type: 'label' | 'selector'; value: string }[] = []
+        try { parts = JSON.parse(rule.value) } catch { parts = [] }
+        const resolved: string[] = []
+        for (const part of parts) {
+          const t = await resolveLabelOrSelector(page, raw.infoRows, part)
+          if (t) resolved.push(t)
+        }
+        text = resolved.length ? resolved.join(' ') : null
       } else {
-        // textContent를 그대로 읽으면 가방쟁이 배송비처럼 display:none 팝업(지역별 추가배송비 목록 등)이
-        // 값에 섞여든다 — 라벨 방식(infoRows)이 이미 받는 cleanText 처리를 셀렉터 방식에도 동일하게 적용.
-        text = await page.locator(rule.value).first().evaluate((el: Element) => {
-          const clone = el.cloneNode(true) as Element
-          clone.querySelectorAll('.layer_area, [style*="display:none" i], [style*="display: none" i]').forEach(n => n.remove())
-          return (clone.textContent || '').trim()
-        }, null, { timeout: 3_000 }).catch(() => null)
+        text = await resolveLabelOrSelector(page, raw.infoRows, rule as { type: 'label' | 'selector'; value: string })
       }
       const trimmed = text?.trim()
       if (!trimmed) continue

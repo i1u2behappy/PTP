@@ -518,10 +518,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (!selectedSite) return
     setPickerBusy(true)
     try {
-      if (previewResult) await handleOpenItem(previewResult.sourceUrl)
+      // 미리보기 상품 페이지로 이동하는 것까지 서버 쪽(startElementPicker)에서 같은 탭에 대해 한 번에
+      // 처리한다 — 예전엔 여기서 새 탭을 먼저 열고 서버가 "마지막 탭"을 다시 골랐는데, 이 버튼을 다시
+      // 누를 때마다(예: 다른 메뉴 갔다 돌아와서) 매번 탭이 하나씩 쌓이며 예전 탭의 피커가 안 닫힌 채
+      // 방치돼 최신 탭과 서로 저장을 경쟁하는 문제가 있었다.
       const res = await fetch(`/api/sites/${selectedSite.id}/picker/start`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ previewProduct: previewResult?.product ?? null }),
+        body: JSON.stringify({ previewProduct: previewResult?.product ?? null, targetUrl: previewResult?.sourceUrl ?? null }),
       })
       const d = await res.json()
       if (!res.ok) { alert(d.error || '스크랩 대상 직접지정을 시작하지 못했습니다'); return }

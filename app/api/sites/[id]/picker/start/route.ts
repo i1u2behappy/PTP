@@ -9,9 +9,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const { id } = await params
   const siteId = Number(id)
   if (!siteId) return NextResponse.json({ error: 'invalid site id' }, { status: 400 })
-  const { previewProduct } = await req.json().catch(() => ({})) as { previewProduct?: Record<string, unknown> | null }
+  const { previewProduct, targetUrl } = await req.json().catch(() => ({})) as {
+    previewProduct?: Record<string, unknown> | null; targetUrl?: string
+  }
 
-  const ok = await startElementPicker(siteId, previewProduct)
+  const ok = await startElementPicker(siteId, previewProduct, targetUrl)
   if (!ok) return NextResponse.json({ error: '로그인 창이 열려있지 않습니다' }, { status: 400 })
   return NextResponse.json({ ok: true })
 }

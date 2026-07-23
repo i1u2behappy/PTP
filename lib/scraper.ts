@@ -762,11 +762,28 @@ const pickerNavHandlers = new WeakMap<Page, () => void>()
  * 페이지에서 여러 컬럼을 계속 지정할 수 있다. 정확도가 더 높은 것이 목적이라, 라벨을 우선하고(같은 몰의
  * 다른 상품에서도 라벨 텍스트는 대체로 그대로라 셀렉터보다 안정적) 라벨 구조가 없을 때만 셀렉터로 대체한다.
  */
-export async function startElementPicker(siteId: number, previewProduct?: Record<string, unknown> | null): Promise<boolean> {
+export async function startElementPicker(
+  siteId: number, previewProduct?: Record<string, unknown> | null, targetUrl?: string,
+): Promise<boolean> {
   const context = openSessions.get(siteId)
   if (!context) return false
   const pages = context.pages()
   const page = pages.length ? pages[pages.length - 1] : await context.newPage()
+
+  // 미리보기 상품 페이지로 "이동"할 뿐, 새 탭을 열지 않는다 — 예전엔 호출부가 별도로 새 탭을 먼저 열고
+  // (openUrlInLoginWindow) 그 다음 여기서 다시 "마지막 탭"을 골랐는데, "스크랩 대상 직접지정"을 다시
+  // 누를 때마다(예: PTP 화면을 벗어났다 돌아와 다시 누른 경우) 매번 탭이 하나씩 더 쌓였다. 예전 탭에
+  // 남아있던 피커가 안 닫힌 채로 방치되면, 그 탭은 계속 예전 시점의 코드로 저장을 시도해 최신 탭의
+  // 저장과 서로 경쟁하며 값이 사라지는 것처럼 보일 수 있었다(신우 몰 재발 보고). 같은 컨텍스트의 다른
+  // 탭에 아직 살아있는 피커가 있으면 먼저 정리하고, 이 탭 하나만 활성 상태로 유지한다.
+  for (const other of pages) {
+    if (other === page) continue
+    await other.evaluate(() => (window as unknown as { __ptpPickerTeardown?: () => void }).__ptpPickerTeardown?.()).catch(() => {})
+  }
+  if (targetUrl && page.url() !== targetUrl) {
+    await page.goto(targetUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+  }
+  await page.bringToFront().catch(() => {})
 
   if (!pickerExposedPages.has(page)) {
     // SELECT로 읽어 JS에서 합친 뒤 UPDATE하면, 여러 필드를 빠르게 연달아 지정할 때 SELECT~UPDATE 사이에

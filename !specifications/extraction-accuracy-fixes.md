@@ -109,3 +109,21 @@
 ## 관련 파일 (신우 링크 필터)
 
 - `lib/scraper.ts`: `collectProductUrls`의 `scanCurrentPage` 범용 폴백에 자기참조/origin 제외 필터 추가.
+
+## 신우 — 상세페이지 텍스트에 <script> 코드가 그대로 섞여 나옴 (2026-07-24)
+
+사용자 보고: 미리보기의 "상품페이지 텍스트"에 `function sub_open() {...} function tab(id) {...}` 같은
+JS 함수 코드가 그대로 들어있다.
+
+원인: 상세설명 텍스트(`detailText`)를 `detailContainer.textContent`로 그대로 읽고 있었다.
+`textContent`는 `<script>`/`<style>` 태그도 "텍스트 노드"로 취급해 그 소스 코드 문자열을 그대로
+포함한다(브라우저가 화면에 렌더링만 안 할 뿐) — 신우는 상세설명 영역 안에 탭 전환·팝업 열기용 JS를
+직접 심어둬(`sub_open`/`tab` 함수) 그 코드 전체가 텍스트로 섞여 나왔다.
+
+이미 가방쟁이 배송비 숨은 팝업 건에서 만든 `cleanText`(사본에서 숨은 요소를 걷어내고 읽는 헬퍼)가
+있었지만, 정작 `detailText`를 읽는 코드보다 **뒤에** 정의돼 있어 이 자리에서는 못 썼다. `cleanText`
+정의를 앞으로 옮기고, 걷어내는 대상에 `script, style`도 추가한 뒤 `detailText`에도 적용했다(table/dl
+스캔에도 이미 쓰이던 헬퍼라 그쪽도 같이 더 안전해짐 — 스크립트 태그가 우연히 행 안에 있어도 이제 걸러짐).
+
+통제된 페이지(설명 텍스트 + `<script>`/`<style>` 포함)로 확인: 수정 후 `detail_text`엔 진짜 설명
+텍스트만 남고 `sub_open` 등 스크립트 코드는 완전히 제거됨.

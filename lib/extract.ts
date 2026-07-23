@@ -116,6 +116,19 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     }
     const mainImageNames = mainImages.map(nameForImage)
 
+    // 배송비 dt/dd 안에 "지역별 추가배송비" 클릭 시 뜨는 숨겨진 팝업 레이어(도서산간 등 지역별 추가금액
+    // 목록)가 같이 들어있는 경우가 있다(실제 페이지로 확인, 가방쟁이) — textContent는 display:none이어도
+    // 그대로 다 이어붙여, 값이 그 지역 목록으로 오염된다(예: "3,500원 지역별배송비 전라남도... 7,000원...").
+    // <script>/<style> 태그도 textContent에는 그 소스 코드가 그대로 문자열로 들어있다(브라우저가 렌더링만
+    // 안 할 뿐 텍스트 노드로 취급) — 상세페이지 안에 탭 전환/팝업 열기 같은 JS가 박혀있으면(실제 확인,
+    // 신우) 그 함수 코드 전체가 "상세페이지 텍스트"에 그대로 섞여 나온다. 읽기 전에 숨긴 조상/스크립트/
+    // 스타일 태그를 걷어낸 사본에서 읽어 이런 오염을 제외한다.
+    const cleanText = (el: Element) => {
+      const clone = el.cloneNode(true) as Element
+      clone.querySelectorAll('script, style, .layer_area, [style*="display:none" i], [style*="display: none" i]').forEach(n => n.remove())
+      return (clone.textContent || '').trim()
+    }
+
     // ld+json/og의 대표 이미지 갤러리(여러 장일 수 있음)와는 별개로, 상세설명 영역에 판매자가 직접
     // 올린 상품별 상세 이미지(사이즈/소재 등 텍스트로는 안 남는 구분 정보)를 모은다. 카페24는 #prdDetail을
     // 쓰고, 그게 없으면 다른 자체 제작 몰에서 흔한 .detail_con(예: 신우), .view_detail(예: 고도몰,
@@ -131,20 +144,10 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     const detailImageNames = detailImageEls.map(img => nameForImage(img.src))
 
     // 상세페이지에 이미지가 아니라 텍스트로 직접 박혀 있는 설명 내용 (소재/사이즈 안내 등)
-    const detailText = (detailContainer?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 3000)
+    const detailText = (detailContainer ? cleanText(detailContainer) : '').replace(/\s+/g, ' ').trim().slice(0, 3000)
 
     if (!description) {
       description = ogContent('og:description') || document.querySelector('meta[name="description"]')?.getAttribute('content') || ''
-    }
-
-    // 배송비 dt/dd 안에 "지역별 추가배송비" 클릭 시 뜨는 숨겨진 팝업 레이어(도서산간 등 지역별 추가금액
-    // 목록)가 같이 들어있는 경우가 있다(실제 페이지로 확인, 가방쟁이) — textContent는 display:none이어도
-    // 그대로 다 이어붙여, 값이 그 지역 목록으로 오염된다(예: "3,500원 지역별배송비 전라남도... 7,000원...").
-    // 라벨/값을 읽기 전에 숨겨진 하위 요소를 걷어낸 사본에서 읽어 이런 팝업 내용을 제외한다.
-    const cleanText = (el: Element) => {
-      const clone = el.cloneNode(true) as Element
-      clone.querySelectorAll('.layer_area, [style*="display:none" i], [style*="display: none" i]').forEach(n => n.remove())
-      return (clone.textContent || '').trim()
     }
 
     // document 전체에서 table/dl을 훑다 보면 이 상품과 무관한 표까지 섞여 들어간다 — 사이트 공통 영역

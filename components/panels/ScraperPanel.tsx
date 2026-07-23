@@ -191,7 +191,6 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [pickerActive, setPickerActive] = useState(false)
   const [pickerBusy, setPickerBusy] = useState(false)
   const [pickerRules, setPickerRules] = useState<Record<string, { type: string; value: string }>>({})
-  const pickerRulesJsonRef = useRef('')
 
   const [targetUrl, setTargetUrl]           = useState('')
   const [categoryUrlsText, setCategoryUrlsText] = useState('')
@@ -426,9 +425,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setProfileCheckPending(false)
     // 이 몰에 예전에 "스크랩 대상 직접지정"으로 등록해둔 컬럼이 있으면, 피커를 켜지 않은 채 바로 미리보기만
     // 해도 그리드에 컬럼으로 나오도록 미리 채워둔다(그리드는 이 목록에 있는 필드만 컬럼으로 보여준다).
-    const rules = full.extraction_rules || {}
-    setPickerRules(rules)
-    pickerRulesJsonRef.current = JSON.stringify(rules)
+    setPickerRules(full.extraction_rules || {})
     setSiteQuery('')
     setTargetUrl(full.url)
     setCategoryUrlsText('') // 이전 사이트의 카테고리 목록이 남아 시작 URL을 무시하는 것을 방지
@@ -576,6 +573,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     try {
       await fetch(`/api/sites/${selectedSite.id}/picker/stop`, { method: 'POST' })
       setPickerActive(false)
+      // 미리보기 반영은 작업 중(폴링)마다가 아니라 여기서 딱 한 번만 — 예전엔 지정할 때마다 미리보기가
+      // 자동 재실행되면서 몰 페이지(피커가 떠있는 바로 그 탭)가 다시 로드돼, 지정 하나 할 때마다 화면이
+      // 깜빡이고 필드 목록 스크롤이 맨 위로 올라가 버렸다(사용자 보고: 여러 개 연달아 지정하기 불편함).
+      await refreshPreviewSingle()
     } finally {
       setPickerBusy(false)
     }
@@ -585,12 +586,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (!selectedSite) return
     const res = await fetch(`/api/sites/${selectedSite.id}`)
     const d = await res.json() as { extraction_rules?: Record<string, { type: string; value: string }> }
-    const rules = d.extraction_rules || {}
-    const json = JSON.stringify(rules)
-    const changed = pickerRulesJsonRef.current !== '' && json !== pickerRulesJsonRef.current
-    pickerRulesJsonRef.current = json
-    setPickerRules(rules)
-    if (changed) await refreshPreviewSingle()
+    setPickerRules(d.extraction_rules || {})
   }
 
   // 피커가 켜져있는 동안 몰 페이지에서 저장한 컬럼이 이 화면에도 곧바로 보이도록 짧게 폴링한다.
@@ -1263,8 +1259,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               </div>
               <div className="p-3 flex gap-3 border-b border-gray-100">
                 {previewResult.product.thumbnail_urls.length > 0 && (
-                  <div className="flex gap-1 shrink-0">
-                    {previewResult.product.thumbnail_urls.slice(0, 3).map((src, i) => (
+                  <div className="flex gap-1 shrink-0 max-w-[280px] overflow-x-auto">
+                    {previewResult.product.thumbnail_urls.map((src, i) => (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img key={i} src={src} alt="" className="w-20 h-20 object-cover rounded-xl border border-gray-100" />
                     ))}

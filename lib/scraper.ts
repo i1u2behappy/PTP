@@ -1047,7 +1047,8 @@ function injectElementPicker(seed?: {
   function appendOrSaveField(field: string, part: { type: 'label' | 'selector' | 'fixed'; value: string }, displayValue: string) {
     const existing = rulesLocal[field]
     // 직접 입력(고정값)도 다른 조각과 결합 가능 — 클릭으로 찾은 값 + 타이핑한 접미사처럼 섞어 쓸 수
-    // 있게 한다. 대표/상세이미지(갤러리 셀렉터로 전체를 한 번에 잡는 방식)만 결합 대상에서 제외.
+    // 있게 한다. 대표/상세이미지는 텍스트를 이어붙이는 이 방식이 아니라 이미지 장수를 누적하는
+    // appendImagePart를 따로 쓴다(아래).
     if (!existing || IMAGE_FIELDS.has(field)) {
       saveField(field, part.type, part.value, displayValue)
       return
@@ -1061,6 +1062,27 @@ function injectElementPicker(seed?: {
     parts.push(part)
     const combinedDisplay = [lastValueLocal[field], displayValue].filter(Boolean).join(' ')
     saveField(field, 'multi', JSON.stringify(parts), combinedDisplay)
+  }
+
+  // 대표/상세이미지 전용 결합 — 클릭할 때마다 그 갤러리(형제 img들) 전체를 새 조각으로 이어붙인다.
+  // 상품에 따라 이미지들이 하나의 공통 컨테이너 안에 있지 않고 여러 군데로 나뉜 마크업(실사용 확인)에서,
+  // 한 번의 클릭으로 잡히는 셀렉터 하나만으로는 전체 이미지를 다 못 잡을 때 "+" 격으로 계속 추가한다.
+  // 표시값은 텍스트를 이어붙이는 대신 지금까지 조각들이 실제로 매칭하는 이미지 총 장수를 다시 센다.
+  function appendImagePart(field: string, selector: string) {
+    const existing = rulesLocal[field]
+    let parts: { type: 'label' | 'selector' | 'fixed'; value: string }[]
+    if (existing?.type === 'multi') {
+      try { parts = JSON.parse(existing.value) } catch { parts = [] }
+    } else if (existing) {
+      parts = [{ type: existing.type, value: existing.value }]
+    } else {
+      parts = []
+    }
+    parts.push({ type: 'selector', value: selector })
+    const totalCount = parts.reduce((sum, p) => sum + (p.type === 'selector' ? document.querySelectorAll(p.value).length : 0), 0)
+    const display = totalCount ? `이미지 ${totalCount}장` : '(이미지를 찾지 못함)'
+    if (parts.length > 1) saveField(field, 'multi', JSON.stringify(parts), display)
+    else saveField(field, 'selector', selector, display)
   }
 
   // 클릭한 요소 자체의 텍스트 — 저장되는 규칙(라벨/셀렉터 패턴)과 별개로, "방금 뭘 지정했는지" 그
@@ -1122,9 +1144,9 @@ function injectElementPicker(seed?: {
           ${valueLine}
           <div style="display:flex;gap:4px;align-items:center;margin-top:2px">
             <button class="ptp-row-arm" data-field="${esc(key)}"
-              title="${rule && !IMAGE_FIELDS.has(key) ? '이미 지정된 값에 새 요소를 이어붙입니다 — 바꾸려면 먼저 ✕로 지우세요' : ''}"
+              title="${rule ? '이미 지정된 값에 새 요소(이미지)를 이어붙입니다 — 바꾸려면 먼저 ✕로 지우세요' : ''}"
               style="${armBtnStyle};border-radius:5px;padding:4px 6px;font-size:10px;cursor:pointer">
-              ${armed ? '❌ 클릭 대기 취소' : !rule ? '🎯 클릭해서 지정하기' : IMAGE_FIELDS.has(key) ? '🎯 다시 지정' : '🎯 요소 추가'}
+              ${armed ? '❌ 클릭 대기 취소' : !rule ? '🎯 클릭해서 지정하기' : IMAGE_FIELDS.has(key) ? '🎯 이미지 추가' : '🎯 요소 추가'}
             </button>
             ${delBtn}
           </div>
@@ -1147,7 +1169,12 @@ function injectElementPicker(seed?: {
         </div>
       </div>
     `
+    // innerHTML을 통째로 바꾸면 스크롤 위치가 맨 위로 리셋된다 — 지정 하나 할 때마다 목록이 다시
+    // 그려지므로(값/배지 갱신 때문에 필요), 그때마다 스크롤을 기억해뒀다가 그대로 되돌려 놓는다.
+    // 그래야 아래쪽 필드를 계속 지정할 때 매번 다시 스크롤해 내려갈 필요가 없다.
+    const prevScrollTop = fieldListEl.scrollTop
     fieldListEl.innerHTML = rowsHtml
+    fieldListEl.scrollTop = prevScrollTop
 
     fieldListEl.querySelectorAll<HTMLButtonElement>('.ptp-row-arm').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -1214,9 +1241,7 @@ function injectElementPicker(seed?: {
     e.stopPropagation()
 
     if (IMAGE_FIELDS.has(armedField)) {
-      const selector = computeGallerySelector(el)
-      const count = document.querySelectorAll(selector).length
-      saveField(armedField, 'selector', selector, count ? `이미지 ${count}장` : '(이미지를 찾지 못함)')
+      appendImagePart(armedField, computeGallerySelector(el))
     } else {
       const label = detectLabel(el)
       const rule = label ? { type: 'label' as const, value: label } : { type: 'selector' as const, value: computeSelector(el) }

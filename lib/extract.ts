@@ -490,6 +490,23 @@ export async function extractProductRuleBased(
         let urls: string[] = []
         if (rule.type === 'fixed') {
           urls = rule.value.split(/[,\n]/).map(s => s.trim()).filter(Boolean)
+        } else if (rule.type === 'multi') {
+          // 이미지가 하나의 공통 컨테이너에 다 있지 않아 갤러리 셀렉터 하나로 전체를 못 잡을 때, "이미지
+          // 추가"로 여러 번 누적한 조각들 — 각 조각이 매칭하는 img들의 src를 전부 모아 합친다(중복 제거).
+          let parts: { type: 'label' | 'selector' | 'fixed'; value: string }[] = []
+          try { parts = JSON.parse(rule.value) } catch { parts = [] }
+          const collected: string[] = []
+          for (const part of parts) {
+            if (part.type === 'fixed') {
+              collected.push(...part.value.split(/[,\n]/).map(s => s.trim()).filter(Boolean))
+            } else {
+              const partUrls = await page.locator(part.value).evaluateAll(
+                (els: HTMLImageElement[]) => els.map(el => el.src).filter(Boolean),
+              ).catch(() => [])
+              collected.push(...partUrls)
+            }
+          }
+          urls = [...new Set(collected)]
         } else {
           urls = await page.locator(rule.value).evaluateAll(
             (els: HTMLImageElement[]) => els.map(el => el.src).filter(Boolean),

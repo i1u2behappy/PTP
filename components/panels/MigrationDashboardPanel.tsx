@@ -329,7 +329,7 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
           )}
 
           {/* 하단: 수집확인과 동일한 스크랩 상세 그리드 (작업진행사항 없이 조회된 건 전체를 그대로 표시) */}
-          <StagingItemsGrid sessionId={selectedSessionId} />
+          <StagingItemsGrid sessionId={selectedSessionId} siteId={selectedSession?.site_id} />
         </>
       )}
     </div>

@@ -402,6 +402,22 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     })
   }
 
+  /** 그냥 새 탭으로 열면 로그인 쿠키가 없어 로그아웃 상태로 보인다 — 이 몰 전용 로그인 창(프로필
+   *  디렉터리, 예전 로그인 쿠키가 남아있음)에 열어 로그인된 상태로 확인할 수 있게 한다. siteId를 모르는
+   *  호출부(스크랩 조정 기능 없이 이 그리드를 쓰는 화면)에서는 기존처럼 새 탭으로 폴백한다. */
+  async function handleOpenSourceUrl(url: string) {
+    if (siteId) {
+      try {
+        const res = await fetch('/api/scrape/open-url', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ siteId, url }),
+        })
+        if (res.ok) return
+      } catch { /* 폴백으로 진행 */ }
+    }
+    window.open(url, '_blank', 'noreferrer')
+  }
+
   async function handleMerge() {
     if (!selected.size) return
     setMerging(true)
@@ -773,7 +789,9 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
                 detail_text: { node: p.raw_data?.detail_text || '-', title: p.raw_data?.detail_text || '' },
                 extra_info: { node: extraInfoText || '-', title: extraInfoText },
                 source_url: {
-                  node: p.source_url ? <a href={p.source_url} target="_blank" rel="noreferrer" className="text-teal-500 hover:underline">열기 ↗</a> : '-',
+                  node: p.source_url
+                    ? <button type="button" onClick={() => handleOpenSourceUrl(p.source_url!)} className="text-teal-500 hover:underline">열기 ↗</button>
+                    : '-',
                   className: 'px-2 py-2 text-xs truncate', stop: true,
                 },
                 missing: {
@@ -883,7 +901,9 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
               <div className="flex items-center justify-between sticky -top-3 bg-gray-50 pb-1">
                 <span className="font-semibold text-gray-700">현재 추출된 값 (맨 위 1건 · 미리보기)</span>
                 {visibleItems[0].source_url && (
-                  <a href={visibleItems[0].source_url} target="_blank" rel="noreferrer" className="text-teal-500 hover:underline">몰 상품 페이지 열기 ↗</a>
+                  <button type="button" onClick={() => handleOpenSourceUrl(visibleItems[0].source_url!)} className="text-teal-500 hover:underline">
+                    몰 상품 페이지 열기 ↗
+                  </button>
                 )}
               </div>
               {compareColumns.map(col => (

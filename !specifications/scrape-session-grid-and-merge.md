@@ -71,6 +71,31 @@
 - 실제 테스트 세션 3개로 병합→다른 세션 id로도 그룹 전체가 보이는지, 다른 몰끼리는 병합 거부되는지,
   부분 분할 후 나머지가 유지되는지, 그룹에 1개만 남으면 자동 해체되는지까지 curl로 직접 확인 후 삭제.
 
+## "열기" 링크가 로그아웃 상태로 열리던 문제 수정 (2026-07-24)
+
+사용자 보고: "스크랩 Raw확인 메뉴에서... 상품의 URL을 열기 하면, 해당 몰이 '로그아웃'된 상태로 페이지가
+열려서 내용확인을 할 수 없는 데이터가 있어." 원인: `StagingItemsGrid.tsx`의 "열기 ↗"/"몰 상품 페이지
+열기 ↗"가 그냥 `<a href=... target="_blank">`였다 — 사용자의 평범한 새 탭이라 그 몰에 로그인된 쿠키가
+없다.
+
+`ScraperPanel.tsx`가 이미 쓰던 것과 같은 방식(`/api/scrape/open-url` → `openUrlInLoginWindow`)으로
+바꿨다 — 이 몰 전용 로그인 창(활성 세션이 있으면 그 창에 새 탭, 없으면 그 몰 전용 프로필 디렉터리로
+새 창을 띄우는데 예전 로그인 쿠키가 프로필에 남아있으면 자동으로 로그인된 상태로 뜬다)에 열어준다.
+`StagingItemsGrid`는 이미 "스크랩 조정" 기능용으로 `siteId` prop을 받고 있어 그대로 재사용 —
+`ProductsListPanel`(스크랩 Raw 확인)은 이미 `siteId`를 넘기고 있어 바로 적용됨.
+`MigrationDashboardPanel`처럼 `siteId`를 안 넘기는 호출부는 예전처럼 새 탭으로 자연스럽게 폴백한다.
+
+사용자 요청: "PTP에 다른 메뉴에도 '열기' 기능이 있는데, 거기도 마찬가지로 가능하게 해줘." 전체 앱에서
+`target="_blank"`로 몰 URL을 여는 곳을 모두 찾아 정리:
+
+- `ProductDetailPanel.tsx`("원본 페이지 열기 →", `mall_products` 상세 탭)도 같은 패턴으로 교체
+  (`data.site_id` 이미 같은 레코드에 있어 바로 사용 가능).
+- `MigrationDashboardPanel.tsx`가 `StagingItemsGrid`를 쓰면서 `siteId`를 안 넘기고 있어 그 화면의
+  "열기"는 계속 새 탭 폴백이었다 — `siteId={selectedSession?.site_id}`를 추가해 이 화면도 자동으로
+  로그인 창 연동을 받게 했다(`StagingItemsGrid` 쪽 코드는 이미 고쳐져 있어 prop만 넘기면 됨).
+- `ClientDetailPanel.tsx`/`ClientsListPanel.tsx`의 "열기"류 링크는 몰 URL이 아니라 PTP가 직접 서빙하는
+  첨부파일(사업자등록증 등)이라 로그인 창과 무관 — 그대로 둠.
+
 ## 상태
 
-**구현 완료 (2026-07-17).**
+**구현 완료 (2026-07-17, "열기" 로그인 창 연동은 2026-07-24 추가·확장).**

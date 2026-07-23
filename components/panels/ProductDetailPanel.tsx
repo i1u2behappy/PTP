@@ -86,6 +86,20 @@ export function ProductDetailPanel({ params }: { params?: Record<string, unknown
     }
   }
 
+  /** 그냥 새 탭으로 열면 로그인 쿠키가 없어 로그아웃 상태로 보인다 — 이 몰 전용 로그인 창(예전 로그인
+   *  쿠키가 남은 프로필)에 열어 로그인된 상태로 확인할 수 있게 한다. */
+  async function handleOpenSourceUrl() {
+    if (!data) return
+    try {
+      const res = await fetch('/api/scrape/open-url', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteId: data.site_id, url: data.source_url }),
+      })
+      if (res.ok) return
+    } catch { /* 폴백으로 진행 */ }
+    window.open(data.source_url, '_blank', 'noreferrer')
+  }
+
   async function handleMigrate() {
     setMigrating(true)
     try {
@@ -181,7 +195,7 @@ export function ProductDetailPanel({ params }: { params?: Record<string, unknown
               </div>
             </>
           )}
-          <a href={data.source_url} target="_blank" rel="noreferrer" className="block mt-2 text-xs text-teal-500 hover:underline truncate">원본 페이지 열기 →</a>
+          <button type="button" onClick={handleOpenSourceUrl} className="block mt-2 text-xs text-teal-500 hover:underline truncate text-left">원본 페이지 열기 →</button>
           <div className="mt-2 text-xs">
             재고: {data.stock_status === '품절' || data.stock_status?.startsWith('단종') ? (
               <span className="text-rose-500 font-medium">{data.stock_status}</span>

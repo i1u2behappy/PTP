@@ -407,6 +407,30 @@ live 검증: `pending_adjustment_item_id`를 다른(더 오래된) 세션의 항
   N장"으로 스냅샷 표시, 갤러리 이미지 하나 클릭 시 형제 이미지 전체(3장)를 매칭하는 셀렉터가
   정확히 저장됨. 추출 쪽 로직(셀렉터 다중 src 수집, 고정값 쉼표 파싱)도 별도 확인.
 
+## 버그 수정 — 여러 필드를 연달아 지정하면 앞서 저장한 것들이 사라지던 lost-update (2026-07-23)
+
+사용자 보고: "신우 몰에서 스크랩대상직접지정을 했는데, 상품명 등 여러개를 지정하는 중, 또 지정한
+것들이 다 날라갔어."
+
+원인: `extraction_rules`를 저장하는 모든 경로(`ptpSavePick`/`ptpDeletePick`, 고정값 등록 POST/DELETE
+라우트, 기존 "스크랩 조정" `runAdjustment`)가 "SELECT로 현재 규칙을 읽음 → JS에서 새 필드를 합침 →
+통째로 UPDATE" 패턴이었다. 여러 필드를 빠르게 연달아 지정하면(요소 지정의 정상 사용 패턴 그 자체)
+한 저장의 SELECT~UPDATE 사이에 다른 저장이 끼어들어, 나중에 완료된 UPDATE가 그 시점에 자기가 읽었던
+(이미 낡은) 상태를 기준으로 다시 써버려 그사이 저장된 필드들이 통째로 사라지는 고전적인
+lost-update였다.
+
+재현(임시 테이블에 동일 패턴으로 5개 필드 동시 저장): 기존 방식은 **5개 중 1개만 남고 4개 소실**,
+Postgres jsonb `||`(병합)/`-`(키 삭제) 연산자로 한 SQL 문 안에서 원자적으로 처리하도록 고친 새
+방식은 **5개 모두 정상 저장**을 직접 확인.
+
+- `app/api/sites/[id]/picker/rule/route.ts`(POST/DELETE), `lib/scraper.ts`의
+  `ptpSavePick`/`ptpDeletePick` 노출 함수, `lib/scrape/adjustment.ts`의 `runAdjustment` — 전부
+  SELECT+JS merge를 없애고 `UPDATE ... SET extraction_rules = COALESCE(extraction_rules,
+  '{}'::jsonb) || jsonb_build_object(...)` / `... - $1::text`로 교체. `runAdjustment`는 병합 후
+  실제 전체 규칙을 `RETURNING`으로 그대로 돌려받아 호출부에 정확한 최신 상태를 전달한다.
+- 이미 소실된 데이터는 복구 대상이 아니다(경합으로 사라진 시점에 값 자체가 없었음) — 사용자가
+  다시 지정해야 한다.
+
 ## 하지 않는 것 (알려진 한계, 요소 지정 1단계 기준)
 
 - 개발자모드(크롬 확장, `chrome.debugger`)는 아직 지원하지 않는다 — 일반모드(Playwright `openSessions`)만.

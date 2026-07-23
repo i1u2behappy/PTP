@@ -27,7 +27,12 @@ export async function runAdjustment(
   if (!site) throw new Error('mall not found')
 
   const rules = await generateExtractionRules(site.name || `site${siteId}`, prompt, currentValues, pageText, site.scrape_profile)
-  const merged = { ...(site.extraction_rules || {}), ...rules }
-  await pool.query(`UPDATE sites SET extraction_rules=$1 WHERE id=$2`, [JSON.stringify(merged), siteId])
-  return { rules, merged }
+  // SELECT로 읽은 site.extraction_rules를 JS에서 합쳐 그대로 UPDATE하면, 그 사이 "요소 지정" 등
+  // 다른 경로로 저장된 규칙이 이 UPDATE에 덮여씌워질 수 있다(lost update). Postgres jsonb `||`로 그
+  // 시점의 실제 값과 원자적으로 병합하고, RETURNING으로 병합 후 진짜 전체 규칙을 그대로 돌려준다.
+  const updated = await pool.query<{ extraction_rules: Record<string, ExtractionRule> }>(
+    `UPDATE sites SET extraction_rules = COALESCE(extraction_rules, '{}'::jsonb) || $1::jsonb WHERE id=$2 RETURNING extraction_rules`,
+    [JSON.stringify(rules), siteId],
+  )
+  return { rules, merged: updated.rows[0].extraction_rules }
 }

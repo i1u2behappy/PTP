@@ -769,21 +769,19 @@ export async function startElementPicker(siteId: number, previewProduct?: Record
   const page = pages.length ? pages[pages.length - 1] : await context.newPage()
 
   if (!pickerExposedPages.has(page)) {
+    // SELECT로 읽어 JS에서 합친 뒤 UPDATE하면, 여러 필드를 빠르게 연달아 지정할 때 SELECT~UPDATE 사이에
+    // 다른 저장이 끼어들어 먼저 저장한 필드가 통째로 사라지는 lost-update가 생긴다(신우 몰에서 실제
+    // 보고됨: 상품명 등 여러 개를 연속 지정하니 지정한 것들이 사라짐). Postgres의 jsonb `||`(병합)/
+    // `-`(키 제거) 연산자로 한 SQL 문 안에서 원자적으로 처리해 이 경쟁을 없앤다.
     await page.exposeFunction('ptpSavePick', async (payload: { field: string; type: 'label' | 'selector' | 'fixed'; value: string }) => {
       if (!payload.field?.trim()) return
-      const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(
-        'SELECT extraction_rules FROM sites WHERE id=$1', [siteId],
+      await pool.query(
+        `UPDATE sites SET extraction_rules = COALESCE(extraction_rules, '{}'::jsonb) || jsonb_build_object($1::text, $2::jsonb) WHERE id=$3`,
+        [payload.field, JSON.stringify({ type: payload.type, value: payload.value }), siteId],
       )
-      const merged = { ...(res.rows[0]?.extraction_rules || {}), [payload.field]: { type: payload.type, value: payload.value } }
-      await pool.query('UPDATE sites SET extraction_rules=$1 WHERE id=$2', [JSON.stringify(merged), siteId])
     })
     await page.exposeFunction('ptpDeletePick', async (field: string) => {
-      const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(
-        'SELECT extraction_rules FROM sites WHERE id=$1', [siteId],
-      )
-      const rules = { ...(res.rows[0]?.extraction_rules || {}) }
-      delete rules[field]
-      await pool.query('UPDATE sites SET extraction_rules=$1 WHERE id=$2', [JSON.stringify(rules), siteId])
+      await pool.query(`UPDATE sites SET extraction_rules = COALESCE(extraction_rules, '{}'::jsonb) - $1::text WHERE id=$2`, [field, siteId])
     })
     pickerExposedPages.add(page)
   }
@@ -1233,7 +1231,7 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
   if (platform === 'unknown') platform = await detectMallPlatform(page).catch(() => 'unknown' as MallPlatform)
   // 아직 상품 샘플로 이동하기 전(현재 page가 startUrl), 헤더 내비게이션에서 전체 카테고리 메뉴를 스캔한다 —
   // 이동 후엔 이 몰의 헤더가 안 보일 수 있어 반드시 여기서 먼저 해야 한다.
-  const categoryMenuNames = await scanCategoryMenu(page, platform)
+  const categoryMenuNames = await scanCategoryMenu(page)
   // 같은 이유로, 상품 샘플로 이동하기 전에 지금 페이지(홈/목록)의 하단 회사정보와 이용안내·공지 등
   // 게시판 링크를 먼저 훑어 원문을 모아둔다 — 결제계좌/택배사/연락처는 상품페이지가 아니라 이런 정적
   // 페이지에 있다(실사용 몰 확인됨). deep(=="몰 구조 파악" 버튼)에서만 하는 무거운 작업이라 로그인
@@ -1470,22 +1468,51 @@ export async function detectMallPlatform(page: Page): Promise<MallPlatform> {
   })
 }
 
-/** 고도몰(펫투비 등)은 헤더 내비게이션에 대분류(.cate)/중분류(.ovmenu) 카테고리 전체가 항상 박혀있다
- *  (실제 페이지로 확인) — 상품을 하나하나 열어보며 카테고리를 유추하지 않아도 이 몰의 전체 카테고리
- *  구조를 한 번에 알 수 있다. 스킨마다 클래스가 달라 "카테고리 전체보기" 플라이아웃이 .lnb인 스킨도
- *  있다(가방쟁이, 실제 페이지로 확인). 다른 플랫폼은 아직 실제 마크업을 확인 못 해 지원하지 않는다(빈 배열).
- *  ponytail: 플랫폼별/스킨별 메뉴 셀렉터가 확인되는 대로 여기 분기를 하나씩 추가하면 된다. */
-async function scanCategoryMenu(page: Page, platform: MallPlatform): Promise<string[]> {
-  if (platform !== 'godomall') return []
+/** 헤더 내비게이션(GNB/LNB)의 카테고리 메뉴를 부모>자식 계층 그대로 스캔한다. 예전엔 고도몰의 몇 가지
+ *  스킨(.cate/.ovmenu/.lnb)에서 링크 텍스트를 전부 모아 "이름들의 뭉치"만 만들었는데, 그러면 실제
+ *  트리 구조(같은 레벨의 카테고리들, 그 아래 하위 카테고리)가 사라져 "카테고리 구조" 보고서 항목이
+ *  상품 몇 개 샘플의 브레드크럼에만 의존하게 되고, 카페24/메이크샵/미확인 플랫폼에서는 아예 빈 배열이라
+ *  "확인 안됨"으로만 나오는 문제가 있었다(사용자 보고: "몰구조파악 할 때, 왜 파악한 값이 계속 안나와?").
+ *  실제 상품이 들어있는 카테고리는 대개 <ul><li> 중첩 메뉴로 표현되므로, 플랫폼을 가리지 않고 흔한 메뉴
+ *  컨테이너 후보를 순서대로 시도해 <li>의 중첩 구조를 그대로 따라가며 "대분류 > 중분류" 경로 문자열을
+ *  만든다 — 하위 메뉴가 없는 li는 그 자체가 리프(= 상품이 바로 들어있는 카테고리)로 본다. */
+async function scanCategoryMenu(page: Page): Promise<string[]> {
   return page.evaluate(() => {
-    const names = new Set<string>()
-    document.querySelectorAll('.cate a, .ovmenu a, .lnb a').forEach(a => {
-      const name = (a.textContent || '').trim()
-      // .lnb 안에는 닫기 버튼("×") 같은 카테고리가 아닌 링크도 섞여 있어(가방쟁이 실제 확인), 글자/숫자가
-      // 하나도 없는 텍스트는 제외한다.
-      if (name && /[가-힣a-zA-Z0-9]/.test(name)) names.add(name)
-    })
-    return [...names]
+    const ROOT_SELECTORS = [
+      '.gnb', '#gnb', '.category', '#category', '.cate', '.ovmenu', '.lnb', '.snb', '.nav_category', 'nav',
+    ]
+    const isMeaningful = (s: string) => !!s && /[가-힣a-zA-Z0-9]/.test(s)
+    // li 자신의 라벨만 읽는다 — 하위 <ul>(다음 레벨 카테고리들) 텍스트가 그대로 섞여 들어가지 않도록
+    // 사본에서 중첩 목록을 먼저 제거하고 읽는다(cleanText와 같은 패턴).
+    function ownText(li: Element): string {
+      const clone = li.cloneNode(true) as Element
+      clone.querySelectorAll('ul, ol').forEach(n => n.remove())
+      return (clone.textContent || '').trim()
+    }
+    function buildPaths(li: Element, prefix: string[], depth: number, out: string[]) {
+      if (depth > 3 || out.length > 200) return
+      const name = ownText(li)
+      if (!isMeaningful(name)) return
+      const path = [...prefix, name]
+      const childLis = Array.from(li.querySelectorAll(':scope > ul > li, :scope > div > ul > li'))
+      if (childLis.length) {
+        childLis.forEach(sub => buildPaths(sub, path, depth + 1, out))
+      } else {
+        out.push(path.join(' > '))
+      }
+    }
+    for (const rootSel of ROOT_SELECTORS) {
+      const root = document.querySelector(rootSel)
+      if (!root) continue
+      const topLis = Array.from(root.querySelectorAll(':scope > ul > li, :scope > li'))
+      if (!topLis.length) continue
+      const out: string[] = []
+      topLis.forEach(li => buildPaths(li, [], 0, out))
+      // 후보 하나가 우연히 매칭됐을 뿐(카테고리 메뉴가 아닌 다른 위젯)일 위험을 줄이기 위해, 최소 2개
+      // 이상 나온 후보만 채택한다.
+      if (out.length >= 2) return [...new Set(out)]
+    }
+    return []
   }).catch(() => [])
 }
 

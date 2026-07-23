@@ -850,7 +850,11 @@ function injectElementPicker(seed?: {
     ptpSavePick: (payload: { field: string; type: 'label' | 'selector' | 'fixed' | 'multi'; value: string }) => Promise<void>
     ptpDeletePick: (field: string) => Promise<void>
   }
-  if (w.__ptpPickerActive) return
+  // 이전 인스턴스가 (정상 종료 대신) 남아있으면 조용히 무시하지 않고 먼저 정리한다 — teardown이
+  // 페이지 이동과 겹쳐 조용히 실패한 채로 __ptpPickerActive만 true로 남으면, 그 뒤로 "스크랩 대상
+  // 직접지정"을 다시 눌러도 이 함수가 아무 것도 안 하고 바로 리턴돼(패널이 안 보이는데 PTP 화면은
+  // "활성" 상태라고 믿는) 재시작이 안 되는 문제가 있었다. 항상 깨끗한 상태에서 새로 시작하도록 보장.
+  if (w.__ptpPickerActive) w.__ptpPickerTeardown?.()
   w.__ptpPickerActive = true
 
   const previewProduct = seed?.previewProduct || null
@@ -969,7 +973,8 @@ function injectElementPicker(seed?: {
   panel.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483647;background:#fff;border:2px solid #14b8a6;'
     + 'border-radius:12px;padding:12px;width:320px;font:12px/1.4 -apple-system,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);color:#333'
   panel.innerHTML = `
-    <div id="ptp-picker-drag" style="margin-bottom:6px;cursor:move;user-select:none">
+    <button id="ptp-picker-x" title="닫기" style="position:absolute;top:6px;right:8px;background:none;border:0;color:#999;font-size:16px;line-height:1;cursor:pointer;padding:2px 4px">✕</button>
+    <div id="ptp-picker-drag" style="margin-bottom:6px;cursor:move;user-select:none;padding-right:20px">
       <div style="font-size:9px;color:#999;letter-spacing:.02em">PTP 직접지정 패널</div>
       <div style="font-weight:600">⠿ 🎯 스크랩 대상 직접지정</div>
     </div>
@@ -1222,6 +1227,7 @@ function injectElementPicker(seed?: {
   }
 
   panel.querySelector('#ptp-picker-close')!.addEventListener('click', () => w.__ptpPickerTeardown?.())
+  panel.querySelector('#ptp-picker-x')!.addEventListener('click', () => w.__ptpPickerTeardown?.())
 
   document.addEventListener('mouseover', onMouseOver, true)
   document.addEventListener('click', onClick, true)

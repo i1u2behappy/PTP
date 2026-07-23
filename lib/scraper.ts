@@ -1738,7 +1738,18 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
         const viaProfile = pick(platformSel, false, true)
         if (viaProfile.length > 0) return viaProfile
       }
-      return pick('a', true, true) // 범용 폴백: 썸네일 이미지를 감싼 링크만 제품으로 인식
+      // 범용 폴백: 썸네일 이미지를 감싼 링크만 제품으로 인식. 알려진 플랫폼이 아니면(detailRe 없음) 위
+      // 상세 URL 패턴 필터가 사실상 통과라서, 로고(홈 링크)나 "목록 자기 자신으로 돌아가는" 썸네일
+      // 링크(실사용 확인 — 신우: 상품 이미지 위 배너가 지금 보고 있는 목록 URL 그대로를 가리킴)까지
+      // "상품"으로 잘못 인식해 그 카테고리 상품이 아닌 걸(심지어 홈페이지 자체를) 미리보기하게 되는
+      // 문제가 있었다. 지금 보고 있는 페이지 자기 자신과 사이트 루트(로고)는 상품일 수 없으니 제외한다.
+      const normalize = (u: string) => u.replace(/\/+$/, '')
+      const currentNorm = normalize(location.href)
+      const originNorm = normalize(location.origin)
+      return pick('a', true, true).filter(item => {
+        const n = normalize(item.href)
+        return n !== currentNorm && n !== originNorm
+      })
     }, { userSel, platformSel, detailPatternSrc: profile.detailUrlPattern?.source })
     return items.filter(item => item.href.startsWith(baseUrl))
   }

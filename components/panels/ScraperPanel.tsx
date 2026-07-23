@@ -179,6 +179,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [loginPw, setLoginPw]     = useState('')
   const [loginStep, setLoginStep] = useState<LoginStep>('none')
   const [loginBusy, setLoginBusy] = useState(false)
+  // 로그인 확인 직후 백그라운드 구조 체크가 도는 동안 true — 그 사이 사용자가 같은 탭을 쓰는 다른 기능을
+  // 누르면 페이지 이동이 겹쳐 조용히 결과가 틀어질 수 있어(실측 확인됨), "로그인 확인" 버튼을 깜빡여
+  // 끝날 때까지 기다리도록 안내한다.
+  const [profileCheckPending, setProfileCheckPending] = useState(false)
 
   const [profileResult, setProfileResult] = useState<ProfileCheckResult | null>(null)
   const [profileLoading, setProfileLoading] = useState(false)
@@ -419,6 +423,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setLoginId(full.login_id || '')
     setLoginPw(full.login_pw || '')
     setLoginStep('none')
+    setProfileCheckPending(false)
     // 이 몰에 예전에 "스크랩 대상 직접지정"으로 등록해둔 컬럼이 있으면, 피커를 켜지 않은 채 바로 미리보기만
     // 해도 그리드에 컬럼으로 나오도록 미리 채워둔다(그리드는 이 목록에 있는 필드만 컬럼으로 보여준다).
     const rules = full.extraction_rules || {}
@@ -483,11 +488,25 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       setProfileResult(null)
       setProfileError('')
       setPickerActive(false)
+      setProfileCheckPending(true)
       await refreshPickerRules()
     } finally {
       setLoginBusy(false)
     }
   }
+
+  // 로그인 확인마다 도는 백그라운드 구조 체크가 끝날 때까지 짧게 폴링 — 끝나면 버튼 깜빡임을 멈춘다.
+  useEffect(() => {
+    if (!profileCheckPending || !selectedSite) return
+    let cancelled = false
+    const id = setInterval(async () => {
+      const res = await fetch(`/api/scrape/profile-check-status?siteId=${selectedSite.id}`).catch(() => null)
+      if (cancelled || !res?.ok) return
+      const d = await res.json() as { inProgress: boolean }
+      if (!d.inProgress) setProfileCheckPending(false)
+    }, 1_000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [profileCheckPending, selectedSite])
 
   /** "몰 구조 파악" — 로그인 확인 시마다 조용히 도는 백그라운드 프로파일링을 그 자리에서 즉시 실행해
    *  결과를 화면에 보여준다(같은 로직, app/api/sites/[id]/profile이 lib/scrape/mallProfile.ts의
@@ -943,7 +962,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 : (loginStep === 'opened' || loginStep === 'confirmed' ? '몰 페이지 다시 열기' : '몰 페이지 열기')}
             </button>
             <button onClick={handleConfirmLogin} disabled={loginBusy || loginStep === 'none'}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+              title={profileCheckPending ? '몰 구조를 백그라운드에서 확인 중입니다 — 끝날 때까지 다른 버튼은 잠시 기다려주세요' : undefined}
+              className={`px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${profileCheckPending ? 'animate-pulse' : ''}`}>
               {needsLogin ? '로그인 확인' : '확인'}
             </button>
             {loginStep === 'confirmed' && (

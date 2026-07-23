@@ -162,10 +162,11 @@ export interface ExtractionRule {
   value: string
 }
 
-/** 'multi' 규칙의 value에 JSON으로 담기는 각 조각 — 라벨/셀렉터만 가능(고정값은 조각으로 안 씀,
- *  고정값 자체가 이미 값 전체를 대신하므로 여러 개를 합칠 이유가 없다). */
+/** 'multi' 규칙의 value에 JSON으로 담기는 각 조각 — 클릭으로 지정한 라벨/셀렉터뿐 아니라, 직접 입력한
+ *  고정 텍스트도 다른 조각과 결합할 수 있어야 해서(예: 클릭으로 찾은 브랜드명 + 직접 입력한 접미사)
+ *  'fixed'도 조각으로 허용한다. */
 export interface ExtractionRulePart {
-  type: 'label' | 'selector'
+  type: 'label' | 'selector' | 'fixed'
   value: string
 }
 

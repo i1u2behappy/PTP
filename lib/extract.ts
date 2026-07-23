@@ -372,8 +372,9 @@ export interface ExtractSelectorOverrides {
 /** 라벨(dt/dd, th/td) 또는 셀렉터 하나를 실제 값 텍스트로 풀어낸다 — 단일 규칙과 'multi' 규칙의 각
  *  조각이 공유하는 로직이라 하나로 뺐다. */
 async function resolveLabelOrSelector(
-  page: Page, infoRows: [string, string][], part: { type: 'label' | 'selector'; value: string },
+  page: Page, infoRows: [string, string][], part: { type: 'label' | 'selector' | 'fixed'; value: string },
 ): Promise<string | null> {
+  if (part.type === 'fixed') return part.value
   if (part.type === 'label') {
     try { return findInfoValue(infoRows, new RegExp(part.value)) || null } catch { return null }
   }
@@ -507,7 +508,7 @@ export async function extractProductRuleBased(
       } else if (rule.type === 'multi') {
         // 한 컬럼 값이 페이지 여러 곳에 나뉘어 있는 경우(예: 브랜드+모델명 두 요소가 합쳐져 상품명이
         // 되는 몰) — 저장된 조각들을 순서대로 각각 풀어낸 뒤 공백으로 이어붙인다.
-        let parts: { type: 'label' | 'selector'; value: string }[] = []
+        let parts: { type: 'label' | 'selector' | 'fixed'; value: string }[] = []
         try { parts = JSON.parse(rule.value) } catch { parts = [] }
         const resolved: string[] = []
         for (const part of parts) {

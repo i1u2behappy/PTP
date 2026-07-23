@@ -1044,13 +1044,15 @@ function injectElementPicker(seed?: {
   // 기존 값을 덮어쓰지 않고 새 요소를 이어붙인다 — 한 컬럼에 여러 요소를 지정할 수 있게 해달라는 요청.
   // 값 하나로 대체하고 싶으면 먼저 ✕로 지워 새로 지정하면 된다. 대표/상세이미지(갤러리 셀렉터 하나로
   // 전체를 잡는 방식)는 이 결합 대상에서 제외 — 별도의 갤러리 지정 방식을 그대로 쓴다.
-  function appendOrSaveField(field: string, part: { type: 'label' | 'selector'; value: string }, displayValue: string) {
+  function appendOrSaveField(field: string, part: { type: 'label' | 'selector' | 'fixed'; value: string }, displayValue: string) {
     const existing = rulesLocal[field]
-    if (!existing || existing.type === 'fixed' || IMAGE_FIELDS.has(field)) {
+    // 직접 입력(고정값)도 다른 조각과 결합 가능 — 클릭으로 찾은 값 + 타이핑한 접미사처럼 섞어 쓸 수
+    // 있게 한다. 대표/상세이미지(갤러리 셀렉터로 전체를 한 번에 잡는 방식)만 결합 대상에서 제외.
+    if (!existing || IMAGE_FIELDS.has(field)) {
       saveField(field, part.type, part.value, displayValue)
       return
     }
-    let parts: { type: 'label' | 'selector'; value: string }[]
+    let parts: { type: 'label' | 'selector' | 'fixed'; value: string }[]
     if (existing.type === 'multi') {
       try { parts = JSON.parse(existing.value) } catch { parts = [] }
     } else {
@@ -1169,7 +1171,7 @@ function injectElementPicker(seed?: {
         const input = fieldListEl.querySelector<HTMLInputElement>(`.ptp-row-input[data-field="${CSS.escape(field)}"]`)
         const value = input?.value.trim()
         if (!value) return
-        saveField(field, 'fixed', value, value)
+        appendOrSaveField(field, { type: 'fixed', value }, value)
         expandedInputs.delete(field)
         renderFieldList()
       })
@@ -1198,7 +1200,7 @@ function injectElementPicker(seed?: {
       const field = nameEl.value.trim()
       const value = valueEl.value.trim()
       if (!field || !value) return
-      saveField(field, 'fixed', value, value)
+      appendOrSaveField(field, { type: 'fixed', value }, value)
       renderFieldList()
     })
   }
@@ -1239,12 +1241,12 @@ function injectElementPicker(seed?: {
     // 호출) 둘 다 같은 teardown을 타므로, 여기 한 곳에 둬야 어느 쪽으로 끝내도 동일하게 동작한다.
     fieldListEl.querySelectorAll<HTMLInputElement>('.ptp-row-input').forEach(input => {
       const value = input.value.trim()
-      if (value) saveField(input.dataset.field!, 'fixed', value, value)
+      if (value) appendOrSaveField(input.dataset.field!, { type: 'fixed', value }, value)
     })
     const newNameEl = fieldListEl.querySelector<HTMLInputElement>('#ptp-new-field-name')
     const newValueEl = fieldListEl.querySelector<HTMLInputElement>('#ptp-new-field-value')
     if (newNameEl?.value.trim() && newValueEl?.value.trim()) {
-      saveField(newNameEl.value.trim(), 'fixed', newValueEl.value.trim(), newValueEl.value.trim())
+      appendOrSaveField(newNameEl.value.trim(), { type: 'fixed', value: newValueEl.value.trim() }, newValueEl.value.trim())
     }
     document.removeEventListener('mouseover', onMouseOver, true)
     document.removeEventListener('click', onClick, true)

@@ -1565,6 +1565,10 @@ async function scanCategoryMenu(page: Page): Promise<string[]> {
   return page.evaluate(() => {
     const ROOT_SELECTORS = [
       '.gnb', '#gnb', '.category', '#category', '.cate', '.ovmenu', '.lnb', '.snb', '.nav_category', 'nav',
+      // 카페24 EC 표준 카테고리 위젯 클래스 — 테마(스킨)마다 실제 래퍼 클래스명은 제각각(예: 디자인플로어
+      // 테마의 df-lnb-category/df-cnb-items)이라도, 이 위젯 자체엔 카페24가 항상 xans-layout-category를
+      // 붙여준다(걸스굽 실제 페이지로 확인 — 이 셀렉터가 없어 카테고리 메뉴를 하나도 못 읽고 있었다).
+      '.xans-layout-category',
     ]
     const isMeaningful = (s: string) => !!s && /[가-힣a-zA-Z0-9]/.test(s)
     // li 자신의 라벨만 읽는다 — 하위 <ul>(다음 레벨 카테고리들) 텍스트가 그대로 섞여 들어가지 않도록

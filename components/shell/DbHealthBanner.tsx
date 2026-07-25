@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 const NORMAL_POLL_MS = 20_000
 const RESTARTING_POLL_MS = 4_000
@@ -18,8 +18,6 @@ export function DbHealthBanner() {
   const [health, setHealth] = useState<Health>('ok')
   const [restarting, setRestarting] = useState(false)
   const [restartError, setRestartError] = useState('')
-  const restartingRef = useRef(restarting)
-  restartingRef.current = restarting
 
   useEffect(() => {
     let cancelled = false
@@ -33,7 +31,7 @@ export function DbHealthBanner() {
       }
       if (cancelled) return
       setHealth(next)
-      if (next === 'ok' && restartingRef.current) setRestarting(false)
+      if (next === 'ok' && restarting) setRestarting(false)
     }
     check()
     const id = setInterval(check, restarting ? RESTARTING_POLL_MS : NORMAL_POLL_MS)

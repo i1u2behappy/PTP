@@ -1512,7 +1512,7 @@ export async function extractFromHtml(
   }
 }
 
-export type MallPlatform = 'cafe24' | 'makeshop' | 'godomall' | 'unknown'
+export type MallPlatform = 'cafe24' | 'makeshop' | 'godomall' | 'domesin' | 'unknown'
 
 interface PlatformProfile {
   productLinkSelector: string | null
@@ -1528,6 +1528,11 @@ const PLATFORM_PROFILES: Record<MallPlatform, PlatformProfile> = {
   cafe24:   { productLinkSelector: '.xans-product-listmain a, ul.prdList li a, .prdList .thumbnail a', nextPageSelector: '.xans-product-listpagination a.next', detailUrlPattern: /\/product\/detail\.html/ },
   makeshop: { productLinkSelector: '.item_gallery_type a, .prd_list_wrap a', nextPageSelector: '.paging a.next', detailUrlPattern: /shopdetail\.html\?branduid=/ },
   godomall: { productLinkSelector: '.item_cont a, .goods_list a', nextPageSelector: '.paginate a.next', detailUrlPattern: /goods_view\.php\?goodsno=/ },
+  // 도매의신(domesin.com) — 실제 페이지로 확인: productLinkSelector 없이도 detailUrlPattern만 지정하면
+  // 범용 폴백(img 감싼 <a> 전체)에 이 필터가 그대로 적용된다(scanCurrentPage 참고). 이게 없으면 홈페이지
+  // 등에서 이벤트 배너/FAQ 링크(예: p=event_list.html, p=helpdesk/faq.html)까지 "상품"으로 잘못 인식했다
+  // (실사용 확인 — 사용자가 홈페이지를 몰 URL로 등록해둔 상태에서 "스크랩 미리보기"가 상품을 잘못 찾음).
+  domesin:  { productLinkSelector: null, nextPageSelector: null, detailUrlPattern: /p=view\.html.*iid=/i },
   unknown:  { productLinkSelector: null, nextPageSelector: null, detailUrlPattern: null },
 }
 
@@ -1549,6 +1554,7 @@ export async function detectMallPlatform(page: Page): Promise<MallPlatform> {
     if (generator.includes('cafe24') || hasHost('cafe24.com') || /\/product\/(list|detail)\.html/.test(url) || anyLinkMatches(/\/product\/detail\.html/)) return 'cafe24'
     if (generator.includes('makeshop') || hasHost('makeshop.co.kr') || /shopdetail\.html\?branduid=/.test(url) || anyLinkMatches(/shopdetail\.html\?branduid=/)) return 'makeshop'
     if (generator.includes('godo') || hasHost('godomall') || /goods_view\.php\?goodsno=/.test(url) || anyLinkMatches(/goods_view\.php\?goodsno=/)) return 'godomall'
+    if (url.includes('domesin.com')) return 'domesin'
     return 'unknown'
   })
 }

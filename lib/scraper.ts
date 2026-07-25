@@ -1563,12 +1563,18 @@ export async function detectMallPlatform(page: Page): Promise<MallPlatform> {
  *  만든다 — 하위 메뉴가 없는 li는 그 자체가 리프(= 상품이 바로 들어있는 카테고리)로 본다. */
 async function scanCategoryMenu(page: Page): Promise<string[]> {
   return page.evaluate(() => {
-    const ROOT_SELECTORS = [
-      '.gnb', '#gnb', '.category', '#category', '.cate', '.ovmenu', '.lnb', '.snb', '.nav_category', 'nav',
-      // 카페24 EC 표준 카테고리 위젯 클래스 — 테마(스킨)마다 실제 래퍼 클래스명은 제각각(예: 디자인플로어
-      // 테마의 df-lnb-category/df-cnb-items)이라도, 이 위젯 자체엔 카페24가 항상 xans-layout-category를
-      // 붙여준다(걸스굽 실제 페이지로 확인 — 이 셀렉터가 없어 카테고리 메뉴를 하나도 못 읽고 있었다).
-      '.xans-layout-category',
+    // 몰마다(플랫폼/테마마다) 카테고리 메뉴 래퍼의 정확한 class/id가 제각각이라(고도몰 .ovmenu, 카페24
+    // 커스텀테마 df-lnb-category, 도매의신 div_cat 등) 매번 실제 몰을 열어보고 하드코딩 셀렉터를 하나씩
+    // 추가해왔다 — 근본적으로는 정확한 이름을 다 알 수 없으므로, 이름의 "일부"(부분 문자열)로 넓게
+    // 후보를 잡고 실제 카테고리 트리처럼 보이는지(아래 buildPaths + 최소 2개 조건)는 그대로 구조로
+    // 검증한다. 다만 "cat"처럼 카테고리 의도가 명확한 키워드보다 "gnb"/"nav"처럼 범용 내비게이션을
+    // 가리키는 키워드가 먼저 매칭되면 로그인/장바구니 등 무관한 메뉴를 카테고리로 오인할 위험이 커서
+    // (실제 발견: 걸스굽 df-gnb-items가 실제 카테고리 ul보다 더 많은 항목을 가짐), 구체적인 신호부터
+    // 순서대로 시도하고 앞 단계에서 못 찾을 때만 더 넓은 후보로 넘어간다.
+    const SELECTOR_TIERS = [
+      '[class*="cat" i], [id*="cat" i]',
+      '[class*="lnb" i], [id*="lnb" i], [class*="snb" i], [id*="snb" i], [class*="ovmenu" i]',
+      '[class*="gnb" i], [id*="gnb" i], nav',
     ]
     const isMeaningful = (s: string) => !!s && /[가-힣a-zA-Z0-9]/.test(s)
     // li 자신의 라벨만 읽는다 — 하위 <ul>(다음 레벨 카테고리들) 텍스트가 그대로 섞여 들어가지 않도록
@@ -1590,16 +1596,22 @@ async function scanCategoryMenu(page: Page): Promise<string[]> {
         out.push(path.join(' > '))
       }
     }
-    for (const rootSel of ROOT_SELECTORS) {
-      const root = document.querySelector(rootSel)
-      if (!root) continue
-      const topLis = Array.from(root.querySelectorAll(':scope > ul > li, :scope > li'))
-      if (!topLis.length) continue
-      const out: string[] = []
-      topLis.forEach(li => buildPaths(li, [], 0, out))
-      // 후보 하나가 우연히 매칭됐을 뿐(카테고리 메뉴가 아닌 다른 위젯)일 위험을 줄이기 위해, 최소 2개
-      // 이상 나온 후보만 채택한다.
-      if (out.length >= 2) return [...new Set(out)]
+    for (const tierSelector of SELECTOR_TIERS) {
+      let candidates: Element[]
+      try { candidates = Array.from(document.querySelectorAll(tierSelector)) } catch { continue }
+      // 한 티어 안에서도 후보가 여러 개(예: 헤더 카테고리 + 전체메뉴 플라이아웃 사본) 나올 수 있어,
+      // 후보 하나가 우연히 매칭됐을 뿐(카테고리 메뉴가 아닌 다른 위젯)일 위험을 줄이려고 요구하는 "최소
+      // 2개 이상" 조건을 만족하는 후보 중 가장 많은 경로를 뽑아낸 것을 채택한다.
+      let best: string[] = []
+      for (const root of candidates) {
+        const topLis = Array.from(root.querySelectorAll(':scope > ul > li, :scope > li'))
+        if (!topLis.length) continue
+        const out: string[] = []
+        topLis.forEach(li => buildPaths(li, [], 0, out))
+        const uniq = [...new Set(out)]
+        if (uniq.length >= 2 && uniq.length > best.length) best = uniq
+      }
+      if (best.length) return best
     }
     return []
   }).catch(() => [])

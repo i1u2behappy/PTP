@@ -15,12 +15,16 @@ Docker Desktop이 꺼져 Postgres 컨테이너가 죽으면 로그인부터 모�
   `npm run dev:clean`(.next 삭제 후 기동)으로 재기동한다** — 과거에 강제종료 방식이 `.next` 캐시를 깨뜨려
   정상 라우트가 404 나던 사고가 있었다([[dev_server_restart_corrupts_cache]] 메모 참고).
   - 이 요청을 처리 중인 프로세스 자신(`process.pid`)을 죽여야 하므로, 죽이기/재기동은 분리된 detached
-    cmd 프로세스에 맡긴다: 응답을 먼저 보내고, 1초 뒤 `taskkill /PID <pid> /F`로 포트를 비운 뒤 새로 기동.
-  - **`/T`(자식 프로세스까지 정리) 플래그는 쓰지 않는다.** 이 detached cmd 프로세스 자체가 지금 죽이려는
+    PowerShell 프로세스에 맡긴다: 응답을 먼저 보내고, 1초 뒤 `Stop-Process`로 포트를 비운 뒤 새로 기동.
+  - **프로세스 트리째 죽이는 방식(`taskkill /T`)은 쓰지 않는다.** 이 detached 프로세스 자체가 지금 죽이려는
     `process.pid`의 자식으로 생성되므로(Windows는 `detached:true`로도 부모 PID 기록 자체를 못 숨긴다),
-    `/T`를 쓰면 taskkill이 재시작 스크립트 자신까지 트리째 죽여버려 재기동이 실행되지 못한다 — 실제로 이
-    버그로 서버가 죽은 채 복구되지 않는 것을 확인 후 `/T` 제거로 수정, 재검증 완료(요청 후 약 3초 만에
-    정상 복구).
+    트리째 죽이면 재시작 스크립트 자신까지 같이 죽어버려 재기동이 실행되지 못한다 — 실제로 이 버그로 서버가
+    죽은 채 복구되지 않는 것을 확인 후 수정.
+  - **`cmd.exe`의 `timeout` 명령도 쓰지 않는다.** 이 앱이 Git Bash 환경에서 기동되어 PATH에 Git의
+    coreutils(usr/bin)가 Windows System32보다 앞에 오면, Windows용 `timeout /t 1`이 아니라 문법이 다른 GNU
+    `timeout`이 잡혀 즉시 에러로 죽어 재시작 자체가 조용히 실패했다(실제로 겪음). 그래서 `cmd.exe` 대신
+    `powershell.exe -Command`로 바꾸고, 외부 실행파일이 아닌 내장 cmdlet(`Start-Sleep`, `Stop-Process`)만
+    사용해 이 PATH 셰도잉 문제 자체를 피한다. 최종 검증: POST 후 약 6초 만에 정상 복구.
 - `components/shell/DbHealthBanner.tsx` — 20초 주기로 `/api/health/db`를 폴링. `fetch` 자체가 실패(네트워크
   에러)하면 "PTP 서버 응답 없음"으로, fetch는 성공했지만 `{ok:false}`면 "DB 연결 실패"로 구분해서 배너와
   재시작 버튼을 다르게 보여준다. 재시작 중엔 폴링을 4초 간격으로 빠르게 전환.

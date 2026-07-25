@@ -1,5 +1,5 @@
 import pool from '../db'
-import { generateExtractionRules, type ExtractedProduct, type ExtractionRule } from '../ai'
+import { generateExtractionRules, generateAutoExtractionRules, type ExtractedProduct, type ExtractionRule } from '../ai'
 
 /**
  * "스크랩 조정" 기능의 공용 계약 — 스크랩 방식(현재 일반모드/개발자모드, 앞으로 추가될 어떤 방식이든)은
@@ -55,7 +55,7 @@ export async function runAutoAnalysis(siteId: number, pageText: string): Promise
   const site = res.rows[0]
   if (!site) throw new Error('mall not found')
 
-  const rules = await generateExtractionRules(site.name || `site${siteId}`, '', {}, pageText, site.scrape_profile)
+  const rules = await generateAutoExtractionRules(site.name || `site${siteId}`, pageText, site.scrape_profile)
   const merged = await mergeRulesIntoSite(siteId, rules)
   return { rules, merged }
 }

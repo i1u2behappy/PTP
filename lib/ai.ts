@@ -1,10 +1,18 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { GoogleGenAI, FunctionCallingConfigMode, Type, type Schema } from '@google/genai'
 
 // 매 호출마다 새로 생성 — 모듈 로드 시점에 키를 고정하면 .env 값을 나중에 바꿔도
 // (dev 서버가 모듈을 재평가하지 않는 한) 예전 키가 계속 쓰이는 문제가 있었다.
 function getClient() {
   return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 }
+
+// "AI모드 스크래핑"(규칙 자동생성 + 옵션 판별) 전용 — Anthropic 크레딧을 충전하지 않기로 하고, 이 두
+// 기능에만 국한해 Gemini를 붙여달라고 확정함(나머지 AI 기능은 그대로 Anthropic).
+function getGeminiClient() {
+  return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
+}
+const GEMINI_MODEL = 'gemini-2.5-flash'
 
 export interface ExtractedProduct {
   name: string
@@ -179,11 +187,8 @@ const EXTRACTION_RULE_FIELDS = ['name', 'price', 'cost_price', 'shipping_fee', '
  * 기존 8개 고정 필드 외에, 사용자가 프롬프트로 새 컬럼(예: 소재/세탁방법)을 요청하면 그 필드명을 rules에
  * 자유롭게 추가해도 되도록 스키마를 열어둔다 — 결과는 ExtractedProduct.custom_fields로 저장된다.
  * ANTHROPIC_API_KEY가 없으면 조용히 빈 규칙을 반환한다(호출부에서 전체 흐름을 막지 않도록).
- *
- * userPrompt가 빈 문자열이면 "AI모드 스크래핑"(스크랩 미리보기 시점의 1회 자동 분석) 용도로 동작한다 —
- * 사용자가 특정 필드를 지적한 게 아니라, 몰 페이지 구조를 처음부터 스스로 분석해 8개 필드 전체에 대해
- * 규칙을 시도한다. 이렇게 한 번 만들어진 규칙은 sites.extraction_rules에 저장되어(runAutoAnalysis)
- * 이후 같은 몰의 다른 상품에는 AI 재호출 없이 그대로 재사용된다.
+ * ("AI모드 스크래핑"의 자동 분석은 이 함수가 아니라 Gemini 기반 generateAutoExtractionRules가 담당한다 —
+ * 사용자가 명시적으로 "AI모드만 Gemini, 나머지는 그대로 Anthropic"으로 분리해달라고 확정함.)
  */
 export async function generateExtractionRules(
   mallName: string,
@@ -194,7 +199,7 @@ export async function generateExtractionRules(
    *  참고해 더 정확한 규칙을 만들 수 있다. lib/scraper.ts의 MallProfileSignals와 같은 모양. */
   mallProfile?: Record<string, unknown> | null,
 ): Promise<Record<string, ExtractionRule>> {
-  if (!process.env.ANTHROPIC_API_KEY) return {}
+  if (!process.env.ANTHROPIC_API_KEY || !userPrompt.trim()) return {}
 
   const ruleSchema = {
     type: 'object',
@@ -207,19 +212,17 @@ export async function generateExtractionRules(
   const properties: Record<string, unknown> = {}
   EXTRACTION_RULE_FIELDS.forEach(f => { properties[f] = ruleSchema })
 
+  // additionalProperties만으로는 모델이 스키마에 안 보이는 새 필드를 스스로 잘 안 채우는 경향이 있어
+  // (실측 확인됨) — "'필드명' 필드 추가"로 시작하는 새 컬럼 요청은 그 필드명을 properties에 직접
+  // 명시적으로 추가해, 기존 8개 필드와 똑같이 확실하게 채워지도록 한다.
+  const newFieldMatch = userPrompt.match(/^'([^']+)' 필드 추가/)
+  if (newFieldMatch) properties[newFieldMatch[1]] = ruleSchema
+
   const mallProfileBlock = mallProfile
     ? `\n[이 몰에 대해 "몰 구조 파악"으로 미리 확인해둔 정보 — 참고만 하고, 실제 페이지 내용과 다르면 실제 페이지를 따른다]\n${JSON.stringify(mallProfile)}\n`
     : ''
 
-  let prompt: string
-  if (userPrompt.trim()) {
-    // additionalProperties만으로는 모델이 스키마에 안 보이는 새 필드를 스스로 잘 안 채우는 경향이 있어
-    // (실측 확인됨) — "'필드명' 필드 추가"로 시작하는 새 컬럼 요청은 그 필드명을 properties에 직접
-    // 명시적으로 추가해, 기존 8개 필드와 똑같이 확실하게 채워지도록 한다.
-    const newFieldMatch = userPrompt.match(/^'([^']+)' 필드 추가/)
-    if (newFieldMatch) properties[newFieldMatch[1]] = ruleSchema
-
-    prompt = `몰 '${mallName}'의 상품 페이지를 스크랩하는데 값이 잘못 추출되고 있다.
+  const prompt = `몰 '${mallName}'의 상품 페이지를 스크랩하는데 값이 잘못 추출되고 있다.
 
 [사용자 지적 사항]
 ${userPrompt}
@@ -238,27 +241,6 @@ ${mallProfileBlock}
 사용자 지적 사항에 작은따옴표(')로 감싼 필드명이 있으면(예: '소재' 필드 추가) 그 값을 정확히 그 이름
 그대로 rules의 key로 써라 — 기존 8개 필드(name/price/cost_price/shipping_fee/category/brand/manufacturer/
 origin)에 없는 완전히 새로운 종류의 정보라도 상관없다. 그 외의 경우 새 필드명을 임의로 지어내지 마라.`
-  } else {
-    prompt = `몰 '${mallName}'의 상품 페이지 구조를 처음 분석한다("AI모드 스크래핑"). 사용자가 지적한
-특정 필드는 없다 — 아래 페이지 내용을 보고, 8개 필드(name/price/cost_price/shipping_fee/category/brand/
-manufacturer/origin) 각각을 이 몰에서 어떻게 추출할 수 있는지 스스로 판단해 규칙을 만들어라.
-
-판단 기준은 실제 소비자가 브라우저로 이 페이지를 볼 때 눈에 보이는 상품 데이터여야 한다 — 아래는 모두
-상품 데이터가 아니니 절대 값으로 쓰지 마라: 사이트 로고/메뉴/푸터, 검색창·검색범위 선택, 카테고리
-필터/정렬 드롭다운, 로그인·장바구니·회원가입 링크, "HOME | 회사소개 | 이용약관" 같은 사이트 전체 내비게이션.
-페이지 <title>은 사이트명이 섞여있는 경우가 많아 name에는 되도록 쓰지 말고, 페이지 안의 실제 상품명
-표시(예: "품명" 라벨이나 상품 제목 영역)를 우선하라.
-
-[실제 상품 페이지 내용 (일부)]
-${pageText.slice(0, 30_000)}
-${mallProfileBlock}
-각 필드마다 페이지에 라벨-값 쌍(예: <dt>도매가격</dt><dd>12,000원</dd> 같은 구조나 표)이 보이면 그 라벨
-텍스트를 정규식으로 만들고(type='label'), 그게 아니라 특정 요소를 CSS 셀렉터로 바로 집어야 하면
-type='selector'로 답하라. 라벨의 값에 다른 정보가 섞여 있어(예: "배송비" 금액이 배송 정책 설명 문장
-안에 파묻혀 있는 경우) 규칙만으로 깨끗한 값을 뽑기 어렵다고 판단되면, 억지로 만들지 말고 그 필드는
-비워둬라 — 틀린 값보다 빈 값이 낫다. 페이지에서 값이 안 보이거나 확신할 수 없는 필드도 마찬가지로
-절대 넣지 마라 — 아는 것만 답한다.`
-  }
 
   try {
     const response = await getClient().messages.create({
@@ -290,6 +272,82 @@ type='selector'로 답하라. 라벨의 값에 다른 정보가 섞여 있어(�
   }
 }
 
+/**
+ * "AI모드 스크래핑" 전용 — 사용자가 지적한 특정 필드 없이, 몰 페이지 구조를 처음부터 스스로 분석해 8개
+ * 필드(name/price/cost_price/shipping_fee/category/brand/manufacturer/origin) 전체에 대해 규칙을 시도한다.
+ * 이렇게 한 번 만들어진 규칙은 sites.extraction_rules에 저장되어(runAutoAnalysis) 이후 같은 몰의 다른
+ * 상품에는 AI 재호출 없이 그대로 재사용된다.
+ *
+ * 사용자 요청으로 이 함수만 Gemini(GEMINI_API_KEY)를 쓴다 — Anthropic API 크레딧을 충전하지 않기로
+ * 했고, "스크래핑을 위한 AI모드"에만 국한해서 다른 AI를 붙여달라고 확정함. 나머지 AI 기능(스크랩 조정,
+ * 상품명 생성, Transform, 몰 구조 파악)은 전부 그대로 Anthropic을 쓴다 — 전체 교체가 아니다.
+ */
+export async function generateAutoExtractionRules(
+  mallName: string,
+  pageText: string,
+  mallProfile?: Record<string, unknown> | null,
+): Promise<Record<string, ExtractionRule>> {
+  if (!process.env.GEMINI_API_KEY) return {}
+
+  const ruleSchema: Schema = {
+    type: Type.OBJECT,
+    properties: {
+      type: { type: Type.STRING, enum: ['label', 'selector'], description: "'label'이면 dt/dd나 표의 라벨 텍스트를 정규식으로 찾고, 'selector'면 CSS 셀렉터로 직접 값을 읽는다." },
+      value: { type: Type.STRING, description: "type='label'이면 라벨과 매칭할 정규식 문자열(예: '도매가|공급가'), type='selector'면 CSS 셀렉터 문자열." },
+    },
+    required: ['type', 'value'],
+  }
+  const properties: Record<string, Schema> = {}
+  EXTRACTION_RULE_FIELDS.forEach(f => { properties[f] = ruleSchema })
+
+  const mallProfileBlock = mallProfile
+    ? `\n[이 몰에 대해 "몰 구조 파악"으로 미리 확인해둔 정보 — 참고만 하고, 실제 페이지 내용과 다르면 실제 페이지를 따른다]\n${JSON.stringify(mallProfile)}\n`
+    : ''
+
+  const prompt = `몰 '${mallName}'의 상품 페이지 구조를 처음 분석한다("AI모드 스크래핑"). 사용자가 지적한
+특정 필드는 없다 — 아래 페이지 내용을 보고, 8개 필드(name/price/cost_price/shipping_fee/category/brand/
+manufacturer/origin) 각각을 이 몰에서 어떻게 추출할 수 있는지 스스로 판단해 규칙을 만들어라.
+
+판단 기준은 실제 소비자가 브라우저로 이 페이지를 볼 때 눈에 보이는 상품 데이터여야 한다 — 아래는 모두
+상품 데이터가 아니니 절대 값으로 쓰지 마라: 사이트 로고/메뉴/푸터, 검색창·검색범위 선택, 카테고리
+필터/정렬 드롭다운, 로그인·장바구니·회원가입 링크, "HOME | 회사소개 | 이용약관" 같은 사이트 전체 내비게이션.
+페이지 <title>은 사이트명이 섞여있는 경우가 많아 name에는 되도록 쓰지 말고, 페이지 안의 실제 상품명
+표시(예: "품명" 라벨이나 상품 제목 영역)를 우선하라.
+
+[실제 상품 페이지 내용 (일부)]
+${pageText.slice(0, 30_000)}
+${mallProfileBlock}
+각 필드마다 페이지에 라벨-값 쌍(예: <dt>도매가격</dt><dd>12,000원</dd> 같은 구조나 표)이 보이면 그 라벨
+텍스트를 정규식으로 만들고(type='label'), 그게 아니라 특정 요소를 CSS 셀렉터로 바로 집어야 하면
+type='selector'로 답하라. 라벨의 값에 다른 정보가 섞여 있어(예: "배송비" 금액이 배송 정책 설명 문장
+안에 파묻혀 있는 경우) 규칙만으로 깨끗한 값을 뽑기 어렵다고 판단되면, 억지로 만들지 말고 그 필드는
+비워둬라 — 틀린 값보다 빈 값이 낫다. 페이지에서 값이 안 보이거나 확신할 수 없는 필드도 마찬가지로
+절대 넣지 마라 — 아는 것만 답한다.`
+
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_extraction_rules',
+          description: '확신하는 필드에 대해서만 추출 규칙을 채워 반환한다. 확신 없는 필드는 아예 넣지 않는다.',
+          parameters: { type: Type.OBJECT, properties: { rules: { type: Type.OBJECT, properties } }, required: ['rules'] },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_extraction_rules'] } },
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) return {}
+    const args = call.args as { rules?: Record<string, ExtractionRule> }
+    return args.rules || {}
+  } catch (e) {
+    // generateExtractionRules(스크랩 조정)와 같은 이유로 그대로 던진다 — 조용히 삼키면 "AI가 확신을
+    // 못 해서 규칙을 안 만든 것"과 "API 호출 자체가 실패한 것"(크레딧/네트워크 등)을 구분할 수 없다.
+    throw new Error(`Gemini 호출 실패: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
 export interface OptionCandidate { name: string; values: string[] }
 
 /**
@@ -300,12 +358,13 @@ export interface OptionCandidate { name: string; values: string[] }
  * 셀렉터가 없으면 document 전체에서 select를 찾아 이런 오탐이 생긴다).
  * 판단 실패(API 없음/오류)는 "지우는" 동작이라 보수적으로 후보 전체를 그대로 유지한다 — AI 문제로
  * 진짜 옵션까지 사라지는 것보다, 기존처럼 오탐이 섞여 있는 채로 두는 쪽이 낫다.
+ * "AI모드 스크래핑" 전용이라 generateAutoExtractionRules와 같은 이유로 Gemini(GEMINI_API_KEY)를 쓴다.
  */
 export async function filterRealProductOptions(
   mallName: string, candidates: OptionCandidate[], pageText: string,
 ): Promise<string[]> {
   const keepAll = candidates.map(c => c.name)
-  if (!candidates.length || !process.env.ANTHROPIC_API_KEY) return keepAll
+  if (!candidates.length || !process.env.GEMINI_API_KEY) return keepAll
 
   const prompt = `몰 '${mallName}'의 상품 페이지에서 아래 후보 목록(select/스와치 등)을 찾았다. 이 중 실제
 소비자가 이 상품을 "구매할 때 고르는" 옵션(색상/사이즈/수량 단위 등)만 골라라. 검색창의 검색범위,
@@ -318,25 +377,26 @@ ${candidates.map(c => `- ${c.name}: ${c.values.slice(0, 8).join(', ')}${c.values
 ${pageText.slice(0, 20_000)}`
 
   try {
-    const response = await getClient().messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 512,
-      tools: [{
-        name: 'set_real_options',
-        description: '후보 중 실제 구매 옵션인 것의 name만 골라 반환한다. 상품과 무관한 UI는 제외한다.',
-        input_schema: {
-          type: 'object',
-          properties: { names: { type: 'array', items: { type: 'string' }, description: '진짜 상품 옵션인 후보의 name 값만' } },
-          required: ['names'],
-        },
-      }],
-      tool_choice: { type: 'tool', name: 'set_real_options' },
-      messages: [{ role: 'user', content: prompt }],
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_real_options',
+          description: '후보 중 실제 구매 옵션인 것의 name만 골라 반환한다. 상품과 무관한 UI는 제외한다.',
+          parameters: {
+            type: Type.OBJECT,
+            properties: { names: { type: Type.ARRAY, items: { type: Type.STRING }, description: '진짜 상품 옵션인 후보의 name 값만' } },
+            required: ['names'],
+          },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_real_options'] } },
+      },
     })
-    const toolUse = response.content.find(b => b.type === 'tool_use')
-    if (!toolUse || toolUse.type !== 'tool_use') return keepAll
-    const input = toolUse.input as { names?: string[] }
-    return input.names ?? keepAll
+    const call = response.functionCalls?.[0]
+    if (!call) return keepAll
+    const args = call.args as { names?: string[] }
+    return args.names ?? keepAll
   } catch {
     return keepAll
   }

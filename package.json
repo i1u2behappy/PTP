@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.109.0",
+    "@google/genai": "^2.13.0",
     "@types/pg": "^8.20.0",
     "@types/uuid": "^10.0.0",
     "axios": "^1.18.1",
@@ -38,6 +39,8 @@
   },
   "allowScripts": {
     "sharp@0.34.5": true,
-    "sharp@0.35.2": true
+    "sharp@0.35.2": true,
+    "@google/genai@2.13.0": true,
+    "protobufjs@7.6.5": true
   }
 }

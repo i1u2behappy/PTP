@@ -16,8 +16,20 @@ import { spawn } from 'child_process'
  *  coreutils(usr/bin)가 Windows System32보다 앞에 와 있으면, Windows용 `timeout /t 1`이 아니라 문법이 다른
  *  GNU `timeout`이 잡혀 즉시 에러로 죽는다(실제로 겪은 문제 — 재시작 자체가 조용히 실패했다).
  *  PowerShell의 Start-Sleep/Stop-Process는 외부 실행파일이 아니라 내장 cmdlet이라 이 PATH 셰도잉에서
- *  자유롭다. */
+ *  자유롭다.
+ *
+ *  주의 3: 버튼을 짧은 시간에 두 번 누르는 등으로 이 POST가 중복 도착하면, 첫 번째 요청이 예약한
+ *  Stop-Process가 아직 실행되기 전(1초 딜레이 중)에 두 번째 요청도 "아직 살아있는" 이 프로세스에서
+ *  처리돼 또 하나의 재기동 체인을 예약해버릴 수 있다 — 그러면 새 인스턴스가 두 개 동시에 뜨면서 같은
+ *  .next 캐시에 동시에 쓰다 충돌하는 사고("Compaction failed" 등, 실제 다른 경로로 겪은 문제)로 이어질
+ *  수 있다. 모듈 스코프 플래그로 중복 요청을 막는다. */
+let restartInFlight = false
+
 export async function POST() {
+  if (restartInFlight) {
+    return NextResponse.json({ error: '이미 재시작이 진행 중입니다' }, { status: 409 })
+  }
+  restartInFlight = true
   const pid = process.pid
   const cwd = process.cwd()
   const script = `Start-Sleep -Seconds 1; Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; Set-Location -LiteralPath '${cwd}'; npm run dev:clean`

@@ -211,6 +211,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [previewLoading, setPreviewLoading] = useState(false)
 
   const [mode, setMode]           = useState<'single' | 'catalog'>('catalog')
+  const [aiMode, setAiMode]       = useState(false)
   const [scrapeMode, setScrapeMode] = useState<'full' | 'incremental'>('full')
   const [linkSel, setLinkSel]     = useState('')
   const [status, setStatus]       = useState<Status>('idle')
@@ -699,7 +700,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             categoryUrls: categoryUrls.length ? categoryUrls : undefined,
             nextPageSelector: nextPageSelector || undefined,
             loginId: loginId || undefined, loginPw: loginPw || undefined,
-            productLinkSelector: linkSel || undefined, siteId: selectedSite.id,
+            productLinkSelector: linkSel || undefined, siteId: selectedSite.id, aiMode,
           }),
         })
         if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`확인 실패: ${e.error || res.status}`); return }
@@ -709,7 +710,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         const res = await fetch('/api/scrape/preview', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: targetUrl, siteId: selectedSite.id, loginId: loginId || undefined, loginPw: loginPw || undefined }),
+          body: JSON.stringify({ url: targetUrl, siteId: selectedSite.id, loginId: loginId || undefined, loginPw: loginPw || undefined, aiMode }),
         })
         if (res.ok) {
           const d = await res.json() as { sourceUrl: string; product: PreviewProduct }
@@ -1065,6 +1066,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               </div>
             </div>
             <div>
+              <div className="text-sm font-semibold text-gray-700 mb-2">AI모드 스크래핑</div>
+              <button type="button" onClick={() => setAiMode(v => !v)} title="스크랩 미리보기 시점에 AI가 이 몰의 상품 페이지 구조를 분석해 컬럼별 추출 규칙을 자동으로 만들어 저장합니다. 이후 같은 몰의 다른 상품은 저장된 규칙으로 빠르게 재사용됩니다."
+                className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${aiMode ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-gray-600 border-gray-300 hover:border-violet-400'}`}>
+                {aiMode ? '🪄 AI모드 ON' : 'AI모드 OFF'}
+              </button>
+            </div>
+            <div>
               <div className="text-sm font-semibold text-gray-700 mb-2">재스크랩 방식</div>
               <div className="flex gap-3">
                 {([
@@ -1201,7 +1209,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             <div className="flex items-center gap-2 shrink-0">
               <button type="button" onClick={handlePreview} disabled={previewLoading || !canPreview}
                 className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-                {previewLoading ? '확인 중...' : '🔍 스크랩 미리보기'}
+                {previewLoading ? (aiMode ? 'AI 분석 중...' : '확인 중...') : '🔍 스크랩 미리보기'}
               </button>
               {loginStep === 'confirmed' && (
                 pickerActive ? (

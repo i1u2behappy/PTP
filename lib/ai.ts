@@ -179,6 +179,11 @@ const EXTRACTION_RULE_FIELDS = ['name', 'price', 'cost_price', 'shipping_fee', '
  * 기존 8개 고정 필드 외에, 사용자가 프롬프트로 새 컬럼(예: 소재/세탁방법)을 요청하면 그 필드명을 rules에
  * 자유롭게 추가해도 되도록 스키마를 열어둔다 — 결과는 ExtractedProduct.custom_fields로 저장된다.
  * ANTHROPIC_API_KEY가 없으면 조용히 빈 규칙을 반환한다(호출부에서 전체 흐름을 막지 않도록).
+ *
+ * userPrompt가 빈 문자열이면 "AI모드 스크래핑"(스크랩 미리보기 시점의 1회 자동 분석) 용도로 동작한다 —
+ * 사용자가 특정 필드를 지적한 게 아니라, 몰 페이지 구조를 처음부터 스스로 분석해 8개 필드 전체에 대해
+ * 규칙을 시도한다. 이렇게 한 번 만들어진 규칙은 sites.extraction_rules에 저장되어(runAutoAnalysis)
+ * 이후 같은 몰의 다른 상품에는 AI 재호출 없이 그대로 재사용된다.
  */
 export async function generateExtractionRules(
   mallName: string,
@@ -189,7 +194,7 @@ export async function generateExtractionRules(
    *  참고해 더 정확한 규칙을 만들 수 있다. lib/scraper.ts의 MallProfileSignals와 같은 모양. */
   mallProfile?: Record<string, unknown> | null,
 ): Promise<Record<string, ExtractionRule>> {
-  if (!process.env.ANTHROPIC_API_KEY || !userPrompt.trim()) return {}
+  if (!process.env.ANTHROPIC_API_KEY) return {}
 
   const ruleSchema = {
     type: 'object',
@@ -201,13 +206,20 @@ export async function generateExtractionRules(
   }
   const properties: Record<string, unknown> = {}
   EXTRACTION_RULE_FIELDS.forEach(f => { properties[f] = ruleSchema })
-  // additionalProperties만으로는 모델이 스키마에 안 보이는 새 필드를 스스로 잘 안 채우는 경향이 있어
-  // (실측 확인됨) — "'필드명' 필드 추가"로 시작하는 새 컬럼 요청은 그 필드명을 properties에 직접
-  // 명시적으로 추가해, 기존 8개 필드와 똑같이 확실하게 채워지도록 한다.
-  const newFieldMatch = userPrompt.match(/^'([^']+)' 필드 추가/)
-  if (newFieldMatch) properties[newFieldMatch[1]] = ruleSchema
 
-  const prompt = `몰 '${mallName}'의 상품 페이지를 스크랩하는데 값이 잘못 추출되고 있다.
+  const mallProfileBlock = mallProfile
+    ? `\n[이 몰에 대해 "몰 구조 파악"으로 미리 확인해둔 정보 — 참고만 하고, 실제 페이지 내용과 다르면 실제 페이지를 따른다]\n${JSON.stringify(mallProfile)}\n`
+    : ''
+
+  let prompt: string
+  if (userPrompt.trim()) {
+    // additionalProperties만으로는 모델이 스키마에 안 보이는 새 필드를 스스로 잘 안 채우는 경향이 있어
+    // (실측 확인됨) — "'필드명' 필드 추가"로 시작하는 새 컬럼 요청은 그 필드명을 properties에 직접
+    // 명시적으로 추가해, 기존 8개 필드와 똑같이 확실하게 채워지도록 한다.
+    const newFieldMatch = userPrompt.match(/^'([^']+)' 필드 추가/)
+    if (newFieldMatch) properties[newFieldMatch[1]] = ruleSchema
+
+    prompt = `몰 '${mallName}'의 상품 페이지를 스크랩하는데 값이 잘못 추출되고 있다.
 
 [사용자 지적 사항]
 ${userPrompt}
@@ -217,7 +229,7 @@ ${JSON.stringify(currentValues)}
 
 [실제 상품 페이지 내용 (일부)]
 ${pageText.slice(0, 30_000)}
-${mallProfile ? `\n[이 몰에 대해 "몰 구조 파악"으로 미리 확인해둔 정보 — 참고만 하고, 실제 페이지 내용과 다르면 실제 페이지를 따른다]\n${JSON.stringify(mallProfile)}\n` : ''}
+${mallProfileBlock}
 위 페이지에서 사용자가 지적한 필드(들)의 올바른 값을 찾을 수 있는 방법을 알아내라. 페이지에 라벨-값
 쌍(예: <dt>도매가격</dt><dd>12,000원</dd> 같은 구조나 표)이 보이면 그 라벨 텍스트를 정규식으로 만들고
 (type='label'), 그게 아니라 특정 요소를 CSS 셀렉터로 바로 집어야 하면 type='selector'로 답하라. 사용자가
@@ -226,6 +238,19 @@ ${mallProfile ? `\n[이 몰에 대해 "몰 구조 파악"으로 미리 확인해
 사용자 지적 사항에 작은따옴표(')로 감싼 필드명이 있으면(예: '소재' 필드 추가) 그 값을 정확히 그 이름
 그대로 rules의 key로 써라 — 기존 8개 필드(name/price/cost_price/shipping_fee/category/brand/manufacturer/
 origin)에 없는 완전히 새로운 종류의 정보라도 상관없다. 그 외의 경우 새 필드명을 임의로 지어내지 마라.`
+  } else {
+    prompt = `몰 '${mallName}'의 상품 페이지 구조를 처음 분석한다("AI모드 스크래핑"). 사용자가 지적한
+특정 필드는 없다 — 아래 페이지 내용을 보고, 8개 필드(name/price/cost_price/shipping_fee/category/brand/
+manufacturer/origin) 각각을 이 몰에서 어떻게 추출할 수 있는지 스스로 판단해 규칙을 만들어라.
+
+[실제 상품 페이지 내용 (일부)]
+${pageText.slice(0, 30_000)}
+${mallProfileBlock}
+각 필드마다 페이지에 라벨-값 쌍(예: <dt>도매가격</dt><dd>12,000원</dd> 같은 구조나 표)이 보이면 그 라벨
+텍스트를 정규식으로 만들고(type='label'), 그게 아니라 특정 요소를 CSS 셀렉터로 바로 집어야 하면
+type='selector'로 답하라. 페이지에서 값이 안 보이거나 확신할 수 없는 필드는 절대 넣지 마라 — 아는 것만
+답한다.`
+  }
 
   try {
     const response = await getClient().messages.create({

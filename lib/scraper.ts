@@ -15,6 +15,7 @@ import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMa
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
+import { runAutoAnalysis } from './scrape/adjustment'
 import pool from './db'
 
 const execFileAsync = promisify(execFile)
@@ -114,6 +115,9 @@ export interface ScrapeOptions {
   thumbnailSelector?: string
   /** "스크랩 조정" 기능이 AI로 학습해 저장한 그 몰 전용 추출 규칙 (sites.extraction_rules) */
   extractionRules?: Record<string, ExtractionRule>
+  /** "AI모드 스크래핑" — 켜져 있으면(미리보기 시점) 이 페이지를 AI로 분석해 이 몰의 추출 규칙을 새로
+   *  만들어 저장하고, 그 규칙으로 다시 추출한 값을 돌려준다. siteId 없이는 저장할 곳이 없어 무시된다. */
+  aiMode?: boolean
 }
 
 export function profileDir(siteId: number) {
@@ -274,7 +278,7 @@ export async function closeLoginWindow(siteId: number) {
 
 // 어디서든 Playwright 번들 Chromium이 아니라 실제 설치된 크롬을 띄운다 — 몰이 자동화 브라우저를
 // 감지해 차단/도전과제를 거는 경우(예: manual-login-required 몰의 봇 탐지) 실제 크롬 쪽이 더 정상적으로 통과한다.
-async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, context: BrowserContext) => Promise<T>): Promise<T> {
+export async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, context: BrowserContext) => Promise<T>): Promise<T> {
   if (opts.siteId) {
     const openContext = openSessions.get(opts.siteId)
     if (openContext) {
@@ -358,6 +362,32 @@ async function tryAiFallback(page: Page, product: ExtractedProduct): Promise<Ext
   const ai = await extractProductFieldsWithAI(text)
   if (ai.price == null) return null
   return { ...product, name: ai.name || product.name, price: ai.price, sale_price: ai.price }
+}
+
+/**
+ * "AI모드 스크래핑" — 지금 열려있는 이 상품 페이지를 AI로 분석해 이 몰의 추출 규칙(8개 필드: 이름/가격/
+ * 원가/배송비/카테고리/브랜드/제조사/원산지)을 새로 만들어 sites.extraction_rules에 저장하고, 그 규칙으로
+ * 다시 추출한 값을 돌려준다. 몰은 자주 안 바뀌니 매 상품마다 AI를 부르지 않고 이 미리보기 시점에만
+ * 호출해 규칙을 재사용 가능하게 만드는 게 목적이다(runAutoAnalysis 참고).
+ * AI 호출/분석 실패는 조용히 삼켜 null을 돌려준다 — 이미 규칙 기반으로 뽑은 결과가 있으니 미리보기
+ * 자체가 막히면 안 된다.
+ */
+async function applyAiModeRules(
+  page: Page, siteId: number, sourceUrl: string, opts: ScrapeOptions,
+): Promise<{ product: ExtractedProduct; rules: Record<string, ExtractionRule> } | null> {
+  try {
+    const pageText = await page.evaluate(() => document.body.innerText).catch(() => '')
+    if (!pageText) return null
+    const { merged } = await runAutoAnalysis(siteId, pageText)
+    const product = await extractProductRuleBased(page, sourceUrl, selectorOverrides(opts), merged)
+    const domOptions = await extractOptionsFromDom(page)
+    if (domOptions.options.length) product.options = domOptions.options
+    if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
+    await applyStockByOption(page, product)
+    return { product, rules: merged }
+  } catch {
+    return null
+  }
 }
 
 export interface ScrapeResult {
@@ -1121,7 +1151,7 @@ function injectElementPicker(seed?: {
         : ''
       const valueLine = rule
         ? `<div style="font-size:12px;color:#0d9488;font-weight:600;margin:3px 0;word-break:break-all">${esc(lastValueLocal[key] ?? currentValue(key)) || '(값 없음)'}</div>`
-        : `<div style="font-size:10px;color:#bbb;margin:3px 0">미지정${currentValue(key) ? ` — 현재 스크랩 값: ${esc(currentValue(key))}` : ''}</div>`
+        : `<div style="font-size:10px;color:#bbb;margin:3px 0">미지정</div>`
       const delBtn = rule
         ? `<button class="ptp-row-del" data-field="${esc(key)}" title="삭제" style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">✕</button>`
         : ''
@@ -1466,6 +1496,10 @@ export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeRe
         // 높다 (빠른 연속 요청을 감지해 안내 페이지로 대신 응답하는 몰이 있음) — 그대로 반환하지 않고 재시도한다.
         if (product.price == null && !product.thumbnail_urls.length) {
           throw new Error('가격/이미지를 모두 찾지 못함 (차단 또는 일시 오류로 추정)')
+        }
+        if (opts.aiMode && opts.siteId) {
+          const ai = await applyAiModeRules(page, opts.siteId, sourceUrl, opts)
+          if (ai) return { sourceUrl, product: ai.product }
         }
         return { sourceUrl, product }
       } catch (err) {
@@ -1915,6 +1949,13 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
     await applyStockByOption(page, product)
     applyCategoryOverride(product, categoryByUrl.get(firstUrl), opts.extractionRules)
 
+    if (opts.aiMode && opts.siteId) {
+      const ai = await applyAiModeRules(page, opts.siteId, firstUrl, opts)
+      if (ai) {
+        applyCategoryOverride(ai.product, categoryByUrl.get(firstUrl), ai.rules)
+        return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product: ai.product }, items }
+      }
+    }
     return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product }, items }
   })
 }

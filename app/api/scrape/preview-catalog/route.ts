@@ -7,7 +7,7 @@ import type { ExtractionRule } from '@/lib/ai'
 export async function POST(req: NextRequest) {
   const body = await req.json() as {
     url?: string; categoryUrls?: string[]; nextPageSelector?: string; maxPages?: number
-    productLinkSelector?: string; loginId?: string; loginPw?: string; siteId?: number
+    productLinkSelector?: string; loginId?: string; loginPw?: string; siteId?: number; aiMode?: boolean
   }
 
   const resolvedUrl = body.url || body.categoryUrls?.[0] || (body.siteId ? getOpenPageUrl(body.siteId) : null)

@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { Geist } from 'next/font/google'
 import { ChromeWarning } from '../components/shell/ChromeWarning'
+import { DbHealthBanner } from '../components/shell/DbHealthBanner'
 import './globals.css'
 
 const geist = Geist({ variable: '--font-geist', subsets: ['latin'] })
@@ -18,6 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css" />
       </head>
       <body className="min-h-full">
+        <DbHealthBanner />
         <ChromeWarning />
         {children}
       </body>

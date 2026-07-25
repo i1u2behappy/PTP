@@ -21,6 +21,7 @@ interface RawExtra {
 
 interface StagingRow {
   id: number
+  session_id: number
   mall_product_code: string
   mall_category: string | null
   name_original: string
@@ -105,6 +106,7 @@ function formatOptionCombinations(combos: string[][] | undefined): string {
 const COLUMNS_BEFORE_OPTIONS: ColumnDef[] = [
   { key: 'created_at', label: '스크래핑 일시', getValue: p => p.created_at },
   { key: 'source_url', label: 'URL', getValue: p => p.source_url },
+  { key: 'file', label: '파일', getValue: () => '' },
   { key: 'thumbnail_img', label: '이미지', getValue: p => p.thumbnail_urls?.length ?? 0 },
   { key: 'mall_product_code', label: '상품코드', getValue: p => p.mall_product_code },
   { key: 'name_original', label: '상품명', getValue: p => p.name_original },
@@ -154,16 +156,16 @@ const DEFAULT_COL_WIDTH: Record<string, number> = {
   manufacturer: 90, origin: 90, mall_category: 150, description: 180,
   thumbnail_names: 260, detail_image_urls: 260, stock_status: 90, stock_qty: 90, stock_by_option: 200,
   summary_info: 160, english_name: 130, detail_text: 220, extra_info: 220,
-  source_url: 100, missing: 150, migration_status: 120,
+  source_url: 100, file: 60, missing: 150, migration_status: 120,
 }
 const MIN_COL_WIDTH = 50
 function widthFor(key: string): number {
   return DEFAULT_COL_WIDTH[key] ?? (key.startsWith('option_') ? 180 : key.startsWith('custom_') ? 160 : 120)
 }
 
-// v8: '공급가' 컬럼이 sale_price -> cost_price로 키가 바뀌면서, 옛 버전 그대로면 새 키가 목록 맨 뒤로
-// 밀려나 위치가 바뀌어 보인다 — 버전을 올려 기본 순서(소비자판가 바로 옆)로 한 번 리셋한다.
-const COL_ORDER_KEY = 'stagingGrid.colOrder.v8'
+// v9: 새로 추가한 '파일' 컬럼이 저장된 옛 순서에서는 그냥 맨 뒤로 붙어버려 URL 옆이라는 의도한 위치가
+// 아니게 된다 — 버전을 올려 기본 순서(URL 바로 옆)로 한 번 리셋한다.
+const COL_ORDER_KEY = 'stagingGrid.colOrder.v9'
 const DEFAULT_COL_ORDER = [...COLUMNS_BEFORE_OPTIONS, ...COLUMNS_AFTER_OPTIONS].map(c => c.key)
 
 function loadColOrder(): string[] {
@@ -195,6 +197,10 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
   const [merging, setMerging] = useState(false)
   const [includeMigrated, setIncludeMigrated] = useState(false)
   const [issuesOnly, setIssuesOnly] = useState(false)
+  // 선택한 상품이 몇 개 안 되는데 그리드 전체(수십~수백 건)가 화면을 다 차지해, 그 아래(비교 카드 등)가
+  // 안 보인다는 요청 — 켜면 선택된 행만 남기고 나머지는 숨긴다. 끄면 즉시 원래대로 전체가 다시 보인다.
+  // 선택이 전부 풀리는 지점(선택 해제/선택 무시/확정)마다 같이 꺼서, 그리드가 텅 빈 채 남지 않게 한다.
+  const [showOnlySelected, setShowOnlySelected] = useState(false)
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [sortKeys, setSortKeys] = useState<SortKey[]>([])
   const [showFilters, setShowFilters] = useState(false)
@@ -312,7 +318,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
   useEffect(() => { loadItems() }, [loadItems, refreshSignals.products, refreshSignals.staging])
 
   /* eslint-disable react-hooks/set-state-in-effect */
-  useEffect(() => { setSelected(new Set()) }, [scopeQuery])
+  useEffect(() => { setSelected(new Set()); setShowOnlySelected(false) }, [scopeQuery])
   // "스크랩 조정" 모달은 백드롭이 없어 열어둔 채로 뒤 그리드에서 다른 세션/몰을 고를 수 있다 — 그대로 두면
   // siteId가 바뀌어도 모달은 이전 몰의 메시지/학습된 규칙/미리보기를 계속 보여줘 헷갈린다. 범위가 바뀌면
   // 모달을 닫고 상태를 비워, 다시 열 때(openAdjust) 새 몰 기준으로 시작하게 한다.
@@ -331,8 +337,9 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     if (!f) return true
     return String(col.getValue(p) ?? '').toLowerCase().includes(f.toLowerCase())
   }))
+  const selectionFiltered = showOnlySelected ? filteredItems.filter(p => selected.has(p.id)) : filteredItems
   const visibleItems = sortKeys.length
-    ? [...filteredItems].sort((a, b) => {
+    ? [...selectionFiltered].sort((a, b) => {
         for (const { key, dir } of sortKeys) {
           const col = columns.find(c => c.key === key)
           if (!col) continue
@@ -341,7 +348,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
         }
         return 0
       })
-    : filteredItems
+    : selectionFiltered
 
   function handleSort(key: string, e: { shiftKey: boolean }) {
     setSortKeys(prev => {
@@ -369,7 +376,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
 
   // "스크랩 조정" 모달에서 실제 몰 페이지와 컬럼별로 비교할 목록 — 그리드에 실제 보이는 데이터 컬럼을
   // 그대로 재사용한다(아이콘/상태 등 데이터가 아닌 컬럼만 제외). 커스텀 컬럼이 추가되면 자동으로 같이 뜬다.
-  const compareColumns = orderedColumns.filter(c => !['thumbnail_img', 'created_at', 'missing', 'migration_status'].includes(c.key))
+  const compareColumns = orderedColumns.filter(c => !['thumbnail_img', 'file', 'created_at', 'missing', 'migration_status'].includes(c.key))
   function formatCompareValue(col: ColumnDef, p: StagingRow): string {
     const v = col.getValue(p)
     if (v == null || v === '') return '-'
@@ -390,7 +397,9 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
   }
   const selectableItems = visibleItems.filter(isSelectable)
   function selectAll() {
-    setSelected(selected.size === selectableItems.length ? new Set() : new Set(selectableItems.map(p => p.id)))
+    const turningOff = selected.size === selectableItems.length
+    setSelected(turningOff ? new Set() : new Set(selectableItems.map(p => p.id)))
+    if (turningOff) setShowOnlySelected(false)
   }
 
   function openDetail(p: StagingRow) {
@@ -402,20 +411,20 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     })
   }
 
-  /** 그냥 새 탭으로 열면 로그인 쿠키가 없어 로그아웃 상태로 보인다 — 이 몰 전용 로그인 창(프로필
-   *  디렉터리, 예전 로그인 쿠키가 남아있음)에 열어 로그인된 상태로 확인할 수 있게 한다. siteId를 모르는
-   *  호출부(스크랩 조정 기능 없이 이 그리드를 쓰는 화면)에서는 기존처럼 새 탭으로 폴백한다. */
-  async function handleOpenSourceUrl(url: string) {
-    if (siteId) {
-      try {
-        const res = await fetch('/api/scrape/open-url', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ siteId, url }),
-        })
-        if (res.ok) return
-      } catch { /* 폴백으로 진행 */ }
-    }
+  function handleOpenSourceUrl(url: string) {
     window.open(url, '_blank', 'noreferrer')
+  }
+
+  /** 그 상품이 속한 세션의 이미지 저장 폴더(대표/상세이미지 상위)를 탐색기로 연다. */
+  async function handleOpenImageFolder(rowSessionId: number) {
+    const res = await fetch('/api/scrape/open-image-folder', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: rowSessionId }),
+    })
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}))
+      alert(d.error || '폴더를 열지 못했습니다')
+    }
   }
 
   async function handleMerge() {
@@ -435,6 +444,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
         alert(`${d.noClient.length}개는 몰에 거래처가 연결되어 있지 않아 상품마스터로 반영되지 않았습니다. Mall 상세관리에서 거래처를 먼저 지정해주세요.`)
       }
       setSelected(new Set())
+      setShowOnlySelected(false)
       bumpRefresh('products')
       bumpRefresh('staging')
       loadItems()
@@ -449,6 +459,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     try {
       await Promise.all([...selected].map(id => fetch(`/api/scrape-staging/${id}`, { method: 'DELETE' })))
       setSelected(new Set())
+      setShowOnlySelected(false)
       bumpRefresh('staging')
       loadItems()
     } finally {
@@ -625,20 +636,24 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     <>
     <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-0 flex flex-col">
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 shrink-0 flex-wrap gap-2">
-        <label className="flex items-center gap-3 text-xs text-gray-600 cursor-pointer">
-          <span className="flex items-center gap-2">
+        <div className="flex items-center gap-3 text-xs text-gray-600">
+          <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={selected.size === selectableItems.length && selectableItems.length > 0} onChange={selectAll} />
-            전체 선택 ({selectableItems.length}개 선택 가능{(hasFilters || sortKeys.length > 0 || issuesOnly) && ` · 전체 ${items.length}개 중 ${visibleItems.length}개 표시`})
-          </span>
-          <span className="flex items-center gap-1.5 border-l border-gray-200 pl-3">
+            전체 선택 ({selectableItems.length}개 선택 가능{(hasFilters || sortKeys.length > 0 || issuesOnly || showOnlySelected) && ` · 전체 ${items.length}개 중 ${visibleItems.length}개 표시`})
+          </label>
+          <label className="flex items-center gap-1.5 border-l border-gray-200 pl-3 cursor-pointer">
             <input type="checkbox" checked={issuesOnly} onChange={e => setIssuesOnly(e.target.checked)} />
             누락된 데이터만 {totalIssues > 0 && `(${totalIssues}개)`}
-          </span>
-          <span className="flex items-center gap-1.5 border-l border-gray-200 pl-3">
+          </label>
+          <label className="flex items-center gap-1.5 border-l border-gray-200 pl-3 cursor-pointer">
             <input type="checkbox" checked={includeMigrated} onChange={e => setIncludeMigrated(e.target.checked)} />
             이미 가공된 상품도 포함
-          </span>
-        </label>
+          </label>
+          <label className="flex items-center gap-1.5 border-l border-gray-200 pl-3 cursor-pointer">
+            <input type="checkbox" checked={showOnlySelected} disabled={!selected.size} onChange={e => setShowOnlySelected(e.target.checked)} />
+            선택한 것만 보기{selected.size > 0 && ` (${selected.size}개)`}
+          </label>
+        </div>
         <div className="flex gap-2">
           <button onClick={() => setShowFilters(v => !v)}
             className={`px-4 py-1.5 text-xs font-semibold rounded-full transition-colors ${showFilters ? 'bg-teal-500 text-white hover:bg-teal-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
@@ -792,6 +807,10 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
                   node: p.source_url
                     ? <button type="button" onClick={() => handleOpenSourceUrl(p.source_url!)} className="text-teal-500 hover:underline">열기 ↗</button>
                     : '-',
+                  className: 'px-2 py-2 text-xs truncate', stop: true,
+                },
+                file: {
+                  node: <button type="button" onClick={() => handleOpenImageFolder(p.session_id)} className="text-teal-500 hover:underline">열기 ↗</button>,
                   className: 'px-2 py-2 text-xs truncate', stop: true,
                 },
                 missing: {

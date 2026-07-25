@@ -243,13 +243,21 @@ origin)에 없는 완전히 새로운 종류의 정보라도 상관없다. 그 �
 특정 필드는 없다 — 아래 페이지 내용을 보고, 8개 필드(name/price/cost_price/shipping_fee/category/brand/
 manufacturer/origin) 각각을 이 몰에서 어떻게 추출할 수 있는지 스스로 판단해 규칙을 만들어라.
 
+판단 기준은 실제 소비자가 브라우저로 이 페이지를 볼 때 눈에 보이는 상품 데이터여야 한다 — 아래는 모두
+상품 데이터가 아니니 절대 값으로 쓰지 마라: 사이트 로고/메뉴/푸터, 검색창·검색범위 선택, 카테고리
+필터/정렬 드롭다운, 로그인·장바구니·회원가입 링크, "HOME | 회사소개 | 이용약관" 같은 사이트 전체 내비게이션.
+페이지 <title>은 사이트명이 섞여있는 경우가 많아 name에는 되도록 쓰지 말고, 페이지 안의 실제 상품명
+표시(예: "품명" 라벨이나 상품 제목 영역)를 우선하라.
+
 [실제 상품 페이지 내용 (일부)]
 ${pageText.slice(0, 30_000)}
 ${mallProfileBlock}
 각 필드마다 페이지에 라벨-값 쌍(예: <dt>도매가격</dt><dd>12,000원</dd> 같은 구조나 표)이 보이면 그 라벨
 텍스트를 정규식으로 만들고(type='label'), 그게 아니라 특정 요소를 CSS 셀렉터로 바로 집어야 하면
-type='selector'로 답하라. 페이지에서 값이 안 보이거나 확신할 수 없는 필드는 절대 넣지 마라 — 아는 것만
-답한다.`
+type='selector'로 답하라. 라벨의 값에 다른 정보가 섞여 있어(예: "배송비" 금액이 배송 정책 설명 문장
+안에 파묻혀 있는 경우) 규칙만으로 깨끗한 값을 뽑기 어렵다고 판단되면, 억지로 만들지 말고 그 필드는
+비워둬라 — 틀린 값보다 빈 값이 낫다. 페이지에서 값이 안 보이거나 확신할 수 없는 필드도 마찬가지로
+절대 넣지 마라 — 아는 것만 답한다.`
   }
 
   try {
@@ -279,6 +287,58 @@ type='selector'로 답하라. 페이지에서 값이 안 보이거나 확신할 
     // 실제 실패 사유를 보여주게 한다.
     const message = e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : String(e)
     throw new Error(`AI 호출 실패: ${message}`)
+  }
+}
+
+export interface OptionCandidate { name: string; values: string[] }
+
+/**
+ * "AI모드 스크래핑" 전용 — DOM에서 감지된 후보 옵션 그룹(select/스와치 등)이 실제 소비자가 구매 시 고르는
+ * 진짜 상품 옵션(색상/사이즈 등)인지, 아니면 검색범위·카테고리 필터·정렬 방식 같은 상품과 무관한 사이트
+ * UI 위젯인지 AI가 페이지 맥락을 보고 판별한다(실제로 도매의신에서 "검색 범위"/"카테고리 필터" select가
+ * 상품 옵션으로 잘못 잡히는 것을 확인 — extractOptionsFromDom은 알려진 플랫폼(카페24 등)의 컨테이너
+ * 셀렉터가 없으면 document 전체에서 select를 찾아 이런 오탐이 생긴다).
+ * 판단 실패(API 없음/오류)는 "지우는" 동작이라 보수적으로 후보 전체를 그대로 유지한다 — AI 문제로
+ * 진짜 옵션까지 사라지는 것보다, 기존처럼 오탐이 섞여 있는 채로 두는 쪽이 낫다.
+ */
+export async function filterRealProductOptions(
+  mallName: string, candidates: OptionCandidate[], pageText: string,
+): Promise<string[]> {
+  const keepAll = candidates.map(c => c.name)
+  if (!candidates.length || !process.env.ANTHROPIC_API_KEY) return keepAll
+
+  const prompt = `몰 '${mallName}'의 상품 페이지에서 아래 후보 목록(select/스와치 등)을 찾았다. 이 중 실제
+소비자가 이 상품을 "구매할 때 고르는" 옵션(색상/사이즈/수량 단위 등)만 골라라. 검색창의 검색범위,
+카테고리 필터, 정렬 방식처럼 이 상품과 무관한 사이트 UI는 절대 포함하지 마라. 확실하지 않으면 빼라.
+
+[후보 목록]
+${candidates.map(c => `- ${c.name}: ${c.values.slice(0, 8).join(', ')}${c.values.length > 8 ? ' 등' : ''}`).join('\n')}
+
+[실제 페이지 내용 (일부)]
+${pageText.slice(0, 20_000)}`
+
+  try {
+    const response = await getClient().messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 512,
+      tools: [{
+        name: 'set_real_options',
+        description: '후보 중 실제 구매 옵션인 것의 name만 골라 반환한다. 상품과 무관한 UI는 제외한다.',
+        input_schema: {
+          type: 'object',
+          properties: { names: { type: 'array', items: { type: 'string' }, description: '진짜 상품 옵션인 후보의 name 값만' } },
+          required: ['names'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'set_real_options' },
+      messages: [{ role: 'user', content: prompt }],
+    })
+    const toolUse = response.content.find(b => b.type === 'tool_use')
+    if (!toolUse || toolUse.type !== 'tool_use') return keepAll
+    const input = toolUse.input as { names?: string[] }
+    return input.names ?? keepAll
+  } catch {
+    return keepAll
   }
 }
 

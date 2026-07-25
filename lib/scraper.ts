@@ -11,7 +11,7 @@ import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import { chromium, type BrowserContext, type Page } from 'playwright'
 import type { ExtractedProduct } from './ai'
-import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, type MallStructureReport } from './ai'
+import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, type MallStructureReport, type OptionCandidate } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
@@ -369,20 +369,41 @@ async function tryAiFallback(page: Page, product: ExtractedProduct): Promise<Ext
  * 원가/배송비/카테고리/브랜드/제조사/원산지)을 새로 만들어 sites.extraction_rules에 저장하고, 그 규칙으로
  * 다시 추출한 값을 돌려준다. 몰은 자주 안 바뀌니 매 상품마다 AI를 부르지 않고 이 미리보기 시점에만
  * 호출해 규칙을 재사용 가능하게 만드는 게 목적이다(runAutoAnalysis 참고).
+ *
+ * domOptions는 호출부가 이미 스캔해둔 결과를 그대로 받는다 — select 옵션 스캔은 실제로 값을 선택해보는
+ * 상태 변경 동작이라(scanSelectOptions), 여기서 다시 스캔하면 같은 페이지에 두 번 개입해 결과가 달라질
+ * 위험이 있다. 대신 AI모드에서는 그 결과가 진짜 구매 옵션인지 AI로 한 번 더 검증한다 — 실제로 도매의신
+ * 같은(카페24 등 알려진 플랫폼이 아닌) 몰은 옵션 컨테이너 셀렉터가 없어 document 전체에서 select를
+ * 찾다가 "검색범위"/카테고리 필터 같은 사이트 UI를 상품 옵션으로 잘못 잡는 것을 실제로 확인했다.
+ *
  * AI 호출/분석 실패는 조용히 삼켜 null을 돌려준다 — 이미 규칙 기반으로 뽑은 결과가 있으니 미리보기
  * 자체가 막히면 안 된다.
  */
 async function applyAiModeRules(
-  page: Page, siteId: number, sourceUrl: string, opts: ScrapeOptions,
+  page: Page, siteId: number, sourceUrl: string, opts: ScrapeOptions, domOptions: DomOptionsResult,
 ): Promise<{ product: ExtractedProduct; rules: Record<string, ExtractionRule> } | null> {
   try {
     const pageText = await page.evaluate(() => document.body.innerText).catch(() => '')
     if (!pageText) return null
     const { merged } = await runAutoAnalysis(siteId, pageText)
     const product = await extractProductRuleBased(page, sourceUrl, selectorOverrides(opts), merged)
-    const domOptions = await extractOptionsFromDom(page)
-    if (domOptions.options.length) product.options = domOptions.options
-    if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
+
+    let options = domOptions.options
+    let combinations = domOptions.combinations
+    if (options.length) {
+      const { name: mallName } = await siteInfo(siteId)
+      const candidates: OptionCandidate[] = options.map(o => ({ name: o.name, values: o.values }))
+      const realNames = await filterRealProductOptions(mallName, candidates, pageText)
+      if (realNames.length < options.length) {
+        options = options.filter(o => realNames.includes(o.name))
+        // 제외된 옵션이 있으면 그걸로 만들어진 캐스케이딩 조합도 더는 신뢰할 수 없다 — 조합 없이 옵션
+        // 목록만 남긴다(신우처럼 진짜 캐스케이딩 몰은 애초에 필터링될 옵션이 없어 이 분기를 안 탄다).
+        combinations = []
+      }
+    }
+    if (options.length) product.options = options
+    if (combinations.length) product.option_combinations = combinations
+
     await applyStockByOption(page, product)
     return { product, rules: merged }
   } catch {
@@ -1498,7 +1519,7 @@ export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeRe
           throw new Error('가격/이미지를 모두 찾지 못함 (차단 또는 일시 오류로 추정)')
         }
         if (opts.aiMode && opts.siteId) {
-          const ai = await applyAiModeRules(page, opts.siteId, sourceUrl, opts)
+          const ai = await applyAiModeRules(page, opts.siteId, sourceUrl, opts, domOptions)
           if (ai) return { sourceUrl, product: ai.product }
         }
         return { sourceUrl, product }
@@ -1950,7 +1971,7 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
     applyCategoryOverride(product, categoryByUrl.get(firstUrl), opts.extractionRules)
 
     if (opts.aiMode && opts.siteId) {
-      const ai = await applyAiModeRules(page, opts.siteId, firstUrl, opts)
+      const ai = await applyAiModeRules(page, opts.siteId, firstUrl, opts, domOptions)
       if (ai) {
         applyCategoryOverride(ai.product, categoryByUrl.get(firstUrl), ai.rules)
         return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product: ai.product }, items }

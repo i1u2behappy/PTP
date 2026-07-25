@@ -211,7 +211,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [previewLoading, setPreviewLoading] = useState(false)
 
   const [mode, setMode]           = useState<'single' | 'catalog'>('catalog')
-  const [aiMode, setAiMode]       = useState(false)
+  const [aiMode, setAiMode]       = useState(true)
   const [scrapeMode, setScrapeMode] = useState<'full' | 'incremental'>('full')
   const [linkSel, setLinkSel]     = useState('')
   const [status, setStatus]       = useState<Status>('idle')
@@ -1066,13 +1066,6 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               </div>
             </div>
             <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">AI모드 스크래핑</div>
-              <button type="button" onClick={() => setAiMode(v => !v)} title="스크랩 미리보기 시점에 AI가 이 몰의 상품 페이지 구조를 분석해 컬럼별 추출 규칙을 자동으로 만들어 저장합니다. 이후 같은 몰의 다른 상품은 저장된 규칙으로 빠르게 재사용됩니다."
-                className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${aiMode ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-gray-600 border-gray-300 hover:border-violet-400'}`}>
-                {aiMode ? '🪄 AI모드 ON' : 'AI모드 OFF'}
-              </button>
-            </div>
-            <div>
               <div className="text-sm font-semibold text-gray-700 mb-2">재스크랩 방식</div>
               <div className="flex gap-3">
                 {([
@@ -1207,6 +1200,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
             <label className="block text-sm font-semibold text-gray-700">상품 페이지 미리보기</label>
             <div className="flex items-center gap-2 shrink-0">
+              <button type="button" onClick={() => setAiMode(v => !v)} aria-pressed={aiMode}
+                title="켜두면 스크랩 미리보기 시점에 AI가 이 몰의 상품 페이지 구조를 분석해 컬럼별 추출 규칙을 자동으로 만들어 저장합니다. 미리보기로 결과를 확인하고, 부족한 부분은 '스크랩 대상 직접지정'으로 보완하세요."
+                className={`px-3 py-2 rounded-full text-sm font-medium border transition-colors ${aiMode ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-gray-500 border-gray-300 hover:border-violet-400'}`}>
+                🪄 AI모드
+              </button>
               <button type="button" onClick={handlePreview} disabled={previewLoading || !canPreview}
                 className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
                 {previewLoading ? (aiMode ? 'AI 분석 중...' : '확인 중...') : '🔍 스크랩 미리보기'}

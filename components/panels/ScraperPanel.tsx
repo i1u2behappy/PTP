@@ -1203,7 +1203,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               <button type="button" onClick={() => setAiMode(v => !v)} aria-pressed={aiMode}
                 title="켜두면 스크랩 미리보기 시점에 AI가 이 몰의 상품 페이지 구조를 분석해 컬럼별 추출 규칙을 자동으로 만들어 저장합니다. 미리보기로 결과를 확인하고, 부족한 부분은 '스크랩 대상 직접지정'으로 보완하세요."
                 className={`px-3 py-2 rounded-full text-sm font-medium border transition-colors ${aiMode ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-gray-500 border-gray-300 hover:border-violet-400'}`}>
-                🪄 AI모드
+                {aiMode ? '☑ 🪄 AI모드 켜짐' : '☐ AI모드 꺼짐'}
               </button>
               <button type="button" onClick={handlePreview} disabled={previewLoading || !canPreview}
                 className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">

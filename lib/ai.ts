@@ -12,7 +12,9 @@ function getClient() {
 function getGeminiClient() {
   return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
 }
-const GEMINI_MODEL = 'gemini-2.5-flash'
+// 'gemini-2.5-flash'는 신규 사용자에게 더는 제공되지 않아(실제 API 호출로 확인, 2026-07-26)
+// 항상 최신 flash 모델을 가리키는 별칭을 쓴다 — 특정 버전이 나중에 또 폐기돼도 코드를 안 고쳐도 된다.
+const GEMINI_MODEL = 'gemini-flash-latest'
 
 export interface ExtractedProduct {
   name: string

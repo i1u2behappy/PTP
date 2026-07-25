@@ -29,35 +29,45 @@ Anthropic API 크레딧을 충전하지 않기로 결정 — "다른 AI를 붙�
   JSON-schema 문자열(`type:'object'`) 대신 Gemini 전용 `Type` enum(`Type.OBJECT`/`Type.STRING`/...)으로
   작성해야 한다(SDK 공식 샘플로 확인 — README의 `parametersJsonSchema` 예시와 실제 코드 샘플의 `parameters`+
   `Type` enum 방식이 달라서, 실제 동작하는 쪽인 후자를 채택).
-- `.env.local`에 `GEMINI_API_KEY` 추가(현재는 보류 상태라 빈 값 — 아래 "알려진 문제" 참고).
+- `.env.local`에 `GEMINI_API_KEY` 추가.
+- 모델명은 `gemini-flash-latest`(별칭) — `gemini-2.5-flash`는 신규 사용자에게 더는 제공 안 됨을 실제
+  API 호출로 확인하고 교체(`404 This model ... is no longer available to new users`).
 
-## 실사용 중 발견한 진짜 문제 — Windows 환경변수 우선순위
-`.env.local`에 뭘 넣어도 계속 같은 값으로 덮어써지는 현상을 겪음 — 원인은 **이 PC에 이미 Windows 사용자
-환경변수로 `GEMINI_API_KEY`가 설정되어 있었고(값: `AIzaSy-AIzaSyCFVKOeVwAMFbz862gfymibCNZKC4b4I4k`, 앞에
-`AIzaSy-`가 잘못 붙은 47자 손상값)**, Node.js/Next.js의 dotenv류 로딩은 이미 존재하는 OS 프로세스
-환경변수를 `.env.local`보다 우선시해서 덮어쓰지 않기 때문. `[System.Environment]::SetEnvironmentVariable(
-"GEMINI_API_KEY", "<값>", "User")`로 고쳤다(사용자 확인 후 진행 — 시스템 설정 변경이라 먼저 물어봄).
-**교훈**: 이 프로젝트에서 API 키 관련 env 문제가 재발하면 `.env.local`만 보지 말고
-`[System.Environment]::GetEnvironmentVariable("<KEY>", "User")`로 OS 레벨 값도 반드시 확인할 것.
+## 최종 상태: 정상 동작 확인 (2026-07-26)
+`generateAutoExtractionRules`/`filterRealProductOptions` 둘 다 실제 키로 end-to-end 검증 완료. 도매의신
+실제 원문으로 테스트한 결과, `name`이 `<title>`이 아니라 "품명" 라벨을 정확히 골랐고, `price`/`manufacturer`/
+`origin`도 정확한 라벨 정규식을 만들었으며, `shipping_fee`처럼 값이 다른 텍스트와 뭉쳐 깨끗이 못 뽑는
+필드는 설계대로 억지로 만들지 않고 비워뒀다.
 
-## 알려진 문제 — 미해결, Google 쪽 버그 (2026-07-26 기준 보류)
-이 Google 계정은 Google AI Studio에서 새 API 키를 만들 때마다 **`AQ.` 형식**(예: `AQ.Ab8RN6...`)만
-발급되는데, 이 형식은 **실제 Generative Language REST API(`generativelanguage.googleapis.com`, 우리가
-쓰는 그 API)와 호환되지 않는다** — 공식 포럼(discuss.ai.google.dev)에 구글 담당자가 직접 "AIza에서 AQ로
-전환 중"이라고 확인한 글이 있고, 기술적 해결책 없이 "피드백 폼에 제출"만 안내됨. 여러 사용자가 같은 문제로
-"AIza 키 복원"을 요청 중.
+## 디버깅 중 겪은 두 가지 함정 (둘 다 코드 문제 아니었음)
 
-- `AQ.` 키로 REST 호출 시: `401 UNAUTHENTICATED / ACCESS_TOKEN_TYPE_UNSUPPORTED` ("Expected OAuth 2
-  access token...")
-- (참고로 시도했던) 손상된 Windows env var 정정값 `AIzaSy...4b4I4k`로 호출 시: `400 INVALID_ARGUMENT /
-  API_KEY_INVALID` — 이건 AQ 문제와 무관하게 그 키 자체가 유효하지 않았던 것으로 보임(출처 불명, 아마
-  예전 다른 도구 설정의 잔재).
-- SDK 버그 여부는 raw REST(`curl`)로 동일하게 재현해 완전히 배제함.
+**1. Windows 사용자 환경변수가 `.env.local`보다 우선한다.** `.env.local`에 뭘 넣어도 계속 같은(손상된)
+값으로 덮어써지는 현상을 겪음 — 이 PC에 이미 Windows 사용자 환경변수로 `GEMINI_API_KEY`가 설정되어
+있었고(값: `AIzaSy-AIzaSyCFVKOeVwAMFbz862gfymibCNZKC4b4I4k`, 앞에 `AIzaSy-`가 잘못 붙은 47자 손상값),
+Node.js/Next.js의 dotenv류 로딩은 이미 존재하는 OS 프로세스 환경변수를 `.env.local`보다 우선시해서
+덮어쓰지 않기 때문. `[System.Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "<값>", "User")`로
+고쳤다(사용자 확인 후 진행 — 시스템 설정 변경이라 먼저 물어봄).
 
-**사용자 결정: 일단 보류.** `.env.local`의 `GEMINI_API_KEY`를 빈 값으로 둠 — `generateAutoExtractionRules`/
-`filterRealProductOptions` 둘 다 `!process.env.GEMINI_API_KEY` 가드로 즉시 조용히 스킵(불필요한 실패
-API 호출도 안 함), AI모드는 기존 규칙 기반 결과만 그대로 쓰는 상태로 정상 동작한다.
+**2. 이미 실행 중인 Bash 세션은 레지스트리 변경을 반영하지 못한다.** 위 1번을 고친 뒤에도 계속 같은 옛날
+값이 나와서 다시 혼란스러웠는데, 원인은 이 세션 내내 써온 Bash 셸 프로세스 자체가 애초에 시작될 때의
+환경변수 스냅샷을 그대로 물고 있어서(레지스트리를 나중에 고쳐도 이미 떠 있는 프로세스엔 반영 안 됨),
+그 Bash에서 `npm run dev &`로 띄우는 서버도 계속 옛날 값을 상속받았던 것. **해결**: PowerShell에서
+`$env:GEMINI_API_KEY = "<새 값>"`을 그 세션에 직접 설정한 뒤 그 세션에서 서버를 띄워야 새 값이 반영된다.
+**교훈**: 이 프로젝트에서 API 키 관련 env 문제가 재발하면 (a) `.env.local`뿐 아니라
+`[System.Environment]::GetEnvironmentVariable("<KEY>", "User")`로 OS 레벨 값도 확인하고, (b) 그 값을
+고친 뒤에는 반드시 PowerShell에서 `$env:` 로 명시적으로 설정한 세션에서 서버를 재시작할 것 — 기존에 떠
+있던 Bash 세션에서 그냥 재시작하면 계속 옛날 값을 쓴다. 디버그 라우트로 `process.env.GEMINI_API_KEY`의
+길이/앞뒤 몇 글자를 직접 찍어봐야 확실히 구분된다(추측하지 말 것).
 
-**재개 시 확인할 것**: (1) 다른 Google 계정으로 발급 시도(이 문제가 계정별로 다르게 나타남 — 새 계정은
-AIza가 나올 수도 있음), (2) Google Cloud Console(console.cloud.google.com/apis/credentials)에서 직접
-발급하면 다른 경로라 AIza가 나올 가능성(미검증), (3) 또는 Groq API 등 이 문제와 무관한 다른 제공자로 전환.
+## 정정: "AQ. 형식 키는 구글 쪽 버그로 근본적으로 안 된다"는 이전 결론은 틀렸음
+디버깅 초반에 여러 `AQ.` 키가 계속 실패해서 "AQ 형식이 REST API와 근본적으로 미호환"이라고 결론 내리고
+공식 포럼 글까지 근거로 들었으나, 이는 **성급한 결론이었다**. 실제로는:
+- 실패했던 시도 대부분이 위 두 함정(손상된 Windows env var, 레지스트리 변경 미반영) 때문에 애초에
+  올바른 키를 테스트하고 있지 않았다.
+- raw curl로 직접 테스트했던 특정 키(`...sEcA`, AI Studio에 처음 나열됐던 그 키)는 실제로 실패했는데,
+  이건 AQ 형식 자체의 문제가 아니라 그 키 개별의 제한사항 설정 문제였을 가능성이 높다(사용자가 "제한사항
+  추가" 중 애플리케이션 제한을 잘못 설정했을 수 있음 — 확인은 안 함).
+- 사용자가 마지막으로 새로 발급한 키(`AQ.Ab8RN6IK...ybao8FA`)는 x-goog-api-key 헤더, `?key=` 쿼리
+  파라미터, SDK 세 가지 방식 모두에서 정상 작동을 raw curl과 실제 함수 호출로 전부 확인했다.
+- **결론**: `AQ.` 형식 자체는 정상 작동하는 유효한 키 형식이다. 개별 키가 실패하면 형식을 의심하기 전에
+  먼저 (1) env 캐싱 문제, (2) 그 키의 제한사항 설정을 확인할 것.

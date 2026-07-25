@@ -25,6 +25,12 @@ Docker Desktop이 꺼져 Postgres 컨테이너가 죽으면 로그인부터 모�
     `timeout`이 잡혀 즉시 에러로 죽어 재시작 자체가 조용히 실패했다(실제로 겪음). 그래서 `cmd.exe` 대신
     `powershell.exe -Command`로 바꾸고, 외부 실행파일이 아닌 내장 cmdlet(`Start-Sleep`, `Stop-Process`)만
     사용해 이 PATH 셰도잉 문제 자체를 피한다. 최종 검증: POST 후 약 6초 만에 정상 복구.
+  - **중복 요청 방지 가드(`restartInFlight` 모듈 스코프 플래그).** 재시작 예약 후 실제 `Stop-Process`가
+    실행되기까지 1초의 틈이 있어, 그 사이 두 번째 POST가 도착하면(중복 클릭 등) "아직 살아있는" 같은
+    프로세스가 이를 처리해 재기동 체인을 하나 더 예약해버릴 수 있다 — 그러면 새 인스턴스가 둘 동시에 뜨며
+    같은 `.next` 캐시에 동시에 써서 충돌하는 사고로 이어진다([[orphaned_dev_server_cache_corruption]]
+    메모 참고 — 실제로 이 세션에서 다른 경로(반복 수동 재시작)로 겪은 것과 같은 유형의 사고). 이미 진행
+    중이면 두 번째 요청은 409로 거부한다.
 - `components/shell/DbHealthBanner.tsx` — 20초 주기로 `/api/health/db`를 폴링. `fetch` 자체가 실패(네트워크
   에러)하면 "PTP 서버 응답 없음"으로, fetch는 성공했지만 `{ok:false}`면 "DB 연결 실패"로 구분해서 배너와
   재시작 버튼을 다르게 보여준다. 재시작 중엔 폴링을 4초 간격으로 빠르게 전환.

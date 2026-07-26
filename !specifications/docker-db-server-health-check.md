@@ -9,8 +9,24 @@ Docker Desktop이 꺼져 Postgres 컨테이너가 죽으면 로그인부터 모�
 - `app/api/health/db/route.ts` — DB 연결 확인용 공개 엔드포인트. `pg.Pool`엔 기본 타임아웃이 없어
   Docker Desktop이 아직 안정화되지 않은 상태(WSL2 네트워킹)에서 연결이 에러 없이 그냥 몇 분씩 멈추는
   경우가 실제로 있었다 — 그래서 쿼리에 3초 타임아웃을 걸어 무조건 빨리 `{ok:false}`로라도 응답한다.
-- `app/api/system/restart-docker/route.ts` — Docker Desktop 실행파일을 `spawn(detached, unref)`로 띄운다.
-  컨테이너는 `unless-stopped` 정책으로 Docker Desktop이 뜨면 자동으로 따라 올라온다.
+- `app/api/system/restart-docker/route.ts` — Docker Desktop 관련 프로세스를 전부 강제 종료했다가 다시
+  띄운다. 컨테이너는 `unless-stopped` 정책으로 Docker Desktop이 뜨면 자동으로 따라 올라온다.
+  - **처음엔 Docker Desktop 실행파일만 다시 `spawn`했는데 실사용해보니 이 버튼이 필요한 바로 그 상황
+    (Docker Desktop은 떠 있는데 WSL2 네트워킹만 불안정한 경우)에서 아무 효과가 없었다** — Docker
+    Desktop은 단일 인스턴스 앱이라 이미 떠 있으면 그냥 기존 창을 포커스할 뿐 백엔드(WSL2 VM)는 전혀
+    재시작되지 않는다(2026-07-26, 사용자 지적으로 발견: "2번의 이유였다면, 백엔드를 재시작해야하는거야?").
+    그래서 관련 프로세스를 전부 죽인 뒤 다시 띄우는 방식으로 바꿨다.
+  - **`child_process.spawn(powershell, {detached:true})`로 직접 띄우는 방식은 이 서버(npm run dev)
+    안에서 호출하면 조용히 실패한다.** `pid`는 정상 발급되고 `'error'` 이벤트도 없는데, `Get-Process`로
+    직후 조회하면 이미 사라져 있다 — 스크립트를 실행하기도 전에 죽는다(`-Command` 문자열의 인용부호
+    이스케이프 문제도 아니었음 — `.ps1` 파일 + `-File`로 바꿔도 동일). 같은 스크립트를 이 서버 프로세스
+    밖(별도 터미널)에서 그대로 실행하면 정상 동작한다 — 이 dev 서버 프로세스가 속한 Windows Job Object의
+    kill-on-close 특성 때문으로 추정([[windows_spawn_job_object_kill]] 메모 참고. `detached:true`는
+    `CREATE_NEW_PROCESS_GROUP`만 줄 뿐 Job에서 breakaway는 안 됨). **해결**: PowerShell 스크립트를
+    임시 `.ps1` 파일로 써두고, `schtasks /Create ... /SC ONCE /F` + `schtasks /Run /TN <name>`으로 작업
+    스케줄러에 등록해 실행한다 — 스케줄러 서비스가 완전히 별개의 프로세스 트리에서 띄우므로 이 문제를
+    원천적으로 피한다. 최종 검증: 실제 curl로 라우트를 호출해 `scrape-postgres` 컨테이너가 "Up 2
+    seconds"로 재기동되고 `/api/health/db`가 `{"ok":true}`로 돌아오는 것까지 확인.
 - `app/api/system/restart-server/route.ts` — PTP 서버(Next dev) 자체를 강제 재시작. **반드시
   `npm run dev:clean`(.next 삭제 후 기동)으로 재기동한다** — 과거에 강제종료 방식이 `.next` 캐시를 깨뜨려
   정상 라우트가 404 나던 사고가 있었다([[dev_server_restart_corrupts_cache]] 메모 참고).

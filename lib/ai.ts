@@ -7,8 +7,9 @@ function getClient() {
   return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 }
 
-// "AI모드 스크래핑"(규칙 자동생성 + 옵션 판별) 전용 — Anthropic 크레딧을 충전하지 않기로 하고, 이 두
-// 기능에만 국한해 Gemini를 붙여달라고 확정함(나머지 AI 기능은 그대로 Anthropic).
+// "AI모드 스크래핑"(규칙 자동생성 + 옵션 판별)과 "스크랩 조정"(사용자 지적 기반 규칙 생성) 전용 —
+// Anthropic 크레딧을 충전하지 않기로 하고, 이 세 기능에만 국한해 Gemini를 붙여달라고 확정함
+// (나머지 AI 기능 — 상품명 생성/Transform/몰 구조 파악 — 은 그대로 Anthropic).
 function getGeminiClient() {
   return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
 }
@@ -183,14 +184,16 @@ export interface ExtractionRulePart {
 const EXTRACTION_RULE_FIELDS = ['name', 'price', 'cost_price', 'shipping_fee', 'category', 'brand', 'manufacturer', 'origin'] as const
 
 /**
- * "스크랩 조정" 기능용 — 사용자가 지적한 프롬프트 + 지금 잘못 추출된 값 + 실제 페이지 내용을 보고,
- * 수정이 필요한 필드마다 추출 규칙(라벨 정규식 또는 CSS 셀렉터)을 만든다. generateTransformColumns와
- * 같은 tool-call 강제 스키마 패턴 — 확신이 없는 필드는 rules에서 아예 빼도 되게 required를 안 건다.
- * 기존 8개 고정 필드 외에, 사용자가 프롬프트로 새 컬럼(예: 소재/세탁방법)을 요청하면 그 필드명을 rules에
- * 자유롭게 추가해도 되도록 스키마를 열어둔다 — 결과는 ExtractedProduct.custom_fields로 저장된다.
- * ANTHROPIC_API_KEY가 없으면 조용히 빈 규칙을 반환한다(호출부에서 전체 흐름을 막지 않도록).
- * ("AI모드 스크래핑"의 자동 분석은 이 함수가 아니라 Gemini 기반 generateAutoExtractionRules가 담당한다 —
- * 사용자가 명시적으로 "AI모드만 Gemini, 나머지는 그대로 Anthropic"으로 분리해달라고 확정함.)
+ * "스크랩 조정" 기능용 — 사용자가 지적한 프롬프트("부족한/틀린 부분")+ 지금 잘못 추출된 값 + 실제
+ * 페이지 내용을 보고, 수정이 필요한 필드마다 추출 규칙(라벨 정규식 또는 CSS 셀렉터)을 만든다.
+ * generateTransformColumns와 같은 tool-call 강제 스키마 패턴 — 확신이 없는 필드는 rules에서 아예
+ * 빼도 되게 required를 안 건다. 기존 8개 고정 필드 외에, 사용자가 프롬프트로 새 컬럼(예: 소재/세탁방법)을
+ * 요청하면 그 필드명을 rules에 자유롭게 추가해도 되도록 스키마를 열어둔다 — 결과는
+ * ExtractedProduct.custom_fields로 저장된다. GEMINI_API_KEY가 없으면 조용히 빈 규칙을 반환한다
+ * (호출부에서 전체 흐름을 막지 않도록).
+ *
+ * "AI모드 스크래핑"(generateAutoExtractionRules)과 같은 이유로 Gemini(GEMINI_API_KEY)를 쓴다 — Anthropic
+ * 크레딧을 충전하지 않기로 하고, "AI를 통해 부족한 부분을 조정하는" 이 기능도 Gemini로 옮겨달라고 확정함.
  */
 export async function generateExtractionRules(
   mallName: string,
@@ -201,22 +204,22 @@ export async function generateExtractionRules(
    *  참고해 더 정확한 규칙을 만들 수 있다. lib/scraper.ts의 MallProfileSignals와 같은 모양. */
   mallProfile?: Record<string, unknown> | null,
 ): Promise<Record<string, ExtractionRule>> {
-  if (!process.env.ANTHROPIC_API_KEY || !userPrompt.trim()) return {}
+  if (!process.env.GEMINI_API_KEY || !userPrompt.trim()) return {}
 
-  const ruleSchema = {
-    type: 'object',
+  const ruleSchema: Schema = {
+    type: Type.OBJECT,
     properties: {
-      type: { type: 'string', enum: ['label', 'selector'], description: "'label'이면 dt/dd나 표의 라벨 텍스트를 정규식으로 찾고, 'selector'면 CSS 셀렉터로 직접 값을 읽는다." },
-      value: { type: 'string', description: "type='label'이면 라벨과 매칭할 정규식 문자열(예: '도매가|공급가'), type='selector'면 CSS 셀렉터 문자열." },
+      type: { type: Type.STRING, enum: ['label', 'selector'], description: "'label'이면 dt/dd나 표의 라벨 텍스트를 정규식으로 찾고, 'selector'면 CSS 셀렉터로 직접 값을 읽는다." },
+      value: { type: Type.STRING, description: "type='label'이면 라벨과 매칭할 정규식 문자열(예: '도매가|공급가'), type='selector'면 CSS 셀렉터 문자열." },
     },
     required: ['type', 'value'],
   }
-  const properties: Record<string, unknown> = {}
+  const properties: Record<string, Schema> = {}
   EXTRACTION_RULE_FIELDS.forEach(f => { properties[f] = ruleSchema })
 
-  // additionalProperties만으로는 모델이 스키마에 안 보이는 새 필드를 스스로 잘 안 채우는 경향이 있어
-  // (실측 확인됨) — "'필드명' 필드 추가"로 시작하는 새 컬럼 요청은 그 필드명을 properties에 직접
-  // 명시적으로 추가해, 기존 8개 필드와 똑같이 확실하게 채워지도록 한다.
+  // 스키마에 없는 필드는 모델이 스스로 잘 안 채우는 경향이 있어(실측 확인됨) — "'필드명' 필드 추가"로
+  // 시작하는 새 컬럼 요청은 그 필드명을 properties에 직접 명시적으로 추가해, 기존 8개 필드와 똑같이
+  // 확실하게 채워지도록 한다.
   const newFieldMatch = userPrompt.match(/^'([^']+)' 필드 추가/)
   if (newFieldMatch) properties[newFieldMatch[1]] = ruleSchema
 
@@ -245,32 +248,28 @@ ${mallProfileBlock}
 origin)에 없는 완전히 새로운 종류의 정보라도 상관없다. 그 외의 경우 새 필드명을 임의로 지어내지 마라.`
 
   try {
-    const response = await getClient().messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
-      tools: [{
-        name: 'set_extraction_rules',
-        description: '수정이 필요하다고 확신하는 필드에 대해서만 추출 규칙을 채워 반환한다. 확신 없는 필드는 아예 넣지 않는다. 사용자가 새 컬럼명을 지정했으면 그 이름을 key로 추가해도 된다.',
-        input_schema: {
-          type: 'object',
-          properties: { rules: { type: 'object', properties, additionalProperties: ruleSchema } },
-          required: ['rules'],
-        },
-      }],
-      tool_choice: { type: 'tool', name: 'set_extraction_rules' },
-      messages: [{ role: 'user', content: prompt }],
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_extraction_rules',
+          description: '수정이 필요하다고 확신하는 필드에 대해서만 추출 규칙을 채워 반환한다. 확신 없는 필드는 아예 넣지 않는다. 사용자가 새 컬럼명을 지정했으면 그 이름을 key로 추가해도 된다.',
+          parameters: { type: Type.OBJECT, properties: { rules: { type: Type.OBJECT, properties } }, required: ['rules'] },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_extraction_rules'] } },
+      },
     })
-    const toolUse = response.content.find(b => b.type === 'tool_use')
-    if (!toolUse || toolUse.type !== 'tool_use') return {}
-    const input = toolUse.input as { rules?: Record<string, ExtractionRule> }
-    return input.rules || {}
+    const call = response.functionCalls?.[0]
+    if (!call) return {}
+    const args = call.args as { rules?: Record<string, ExtractionRule> }
+    return args.rules || {}
   } catch (e) {
     // generateTransformColumns(대량 배치 처리)와 달리 이 기능은 사용자가 방금 누른 단일 조정 시도라,
     // 실패를 조용히 삼키면 "AI가 확신을 못 해서 규칙을 안 만든 것"과 "API 호출 자체가 실패한 것"(크레딧
     // 부족, 네트워크 오류 등)을 구분할 수 없어 혼란스럽다 — 여기서는 그대로 던져 호출부가 사용자에게
     // 실제 실패 사유를 보여주게 한다.
-    const message = e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : String(e)
-    throw new Error(`AI 호출 실패: ${message}`)
+    throw new Error(`Gemini 호출 실패: ${e instanceof Error ? e.message : String(e)}`)
   }
 }
 

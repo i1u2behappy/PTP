@@ -7,16 +7,18 @@ Anthropic API 크레딧을 충전하지 않기로 결정 — "다른 AI를 붙�
 자체를 바꾸는 게 아니냐는 오해도 있었음, 별개임을 확인).
 
 ## 범위
-- **Gemini로 전환**: `generateAutoExtractionRules`(신규, AI모드의 규칙 자동생성), `filterRealProductOptions`
-  (옵션 진위 판별)
-- **그대로 Anthropic 유지**: `generateExtractionRules`("스크랩 조정", 사용자 지적 기반), `generateProductName`
-  (상품명 생성), `generateTransformColumns`(Transform), `generateMallProfileReport`("몰 구조 파악"),
-  `extractProductFieldsWithAI`(스크랩 최종 폴백)
+- **Gemini로 전환**: `generateAutoExtractionRules`(AI모드의 규칙 자동생성), `filterRealProductOptions`
+  (옵션 진위 판별), **`generateExtractionRules`("스크랩 조정", 사용자 지적 기반 — 2차 확장, 아래 참고)**
+- **그대로 Anthropic 유지**: `generateProductName`(상품명 생성), `generateTransformColumns`(Transform),
+  `generateMallProfileReport`("몰 구조 파악"), `extractProductFieldsWithAI`(스크랩 최종 폴백)
 
 기존엔 `generateExtractionRules`가 `userPrompt` 빈 문자열 여부로 "스크랩 조정"/"AI모드" 두 용도를 겸했는데,
-이제 두 용도가 서로 다른 AI 제공자를 쓰게 되어 겸용이 더 이상 말이 안 돼 분리했다 — `generateExtractionRules`는
-원래대로 "스크랩 조정" 전용(Anthropic, `userPrompt` 필수)으로 되돌리고, AI모드 자동분석은 신규
-`generateAutoExtractionRules`(Gemini)로 완전히 독립.
+두 용도가 서로 다른 AI 제공자를 쓰게 되면서 겸용이 더 이상 말이 안 돼 분리했다 — AI모드 자동분석은 신규
+`generateAutoExtractionRules`(Gemini)로 독립시키고, `generateExtractionRules`는 "스크랩 조정" 전용
+(`userPrompt` 필수)으로 남겼다. **이후 "스크랩 조정도 Anthropic 크레딧 문제로 똑같이 안 되고 있다"는
+사용자 지적에 따라, 이 `generateExtractionRules`도 그대로 Gemini로 전환** — 이제 `lib/ai.ts`에서 AI 기반
+추출 규칙 생성 관련 3개 함수(자동분석/옵션판별/사용자지적 조정)가 전부 Gemini, 나머지(상품명/Transform/
+몰구조파악)는 여전히 Anthropic이다.
 
 ## 구성
 - 패키지: `@google/genai`(공식 Node SDK) 설치. 스크립트 승인(`npm approve-scripts`) 없이도 정상 로드
@@ -71,3 +73,23 @@ Node.js/Next.js의 dotenv류 로딩은 이미 존재하는 OS 프로세스 환�
   파라미터, SDK 세 가지 방식 모두에서 정상 작동을 raw curl과 실제 함수 호출로 전부 확인했다.
 - **결론**: `AQ.` 형식 자체는 정상 작동하는 유효한 키 형식이다. 개별 키가 실패하면 형식을 의심하기 전에
   먼저 (1) env 캐싱 문제, (2) 그 키의 제한사항 설정을 확인할 것.
+
+## 2차 확장 — "스크랩 조정"도 Gemini로 (2026-07-26)
+사용자 지적: "스크랩RAw 확인 메뉴의 '스크랩 조정' 기능은 필요한 상황일까? 정상 작동도 되지 않는
+상황인데." — AI모드는 Gemini로 옮겨 되살렸지만, "스크랩 조정"(사용자가 프롬프트로 특정 필드를 지적하면
+AI가 규칙을 만드는 기능)은 여전히 Anthropic을 쓰고 있어 크레딧 문제로 똑같이 막혀있었다. 답변: "요소
+지정"(클릭으로 직접 지정, AI 불필요)과 "커스텀 컬럼 추가"는 살아있지만, AI 프롬프트 기반 수정 자체는
+막혀있다고 설명 — 사용자가 "Gemini로 옮기고, AI를 통해 부족한 부분을 조정하는 기능으로 해달라"고 확정.
+
+`generateExtractionRules`를 `generateAutoExtractionRules`와 같은 패턴(Gemini `Type` enum 스키마,
+`functionDeclarations`+`FunctionCallingConfigMode.ANY`)으로 그대로 전환. 함수 시그니처·호출부
+(`lib/scrape/adjustment.ts`의 `runAdjustment`)는 전혀 안 바뀜 — `generateExtractionRules`는 이제도
+`runAdjustment` 한 곳에서만 호출되므로(AI모드 자동분석은 이미 `generateAutoExtractionRules`로 분리돼
+있었음) 그대로 자리에서 제공자만 교체하면 됐다.
+
+**검증**: 실제 키로 두 가지 실사용 패턴 모두 end-to-end 확인 —
+1. 필드 지적: "shipping_fee가 비어있어. 배송유형에 배송비가 있으니 그걸로 채워줘" → `{shipping_fee:
+   {type:'label', value:'배송유형'}}` 정확히 생성.
+2. 커스텀 필드 추가: "'고시분류' 필드 추가" → `{고시분류: {type:'label', value:'고시분류'}}` 정확히 생성
+   (스키마에 없는 필드명을 `properties`에 직접 주입하는 기존 메커니즘이 Gemini `Type` enum 스키마에서도
+   그대로 동작함을 확인).

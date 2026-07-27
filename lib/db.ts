@@ -8,6 +8,15 @@ const pool = new Pool({
   database: process.env.DB_NAME     || 'scrape',
   user:     process.env.DB_USER     || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
+  // DB가 잠깐 안 닿을 때(Docker 재시작, 네트워크 문제 등) 무한정 멈추는 대신 몇 초 안에 에러로 실패하게 한다.
+  connectionTimeoutMillis: 5000,
+})
+
+// pg Pool은 idle 커넥션이 예기치 않게 끊기면(DB 재시작, 네트워크 단절 등) 'error' 이벤트를 낸다 —
+// 리스너가 없으면 Node가 이 이벤트를 uncaughtException으로 취급해 프로세스 전체가 죽는다(pg 공식 문서에
+// 명시된 함정). 로그만 남기고 계속 동작하게 해서, DB가 잠깐 끊겨도 서버 프로세스는 살아있게 한다.
+pool.on('error', err => {
+  console.error('[db] idle client error (연결이 계속 시도됩니다):', err.message)
 })
 
 export default pool

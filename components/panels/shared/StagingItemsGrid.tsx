@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useTabs } from '../../shell/TabsContext'
+import { useCurrentUser } from '../../shell/CurrentUserContext'
 import type { ExtractedProduct } from '@/lib/ai'
 
 interface RawExtra {
@@ -191,6 +192,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
 }) {
   const scopeQuery = sessionId ? `sessionId=${sessionId}` : ''
   const { openTab, activeTabId, refreshSignals, bumpRefresh } = useTabs()
+  const { isAdmin } = useCurrentUser()
   const [items, setItems] = useState<StagingRow[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [discarding, setDiscarding] = useState(false)
@@ -669,7 +671,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
             className="px-4 py-1.5 bg-gray-100 text-gray-600 text-xs font-semibold rounded-full hover:bg-gray-200 transition-colors">
             📥 엑셀 다운로드
           </button>
-          {selected.size > 0 && (
+          {isAdmin && selected.size > 0 && (
             <button onClick={discardSelected} disabled={discarding}
               className="px-4 py-1.5 bg-rose-50 text-rose-600 text-xs font-semibold rounded-full hover:bg-rose-100 disabled:opacity-50 transition-colors">
               🗑 선택 무시 ({selected.size})

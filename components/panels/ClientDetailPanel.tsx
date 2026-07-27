@@ -1,6 +1,7 @@
 'use client'
 import { useCallback, useEffect, useState } from 'react'
 import { useTabs } from '../shell/TabsContext'
+import { useCurrentUser } from '../shell/CurrentUserContext'
 import { MemoLog } from './MemoLog'
 import { CLIENTS_LIST_TAB, SITES_LIST_TAB } from '../shell/menuTabs'
 
@@ -58,6 +59,7 @@ const FIELDS: { key: keyof ClientDetail; label: string }[] = [
 
 export function ClientDetailPanel({ params }: Props) {
   const { bumpRefresh, openTab } = useTabs()
+  const { isAdmin } = useCurrentUser()
   const clientId = params?.clientId as number
 
   function backToList() { openTab(CLIENTS_LIST_TAB) }
@@ -160,10 +162,12 @@ export function ClientDetailPanel({ params }: Props) {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-800">🏢 {form.name} 수정</h1>
         <div className="flex items-center gap-2 shrink-0">
-          <button onClick={handleDelete}
-            className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-600 text-sm font-semibold rounded-full transition-colors mr-2">
-            🗑 삭제
-          </button>
+          {isAdmin && (
+            <button onClick={handleDelete}
+              className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-600 text-sm font-semibold rounded-full transition-colors mr-2">
+              🗑 삭제
+            </button>
+          )}
           <button onClick={backToList} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-full transition-colors">
             취소
           </button>
@@ -274,7 +278,7 @@ export function ClientDetailPanel({ params }: Props) {
                     <td className="px-3 py-2 text-gray-500">{m.login_id || '-'}</td>
                     <td className="px-3 py-2 whitespace-nowrap">
                       <button onClick={() => openMall(m)} className="text-teal-500 hover:underline mr-2">수정</button>
-                      <button onClick={() => deleteMall(m.id)} className="text-rose-500 hover:underline">삭제</button>
+                      {isAdmin && <button onClick={() => deleteMall(m.id)} className="text-rose-500 hover:underline">삭제</button>}
                     </td>
                   </tr>
                 ))}

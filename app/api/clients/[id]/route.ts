@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
+import { isAdminRequest } from '@/lib/auth'
 
 interface PaymentAccount {
   payerName: string
@@ -60,7 +61,8 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   return NextResponse.json({ ok: true })
 }
 
-export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  if (!isAdminRequest(req)) return NextResponse.json({ error: '관리자 권한이 필요합니다.' }, { status: 403 })
   const { id } = await params
   await pool.query(`DELETE FROM supply_clients WHERE id = $1`, [id])
   return NextResponse.json({ ok: true })

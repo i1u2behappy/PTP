@@ -1,8 +1,10 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
 import { useTabs } from '../shell/TabsContext'
+import { useCurrentUser } from '../shell/CurrentUserContext'
 import { StagingItemsGrid } from './shared/StagingItemsGrid'
 import { ScrapeSessionGrid } from './shared/ScrapeSessionGrid'
+import { ClientMallFilterBar } from './shared/ClientMallFilterBar'
 
 interface Session {
   id: number
@@ -24,11 +26,17 @@ interface Session {
 
 export function ProductsListPanel() {
   const { openTab, refreshSignals } = useTabs()
+  const { isAdmin } = useCurrentUser()
   const [sessions, setSessions] = useState<Session[]>([])
   const [sessionSearch, setSessionSearch] = useState('')
+  const [clientFilter, setClientFilter] = useState('')
+  const [siteFilter, setSiteFilter] = useState<number | ''>('')
   const [selectedSessionId, setSelectedSessionId] = useState<number | ''>('')
   const [checkedSessionIds, setCheckedSessionIds] = useState<Set<number>>(new Set())
   const [deleting, setDeleting] = useState(false)
+  // 검색/스크래핑 목록이 화면 공간을 많이 차지해 아래 스크랩 상세 그리드를 보기 어렵다는 요청 — 접으면
+  // 한 줄 요약 바로 줄어들고, 세션 선택은 접기 전 상태 그대로 유지된다.
+  const [topCollapsed, setTopCollapsed] = useState(false)
 
   const loadSessions = useCallback(() => {
     fetch('/api/sessions').then(r => r.json()).then((d: Session[]) => {
@@ -41,6 +49,8 @@ export function ProductsListPanel() {
   useEffect(() => { loadSessions() }, [loadSessions, refreshSignals.products, refreshSignals.staging])
 
   const filteredSessions = sessions.filter(s => {
+    if (siteFilter !== '' && s.site_id !== siteFilter) return false
+    if (siteFilter === '' && clientFilter !== '' && s.client_name !== clientFilter) return false
     const q = sessionSearch.trim().toLowerCase()
     if (!q) return true
     return s.url.toLowerCase().includes(q) || s.status.toLowerCase().includes(q) || new Date(s.created_at).toLocaleString().toLowerCase().includes(q)
@@ -109,7 +119,9 @@ export function ProductsListPanel() {
         </button>
       </div>
 
-      {/* 상단: 검색 가능한 스크래핑 목록 (클릭 시 하단 그리드가 해당 세션으로 전환) */}
+      {/* 상단: 검색 가능한 스크래핑 목록 (클릭 시 하단 그리드가 해당 세션으로 전환) — 아래 상세 그리드를
+          볼 공간이 부족하다는 요청으로 접기/펼치기를 넣었다. 접기/펼치기 버튼은 상태와 무관하게 항상
+          같은 자리(맨 위 줄 우측 끝)에 고정 — 펼쳤을 때만 버튼 위치가 바뀌면 매번 찾기 불편하다는 요청. */}
       {sessions.length === 0 ? (
         <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 mb-4 shrink-0">
           <div className="text-4xl mb-3">📭</div>
@@ -118,22 +130,43 @@ export function ProductsListPanel() {
             className="mt-2 inline-block text-teal-500 text-sm hover:underline">스크래핑 시작하기 →</button>
         </div>
       ) : (
-        <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4 shrink-0">
-          <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3 flex-wrap">
-            <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
-            <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="거래처·몰·URL·상태·일시 검색..."
-              className="flex-1 min-w-[200px] border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
-            {checkedSessionIds.size > 0 && (
-              <button onClick={handleDeleteChecked} disabled={deleting}
-                className="px-3 py-1.5 bg-rose-50 text-rose-600 text-xs font-semibold rounded-full hover:bg-rose-100 disabled:opacity-50 transition-colors shrink-0">
-                🗑 선택 삭제 ({checkedSessionIds.size})
-              </button>
+        <>
+          <div className="bg-white rounded-2xl border border-gray-200 px-4 py-2 mb-3 shrink-0 flex items-center gap-3">
+            {topCollapsed ? (
+              <span className="text-xs text-gray-400 truncate">
+                {selectedSession
+                  ? `선택된 세션: ${selectedSession.client_name || '-'} · ${selectedSession.site_name || selectedSession.url} · ${new Date(selectedSession.created_at).toLocaleString()}`
+                  : '선택된 세션이 없습니다.'}
+              </span>
+            ) : (
+              <>
+                <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
+                {isAdmin && checkedSessionIds.size > 0 && (
+                  <button onClick={handleDeleteChecked} disabled={deleting}
+                    className="px-3 py-1.5 bg-rose-50 text-rose-600 text-xs font-semibold rounded-full hover:bg-rose-100 disabled:opacity-50 transition-colors shrink-0">
+                    🗑 선택 삭제 ({checkedSessionIds.size})
+                  </button>
+                )}
+              </>
             )}
+            <button onClick={() => setTopCollapsed(v => !v)}
+              className="ml-auto px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full transition-colors shrink-0">
+              {topCollapsed ? '▼ 검색·목록 펼치기' : '▲ 검색·목록 접기'}
+            </button>
           </div>
-          <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId}
-            onDelete={handleDeleteSession} maxHeightClassName="max-h-48" showClientMall
-            checkedIds={checkedSessionIds} onToggleCheck={toggleCheckSession} />
-        </div>
+
+          {!topCollapsed && (
+            <>
+              <ClientMallFilterBar searchPlaceholder="URL·상태·일시 검색..."
+                onChange={f => { setClientFilter(f.clientName); setSiteFilter(f.siteId); setSessionSearch(f.search) }} />
+              <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4 shrink-0">
+                <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId}
+                  onDelete={isAdmin ? handleDeleteSession : undefined} maxHeightClassName="max-h-48" showClientMall
+                  checkedIds={isAdmin ? checkedSessionIds : undefined} onToggleCheck={isAdmin ? toggleCheckSession : undefined} />
+              </div>
+            </>
+          )}
+        </>
       )}
 
       {/* 하단: 선택한 스크래핑의 전체 컬럼 상세 그리드 (병합 여부 무관, 확인/검증용) — "스크랩 조정"도 여기,

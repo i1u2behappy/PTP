@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useTabs } from '../shell/TabsContext'
+import { useCurrentUser } from '../shell/CurrentUserContext'
 import { SITES_LIST_TAB } from '../shell/menuTabs'
 
 const MEMO_TEMPLATE = '택배사: \n배송비: \n배송/반품 주소지: \n연락처: \n은행: \n계좌번호: '
@@ -40,6 +41,7 @@ function formatDateTime(iso: string) {
 
 export function SiteDetailPanel({ params }: Props) {
   const { bumpRefresh, openTab } = useTabs()
+  const { isAdmin } = useCurrentUser()
   const siteId = params?.siteId as number | undefined
   const isNew = siteId == null
 
@@ -142,7 +144,7 @@ export function SiteDetailPanel({ params }: Props) {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-800">{isNew ? '➕ 새 Mall 등록' : `🏬 ${name || url} 수정`}</h1>
         <div className="flex items-center gap-2 shrink-0">
-          {!isNew && (
+          {!isNew && isAdmin && (
             <button onClick={handleDelete}
               className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-600 text-sm font-semibold rounded-full transition-colors mr-2">
               🗑 삭제

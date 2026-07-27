@@ -36,7 +36,8 @@ export default function LoginPage() {
       <form onSubmit={handleSubmit} className="w-full max-w-sm bg-white border border-slate-200 rounded-2xl shadow-sm p-8">
         <div className="flex flex-col items-center mb-6">
           <Image src="/logo.jpg" alt="ILDA:Bridge" width={600} height={566} className="h-16 w-auto mb-2" priority />
-          <p className="text-xs text-slate-400 mt-1">Products Transformation Platform</p>
+          <p className="text-sm font-bold text-slate-700">PTP</p>
+          <p className="text-xs text-slate-400 mt-1">(Product Transformation Platform)</p>
         </div>
 
         <label className="block mb-3">

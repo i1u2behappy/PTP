@@ -1,6 +1,8 @@
 'use client'
 import { useEffect, useMemo, useState, useCallback } from 'react'
 import { useTabs } from '../shell/TabsContext'
+import { useCurrentUser } from '../shell/CurrentUserContext'
+import { ClientMallFilterBar } from './shared/ClientMallFilterBar'
 import { SITES_LIST_TAB } from '../shell/menuTabs'
 
 interface Site {
@@ -9,6 +11,7 @@ interface Site {
   url: string
   login_id: string | null
   login_pw_masked: string | null
+  client_id: number | null
   client_name: string | null
   blocked: boolean
   manual_login_required: boolean | null
@@ -70,8 +73,10 @@ interface SortKey { key: string; dir: SortDir }
 
 export function SitesListPanel() {
   const { openTab, refreshSignals } = useTabs()
+  const { isAdmin } = useCurrentUser()
   const [sites, setSites] = useState<Site[]>([])
   const [q, setQ] = useState('')
+  const [clientFilter, setClientFilter] = useState<number | ''>('')
   const [loadError, setLoadError] = useState(false)
   const [sortKeys, setSortKeys] = useState<SortKey[]>([])
   const [filters, setFilters] = useState<Record<string, string>>({})
@@ -141,11 +146,14 @@ export function SitesListPanel() {
   }
 
   const hasFilters = Object.values(filters).some(Boolean)
-  const filteredSites = sites.filter(s => COLUMNS.every(col => {
-    const f = filters[col.key]
-    if (!f) return true
-    return col.getValue(s).toLowerCase().includes(f.toLowerCase())
-  }))
+  const filteredSites = sites.filter(s => {
+    if (clientFilter !== '' && s.client_id !== clientFilter) return false
+    return COLUMNS.every(col => {
+      const f = filters[col.key]
+      if (!f) return true
+      return col.getValue(s).toLowerCase().includes(f.toLowerCase())
+    })
+  })
   const visibleSites = sortKeys.length
     ? [...filteredSites].sort((a, b) => {
         for (const { key, dir } of sortKeys) {
@@ -191,10 +199,8 @@ export function SitesListPanel() {
         </div>
       </div>
 
-      <div className="mb-4 shrink-0">
-        <input value={q} onChange={e => setQ(e.target.value)} placeholder="이름 또는 URL 검색..."
-          className="w-full max-w-md border border-gray-300 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-      </div>
+      <ClientMallFilterBar showMallFilter={false} searchPlaceholder="이름 또는 URL 검색..."
+        onChange={f => { setClientFilter(f.clientId); setQ(f.search) }} />
 
       {loadError ? (
         <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-sm text-rose-500">목록을 불러오지 못했습니다. 서버(DB) 연결을 확인해주세요.</div>
@@ -267,7 +273,7 @@ export function SitesListPanel() {
                     ))}
                     <td className="px-3 py-2 whitespace-nowrap" onClick={e => e.stopPropagation()}>
                       <button onClick={() => openDetail(s)} className="text-teal-500 hover:underline mr-2">수정</button>
-                      <button onClick={() => handleDelete(s.id)} className="text-rose-500 hover:underline">삭제</button>
+                      {isAdmin && <button onClick={() => handleDelete(s.id)} className="text-rose-500 hover:underline">삭제</button>}
                     </td>
                   </tr>
                 ))}

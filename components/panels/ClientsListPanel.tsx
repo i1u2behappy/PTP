@@ -1,7 +1,9 @@
 'use client'
 import { useEffect, useMemo, useState, useCallback } from 'react'
 import { useTabs } from '../shell/TabsContext'
+import { useCurrentUser } from '../shell/CurrentUserContext'
 import { NewClientForm } from './shared/NewClientForm'
+import { ClientMallFilterBar } from './shared/ClientMallFilterBar'
 import { CLIENTS_LIST_TAB } from '../shell/menuTabs'
 
 interface Client {
@@ -72,8 +74,10 @@ interface SortKey { key: string; dir: SortDir }
 
 export function ClientsListPanel() {
   const { openTab, refreshSignals } = useTabs()
+  const { isAdmin } = useCurrentUser()
   const [clients, setClients] = useState<Client[]>([])
   const [q, setQ] = useState('')
+  const [clientIdFilter, setClientIdFilter] = useState<number | ''>('')
   const [loadError, setLoadError] = useState(false)
   const [sortKeys, setSortKeys] = useState<SortKey[]>([])
   const [filters, setFilters] = useState<Record<string, string>>({})
@@ -143,11 +147,14 @@ export function ClientsListPanel() {
   }
 
   const hasFilters = Object.values(filters).some(Boolean)
-  const filteredClients = clients.filter(c => COLUMNS.every(col => {
-    const f = filters[col.key]
-    if (!f) return true
-    return col.getValue(c).toLowerCase().includes(f.toLowerCase())
-  }))
+  const filteredClients = clients.filter(c => {
+    if (clientIdFilter !== '' && c.id !== clientIdFilter) return false
+    return COLUMNS.every(col => {
+      const f = filters[col.key]
+      if (!f) return true
+      return col.getValue(c).toLowerCase().includes(f.toLowerCase())
+    })
+  })
   const visibleClients = sortKeys.length
     ? [...filteredClients].sort((a, b) => {
         for (const { key, dir } of sortKeys) {
@@ -193,10 +200,9 @@ export function ClientsListPanel() {
         </div>
 
         <div className="flex-[2_1_0%] min-h-0 flex flex-col">
-          <div className="mb-3 shrink-0">
-            <input value={q} onChange={e => setQ(e.target.value)} placeholder="거래처명, 사업자번호, 대표자, 담당자, 연락처, 메모 검색..."
-              className="w-full max-w-md border border-gray-300 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-          </div>
+          <ClientMallFilterBar showMallFilter={false}
+            searchPlaceholder="거래처명, 사업자번호, 대표자, 담당자, 연락처, 메모 검색..."
+            onChange={f => { setClientIdFilter(f.clientId); setQ(f.search) }} />
 
           {loadError ? (
             <div className="bg-white rounded-2xl border border-gray-200 p-8 text-center text-sm text-rose-500">목록을 불러오지 못했습니다. 서버(DB) 연결을 확인해주세요.</div>
@@ -269,7 +275,7 @@ export function ClientsListPanel() {
                         ))}
                         <td className="px-3 py-2 whitespace-nowrap" onClick={e => e.stopPropagation()}>
                           <button onClick={() => openDetail(c)} className="text-teal-500 hover:underline mr-2">수정</button>
-                          <button onClick={() => handleDelete(c.id)} className="text-rose-500 hover:underline">삭제</button>
+                          {isAdmin && <button onClick={() => handleDelete(c.id)} className="text-rose-500 hover:underline">삭제</button>}
                         </td>
                       </tr>
                     ))}

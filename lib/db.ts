@@ -93,14 +93,24 @@ export async function initDb() {
   import('./scheduler').then(m => m.startScheduler()).catch(() => {})
 
   await pool.query(`
-    -- PTP 앱 자체 로그인 관리자 계정(단일 계정). 몰 스크래핑 로그인 정보(sites 테이블)와는 별개.
-    CREATE TABLE IF NOT EXISTS admin_accounts (
+    -- PTP 앱 자체 로그인 계정. 몰 스크래핑 로그인 정보(sites 테이블)와는 별개.
+    -- 원래 admin_accounts(단일 관리자 계정)이었다가 권한관리 기능 추가로 다중 사용자 테이블로 확장 —
+    -- 기존 DB는 테이블명을 그대로 옮기고, role 컬럼만 새로 얹는다(기존 유일 행은 아래에서 admin으로 지정).
+    ALTER TABLE IF EXISTS admin_accounts RENAME TO users;
+    CREATE TABLE IF NOT EXISTS users (
       id            SERIAL PRIMARY KEY,
       username      TEXT NOT NULL,
       password_hash TEXT NOT NULL,
       password_salt TEXT NOT NULL,
       updated_at    TIMESTAMPTZ DEFAULT NOW()
     );
+    -- role: 'admin'(거래처/Mall 등록·삭제, 스크랩 데이터 삭제 가능) | 'user'(그 외 전부 — admin 권한만 없음).
+    -- 신규 가입은 항상 'user'로만 생성된다(권한관리 화면에 role 선택 UI 자체가 없음) — admin은 최초 시드
+    -- 계정 하나뿐이라는 전제.
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    CREATE UNIQUE INDEX IF NOT EXISTS users_username_idx ON users (username);
+    UPDATE users SET role = 'admin' WHERE username = 'admin';
 
     CREATE TABLE IF NOT EXISTS sites (
       id                         SERIAL PRIMARY KEY,
@@ -151,6 +161,10 @@ export async function initDb() {
     -- 이게 없으면 확장이 "이 몰에서 아무 미확정 상품이나 최신순 1건"을 테스트 대상으로 골라버려서,
     -- 사용자가 지금 보고 있는(방금 스크랩한) 세션이 아니라 다른 세션의 상품을 조정해버릴 수 있었다.
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS pending_adjustment_item_id INT;
+    -- 개발자모드 "상품 페이지 미리보기"의 AI모드 토글 — PTP 화면(일반모드와 같은 자리)에서 켜고 끄지만,
+    -- 실제로 그 값을 참고하는 건 확장(별도 실제 크롬 탭)이라 DB에 저장해두고 /api/sites/resolve로 매번
+    -- 같이 받아가게 한다.
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS devmode_ai_preview BOOLEAN NOT NULL DEFAULT false;
 
     CREATE TABLE IF NOT EXISTS supply_clients (
       id                   SERIAL PRIMARY KEY,
@@ -240,6 +254,9 @@ export async function initDb() {
     ALTER TABLE scrape_sessions ADD COLUMN IF NOT EXISTS merge_group_id INTEGER;
     ALTER TABLE scrape_sessions ADD COLUMN IF NOT EXISTS merged_at TIMESTAMPTZ;
     CREATE INDEX IF NOT EXISTS idx_scrape_sessions_merge_group ON scrape_sessions(merge_group_id) WHERE merge_group_id IS NOT NULL;
+    -- Mall 상세관리 목록(GET /api/sites)이 몰마다 "가장 최근 세션" 하나를 LATERAL로 조회하는데,
+    -- site_id에 인덱스가 없어 scrape_sessions가 쌓일수록 몰 수만큼 순차 스캔이 반복돼 점점 느려졌다.
+    CREATE INDEX IF NOT EXISTS idx_scrape_sessions_site_created ON scrape_sessions(site_id, created_at DESC);
 
     -- 카탈로그 스크랩 중 상품별 성공/실패 로그 (진행 화면의 실시간 로그 + 실패 재시도 큐 근거)
     CREATE TABLE IF NOT EXISTS scrape_item_log (
@@ -250,6 +267,9 @@ export async function initDb() {
       error      TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+    -- 진행 화면이 세션당 로그를 계속 폴링(session_id 조회 + id DESC LIMIT)하고, 확장의 "실패 재수집"도
+    -- session_id로 join하므로 스크랩량이 쌓일수록 인덱스 없인 점점 느려진다.
+    CREATE INDEX IF NOT EXISTS idx_scrape_item_log_session ON scrape_item_log(session_id, id DESC);
 
     -- 1단계 원천 스크랩 데이터. 몰 상품코드 기준 upsert (증분 재스크랩의 정체성 앵커)
     CREATE TABLE IF NOT EXISTS mall_products (
@@ -279,6 +299,9 @@ export async function initDb() {
       updated_at             TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE (site_id, mall_product_code)
     );
+    -- site_id는 위 UNIQUE(site_id, mall_product_code)가 왼쪽 컬럼이라 이미 인덱스로 커버되지만,
+    -- last_seen_session_id로 필터/조인하는 곳(세션 그리드, 상품 목록)은 커버되지 않아 따로 추가.
+    CREATE INDEX IF NOT EXISTS idx_mall_products_last_seen_session ON mall_products(last_seen_session_id);
 
     -- 스크랩 직후 원시 결과 보관소. mall_products를 즉시 덮어쓰지 않고, 사용자가 검토 후 병합할 때까지 대기시킨다.
     -- 같은 상품이 여러 세션에서 스크랩되면 세션마다 별도 행으로 쌓여 세션 간 비교/개별 병합이 가능하다.
@@ -309,6 +332,12 @@ export async function initDb() {
       created_at               TIMESTAMPTZ DEFAULT NOW(),
       updated_at               TIMESTAMPTZ DEFAULT NOW()
     );
+    -- "스크랩 Raw 확인 그리드"(session_id/site_id 필터 + created_at 정렬)와 병합/마이그레이션 쪽의
+    -- matched_mall_product_id join이 전부 이 테이블을 scan하는데, 스크랩할수록 계속 쌓이는 테이블이라
+    -- 인덱스 없인 Mall 상세관리와 똑같은 방식으로 느려진다.
+    CREATE INDEX IF NOT EXISTS idx_staging_items_session_status ON scrape_staging_items(session_id, status);
+    CREATE INDEX IF NOT EXISTS idx_staging_items_site_created ON scrape_staging_items(site_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_staging_items_matched_mall_product ON scrape_staging_items(matched_mall_product_id);
 
     -- 재고/가격 변동 이력 (증분 스크랩 diff 근거)
     CREATE TABLE IF NOT EXISTS stock_snapshots (
@@ -321,6 +350,8 @@ export async function initDb() {
       sale_price       INT,
       captured_at      TIMESTAMPTZ DEFAULT NOW()
     );
+    -- 가공내역(재고/가격 history)이 mall_product_id로 최근 순 조회되는데, 재스크랩마다 계속 쌓인다.
+    CREATE INDEX IF NOT EXISTS idx_stock_snapshots_mall_product ON stock_snapshots(mall_product_id, captured_at DESC);
 
     -- 가공 시 빈 컬럼을 채우는 참조(이전 완료) 데이터
     CREATE TABLE IF NOT EXISTS reference_products (
@@ -400,6 +431,10 @@ export async function initDb() {
       file_size_bytes        INT,
       created_at             TIMESTAMPTZ DEFAULT NOW()
     );
+    -- 상품/마스터 상세, 목록 썸네일, 마이그레이션 화면 전부 mall_product_id 또는 product_master_id +
+    -- image_type(+ sort_order 정렬)으로 이 테이블을 조회한다 — 이미지가 계속 쌓이는 테이블이라 필수.
+    CREATE INDEX IF NOT EXISTS idx_product_images_mall_product ON product_images(mall_product_id, image_type, sort_order);
+    CREATE INDEX IF NOT EXISTS idx_product_images_master ON product_images(product_master_id, image_type, sort_order);
 
     -- 대표이미지가 여러 장일 수 있도록 단일 thumbnail_url(TEXT)을 배열 thumbnail_urls(JSONB)로 이전.
     -- 기존 값이 있는 행만 1회 백필하고, 이관이 끝나면 옛 컬럼은 지운다 (컬럼이 없으면 이미 이관된 것으로 보고 건너뜀).
@@ -522,6 +557,8 @@ export async function initDb() {
       row_values               JSONB NOT NULL DEFAULT '{}',
       matched_mall_product_id  INT REFERENCES mall_products(id) ON DELETE SET NULL
     );
+    -- Transform 업로드 매칭(lib/transform/matching.ts)이 upload_id로 반복 조회한다.
+    CREATE INDEX IF NOT EXISTS idx_transform_reference_rows_upload ON transform_reference_rows(upload_id);
 
     -- 컬럼별 생성 규칙 (몰 단위). target_field는 이 값이 최종 반영될 product_master 컬럼명
     CREATE TABLE IF NOT EXISTS transform_column_rules (
@@ -592,11 +629,11 @@ export async function initDb() {
     ON CONFLICT (code) DO NOTHING;
   `)
 
-  const adminCount = await pool.query('SELECT COUNT(*) FROM admin_accounts')
+  const adminCount = await pool.query('SELECT COUNT(*) FROM users')
   if (Number(adminCount.rows[0].count) === 0) {
     const { hash, salt } = hashPassword('admin1234')
     await pool.query(
-      'INSERT INTO admin_accounts (username, password_hash, password_salt) VALUES ($1,$2,$3)',
+      "INSERT INTO users (username, password_hash, password_salt, role) VALUES ($1,$2,$3,'admin')",
       ['admin', hash, salt],
     )
     console.warn('[auth] 기본 관리자 계정 생성: admin / admin1234 — 설정 메뉴에서 즉시 변경해주세요.')

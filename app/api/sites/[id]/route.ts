@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool, { encryptSecret, decryptSecret } from '@/lib/db'
 import { profileDir } from '@/lib/scraper'
+import { isAdminRequest } from '@/lib/auth'
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
@@ -8,7 +9,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     `SELECT id, name, url, login_url, login_id, login_pw_encrypted, login_pw_iv, client_id,
             custom_name_selector, custom_price_selector, custom_thumbnail_selector,
             auto_scrape_enabled, auto_scrape_hour, manual_login_required, main_items, extraction_rules,
-            last_adjustment_preview, scrape_profile, scrape_profile_updated_at, memo
+            last_adjustment_preview, devmode_ai_preview, scrape_profile, scrape_profile_updated_at, memo
      FROM sites WHERE id = $1`,
     [id],
   )
@@ -28,6 +29,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     memo: site.memo,
     extraction_rules: site.extraction_rules,
     last_adjustment_preview: site.last_adjustment_preview,
+    devmode_ai_preview: site.devmode_ai_preview,
     // "몰 구조 파악"의 거래정보 리포트(있으면) — SiteDetailPanel이 운영 메모 아래 참고용으로 표시한다.
     mall_report: site.scrape_profile?.report ?? null,
     mall_report_updated_at: site.scrape_profile_updated_at,
@@ -71,18 +73,26 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   return NextResponse.json({ ok: true })
 }
 
-/** 스크래핑 화면에서 "일반모드/개발자모드" 중 하나를 확정할 때 쓰는 최소 갱신 — 로그인정보/셀렉터 등
- * 전체 필드를 요구하는 PUT과 달리 이 값 하나만 바꾼다(그 화면은 다른 필드를 갖고 있지 않아, PUT을 그대로
- * 쓰면 나머지 필드를 실수로 지울 위험이 있다). */
+/** 스크래핑 화면에서 "일반모드/개발자모드" 중 하나를 확정하거나, 개발자모드 미리보기의 AI모드를 켤 때 쓰는
+ * 최소 갱신 — 로그인정보/셀렉터 등 전체 필드를 요구하는 PUT과 달리 이 값들만 바꾼다(그 화면은 다른 필드를
+ * 갖고 있지 않아, PUT을 그대로 쓰면 나머지 필드를 실수로 지울 위험이 있다). */
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const b = await req.json() as { manualLoginRequired: boolean }
-  if (typeof b.manualLoginRequired !== 'boolean') return NextResponse.json({ error: 'manualLoginRequired required' }, { status: 400 })
-  await pool.query(`UPDATE sites SET manual_login_required=$1 WHERE id=$2`, [b.manualLoginRequired, id])
+  const b = await req.json() as { manualLoginRequired?: boolean; devmodeAiPreview?: boolean }
+  if (typeof b.manualLoginRequired !== 'boolean' && typeof b.devmodeAiPreview !== 'boolean') {
+    return NextResponse.json({ error: 'manualLoginRequired 또는 devmodeAiPreview 중 하나가 필요합니다' }, { status: 400 })
+  }
+  if (typeof b.manualLoginRequired === 'boolean') {
+    await pool.query(`UPDATE sites SET manual_login_required=$1 WHERE id=$2`, [b.manualLoginRequired, id])
+  }
+  if (typeof b.devmodeAiPreview === 'boolean') {
+    await pool.query(`UPDATE sites SET devmode_ai_preview=$1 WHERE id=$2`, [b.devmodeAiPreview, id])
+  }
   return NextResponse.json({ ok: true })
 }
 
-export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  if (!isAdminRequest(req)) return NextResponse.json({ error: '관리자 권한이 필요합니다.' }, { status: 403 })
   const { id } = await params
   await pool.query(`DELETE FROM sites WHERE id = $1`, [id])
   return NextResponse.json({ ok: true })

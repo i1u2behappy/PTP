@@ -8,8 +8,8 @@ export async function POST(req: NextRequest) {
   const { username, password } = await req.json() as { username?: string; password?: string }
   if (!username || !password) return NextResponse.json({ error: 'username/password required' }, { status: 400 })
 
-  const res = await pool.query<{ username: string; password_hash: string; password_salt: string }>(
-    'SELECT username, password_hash, password_salt FROM admin_accounts WHERE username=$1',
+  const res = await pool.query<{ username: string; password_hash: string; password_salt: string; role: string }>(
+    'SELECT username, password_hash, password_salt, role FROM users WHERE username=$1',
     [username],
   )
   const account = res.rows[0]
@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
   }
 
   const cookieStore = await cookies()
-  cookieStore.set(SESSION_COOKIE, signSessionToken(account.username), {
+  cookieStore.set(SESSION_COOKIE, signSessionToken(account.username, account.role), {
     httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: SESSION_MAX_AGE,
   })
   return NextResponse.json({ ok: true })

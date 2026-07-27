@@ -21,3 +21,14 @@ body {
 input[type='checkbox'], input[type='radio'] {
   accent-color: #14b8a6;
 }
+
+/* 백그라운드 작업 진행 중임을 알리는 버튼 강조 — 기본 animate-pulse(불투명도)만으로는 눈에 잘 띄지 않아
+   테두리 밖으로 퍼지는 글로우 링을 더함 */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); }
+  50% { box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 1.2s ease-in-out infinite;
+}

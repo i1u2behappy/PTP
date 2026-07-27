@@ -21,13 +21,15 @@ let sessionId = null
 let running = false
 
 /** 현재 탭의 도메인으로 PTP에 "이 몰이 몇 번 site냐"고 물어본다 — 몰마다 확장을 새로 만들지 않기 위함.
- * "스크랩 조정" 기능이 그 몰에 대해 학습해둔 추출 규칙(extractionRules)도 같이 받아온다. */
+ * "스크랩 조정" 기능이 그 몰에 대해 학습해둔 추출 규칙(extractionRules)과, PTP 화면(일반모드와 같은 자리)
+ * 의 AI모드 토글 상태(aiPreviewMode)도 같이 받아온다 — 확장은 PTP와 직접 연결돼 있지 않아(별도 실제
+ * 크롬 탭) 실행 시점마다 이 값을 물어봐야 한다. */
 async function resolveSite(hostname) {
   const res = await fetch(`${RESOLVE_ENDPOINT}?host=${encodeURIComponent(hostname)}`)
   if (!res.ok) return null
   const data = await res.json()
   if (data.id == null) return null
-  return { id: data.id, extractionRules: data.extractionRules || {} }
+  return { id: data.id, extractionRules: data.extractionRules || {}, aiPreviewMode: !!data.aiPreviewMode }
 }
 
 /** PTP의 "스크래핑 중지" 버튼은 서버 인메모리 Set에 요청만 남겨둔다(일반모드는 서버 자신이 그 루프를
@@ -485,16 +487,11 @@ async function run(tabId, startUrl) {
   }
 }
 
-chrome.action.onClicked.addListener(async (tab) => {
-  if (running) { console.log('[PTP] 이미 실행 중입니다.'); return }
-  if (!tab.id || !tab.url) return
-
-  const hostname = new URL(tab.url).hostname
-  const site = await resolveSite(hostname).catch(() => null)
-  if (!site) {
-    console.log(`[PTP] "${hostname}"은 PTP Mall 관리에 "크롬익스텐션-개발자모드"로 등록돼 있지 않습니다.`)
-    return
-  }
+/** "스크랩 시작" — 팝업의 "🔄 스크랩 시작" 버튼이 메시지로 호출하는 본체. default_popup을 등록한 뒤로는
+ *  아이콘 클릭이 항상 팝업을 여는 것으로 바뀌어(브라우저 자체 규칙) 예전처럼 chrome.action.onClicked로
+ *  직접 시작할 수 없다 — 그래서 팝업 버튼 → 메시지 → 이 함수 순서로 바뀌었다. */
+async function startScrape(tab, site) {
+  if (running) { console.log('[PTP] 이미 실행 중입니다.'); return { ok: false, error: '이미 실행 중입니다' } }
   siteId = site.id
   extractionRules = site.extractionRules
   sessionId = null
@@ -503,14 +500,13 @@ chrome.action.onClicked.addListener(async (tab) => {
     await chrome.debugger.attach({ tabId: tab.id }, '1.3')
   } catch (e) {
     console.log('[PTP] debugger attach 실패:', e.message)
-    return
+    return { ok: false, error: `디버거 연결 실패: ${e.message}` }
   }
-  try {
-    await run(tab.id, tab.url)
-  } finally {
-    await chrome.debugger.detach({ tabId: tab.id }).catch(() => {})
-  }
-})
+  // run()은 상품 여러 개를 순회하며 오래 걸릴 수 있어(수 분) 완료를 기다리지 않고 백그라운드로 흘려보낸다
+  // — 팝업은 "시작했다"는 응답만 받고, 진행상황은 PTP 화면의 기존 5초 폴링이 이어받는다.
+  run(tab.id, tab.url).finally(() => chrome.debugger.detach({ tabId: tab.id }).catch(() => {}))
+  return { ok: true }
+}
 
 // "스크랩 조정" 2단계 — 사용자가 PTP에 프롬프트를 먼저 입력해두고(1단계, /api/sites/{id}/adjust/prompt),
 // 이 몰의 아무 페이지에서나(로그인된 상태) 이 우클릭 메뉴를 실행하면, 확장이 PTP에 "지금 테스트해야 할
@@ -519,6 +515,7 @@ chrome.action.onClicked.addListener(async (tab) => {
 // 백엔드가 이 몰의 페이지를 스스로 못 열어보는 게 개발자모드의 정의라, 이 캡처가 유일한 통로다.
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({ id: 'ptp-adjust', title: 'PTP 조정 테스트 실행', contexts: ['page'] }, () => void chrome.runtime.lastError)
+  chrome.contextMenus.create({ id: 'ptp-preview', title: 'PTP 미리보기 실행', contexts: ['page'] }, () => void chrome.runtime.lastError)
   chrome.contextMenus.create({ id: 'ptp-retry-failed', title: 'PTP 실패 상품 재수집', contexts: ['page'] }, () => void chrome.runtime.lastError)
 })
 
@@ -530,14 +527,15 @@ async function retryFailed(tab) {
   const hostname = new URL(tab.url).hostname
   const site = await resolveSite(hostname).catch(() => null)
   if (!site) {
-    console.log(`[PTP] "${hostname}"은 PTP Mall 관리에 "크롬익스텐션-개발자모드"로 등록돼 있지 않습니다.`)
-    return
+    const msg = `"${hostname}"은 PTP Mall 관리에 "크롬익스텐션-개발자모드"로 등록돼 있지 않습니다.`
+    console.log('[PTP]', msg)
+    return { ok: false, error: msg }
   }
   const data = await fetch(`${FAILED_URLS_ENDPOINT}?siteId=${site.id}`).then(r => r.json()).catch(() => null)
   const urls = data?.urls || []
   if (!urls.length) {
     console.log('[PTP] 재수집할 실패 상품이 없습니다.')
-    return
+    return { ok: false, error: '재수집할 실패 상품이 없습니다' }
   }
   console.log(`[PTP] 실패 상품 재수집 시작 — ${urls.length}개`)
 
@@ -549,77 +547,144 @@ async function retryFailed(tab) {
     await chrome.debugger.attach({ tabId: tab.id }, '1.3')
   } catch (e) {
     console.log('[PTP] 재수집 실패(디버거 연결 안 됨):', e.message)
-    return
+    return { ok: false, error: `디버거 연결 실패: ${e.message}` }
+  }
+  // 실패 상품이 많으면 몇 분씩 걸릴 수 있어(URL마다 1.2~2.4초 대기) startScrape와 같은 이유로 완료를
+  // 기다리지 않고 백그라운드로 흘려보낸다 — 팝업은 "시작했다"는 응답만 받는다.
+  ;(async () => {
+    try {
+      let processed = 0
+      for (const url of urls) {
+        if (await checkStopRequested(sessionId)) {
+          console.log('[PTP] 중지 요청을 확인해 재수집을 멈춥니다.')
+          break
+        }
+        await navigate(tab.id, url)
+        try {
+          const product = await evalInTab(tab.id, buildExtractExpr(extractionRules))
+          const result = await report(url, product)
+          console.log(`[PTP] 재수집 ${++processed}/${urls.length} 저장:`, product.name, result)
+        } catch (e) {
+          console.log('[PTP] 재수집 실패:', url, e.message)
+          await reportFailure(url, e.message).catch(() => {})
+        }
+        await throttle()
+      }
+      console.log(`[PTP] 실패 상품 재수집 완료 — 총 ${urls.length}개 시도`)
+    } finally {
+      await reportDone()
+      await navigate(tab.id, tab.url).catch(() => {})
+      await chrome.debugger.detach({ tabId: tab.id }).catch(() => {})
+    }
+  })()
+  return { ok: true, count: urls.length }
+}
+
+/** "PTP 미리보기 실행" — 스크랩을 아직 한 번도 안 한 몰이라도, 지금 보고 있는 상품 페이지 그대로 캡처해
+ * 규칙기반(+aiPreviewMode면 AI모드) 추출 결과를 보여준다. "조정"과 달리 프롬프트도 기존 스크랩 세션도
+ * 필요 없다 — 지금 이 페이지 그대로, 이동 없이 캡처한다. */
+async function runPreview(tab, site, aiMode) {
+  try {
+    await chrome.debugger.attach({ tabId: tab.id }, '1.3')
+  } catch (e) {
+    console.log('[PTP] 미리보기 실패(디버거 연결 안 됨):', e.message)
+    return { ok: false, error: `디버거 연결 실패: ${e.message}` }
   }
   try {
-    let processed = 0
-    for (const url of urls) {
-      if (await checkStopRequested(sessionId)) {
-        console.log('[PTP] 중지 요청을 확인해 재수집을 멈춥니다.')
-        break
-      }
-      await navigate(tab.id, url)
-      try {
-        const product = await evalInTab(tab.id, buildExtractExpr(extractionRules))
-        const result = await report(url, product)
-        console.log(`[PTP] 재수집 ${++processed}/${urls.length} 저장:`, product.name, result)
-      } catch (e) {
-        console.log('[PTP] 재수집 실패:', url, e.message)
-        await reportFailure(url, e.message).catch(() => {})
-      }
-      await throttle()
-    }
-    console.log(`[PTP] 실패 상품 재수집 완료 — 총 ${urls.length}개 시도`)
+    const html = await evalInTab(tab.id, '(() => document.documentElement.outerHTML.slice(0, 200000))()')
+    const res = await fetch(`${ADJUST_CAPTURE_ENDPOINT_BASE}/${site.id}/preview-capture`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: tab.url, html, aiMode: !!aiMode }),
+    })
+    const data = await res.json()
+    if (!res.ok) { console.log('[PTP] 미리보기 실패:', data.error || res.status); return { ok: false, error: data.error || String(res.status) } }
+    console.log('[PTP] 미리보기 완료:', data.preview)
+    return { ok: true, preview: data.preview }
+  } catch (e) {
+    console.log('[PTP] 미리보기 중 오류:', e.message)
+    return { ok: false, error: e.message }
   } finally {
-    await reportDone()
-    await navigate(tab.id, tab.url).catch(() => {})
     await chrome.debugger.detach({ tabId: tab.id }).catch(() => {})
   }
 }
 
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId === 'ptp-retry-failed') {
-    if (tab?.id && tab.url) await retryFailed(tab)
-    return
+/** "PTP 조정 테스트 실행" 본체 — 우클릭 메뉴와 팝업 버튼이 공유한다. */
+async function runAdjust(tab, site) {
+  // 프롬프트는 PTP 화면(일반모드와 같은 자리)에서 미리 입력해 저장해둔다 — 여기서는 그 값이 있는지와
+  // 어느 상품 페이지를 테스트해야 하는지만 물어본다.
+  const target = await fetch(`${ADJUST_CAPTURE_ENDPOINT_BASE}/${site.id}/adjust/target`).then(r => r.json()).catch(() => null)
+  if (!target?.prompt) {
+    const msg = 'PTP 스크랩 조정 화면에서 프롬프트를 먼저 입력하고 "지정 개시"를 눌러주세요.'
+    console.log('[PTP]', msg)
+    return { ok: false, error: msg }
   }
-  if (info.menuItemId !== 'ptp-adjust' || !tab?.id || !tab.url) return
+  // 이 몰을 아직 한 번도 스크랩하지 않았으면(테스트할 미확정 상품이 없으면) 다른 URL로 이동하는 대신
+  // 지금 보고 있는 이 페이지를 그대로 테스트 대상으로 삼는다 — 사용자가 이미 상품 페이지를 열어둔
+  // 상태로 실행했다고 가정한다.
+  const testUrl = target.testUrl || tab.url
+
+  try {
+    await chrome.debugger.attach({ tabId: tab.id }, '1.3')
+  } catch (e) {
+    console.log('[PTP] 조정 테스트 실패(디버거 연결 안 됨):', e.message)
+    return { ok: false, error: `디버거 연결 실패: ${e.message}` }
+  }
+  try {
+    if (testUrl !== tab.url) await navigate(tab.id, testUrl)
+    const html = await evalInTab(tab.id, '(() => document.documentElement.outerHTML.slice(0, 200000))()')
+    const res = await fetch(`${ADJUST_CAPTURE_ENDPOINT_BASE}/${site.id}/adjust/capture`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: testUrl, html }),
+    })
+    const data = await res.json()
+    if (testUrl !== tab.url) await navigate(tab.id, tab.url).catch(() => {}) // 원래 있던 페이지로 되돌려놓는다
+    if (!res.ok) { console.log('[PTP] 조정 테스트 실패:', data.error || res.status); return { ok: false, error: data.error || String(res.status) } }
+    console.log('[PTP] 조정 테스트 완료 — 갱신된 규칙:', data.rules)
+    return { ok: true, rules: data.rules, preview: data.preview }
+  } catch (e) {
+    console.log('[PTP] 조정 테스트 중 오류:', e.message)
+    return { ok: false, error: e.message }
+  } finally {
+    await chrome.debugger.detach({ tabId: tab.id }).catch(() => {})
+  }
+}
+
+// 우클릭 컨텍스트메뉴는 몰이 우클릭 자체를 JS로 차단하면(실제 발견된 사례 — 일부 쇼핑몰의 이미지 보호
+// 스크립트) 아예 뜨지 않아 무용지물이 될 수 있다 — 그래서 이제 기본 접근 경로는 팝업(아래
+// chrome.runtime.onMessage)이고, 컨텍스트메뉴는 우클릭이 정상 동작하는 몰을 위한 보조 경로로만 남긴다.
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (!tab?.id || !tab.url) return
+  if (info.menuItemId === 'ptp-retry-failed') { await retryFailed(tab); return }
+
   const hostname = new URL(tab.url).hostname
   const site = await resolveSite(hostname).catch(() => null)
   if (!site) {
     console.log(`[PTP] "${hostname}"은 PTP Mall 관리에 "크롬익스텐션-개발자모드"로 등록돼 있지 않습니다.`)
     return
   }
+  if (info.menuItemId === 'ptp-preview') await runPreview(tab, site, site.aiPreviewMode)
+  else if (info.menuItemId === 'ptp-adjust') await runAdjust(tab, site)
+})
 
-  const target = await fetch(`${ADJUST_CAPTURE_ENDPOINT_BASE}/${site.id}/adjust/target`).then(r => r.json()).catch(() => null)
-  if (!target?.prompt) {
-    console.log('[PTP] 먼저 PTP 스크랩 조정 화면에서 프롬프트를 입력하고 "스크랩 조정 개시"를 눌러주세요.')
-    return
-  }
-  if (!target.testUrl) {
-    console.log('[PTP] 테스트할 미확정 상품이 없습니다 — 이 몰을 먼저 한 번 스크랩해주세요.')
-    return
-  }
+/** 팝업(popup.js)이 보내는 메시지 — 우클릭이 막힌 몰에서도 4개 기능 모두를 쓸 수 있는 기본 경로.
+ *  탭 조회는 popup.js가 이미 자신이 매인 창 기준으로 끝내고 tabId/tabUrl로 넘겨준다 — 이 서비스 워커
+ *  자신은 "현재 창"이라는 개념이 없어(특정 창에 매인 UI가 아니다) 여기서 다시 chrome.tabs.query를
+ *  하면 어느 창 기준인지 불확실해진다. */
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  (async () => {
+    if (!msg.tabId || !msg.tabUrl) { sendResponse({ ok: false, error: '활성 탭을 찾을 수 없습니다' }); return }
+    const tab = { id: msg.tabId, url: msg.tabUrl }
 
-  try {
-    await chrome.debugger.attach({ tabId: tab.id }, '1.3')
-  } catch (e) {
-    console.log('[PTP] 조정 테스트 실패(디버거 연결 안 됨):', e.message)
-    return
-  }
-  try {
-    await navigate(tab.id, target.testUrl)
-    const html = await evalInTab(tab.id, '(() => document.documentElement.outerHTML.slice(0, 200000))()')
-    const res = await fetch(`${ADJUST_CAPTURE_ENDPOINT_BASE}/${site.id}/adjust/capture`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: target.testUrl, html }),
-    })
-    const data = await res.json()
-    if (!res.ok) console.log('[PTP] 조정 테스트 실패:', data.error || res.status)
-    else console.log('[PTP] 조정 테스트 완료 — 갱신된 규칙:', data.rules, '(PTP로 돌아가 "개발자모드 재기동"을 눌러 확인하세요)')
-    await navigate(tab.id, tab.url).catch(() => {}) // 원래 있던 페이지로 되돌려놓는다
-  } catch (e) {
-    console.log('[PTP] 조정 테스트 중 오류:', e.message)
-  } finally {
-    await chrome.debugger.detach({ tabId: tab.id }).catch(() => {})
-  }
+    if (msg.action === 'retry-failed') { sendResponse(await retryFailed(tab) || { ok: true }); return }
+
+    const hostname = new URL(tab.url).hostname
+    const site = await resolveSite(hostname).catch(() => null)
+    if (!site) { sendResponse({ ok: false, error: `"${hostname}"은 PTP Mall 관리에 "크롬익스텐션-개발자모드"로 등록돼 있지 않습니다` }); return }
+
+    if (msg.action === 'start') sendResponse(await startScrape(tab, site))
+    else if (msg.action === 'preview') sendResponse(await runPreview(tab, site, site.aiPreviewMode))
+    else if (msg.action === 'adjust') sendResponse(await runAdjust(tab, site))
+    else sendResponse({ ok: false, error: `알 수 없는 action: ${msg.action}` })
+  })()
+  return true // 비동기 sendResponse를 쓰겠다는 표시
 })

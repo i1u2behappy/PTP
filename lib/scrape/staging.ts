@@ -167,7 +167,7 @@ export async function mergeStagingItems(ids: number[], opts: { force?: boolean }
     }
 
     const { id: mallProductId } = await upsertMallProduct({ siteId: row.site_id, sessionId: row.session_id }, toScrapeResult(row))
-    await downloadProductImages(row.thumbnail_urls || [], row.detail_image_urls || [], mallProductId, row.mall_product_code, row.name_original, row.session_id)
+    await downloadProductImages(row.thumbnail_urls || [], row.detail_image_urls || [], mallProductId, row.mall_product_code, row.name_original, row.session_id, row.site_id)
     const clientId = await clientIdForSite(row.site_id)
     if (clientId != null) await migrateToMaster([mallProductId], clientId)
     else noClient.push(id)

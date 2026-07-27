@@ -31,8 +31,8 @@ export async function GET(req: NextRequest) {
   const host = req.nextUrl.searchParams.get('host')
   if (!host) return NextResponse.json({ error: 'host required' }, { status: 400, headers: corsHeaders() })
 
-  const res = await pool.query<{ id: number; name: string | null; url: string; extraction_rules: unknown }>(
-    `SELECT id, name, url, extraction_rules FROM sites WHERE manual_login_required = true`,
+  const res = await pool.query<{ id: number; name: string | null; url: string; extraction_rules: unknown; devmode_ai_preview: boolean }>(
+    `SELECT id, name, url, extraction_rules, devmode_ai_preview FROM sites WHERE manual_login_required = true`,
   )
   const targetHost = normalizeHost(host)
   const match = res.rows.find(row => {
@@ -41,6 +41,9 @@ export async function GET(req: NextRequest) {
   if (!match) return NextResponse.json({ error: 'not found' }, { status: 404, headers: corsHeaders() })
 
   // extractionRules: "스크랩 조정" 기능이 이 몰에 대해 학습해둔 영구 추출 규칙 — 확장이 매번 같이 받아가
-  // EXTRACT_PRODUCT_EXPR에 실어 적용한다.
-  return NextResponse.json({ id: match.id, name: match.name, extractionRules: match.extraction_rules || {} }, { headers: corsHeaders() })
+  // EXTRACT_PRODUCT_EXPR에 실어 적용한다. aiPreviewMode: PTP 화면의 AI모드 토글 상태 — 확장은 PTP와 직접
+  // 연결돼 있지 않아(별도 실제 크롬 탭) 실행 시점마다 이 값을 물어봐야 한다.
+  return NextResponse.json({
+    id: match.id, name: match.name, extractionRules: match.extraction_rules || {}, aiPreviewMode: match.devmode_ai_preview,
+  }, { headers: corsHeaders() })
 }

@@ -331,3 +331,31 @@ export function BoltIcon({ className }: IconProps) {
     </svg>
   )
 }
+
+export type IconComponent = (props: IconProps) => React.ReactNode
+
+/** 탭 id → 사이드바 메뉴와 동일한 아이콘. 하단 탭바(TabBar)가 이모지 대신 이 아이콘을 쓰도록
+ *  Sidebar.tsx의 메뉴별 아이콘 배정과 짝을 맞춰 관리한다(메뉴에 새 항목을 추가하면 여기도 추가). */
+export const TAB_ICONS: Record<string, IconComponent> = {
+  'dashboard': DashboardIcon,
+  'clients-list': ClientIcon,
+  'sites-list': StoreIcon,
+  'scraper': SearchIcon,
+  'products-list': InboxIcon,
+  'migration-dashboard': ReviewIcon,
+  'master-schema': ArchiveIcon,
+  'sales-code': TagIcon,
+  'category-mapping': MapIcon,
+  'internal-codes': TagIcon,
+  'name-management': ListIcon,
+  'option-management': SettingsIcon,
+  'brand-origin-management': StoreIcon,
+  'image-edit': ImageEditIcon,
+  'image-host': ImageEditIcon,
+  'pricing-management': CoinIcon,
+  'master-list': ArchiveIcon,
+  'transform': ReviewIcon,
+  'continuous-migration': RefreshIcon,
+  'export': ExportIcon,
+  'settings': SettingsIcon,
+}

@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
 import { useTabs } from './TabsContext'
+import { TAB_ICONS } from './icons'
 
 const TAB_WIDTH = 117
 const MORE_WIDTH = 40
@@ -54,6 +55,7 @@ export function TabBar() {
       <div role="tablist" aria-label="열린 작업 탭" className="flex-1 min-w-0 flex items-stretch gap-1 overflow-hidden">
         {visibleTabs.map((tab, i) => {
           const isActive = tab.id === activeTabId
+          const Icon = TAB_ICONS[tab.id]
           return (
             // 탭 안에 별도의 닫기 버튼이 들어가는 구조라 이 요소 자체는 <button>이 될 수 없다(버튼 중첩은 유효하지 않은 HTML).
             // 대신 role="tab" + tabIndex + 키보드 핸들러로 동일한 접근성을 제공한다.
@@ -63,6 +65,7 @@ export function TabBar() {
               id={`tab-${tab.id}`}
               aria-selected={isActive}
               aria-controls={`panel-${tab.id}`}
+              title={tab.title}
               tabIndex={isActive ? 0 : -1}
               onKeyDown={e => {
                 handleKeyDown(e, i)
@@ -71,8 +74,8 @@ export function TabBar() {
               onClick={() => setActive(tab.id)}
               style={{ width: TAB_WIDTH }}
               className={`group flex items-center gap-1.5 my-1.5 px-3 rounded-full text-sm shrink-0 transition-colors select-none cursor-pointer
-                ${isActive ? 'bg-teal-50 text-teal-700 font-semibold' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'}`}>
-              <span aria-hidden="true" className="shrink-0">{tab.icon}</span>
+                ${isActive ? 'bg-teal-50 text-teal-700 font-semibold' : 'text-slate-600 font-medium hover:bg-slate-50 hover:text-slate-900'}`}>
+              <span aria-hidden="true" className="shrink-0">{Icon ? <Icon active={isActive} /> : tab.icon}</span>
               <span className="whitespace-nowrap truncate min-w-0 flex-1">{tab.title}</span>
               {tab.closable && (
                 <button type="button" onClick={e => { e.stopPropagation(); closeTab(tab.id) }}
@@ -99,12 +102,13 @@ export function TabBar() {
             <div role="menu" className="absolute bottom-full right-0 mb-1 w-56 max-h-72 overflow-y-auto bg-white border border-slate-200 rounded-xl shadow-lg py-1 z-30">
               {overflowTabs.map(tab => {
                 const isActive = tab.id === activeTabId
+                const Icon = TAB_ICONS[tab.id]
                 return (
                   <div key={tab.id} role="menuitem"
                     onClick={() => { setActive(tab.id); setOverflowOpen(false) }}
-                    className={`flex items-center gap-2 px-3 py-2 text-sm cursor-pointer select-none
-                      ${isActive ? 'bg-teal-50 text-teal-700 font-semibold' : 'text-slate-600 hover:bg-slate-50'}`}>
-                    <span aria-hidden="true" className="shrink-0">{tab.icon}</span>
+                    className={`group flex items-center gap-2 px-3 py-2 text-sm cursor-pointer select-none
+                      ${isActive ? 'bg-teal-50 text-teal-700 font-semibold' : 'text-slate-700 hover:bg-slate-50'}`}>
+                    <span aria-hidden="true" className="shrink-0">{Icon ? <Icon active={isActive} /> : tab.icon}</span>
                     <span className="truncate flex-1 min-w-0">{tab.title}</span>
                     {tab.closable && (
                       <button type="button" onClick={e => { e.stopPropagation(); closeTab(tab.id) }}

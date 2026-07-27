@@ -7,13 +7,10 @@ export async function GET(req: NextRequest) {
 
   const res = await pool.query(
     `SELECT s.id, s.status, s.product_count, s.error, s.created_at,
-            COUNT(si.id) AS saved_count,
-            MAX(l.created_at) AS last_activity
+            (SELECT COUNT(*) FROM scrape_staging_items si WHERE si.session_id = s.id) AS saved_count,
+            (SELECT MAX(created_at) FROM scrape_item_log l WHERE l.session_id = s.id) AS last_activity
      FROM scrape_sessions s
-     LEFT JOIN scrape_staging_items si ON si.session_id = s.id
-     LEFT JOIN scrape_item_log l ON l.session_id = s.id
-     WHERE s.id = $1
-     GROUP BY s.id`,
+     WHERE s.id = $1`,
     [sessionId],
   )
   const row = res.rows[0]

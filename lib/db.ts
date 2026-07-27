@@ -3,7 +3,7 @@ import crypto from 'crypto'
 import { hashPassword } from './auth'
 
 const pool = new Pool({
-  host:     process.env.DB_HOST     || 'localhost',
+  host:     process.env.DB_HOST     || '127.0.0.1',
   port:     Number(process.env.DB_PORT) || 5432,
   database: process.env.DB_NAME     || 'scrape',
   user:     process.env.DB_USER     || 'postgres',

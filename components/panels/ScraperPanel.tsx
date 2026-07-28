@@ -83,6 +83,7 @@ interface PreviewProduct {
   category: string
   price: number | null
   sale_price: number | null
+  cost_price: number | null
   brand: string
   manufacturer: string
   origin: string
@@ -1443,19 +1444,23 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   <thead className="bg-gray-50">
                     <tr className="border-b border-gray-200 text-gray-500 font-semibold">
                       <th className="px-3 py-2 text-left">카테고리</th>
-                      <th className="px-3 py-2 text-left">가격</th>
+                      <th className="px-3 py-2 text-left">소비자판가</th>
+                      <th className="px-3 py-2 text-left">공급가</th>
                       <th className="px-3 py-2 text-left">브랜드</th>
                       <th className="px-3 py-2 text-left">제조사</th>
                       <th className="px-3 py-2 text-left">원산지</th>
+                      <th className="px-3 py-2 text-left">옵션1</th>
+                      <th className="px-3 py-2 text-left">옵션2</th>
                       <th className="px-3 py-2 text-left">재고</th>
-                      <th className="px-3 py-2 text-left">옵션별 재고</th>
-                      <th className="px-3 py-2 text-left">상품요약정보</th>
-                      <th className="px-3 py-2 text-left">영문상품명</th>
                       <th className="px-3 py-2 text-left">대표이미지</th>
                       <th className="px-3 py-2 text-left">상세이미지</th>
-                      {previewResult.product.options.map(o => (
-                        <th key={o.name} className="px-3 py-2 text-left">{o.name}</th>
-                      ))}
+                      <th className="px-3 py-2 text-left">상품요약정보</th>
+                      <th className="px-3 py-2 text-left">영문상품명</th>
+                      {previewResult.product.options
+                        .filter(o => !/^option[12]$/i.test(o.name))
+                        .map(o => (
+                          <th key={o.name} className="px-3 py-2 text-left">{o.name}</th>
+                        ))}
                       {Object.keys(previewResult.product.custom_fields || {})
                         .filter(label => label in pickerRules)
                         .map(label => <th key={label} className="px-3 py-2 text-left">🎯 {label}</th>)}
@@ -1469,23 +1474,20 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       <td className="px-3 py-2 text-gray-700">
                         {previewResult.product.price != null ? `₩${previewResult.product.price.toLocaleString()}` : <span className="text-rose-500">찾지 못함</span>}
                       </td>
+                      <td className="px-3 py-2 text-gray-700">
+                        {previewResult.product.cost_price != null ? `₩${previewResult.product.cost_price.toLocaleString()}` : '-'}
+                      </td>
                       <td className="px-3 py-2 text-gray-700">{previewResult.product.brand || '-'}</td>
                       <td className="px-3 py-2 text-gray-700">{previewResult.product.manufacturer || '-'}</td>
                       <td className="px-3 py-2 text-gray-700">{previewResult.product.origin || '-'}</td>
+                      <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate" title={previewResult.product.options[0]?.values.join(', ')}>
+                        {previewResult.product.options[0]?.values.join(', ') || '-'}
+                      </td>
+                      <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate" title={previewResult.product.options[1]?.values.join(', ')}>
+                        {previewResult.product.options[1]?.values.join(', ') || '-'}
+                      </td>
                       <td className="px-3 py-2 text-gray-700">
                         {previewResult.product.stock_status || '-'}{previewResult.product.stock_qty != null && ` (${previewResult.product.stock_qty}개)`}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 max-w-[280px] truncate"
-                        title={previewResult.product.stock_by_option.map(r => `${r.option}: ${r.qty}개`).join(', ')}>
-                        {previewResult.product.stock_by_option.length > 0
-                          ? previewResult.product.stock_by_option.map(r => `${r.option}: ${r.qty}개`).join(', ')
-                          : '-'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate" title={previewResult.product.summary_info}>
-                        {previewResult.product.summary_info || '-'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 max-w-[160px] truncate" title={previewResult.product.english_name}>
-                        {previewResult.product.english_name || '-'}
                       </td>
                       <td className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={previewResult.product.thumbnail_names.join(', ')}>
                         {previewResult.product.thumbnail_urls.length}장 — {previewResult.product.thumbnail_names.join(', ') || '-'}
@@ -1493,11 +1495,19 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       <td className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={previewResult.product.detail_image_names.join(', ')}>
                         {previewResult.product.detail_image_urls.length}장 — {previewResult.product.detail_image_names.join(', ') || '-'}
                       </td>
-                      {previewResult.product.options.map(o => (
-                        <td key={o.name} className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={o.values.join(', ')}>
-                          {o.values.join(', ')}
-                        </td>
-                      ))}
+                      <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate" title={previewResult.product.summary_info}>
+                        {previewResult.product.summary_info || '-'}
+                      </td>
+                      <td className="px-3 py-2 text-gray-700 max-w-[160px] truncate" title={previewResult.product.english_name}>
+                        {previewResult.product.english_name || '-'}
+                      </td>
+                      {previewResult.product.options
+                        .filter(o => !/^option[12]$/i.test(o.name))
+                        .map(o => (
+                          <td key={o.name} className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={o.values.join(', ')}>
+                            {o.values.join(', ')}
+                          </td>
+                        ))}
                       {Object.entries(previewResult.product.custom_fields || {})
                         .filter(([label]) => label in pickerRules)
                         .map(([label, value]) => (

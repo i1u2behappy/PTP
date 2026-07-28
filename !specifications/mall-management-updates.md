@@ -81,12 +81,28 @@
 변경을 그대로 적용. 거래처/검색어 드롭다운 필터로 이미 좁혀진 목록(`filteredSites`) 위에서 추가로
 컬럼 필터·정렬이 적용되는 구조.
 
+## 8. Mall 관리 그리드 — "몰 유형" 컬럼 (2026-07-29)
+
+> "스크래핑을 하고 나면, 해당 몰의 '몰 유형 : 카페24' 이런 식으로 파악을 하잖아. 그 몰 유형 값을
+> Mall관리 메뉴의 하단 그리드에 URL 다음 컬럼으로 넣어줘."
+
+로그인 확인/스크랩 시작마다 자동으로 감지·저장되는 몰 구축 플랫폼(`sites.scrape_profile.platform` —
+[[mall-profile-baseline]] 참고, `MallPlatform` = cafe24/makeshop/godomall/domesin/unknown)을 목록에
+노출했다.
+
+- `app/api/sites/route.ts` GET에 `s.scrape_profile` 추가, 응답에 `mall_platform:
+  scrape_profile?.platform ?? null`로 가공해 실어줌(한 번도 스크랩 안 한 몰은 null).
+- `SitesListPanel.tsx`의 `Site` 인터페이스에 `mall_platform` 추가, URL 컬럼 바로 뒤에 "몰 유형" 컬럼
+  추가 — `ScraperPanel.tsx`의 감지 결과 표시와 같은 라벨(카페24/메이크샵/고도몰/도매의신/알 수 없음)을
+  쓴다(다만 별도 상수로, 공유 모듈화는 하지 않음 — 값 집합이 작고 안정적이라 중복을 감수).
+
 ## 검증
 
 각 항목 진행 시 `npx tsc --noEmit`/`npx eslint` 통과 확인. 스키마 변경(merged_at, main_items, name
 NOT NULL, payment_accounts)은 실제 테스트 데이터로 생성→조회→수정→삭제까지 curl로 직접 확인 후
-정리했다.
+정리했다. 8번(몰 유형)은 실제 DB에 이미 쌓여있던 사이트 9곳의 `scrape_profile.platform` 값을 직접
+조회해(cafe24/godomall/domesin/unknown/null 혼재) 그리드 렌더링과 일치하는지 확인했다.
 
 ## 상태
 
-**구현 완료 (2026-07-18, 6·7번은 2026-07-21 추가).**
+**구현 완료 (2026-07-18, 6·7번은 2026-07-21, 8번은 2026-07-29 추가).**

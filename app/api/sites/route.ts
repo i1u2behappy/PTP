@@ -11,7 +11,7 @@ export async function GET(req: NextRequest) {
   const q = req.nextUrl.searchParams.get('q') || ''
   const res = await pool.query(
     `SELECT s.id, s.name, s.url, s.login_id, s.login_pw_encrypted, s.login_pw_iv, s.client_id, c.name AS client_name, s.created_at,
-            s.manual_login_required, s.main_items,
+            s.manual_login_required, s.main_items, s.scrape_profile,
             COALESCE(latest.status = 'error' AND latest.error ILIKE '%차단%', false) AS blocked,
             s.memo AS latest_memo
      FROM sites s
@@ -23,9 +23,12 @@ export async function GET(req: NextRequest) {
      ORDER BY s.created_at DESC`,
     [`%${q}%`],
   )
-  const sites = res.rows.map(({ login_pw_encrypted, login_pw_iv, ...site }) => ({
+  const sites = res.rows.map(({ login_pw_encrypted, login_pw_iv, scrape_profile, ...site }) => ({
     ...site,
     login_pw_masked: maskPassword(decryptSecret(login_pw_encrypted, login_pw_iv)),
+    // 로그인 확인/스크랩 시작마다 자동으로 감지·저장되는 몰 구축 플랫폼(카페24/메이크샵/고도몰 등) —
+    // Mall 목록에서 몰 유형을 바로 참고할 수 있도록 노출한다. 아직 한 번도 감지되지 않았으면 null.
+    mall_platform: scrape_profile?.platform ?? null,
   }))
   return NextResponse.json(sites)
 }

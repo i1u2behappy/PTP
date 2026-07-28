@@ -18,6 +18,13 @@ interface Site {
   main_items: string | null
   latest_memo: string | null
   created_at: string
+  mall_platform: string | null
+}
+
+/** 로그인 확인/스크랩 시작마다 자동 감지되는 몰 구축 플랫폼(lib/scraper.ts의 MallPlatform) 표시용 —
+ *  ScraperPanel.tsx의 감지 결과 표시와 동일한 라벨을 쓴다. */
+const PLATFORM_LABELS: Record<string, string> = {
+  cafe24: '카페24', makeshop: '메이크샵', godomall: '고도몰', domesin: '도매의신', unknown: '알 수 없음',
 }
 
 interface ColumnDef {
@@ -46,6 +53,8 @@ const COLUMNS: ColumnDef[] = [
   ) },
   { key: 'main_items', label: '메인 품목', getValue: s => s.main_items || '', render: s => s.main_items || '-', className: 'text-gray-500' },
   { key: 'url', label: 'URL', getValue: s => s.url, render: s => s.url, className: 'text-gray-500' },
+  { key: 'mall_platform', label: '몰 유형', getValue: s => s.mall_platform ? (PLATFORM_LABELS[s.mall_platform] || s.mall_platform) : '',
+    render: s => s.mall_platform ? (PLATFORM_LABELS[s.mall_platform] || s.mall_platform) : '-', className: 'text-gray-500' },
   { key: 'login_id', label: '로그인ID', getValue: s => s.login_id || '', render: s => s.login_id || '-', className: 'text-gray-500' },
   { key: 'login_pw_masked', label: '비밀번호', getValue: s => s.login_pw_masked || '', render: s => s.login_pw_masked || '-', className: 'text-gray-500 font-mono' },
   { key: 'client_name', label: '거래처', getValue: s => s.client_name || '', render: s => s.client_name || '-', className: 'text-teal-600' },
@@ -56,7 +65,7 @@ const COLUMNS: ColumnDef[] = [
 ]
 
 const DEFAULT_COL_WIDTH: Record<string, number> = {
-  name: 160, main_items: 140, url: 220, login_id: 110, login_pw_masked: 100,
+  name: 160, main_items: 140, url: 220, mall_platform: 90, login_id: 110, login_pw_masked: 100,
   client_name: 110, blocked: 70, latest_memo: 220, created_at: 100,
 }
 const MIN_COL_WIDTH = 50

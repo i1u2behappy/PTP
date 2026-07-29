@@ -698,8 +698,8 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
           </colgroup>
           <thead className="sticky top-0 z-10 bg-gray-50">
             <tr className="border-b border-gray-200 text-xs font-semibold text-gray-500 whitespace-nowrap">
-              <th className="px-4 py-3"></th>
-              {orderedColumns.map(col => {
+              <th className="px-4 py-3 sticky left-0 z-20 bg-gray-50"></th>
+              {orderedColumns.map((col, colIdx) => {
                 const idx = sortKeys.findIndex(s => s.key === col.key)
                 const active = idx !== -1
                 return (
@@ -708,7 +708,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
                     onDragOver={e => e.preventDefault()}
                     onDrop={() => handleColDrop(col.key)}
                     onDragEnd={() => setDragKey(null)}
-                    className={`relative px-2 py-3 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden ${dragKey === col.key ? 'opacity-40' : ''}`}
+                    className={`relative px-2 py-3 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden ${dragKey === col.key ? 'opacity-40' : ''} ${colIdx === 0 ? 'sticky left-10 z-20 bg-gray-50' : ''}`}
                     onClick={e => handleSort(col.key, e)} title="드래그: 컬럼 순서 이동 · 클릭: 정렬 · Shift+클릭: 복합 정렬 추가">
                     <span className={active ? 'text-gray-800' : ''}>{col.label}</span>
                     {active && (
@@ -725,9 +725,9 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
             </tr>
             {showFilters && (
               <tr className="border-b border-gray-200 bg-white">
-                <th className="px-4 py-1.5"></th>
-                {orderedColumns.map(col => (
-                  <th key={col.key} className="px-2 py-1.5 font-normal">
+                <th className="px-4 py-1.5 sticky left-0 z-20 bg-white"></th>
+                {orderedColumns.map((col, colIdx) => (
+                  <th key={col.key} className={`px-2 py-1.5 font-normal ${colIdx === 0 ? 'sticky left-10 z-20 bg-white' : ''}`}>
                     <input value={filters[col.key] || ''} onChange={e => setFilters(f => ({ ...f, [col.key]: e.target.value }))}
                       placeholder="필터..." onClick={e => e.stopPropagation()}
                       className="w-full border border-gray-200 rounded px-1.5 py-1 text-xs font-normal focus:outline-none focus:ring-1 focus:ring-teal-300" />
@@ -827,17 +827,18 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
                 },
               }
 
+              const rowStickyBg = selected.has(p.id) ? 'bg-teal-50' : 'bg-white group-hover:bg-gray-50'
               return (
               <tr key={p.id} onClick={() => openDetail(p)}
-                className={`border-b border-gray-100 hover:bg-gray-50 transition-colors ${canOpen ? 'cursor-pointer' : ''} ${selected.has(p.id) ? 'bg-teal-50' : ''} ${!selectable ? 'opacity-60' : ''}`}>
-                <td className="px-4 py-2" onClick={e => e.stopPropagation()}>
+                className={`group border-b border-gray-100 hover:bg-gray-50 transition-colors ${canOpen ? 'cursor-pointer' : ''} ${selected.has(p.id) ? 'bg-teal-50' : ''} ${!selectable ? 'opacity-60' : ''}`}>
+                <td className={`px-4 py-2 sticky left-0 z-10 ${rowStickyBg}`} onClick={e => e.stopPropagation()}>
                   <input type="checkbox" checked={selected.has(p.id)} disabled={!selectable} onChange={() => selectable && toggleSelect(p.id)} />
                 </td>
 
-                {orderedColumns.map(col => {
+                {orderedColumns.map((col, colIdx) => {
                   const cell = cells[col.key]
                   return (
-                    <td key={col.key} className={cell.className ?? 'px-2 py-2 text-xs text-gray-500 truncate'} title={cell.title}
+                    <td key={col.key} className={`${cell.className ?? 'px-2 py-2 text-xs text-gray-500 truncate'} ${colIdx === 0 ? `sticky left-10 z-10 ${rowStickyBg}` : ''}`} title={cell.title}
                       onClick={cell.stop ? e => e.stopPropagation() : undefined}>
                       {cell.node}
                     </td>

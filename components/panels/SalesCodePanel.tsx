@@ -21,8 +21,10 @@ export function SalesCodePanel({ params }: { params?: Record<string, unknown> })
   }, [])
 
   const loadRows = useCallback(() => {
-    if (scope.sessionId === '') { setRows([]); return }
-    fetch(`/api/master?sessionId=${scope.sessionId}`).then(r => r.json()).then((d: MasterRow[]) => setRows(Array.isArray(d) ? d : [])).catch(() => {})
+    const result = scope.sessionId === ''
+      ? Promise.resolve([])
+      : fetch(`/api/master?sessionId=${scope.sessionId}`).then(r => r.json())
+    result.then((d: MasterRow[]) => setRows(Array.isArray(d) ? d : [])).catch(() => {})
   }, [scope.sessionId])
 
   useEffect(() => { loadRows() }, [loadRows])
@@ -122,7 +124,7 @@ export function SalesCodePanel({ params }: { params?: Record<string, unknown> })
                 <table className="w-full text-sm border-collapse">
                   <thead className="sticky top-0 z-10 bg-gray-50">
                     <tr className="border-b border-gray-200 text-xs font-semibold text-gray-500">
-                      <th className="px-4 py-3 text-left">상품명</th>
+                      <th className="px-4 py-3 text-left sticky left-0 z-20 bg-gray-50">상품명</th>
                       <th className="px-4 py-3 text-left">거래처코드 접두어</th>
                       <th className="px-4 py-3 text-left">몰 상품코드</th>
                       <th className="px-4 py-3 text-left">조합 미리보기</th>
@@ -135,8 +137,8 @@ export function SalesCodePanel({ params }: { params?: Record<string, unknown> })
                       const preview = combine(row)
                       const isApplied = !!row.sales_code && row.sales_code === preview
                       return (
-                        <tr key={row.id} className="border-b border-gray-100 hover:bg-gray-50">
-                          <td className="px-4 py-2 text-xs text-gray-700 truncate max-w-[260px]">{row.name_final || row.name_ai || row.name_original}</td>
+                        <tr key={row.id} className="group border-b border-gray-100 hover:bg-gray-50">
+                          <td className="px-4 py-2 text-xs text-gray-700 truncate max-w-[260px] sticky left-0 z-10 bg-white group-hover:bg-gray-50">{row.name_final || row.name_ai || row.name_original}</td>
                           <td className="px-4 py-2 text-xs font-mono text-teal-600">{clientPrefix || '-'}</td>
                           <td className="px-4 py-2 text-xs font-mono text-gray-500">{row.mall_product_code || '-'}</td>
                           <td className="px-4 py-2 text-xs font-mono text-gray-400">{preview || '-'}</td>

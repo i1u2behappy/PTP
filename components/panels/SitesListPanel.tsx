@@ -27,6 +27,20 @@ const PLATFORM_LABELS: Record<string, string> = {
   cafe24: '카페24', makeshop: '메이크샵', godomall: '고도몰', domesin: '도매의신', unknown: '알 수 없음',
 }
 
+/** name 컬럼의 ❔ 미정 배지와 같은 기준(manual_login_required)의 텍스트 버전. */
+function loginModeLabel(s: Site): string {
+  if (s.manual_login_required === true) return '개발자모드'
+  if (s.manual_login_required === false) return '일반모드'
+  return '미정'
+}
+
+/** 몰 유형 컬럼에서 로그인 방식을 색으로 바로 구분: 일반모드=초록, 개발자모드=노랑, 미정=회색. */
+const LOGIN_MODE_BADGE_CLASS: Record<string, string> = {
+  '일반모드': 'bg-emerald-100 text-emerald-700',
+  '개발자모드': 'bg-amber-100 text-amber-700',
+  '미정': 'bg-gray-100 text-gray-500',
+}
+
 interface ColumnDef {
   key: string
   label: string
@@ -39,11 +53,6 @@ const COLUMNS: ColumnDef[] = [
   { key: 'name', label: 'Mall 이름', getValue: s => s.name || '', className: 'text-gray-800 font-medium', render: s => (
     <>
       {s.name || '(이름 없음)'}
-      {s.manual_login_required === true && (
-        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold whitespace-nowrap" title="Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 안 되는 몰 — 크롬 확장(개발자모드)으로 스크랩">
-          🧩 개발자모드
-        </span>
-      )}
       {s.manual_login_required === null && (
         <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold whitespace-nowrap" title="아직 스크랩 방식이 정해지지 않았습니다 — 스크래핑 화면에서 처음 스크랩할 때 선택하세요">
           ❔ 미정
@@ -53,8 +62,17 @@ const COLUMNS: ColumnDef[] = [
   ) },
   { key: 'main_items', label: '메인 품목', getValue: s => s.main_items || '', render: s => s.main_items || '-', className: 'text-gray-500' },
   { key: 'url', label: 'URL', getValue: s => s.url, render: s => s.url, className: 'text-gray-500' },
-  { key: 'mall_platform', label: '몰 유형', getValue: s => s.mall_platform ? (PLATFORM_LABELS[s.mall_platform] || s.mall_platform) : '',
-    render: s => s.mall_platform ? (PLATFORM_LABELS[s.mall_platform] || s.mall_platform) : '-', className: 'text-gray-500' },
+  { key: 'mall_platform', label: '몰 유형',
+    getValue: s => `${s.mall_platform ? (PLATFORM_LABELS[s.mall_platform] || s.mall_platform) : '-'} (${loginModeLabel(s)})`,
+    render: s => (
+      <>
+        {s.mall_platform ? (PLATFORM_LABELS[s.mall_platform] || s.mall_platform) : '-'}{' '}
+        <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold whitespace-nowrap ${LOGIN_MODE_BADGE_CLASS[loginModeLabel(s)]}`}>
+          {loginModeLabel(s)}
+        </span>
+      </>
+    ),
+    className: 'text-gray-500' },
   { key: 'login_id', label: '로그인ID', getValue: s => s.login_id || '', render: s => s.login_id || '-', className: 'text-gray-500' },
   { key: 'login_pw_masked', label: '비밀번호', getValue: s => s.login_pw_masked || '', render: s => s.login_pw_masked || '-', className: 'text-gray-500 font-mono' },
   { key: 'client_name', label: '거래처', getValue: s => s.client_name || '', render: s => s.client_name || '-', className: 'text-teal-600' },
@@ -65,7 +83,7 @@ const COLUMNS: ColumnDef[] = [
 ]
 
 const DEFAULT_COL_WIDTH: Record<string, number> = {
-  name: 160, main_items: 140, url: 220, mall_platform: 90, login_id: 110, login_pw_masked: 100,
+  name: 160, main_items: 140, url: 220, mall_platform: 130, login_id: 110, login_pw_masked: 100,
   client_name: 110, blocked: 70, latest_memo: 220, created_at: 100,
 }
 const MIN_COL_WIDTH = 50
@@ -237,7 +255,7 @@ export function SitesListPanel() {
               </colgroup>
               <thead className="sticky top-0 z-10 bg-gray-50">
                 <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                  {orderedColumns.map(col => {
+                  {orderedColumns.map((col, colIdx) => {
                     const idx = sortKeys.findIndex(s => s.key === col.key)
                     const active = idx !== -1
                     return (
@@ -246,7 +264,7 @@ export function SitesListPanel() {
                         onDragOver={e => e.preventDefault()}
                         onDrop={() => handleColDrop(col.key)}
                         onDragEnd={() => setDragKey(null)}
-                        className={`relative px-3 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${dragKey === col.key ? 'opacity-40' : ''}`}
+                        className={`relative px-3 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${dragKey === col.key ? 'opacity-40' : ''} ${colIdx === 0 ? 'sticky left-0 z-20 bg-gray-50' : ''}`}
                         onClick={e => handleSort(col.key, e)} title="드래그: 컬럼 순서 이동 · 클릭: 정렬 · Shift+클릭: 복합 정렬 추가">
                         <span className={active ? 'text-gray-800' : ''}>{col.label}</span>
                         {active && <span className="ml-1 text-teal-500">{sortKeys[idx].dir === 'asc' ? '▲' : '▼'}{sortKeys.length > 1 ? idx + 1 : ''}</span>}
@@ -259,8 +277,8 @@ export function SitesListPanel() {
                 </tr>
                 {showFilters && (
                   <tr className="border-b border-gray-200 bg-white">
-                    {orderedColumns.map(col => (
-                      <th key={col.key} className="px-2 py-1.5 font-normal">
+                    {orderedColumns.map((col, colIdx) => (
+                      <th key={col.key} className={`px-2 py-1.5 font-normal ${colIdx === 0 ? 'sticky left-0 z-20 bg-white' : ''}`}>
                         <input value={filters[col.key] || ''} onChange={e => setFilters(f => ({ ...f, [col.key]: e.target.value }))}
                           placeholder="필터..." onClick={e => e.stopPropagation()}
                           className="w-full border border-gray-200 rounded px-1.5 py-1 text-xs font-normal focus:outline-none focus:ring-1 focus:ring-teal-300" />
@@ -274,9 +292,9 @@ export function SitesListPanel() {
                 {visibleSites.length === 0 ? (
                   <tr><td colSpan={orderedColumns.length + 1} className="px-3 py-3 text-center text-gray-400">필터에 맞는 Mall이 없습니다.</td></tr>
                 ) : visibleSites.map(s => (
-                  <tr key={s.id} onClick={() => openScraper(s)} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
-                    {orderedColumns.map(col => (
-                      <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''}`} title={col.key === 'url' || col.key === 'latest_memo' || col.key === 'main_items' ? col.getValue(s) : undefined}>
+                  <tr key={s.id} onClick={() => openScraper(s)} className="group border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
+                    {orderedColumns.map((col, colIdx) => (
+                      <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''} ${colIdx === 0 ? 'sticky left-0 z-10 bg-white group-hover:bg-gray-50' : ''}`} title={col.key === 'url' || col.key === 'latest_memo' || col.key === 'main_items' ? col.getValue(s) : undefined}>
                         {col.render(s)}
                       </td>
                     ))}

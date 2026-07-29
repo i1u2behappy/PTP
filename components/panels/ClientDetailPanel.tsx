@@ -264,7 +264,7 @@ export function ClientDetailPanel({ params }: Props) {
             <table className="w-full text-xs border-collapse">
               <thead>
                 <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                  <th className="px-3 py-2 text-left">이름</th>
+                  <th className="px-3 py-2 text-left sticky left-0 z-10 bg-white">이름</th>
                   <th className="px-3 py-2 text-left">URL</th>
                   <th className="px-3 py-2 text-left">로그인ID</th>
                   <th className="px-3 py-2 text-left">관리</th>
@@ -273,7 +273,7 @@ export function ClientDetailPanel({ params }: Props) {
               <tbody>
                 {malls.map(m => (
                   <tr key={m.id} className="border-b border-gray-100 last:border-0">
-                    <td className="px-3 py-2 text-gray-800">{m.name || '(이름 없음)'}</td>
+                    <td className="px-3 py-2 text-gray-800 sticky left-0 z-[1] bg-white">{m.name || '(이름 없음)'}</td>
                     <td className="px-3 py-2 text-gray-500 max-w-[280px] truncate" title={m.url}>{m.url}</td>
                     <td className="px-3 py-2 text-gray-500">{m.login_id || '-'}</td>
                     <td className="px-3 py-2 whitespace-nowrap">

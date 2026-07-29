@@ -117,8 +117,8 @@ export function ExportPanel() {
                 <tbody>
                   {readyRows.map(p => (
                     <tr key={p.id} onClick={() => toggleSelect(p.id)}
-                      className={`border-b border-gray-100 last:border-0 cursor-pointer transition-colors ${selected.has(p.id) ? 'bg-teal-50' : 'hover:bg-gray-50'}`}>
-                      <td className="px-4 py-3 w-6">
+                      className={`group border-b border-gray-100 last:border-0 cursor-pointer transition-colors ${selected.has(p.id) ? 'bg-teal-50' : 'hover:bg-gray-50'}`}>
+                      <td className={`px-4 py-3 w-6 sticky left-0 z-[1] ${selected.has(p.id) ? 'bg-teal-50' : 'bg-white group-hover:bg-gray-50'}`}>
                         <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggleSelect(p.id)} onClick={e => e.stopPropagation()} />
                       </td>
                       <td className="px-4 py-3 text-gray-700 max-w-[400px] truncate">{p.name_final || p.name_ai || p.name_original}</td>

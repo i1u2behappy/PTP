@@ -15,8 +15,10 @@ export function ProductNamePanel({ params }: { params?: Record<string, unknown> 
   const [bulkLoading, setBulkLoading] = useState(false)
 
   const load = useCallback(() => {
-    if (scope.sessionId === '') { setRows([]); return }
-    fetch(`/api/master?sessionId=${scope.sessionId}`).then(r => r.json()).then((d: MasterRow[]) => setRows(Array.isArray(d) ? d : [])).catch(() => {})
+    const result = scope.sessionId === ''
+      ? Promise.resolve([])
+      : fetch(`/api/master?sessionId=${scope.sessionId}`).then(r => r.json())
+    result.then((d: MasterRow[]) => setRows(Array.isArray(d) ? d : [])).catch(() => {})
   }, [scope.sessionId])
 
   useEffect(() => { load() }, [load])
@@ -96,15 +98,15 @@ export function ProductNamePanel({ params }: { params?: Record<string, unknown> 
                 <table className="w-full text-sm border-collapse">
                   <thead className="sticky top-0 z-10 bg-gray-50">
                     <tr className="border-b border-gray-200 text-xs font-semibold text-gray-500">
-                      <th className="px-4 py-3 text-left">원본 상품명</th>
+                      <th className="px-4 py-3 text-left sticky left-0 z-20 bg-gray-50">원본 상품명</th>
                       <th className="px-4 py-3 text-left">AI 생성명</th>
                       <th className="px-4 py-3 text-left">최종 상품명</th>
                     </tr>
                   </thead>
                   <tbody>
                     {visibleRows.map(row => (
-                      <tr key={row.id} className="border-b border-gray-100 hover:bg-gray-50">
-                        <td className="px-4 py-2 text-xs text-gray-500 truncate max-w-[240px]" title={row.name_original}>{row.name_original}</td>
+                      <tr key={row.id} className="group border-b border-gray-100 hover:bg-gray-50">
+                        <td className="px-4 py-2 text-xs text-gray-500 truncate max-w-[240px] sticky left-0 z-10 bg-white group-hover:bg-gray-50" title={row.name_original}>{row.name_original}</td>
                         <td className="px-4 py-2 text-xs">
                           <div className="flex items-center gap-1.5">
                             <span className="text-teal-600 truncate max-w-[200px]">{row.name_ai || '-'}</span>

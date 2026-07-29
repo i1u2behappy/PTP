@@ -304,7 +304,7 @@ export function MasterDetailPanel({ params }: { params?: Record<string, unknown>
                 <table className="w-full text-xs border-collapse">
                   <thead>
                     <tr className="text-gray-400 text-left">
-                      <th className="py-1 pr-2">마켓</th>
+                      <th className="py-1 pr-2 sticky left-0 z-10 bg-white">마켓</th>
                       <th className="py-1 pr-2">수수료</th>
                       <th className="py-1 pr-2">공급가</th>
                       <th className="py-1 pr-2">마진</th>
@@ -320,7 +320,7 @@ export function MasterDetailPanel({ params }: { params?: Record<string, unknown>
                       const marginRate = salePrice > 0 ? (marginAmount / salePrice) * 100 : 0
                       return (
                         <tr key={mc.code} className="border-t border-gray-100">
-                          <td className="py-1.5 pr-2 text-gray-700">{mc.name}</td>
+                          <td className="py-1.5 pr-2 text-gray-700 sticky left-0 z-[1] bg-white">{mc.name}</td>
                           <td className="py-1.5 pr-2 text-gray-500">₩{commissionAmount.toLocaleString()} ({Math.round((mc.default_commission_rate || 0) * 100)}%)</td>
                           <td className="py-1.5 pr-2 text-gray-500">₩{supplyPrice.toLocaleString()}</td>
                           <td className={`py-1.5 pr-2 font-medium ${marginAmount >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>₩{marginAmount.toLocaleString()}</td>
@@ -365,7 +365,7 @@ export function MasterDetailPanel({ params }: { params?: Record<string, unknown>
               <table className="w-full text-xs border-collapse">
                 <thead>
                   <tr className="text-gray-400 text-left">
-                    <th className="py-1 pr-2">일시</th>
+                    <th className="py-1 pr-2 sticky left-0 z-10 bg-white">일시</th>
                     <th className="py-1 pr-2">판매가</th>
                     <th className="py-1">재고</th>
                   </tr>
@@ -373,7 +373,7 @@ export function MasterDetailPanel({ params }: { params?: Record<string, unknown>
                 <tbody>
                   {history.map((h, i) => (
                     <tr key={i} className="border-t border-gray-100">
-                      <td className="py-1.5 pr-2 text-gray-500">{new Date(h.captured_at).toLocaleString()}</td>
+                      <td className="py-1.5 pr-2 text-gray-500 sticky left-0 z-[1] bg-white">{new Date(h.captured_at).toLocaleString()}</td>
                       <td className="py-1.5 pr-2 text-gray-700">{h.sale_price ? `₩${h.sale_price.toLocaleString()}` : '-'}</td>
                       <td className="py-1.5 text-gray-500">{h.stock_status || '-'}{h.stock_qty != null && ` (${h.stock_qty})`}</td>
                     </tr>

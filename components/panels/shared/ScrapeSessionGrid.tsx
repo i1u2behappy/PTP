@@ -195,8 +195,8 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
           </colgroup>
           <thead className="sticky top-0 z-10 bg-gray-50">
             <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-              {onToggleCheck && <th className="px-4 py-2 text-left"></th>}
-              {orderedColumns.map(col => {
+              {onToggleCheck && <th className="px-4 py-2 text-left sticky left-0 z-20 bg-gray-50"></th>}
+              {orderedColumns.map((col, colIdx) => {
                 const idx = sortKeys.findIndex(s => s.key === col.key)
                 const active = idx !== -1
                 return (
@@ -205,7 +205,7 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
                     onDragOver={e => e.preventDefault()}
                     onDrop={() => handleColDrop(col.key)}
                     onDragEnd={() => setDragKey(null)}
-                    className={`relative px-4 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${dragKey === col.key ? 'opacity-40' : ''}`}
+                    className={`relative px-4 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${dragKey === col.key ? 'opacity-40' : ''} ${colIdx === 0 ? `sticky z-20 bg-gray-50 ${onToggleCheck ? 'left-10' : 'left-0'}` : ''}`}
                     onClick={e => handleSort(col.key, e)} title="드래그: 컬럼 순서 이동 · 클릭: 정렬 · Shift+클릭: 복합 정렬 추가">
                     <span className={active ? 'text-gray-800' : ''}>{col.label}</span>
                     {active && <span className="ml-1 text-teal-500">{sortKeys[idx].dir === 'asc' ? '▲' : '▼'}{sortKeys.length > 1 ? idx + 1 : ''}</span>}
@@ -218,9 +218,9 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
             </tr>
             {showFilters && (
               <tr className="border-b border-gray-200 bg-white">
-                {onToggleCheck && <th className="px-4 py-1.5"></th>}
-                {orderedColumns.map(col => (
-                  <th key={col.key} className="px-2 py-1.5 font-normal">
+                {onToggleCheck && <th className="px-4 py-1.5 sticky left-0 z-20 bg-white"></th>}
+                {orderedColumns.map((col, colIdx) => (
+                  <th key={col.key} className={`px-2 py-1.5 font-normal ${colIdx === 0 ? `sticky z-20 bg-white ${onToggleCheck ? 'left-10' : 'left-0'}` : ''}`}>
                     <input value={filters[col.key] || ''} onChange={e => setFilters(f => ({ ...f, [col.key]: e.target.value }))}
                       placeholder="필터..." onClick={e => e.stopPropagation()}
                       className="w-full border border-gray-200 rounded px-1.5 py-1 text-xs font-normal focus:outline-none focus:ring-1 focus:ring-teal-300" />
@@ -233,17 +233,19 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
           <tbody>
             {visibleSessions.length === 0 ? (
               <tr><td colSpan={orderedColumns.length + (onToggleCheck ? 1 : 0) + (onDelete ? 1 : 0)} className="px-4 py-3 text-xs text-gray-400 text-center">필터에 맞는 세션이 없습니다.</td></tr>
-            ) : visibleSessions.map(s => (
+            ) : visibleSessions.map(s => {
+              const rowStickyBg = s.id === selectedId ? 'bg-teal-50' : 'bg-white group-hover:bg-gray-50'
+              return (
               <tr key={s.id} onClick={() => onSelect(s.id)}
-                className={`border-b border-gray-100 last:border-0 cursor-pointer transition-colors ${
+                className={`group border-b border-gray-100 last:border-0 cursor-pointer transition-colors ${
                   s.id === selectedId ? 'bg-teal-50' : 'hover:bg-gray-50'}`}>
                 {onToggleCheck && (
-                  <td className="px-4 py-2" onClick={e => e.stopPropagation()}>
+                  <td className={`px-4 py-2 sticky left-0 z-10 ${rowStickyBg}`} onClick={e => e.stopPropagation()}>
                     <input type="checkbox" checked={checkedIds?.has(s.id) ?? false} onChange={() => onToggleCheck(s.id)} />
                   </td>
                 )}
-                {orderedColumns.map(col => (
-                  <td key={col.key} className={`px-4 py-2 truncate ${col.className ?? ''}`} title={col.key === 'url' ? s.url : undefined}>
+                {orderedColumns.map((col, colIdx) => (
+                  <td key={col.key} className={`px-4 py-2 truncate ${col.className ?? ''} ${colIdx === 0 ? `sticky z-10 ${rowStickyBg} ${onToggleCheck ? 'left-10' : 'left-0'}` : ''}`} title={col.key === 'url' ? s.url : undefined}>
                     {col.render(s)}
                   </td>
                 ))}
@@ -253,7 +255,8 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
                   </td>
                 )}
               </tr>
-            ))}
+              )
+            })}
           </tbody>
         </table>
       </div>

@@ -230,7 +230,7 @@ export function ClientsListPanel() {
                   </colgroup>
                   <thead className="sticky top-0 z-10 bg-gray-50">
                     <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                      {orderedColumns.map(col => {
+                      {orderedColumns.map((col, colIdx) => {
                         const idx = sortKeys.findIndex(s => s.key === col.key)
                         const active = idx !== -1
                         return (
@@ -239,7 +239,7 @@ export function ClientsListPanel() {
                             onDragOver={e => e.preventDefault()}
                             onDrop={() => handleColDrop(col.key)}
                             onDragEnd={() => setDragKey(null)}
-                            className={`relative px-3 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${dragKey === col.key ? 'opacity-40' : ''}`}
+                            className={`relative px-3 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${dragKey === col.key ? 'opacity-40' : ''} ${colIdx === 0 ? 'sticky left-0 z-20 bg-gray-50' : ''}`}
                             onClick={e => handleSort(col.key, e)} title="드래그: 컬럼 순서 이동 · 클릭: 정렬 · Shift+클릭: 복합 정렬 추가">
                             <span className={active ? 'text-gray-800' : ''}>{col.label}</span>
                             {active && <span className="ml-1 text-teal-500">{sortKeys[idx].dir === 'asc' ? '▲' : '▼'}{sortKeys.length > 1 ? idx + 1 : ''}</span>}
@@ -252,8 +252,8 @@ export function ClientsListPanel() {
                     </tr>
                     {showFilters && (
                       <tr className="border-b border-gray-200 bg-white">
-                        {orderedColumns.map(col => (
-                          <th key={col.key} className="px-2 py-1.5 font-normal">
+                        {orderedColumns.map((col, colIdx) => (
+                          <th key={col.key} className={`px-2 py-1.5 font-normal ${colIdx === 0 ? 'sticky left-0 z-20 bg-white' : ''}`}>
                             <input value={filters[col.key] || ''} onChange={e => setFilters(f => ({ ...f, [col.key]: e.target.value }))}
                               placeholder="필터..." onClick={e => e.stopPropagation()}
                               className="w-full border border-gray-200 rounded px-1.5 py-1 text-xs font-normal focus:outline-none focus:ring-1 focus:ring-teal-300" />
@@ -267,9 +267,9 @@ export function ClientsListPanel() {
                     {visibleClients.length === 0 ? (
                       <tr><td colSpan={orderedColumns.length + 1} className="px-3 py-3 text-center text-gray-400">필터에 맞는 거래처가 없습니다.</td></tr>
                     ) : visibleClients.map(c => (
-                      <tr key={c.id} onClick={() => openScraper(c)} className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
-                        {orderedColumns.map(col => (
-                          <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''}`} title={col.key === 'business_address' || col.key === 'memo' || col.key === 'payment_accounts' ? col.getValue(c) : undefined}>
+                      <tr key={c.id} onClick={() => openScraper(c)} className="group border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
+                        {orderedColumns.map((col, colIdx) => (
+                          <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''} ${colIdx === 0 ? 'sticky left-0 z-10 bg-white group-hover:bg-gray-50' : ''}`} title={col.key === 'business_address' || col.key === 'memo' || col.key === 'payment_accounts' ? col.getValue(c) : undefined}>
                             {col.render(c)}
                           </td>
                         ))}

@@ -25,8 +25,10 @@ export function MasterSchemaPanel({ params }: { params?: Record<string, unknown>
   }, [])
 
   const loadFields = useCallback(() => {
-    if (clientId === '') { setFields([]); return }
-    fetch(`/api/master/schema?clientId=${clientId}`).then(r => r.json()).then((d: SchemaField[]) => setFields(Array.isArray(d) ? d : [])).catch(() => {})
+    const result = clientId === ''
+      ? Promise.resolve([])
+      : fetch(`/api/master/schema?clientId=${clientId}`).then(r => r.json())
+    result.then((d: SchemaField[]) => setFields(Array.isArray(d) ? d : [])).catch(() => {})
   }, [clientId])
 
   useEffect(() => { loadFields() }, [loadFields])
@@ -121,7 +123,7 @@ export function MasterSchemaPanel({ params }: { params?: Record<string, unknown>
               <table className="w-full text-xs border-collapse">
                 <thead className="bg-gray-50">
                   <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                    <th className="px-3 py-2 text-left">라벨(엑셀 헤더)</th>
+                    <th className="px-3 py-2 text-left sticky left-0 z-10 bg-gray-50">라벨(엑셀 헤더)</th>
                     <th className="px-3 py-2 text-left">필드 키</th>
                     <th className="px-3 py-2 text-left">종류</th>
                     <th className="px-3 py-2 text-left">관리</th>
@@ -130,7 +132,7 @@ export function MasterSchemaPanel({ params }: { params?: Record<string, unknown>
                 <tbody>
                   {fields.map((f, i) => (
                     <tr key={i} className="border-b border-gray-100 last:border-0">
-                      <td className="px-3 py-2">
+                      <td className="px-3 py-2 sticky left-0 z-[1] bg-white">
                         <input value={f.field_label} onChange={e => updateField(i, { field_label: e.target.value })}
                           className="w-full border border-gray-200 rounded px-2 py-1 text-xs" />
                       </td>

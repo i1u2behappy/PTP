@@ -16,8 +16,10 @@ export function InternalCodePanel({ params }: { params?: Record<string, unknown>
   const [generating, setGenerating] = useState(false)
 
   const load = useCallback(() => {
-    if (scope.sessionId === '') { setClient(null); setRows([]); return }
-    fetch(`/api/master/internal-codes?sessionId=${scope.sessionId}`).then(r => r.json()).then((d: { client: Client | null; rows: CodeRow[] }) => {
+    const result = scope.sessionId === ''
+      ? Promise.resolve({ client: null, rows: [] })
+      : fetch(`/api/master/internal-codes?sessionId=${scope.sessionId}`).then(r => r.json())
+    result.then((d: { client: Client | null; rows: CodeRow[] }) => {
       setClient(d.client)
       setRows(Array.isArray(d.rows) ? d.rows : [])
     }).catch(() => {})
@@ -104,7 +106,7 @@ export function InternalCodePanel({ params }: { params?: Record<string, unknown>
                 <table className="w-full text-sm border-collapse">
                   <thead className="sticky top-0 z-10 bg-gray-50">
                     <tr className="border-b border-gray-200 text-xs font-semibold text-gray-500">
-                      <th className="px-4 py-3 text-left">몰 상품코드</th>
+                      <th className="px-4 py-3 text-left sticky left-0 z-20 bg-gray-50">몰 상품코드</th>
                       <th className="px-4 py-3 text-left">상품명</th>
                       <th className="px-4 py-3 text-left">관리코드</th>
                     </tr>
@@ -112,8 +114,8 @@ export function InternalCodePanel({ params }: { params?: Record<string, unknown>
                   <tbody>
                     {visibleRows.map(row => (
                       <tr key={row.id} onClick={() => openMaster(row)}
-                        className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
-                        <td className="px-4 py-2 text-xs text-gray-500">{row.mall_product_code || '-'}</td>
+                        className="group border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors">
+                        <td className="px-4 py-2 text-xs text-gray-500 sticky left-0 z-10 bg-white group-hover:bg-gray-50">{row.mall_product_code || '-'}</td>
                         <td className="px-4 py-2 text-xs text-gray-700 truncate max-w-[320px]">{row.name_final || row.name_ai || row.name_original}</td>
                         <td className="px-4 py-2 text-xs">
                           {row.internal_code ? <span className="font-mono text-teal-600">{row.internal_code}</span> : <span className="text-rose-400">미발급</span>}

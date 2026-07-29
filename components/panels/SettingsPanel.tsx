@@ -120,7 +120,7 @@ export function SettingsPanel() {
             <table className="w-full text-xs border-collapse">
               <thead className="bg-gray-50">
                 <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                  <th className="px-4 py-2 text-left">아이디</th>
+                  <th className="px-4 py-2 text-left sticky left-0 z-10 bg-gray-50">아이디</th>
                   <th className="px-4 py-2 text-left">권한</th>
                   <th className="px-4 py-2 text-left">등록일</th>
                   <th className="px-4 py-2 text-left w-20">관리</th>
@@ -129,7 +129,7 @@ export function SettingsPanel() {
               <tbody>
                 {users.map(u => (
                   <tr key={u.id} className="border-b border-gray-100">
-                    <td className="px-4 py-2 text-gray-700 font-medium">{u.username}</td>
+                    <td className="px-4 py-2 text-gray-700 font-medium sticky left-0 z-[1] bg-white">{u.username}</td>
                     <td className="px-4 py-2">
                       {u.role === 'admin'
                         ? <span className="text-violet-600 font-semibold">관리자 (전체 권한)</span>

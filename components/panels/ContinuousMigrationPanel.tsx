@@ -141,7 +141,7 @@ export function ContinuousMigrationPanel() {
             <table className="w-full text-sm border-collapse">
               <thead className="sticky top-0 z-10 bg-gray-50">
                 <tr className="border-b border-gray-200 text-xs font-semibold text-gray-500">
-                  <th className="px-4 py-3 text-left w-10">
+                  <th className="px-4 py-3 text-left w-10 sticky left-0 z-20 bg-gray-50">
                     <input type="checkbox" checked={selected.size > 0 && selected.size === changes.length} onChange={toggleSelectAll} />
                   </th>
                   <th className="px-4 py-3 text-left">몰상품코드</th>
@@ -153,8 +153,8 @@ export function ContinuousMigrationPanel() {
               </thead>
               <tbody>
                 {changes.map(c => (
-                  <tr key={c.mallProductId} className="border-b border-gray-100 hover:bg-gray-50">
-                    <td className="px-4 py-2">
+                  <tr key={c.mallProductId} className="group border-b border-gray-100 hover:bg-gray-50">
+                    <td className="px-4 py-2 sticky left-0 z-10 bg-white group-hover:bg-gray-50">
                       <input type="checkbox" checked={selected.has(c.mallProductId)} onChange={() => toggleSelect(c.mallProductId)} />
                     </td>
                     <td className="px-4 py-2 text-xs text-gray-500">{c.mallProductCode}</td>

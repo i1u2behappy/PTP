@@ -509,7 +509,7 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
                       <table className="w-full text-xs border-collapse">
                         <thead>
                           <tr className="text-left text-gray-400 border-b border-gray-100">
-                            <th className="px-3 py-1.5 font-normal w-1/4">필드</th>
+                            <th className="px-3 py-1.5 font-normal w-1/4 sticky left-0 z-10 bg-white">필드</th>
                             <th className="px-3 py-1.5 font-normal w-1/3">AS-IS</th>
                             <th className="px-3 py-1.5 font-normal w-1/3">TO-BE</th>
                           </tr>
@@ -517,7 +517,7 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
                         <tbody>
                           {fields.map(f => (
                             <tr key={f.key} className="border-b border-gray-50 last:border-0">
-                              <td className="px-3 py-1.5 text-gray-400 whitespace-nowrap">{f.key}</td>
+                              <td className="px-3 py-1.5 text-gray-400 whitespace-nowrap sticky left-0 z-[1] bg-white">{f.key}</td>
                               <td className="px-3 py-1.5 text-gray-500">{f.asIs || '-'}</td>
                               <td className={`px-3 py-1.5 ${f.changed ? 'text-teal-700 font-semibold bg-teal-50/60' : 'text-gray-700'}`}>{f.toBe || '-'}</td>
                             </tr>
@@ -545,7 +545,7 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
                 <table className="w-full text-xs border-collapse">
                   <thead>
                     <tr className="text-left text-gray-500 border-b border-gray-200">
-                      <th className="px-2 py-2">완성본 컬럼</th>
+                      <th className="px-2 py-2 sticky left-0 z-10 bg-white">완성본 컬럼</th>
                       <th className="px-2 py-2">상품마스터 대상 필드</th>
                       <th className="px-2 py-2">생성 방식</th>
                       <th className="px-2 py-2">설정</th>
@@ -554,7 +554,7 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
                   <tbody>
                     {rules.map(rule => (
                       <tr key={rule.column_name} className="border-b border-gray-100 align-top">
-                        <td className="px-2 py-2 font-medium text-gray-800 whitespace-nowrap">{rule.column_name}</td>
+                        <td className="px-2 py-2 font-medium text-gray-800 whitespace-nowrap sticky left-0 z-[1] bg-white">{rule.column_name}</td>
                         <td className="px-2 py-2">
                           <select value={rule.target_field || ''} onChange={e => saveRule({ ...rule, target_field: e.target.value || null })}
                             className="border border-gray-300 rounded-lg px-2 py-1 text-xs">
@@ -707,7 +707,7 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
                     <table className="w-full text-xs border-collapse">
                       <thead>
                         <tr className="text-left text-gray-500 border-b border-gray-200">
-                          <th className="px-2 py-2 align-top">상품</th>
+                          <th className="px-2 py-2 align-top sticky left-0 z-10 bg-white">상품</th>
                           {columnHeaders.map(h => (
                             <th key={h} className="px-2 py-2 align-top">
                               <div>{h}</div>
@@ -725,7 +725,7 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
                           const locked = row.status === 'committed' || committing === row.id || discarding === row.id
                           return (
                           <tr key={row.id} className="border-b border-gray-100">
-                            <td className="px-2 py-2 whitespace-nowrap">
+                            <td className="px-2 py-2 whitespace-nowrap sticky left-0 z-[1] bg-white">
                               <div className="font-mono text-gray-500">{row.mall_product_code}</div>
                               <div className="text-gray-700 truncate max-w-[160px]">{row.name_original}</div>
                             </td>

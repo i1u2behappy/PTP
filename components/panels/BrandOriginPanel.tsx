@@ -16,8 +16,10 @@ export function BrandOriginPanel({ params }: { params?: Record<string, unknown> 
   const [editValue, setEditValue] = useState('')
 
   const load = useCallback(() => {
-    if (scope.sessionId === '') { setValues([]); return }
-    fetch(`/api/master/field-values?field=${field}&sessionId=${scope.sessionId}`).then(r => r.json()).then((d: FieldValue[]) => setValues(Array.isArray(d) ? d : [])).catch(() => {})
+    const result = scope.sessionId === ''
+      ? Promise.resolve([])
+      : fetch(`/api/master/field-values?field=${field}&sessionId=${scope.sessionId}`).then(r => r.json())
+    result.then((d: FieldValue[]) => setValues(Array.isArray(d) ? d : [])).catch(() => {})
   }, [field, scope.sessionId])
 
   useEffect(() => { load() }, [load])
@@ -75,14 +77,14 @@ export function BrandOriginPanel({ params }: { params?: Record<string, unknown> 
                 <table className="w-full text-sm border-collapse">
                   <thead className="sticky top-0 z-10 bg-gray-50">
                     <tr className="border-b border-gray-200 text-xs font-semibold text-gray-500">
-                      <th className="px-4 py-3 text-left">{FIELD_LABELS[field]}</th>
+                      <th className="px-4 py-3 text-left sticky left-0 z-20 bg-gray-50">{FIELD_LABELS[field]}</th>
                       <th className="px-4 py-3 text-left w-24">상품 수</th>
                     </tr>
                   </thead>
                   <tbody>
                     {visibleValues.map(v => (
-                      <tr key={v.value} className="border-b border-gray-100 hover:bg-gray-50">
-                        <td className="px-4 py-2 text-xs text-gray-700 cursor-pointer" onClick={() => editing !== v.value && startEdit(v.value)}>
+                      <tr key={v.value} className="group border-b border-gray-100 hover:bg-gray-50">
+                        <td className="px-4 py-2 text-xs text-gray-700 cursor-pointer sticky left-0 z-10 bg-white group-hover:bg-gray-50" onClick={() => editing !== v.value && startEdit(v.value)}>
                           {editing === v.value ? (
                             <input autoFocus value={editValue} onChange={e => setEditValue(e.target.value)}
                               onBlur={commitEdit} onKeyDown={e => { if (e.key === 'Enter') commitEdit(); if (e.key === 'Escape') setEditing(null) }}

@@ -105,7 +105,7 @@ export function MemoLog({ baseUrl, title = '일자별 메모', description, plac
           <table className="w-full text-xs border-collapse">
             <thead>
               <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                <th className="px-3 py-2 text-left w-36">일시</th>
+                <th className="px-3 py-2 text-left w-36 sticky left-0 z-10 bg-white">일시</th>
                 <th className="px-3 py-2 text-left">내용</th>
                 <th className="px-3 py-2 text-left">관리</th>
               </tr>
@@ -115,7 +115,7 @@ export function MemoLog({ baseUrl, title = '일자별 메모', description, plac
                 <tr key={m.id} className="border-b border-gray-100 last:border-0">
                   {editingId === m.id ? (
                     <>
-                      <td className="px-3 py-2">
+                      <td className="px-3 py-2 sticky left-0 z-[1] bg-white">
                         <input type="datetime-local" value={editAt} onChange={e => setEditAt(e.target.value)}
                           className="border border-gray-300 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
                       </td>
@@ -130,7 +130,7 @@ export function MemoLog({ baseUrl, title = '일자별 메모', description, plac
                     </>
                   ) : (
                     <>
-                      <td className="px-3 py-2 text-gray-400 whitespace-nowrap">{formatDisplay(m.memo_at)}</td>
+                      <td className="px-3 py-2 text-gray-400 whitespace-nowrap sticky left-0 z-[1] bg-white">{formatDisplay(m.memo_at)}</td>
                       <td className="px-3 py-2 text-gray-700 whitespace-pre-wrap">{m.content}</td>
                       <td className="px-3 py-2 whitespace-nowrap">
                         <button onClick={() => startEdit(m)} className="text-teal-500 hover:underline mr-2">수정</button>

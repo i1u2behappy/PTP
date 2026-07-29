@@ -7,6 +7,8 @@ import { CLIENTS_LIST_TAB, SITES_LIST_TAB, MASTER_LIST_TAB, PRODUCTS_LIST_TAB } 
 
 type IconComponent = (props: { active?: boolean }) => React.ReactNode
 
+const DASHBOARD_TAB: Tab = { id: 'dashboard', type: 'dashboard', title: '대시보드', icon: '📊', closable: false }
+
 function NavGroup({ label, icon: Icon, defaultOpen, tab, children }: { label: string; icon: IconComponent; defaultOpen?: boolean; tab?: Tab; children: React.ReactNode }) {
   const { activeTabId, openTab } = useTabs()
   const [open, setOpen] = useState(!!defaultOpen)
@@ -41,14 +43,17 @@ function NavLeaf({ tab, icon: Icon, nested }: { tab: Tab; icon: IconComponent; n
 }
 
 export function Sidebar() {
+  const { openTab } = useTabs()
   return (
     <aside className="w-64 shrink-0 bg-white border-r border-slate-100 flex flex-col h-full overflow-y-auto">
-      <div className="px-5 h-16 flex items-center shrink-0">
-        <Image src="/logo.jpg" alt="ILDA:Bridge" width={600} height={566} className="h-10 w-auto" priority />
-      </div>
+      <button onClick={() => openTab(DASHBOARD_TAB)} aria-label="첫페이지로 이동" title="첫페이지로 이동"
+        className="px-5 h-16 flex items-center shrink-0 text-left hover:bg-slate-50 active:bg-slate-100 transition-colors cursor-pointer">
+        <Image src="/logo.jpg" alt="ILDA:Bridge" width={600} height={566}
+          className="h-10 w-auto transition-opacity hover:opacity-80" priority />
+      </button>
 
       <nav className="flex-1 px-2 pb-3 space-y-1" aria-label="주 메뉴">
-        <NavLeaf tab={{ id: 'dashboard', type: 'dashboard', title: '대시보드', icon: '📊', closable: false }} icon={DashboardIcon} />
+        <NavLeaf tab={DASHBOARD_TAB} icon={DashboardIcon} />
 
         <NavLeaf tab={CLIENTS_LIST_TAB} icon={ClientIcon} />
 

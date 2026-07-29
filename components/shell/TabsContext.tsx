@@ -100,6 +100,18 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
     setActiveTabId(tab.id)
   }, [])
 
+  // 브라우저 "뒤로가기"를 눌러도 PTP 밖으로 나가지 않고 대시보드가 열리게 한다 — 히스토리에 더미 엔트리를
+  // 계속 채워둬 뒤로가기가 실제로 이전 페이지로 넘어가기 전에 항상 이 트랩에 먼저 걸리게 한다.
+  useEffect(() => {
+    window.history.pushState(null, '', location.href)
+    function handlePopState() {
+      window.history.pushState(null, '', location.href)
+      openTab(DASHBOARD_TAB)
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [openTab])
+
   const setActive = useCallback((id: string) => {
     if (id !== activeTabIdRef.current) recordHistory(activeTabIdRef.current)
     setActiveTabId(id)

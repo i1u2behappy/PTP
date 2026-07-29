@@ -76,6 +76,10 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
   )
   const prev = res.rows[0]?.scrape_profile || null
   if (!next.report && prev?.report) next.report = prev.report
+  // AI 크레딧이 없어 규칙 기반으로 떨어진 결과가, 이전에 실제 AI가 만들어둔 더 정확한 리포트를 조용히
+  // 덮어써버리면 안 된다 — "몰 구조 파악"을 다시 눌렀는데 그 사이 AI 호출이 실패했다면 기존 AI 리포트를
+  // 그대로 유지한다(사용자가 화면에서 이유도 모른 채 리포트 품질이 나빠지는 것을 방지).
+  else if (next.report?.generatedBy === 'heuristic' && prev?.report?.generatedBy === 'ai') next.report = prev.report
 
   await pool.query(
     `UPDATE sites SET scrape_profile = $1, scrape_profile_updated_at = NOW() WHERE id = $2`,

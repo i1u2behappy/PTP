@@ -1414,7 +1414,9 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
       // AI 리포트용 원문은 상품 1건만 있으면 충분해(토큰 절약) 첫 성공 샘플에서만 모은다. deep 전용.
       if (deep && !productContextText) {
         const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '')
+        const imageHints = await page.evaluate(collectImageHintsScript, null).catch(() => [] as string[])
         productContextText = `[샘플 상품페이지: ${url}]\n${bodyText.replace(/\s+/g, ' ').trim().slice(0, 4_000)}`
+          + (imageHints.length ? `\n\n[샘플 상품페이지 이미지 설명/파일명]\n${imageHints.join(', ')}` : '')
       }
     } catch { /* 개별 샘플 실패는 건너뛰고 다음 샘플로 */ }
   }
@@ -1444,13 +1446,41 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
 /** 고도몰 등에서 결제계좌/택배사/업체연락처가 있는 곳은 상품페이지가 아니라 하단 회사정보와 이용안내·
  *  공지사항 같은 정적 게시판이다(실사용 몰 확인됨). 지금 페이지의 footer와, 안내성 키워드가 붙은 링크
  *  몇 개를 실제로 열어 텍스트를 모아온다 — "몰 구조 파악"의 AI 리포트가 근거로 삼을 원문. */
+/** 택배사/은행 로고처럼 글자가 아니라 이미지로만 표시된 정보를 놓치지 않도록, 주어진 요소 안의 <img>
+ *  alt 속성(없으면 파일명)을 모아온다 — textContent/innerText는 이미지에서 아무 것도 못 얻어온다
+ *  (실사용 확인: 택배사가 로고 이미지로만 붙어있어 "한진택배"라는 글자가 원문 어디에도 없었음). */
+function collectImageHintsScript(rootSelector: string | null): string[] {
+  const root = rootSelector ? document.querySelector(rootSelector) : document.body
+  if (!root) return []
+  const hints = Array.from(root.querySelectorAll('img')).map(img => {
+    const alt = img.getAttribute('alt')?.trim()
+    if (alt) return alt
+    const src = img.getAttribute('src') || ''
+    const base = src.split('/').pop()?.split('?')[0].replace(/\.[a-zA-Z0-9]+$/, '') || ''
+    return base.replace(/[-_]+/g, ' ').trim()
+  }).filter(Boolean)
+  return [...new Set(hints)].slice(0, 30)
+}
+
 async function gatherMallContextText(page: Page): Promise<string> {
   const sections: string[] = []
-  const footerText = await page.evaluate(() => {
-    const el = document.querySelector('footer, #footer, .footer, .company_info, .footer_info')
+  const footerSelector = 'footer, #footer, .footer, .company_info, .footer_info'
+  const footerText = await page.evaluate(sel => {
+    const el = document.querySelector(sel)
     return (el?.textContent || '').replace(/\s+/g, ' ').trim()
-  }).catch(() => '')
+  }, footerSelector).catch(() => '')
   if (footerText) sections.push(`[하단 회사정보]\n${footerText.slice(0, 1_500)}`)
+  const footerImageHints = await page.evaluate(collectImageHintsScript, footerSelector).catch(() => [] as string[])
+  if (footerImageHints.length) sections.push(`[하단 영역 이미지 설명/파일명]\n${footerImageHints.join(', ')}`)
+
+  // 카테고리 메뉴가 <ul><li> 구조가 아니라 scanCategoryMenu가 못 뽑아내는 몰도 있다 — AI가 그래도 참고할
+  // 수 있도록, 헤더/내비게이션 영역의 링크 텍스트를 구조 검증 없이 그대로 모아 별도 절로 남겨둔다.
+  const navText = await page.evaluate(() => {
+    const roots = Array.from(document.querySelectorAll('nav, [class*="gnb" i], [id*="gnb" i], [class*="lnb" i], [id*="lnb" i], [class*="cat" i], [id*="cat" i]'))
+    const names = roots.flatMap(root => Array.from(root.querySelectorAll('a')).map(a => (a.textContent || '').trim()).filter(t => t && t.length <= 15))
+    return [...new Set(names)].slice(0, 100).join(', ')
+  }).catch(() => '')
+  if (navText) sections.push(`[헤더/카테고리 메뉴 텍스트 (참고용 — 구조는 불확실할 수 있음)]\n${navText}`)
 
   const baseUrl = new URL(page.url()).origin
   const links = await findInfoPageLinks(page)
@@ -1460,12 +1490,14 @@ async function gatherMallContextText(page: Page): Promise<string> {
       await page.goto(link.href, { waitUntil: 'load', timeout: 15_000 })
       const text = await page.evaluate(() => document.body.innerText).catch(() => '')
       if (text.trim()) sections.push(`[${link.text}]\n${text.replace(/\s+/g, ' ').trim().slice(0, 2_500)}`)
+      const imageHints = await page.evaluate(collectImageHintsScript, null).catch(() => [] as string[])
+      if (imageHints.length) sections.push(`[${link.text} 페이지 이미지 설명/파일명]\n${imageHints.join(', ')}`)
     } catch { /* 게시판 접근 실패(로그인 필요 등)는 건너뛰고 다음 링크로 */ }
   }
   return sections.join('\n\n')
 }
 
-const INFO_PAGE_KEYWORDS = /배송|반품|교환|환불|이용안내|이용약관|회사소개|공지|고객센터|무통장|계좌|입금안내/
+const INFO_PAGE_KEYWORDS = /배송|반품|반송|교환|환불|이용안내|이용약관|회사소개|공지|고객센터|무통장|계좌|입금안내/
 // 메뉴/푸터의 안내 링크는 보통 짧은 라벨("이용안내", "배송/교환/환불")이다 — 길이 제한 없이 매칭하면
 // "GE_5645 28인치캐리어/배송비별도"처럼 "배송"을 우연히 포함한 홈페이지 추천상품 링크가 걸려, 그 4개
 // 한도를 상품 링크가 다 채워버려 정작 진짜 안내 페이지(이용안내 등)를 못 찾는 문제가 실제 발견됐다
@@ -1665,7 +1697,7 @@ async function scanCategoryMenu(page: Page): Promise<string[]> {
       // 2개 이상" 조건을 만족하는 후보 중 가장 많은 경로를 뽑아낸 것을 채택한다.
       let best: string[] = []
       for (const root of candidates) {
-        const topLis = Array.from(root.querySelectorAll(':scope > ul > li, :scope > li'))
+        const topLis = Array.from(root.querySelectorAll(':scope > ul > li, :scope > li, :scope > div > ul > li'))
         if (!topLis.length) continue
         const out: string[] = []
         topLis.forEach(li => buildPaths(li, [], 0, out))

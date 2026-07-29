@@ -415,6 +415,8 @@ export interface MallStructureReport {
   companyContact: string
   productPageStructure: string
   scrapingNeeds: string
+  /** 이 리포트가 AI 분석인지 API 실패 시의 규칙 기반 대체 결과인지 — 화면에서 신뢰도를 구분해 보여주는 용도. */
+  generatedBy: 'ai' | 'heuristic'
 }
 
 const MALL_REPORT_FIELDS: { key: keyof MallStructureReport; label: string; hint: string }[] = [
@@ -440,10 +442,12 @@ const MALL_REPORT_FIELDS: { key: keyof MallStructureReport; label: string; hint:
 const MALL_ANALYSIS_KNOWLEDGE = [
   '결제계좌/은행 정보는 상품페이지가 아니라 "이용안내" 같은 정적 안내 페이지에 있는 경우가 많다.',
   '택배사명을 구체적으로 밝히지 않고 "택배 서비스 이용"이라고만 적어둔 몰도 있다 — 이런 경우 특정 택배사를 추측하지 말고 확인 안됨으로 답한다.',
-  '반품 주소지가 따로 없고 회사(본사) 주소만 있는 몰도 있다 — 그 경우 회사 주소를 반품 주소로 단정하지 말고, 명시적으로 "반품 주소"라고 라벨된 것만 인정한다.',
+  '반품 주소지가 따로 없고 회사(본사) 주소만 있는 몰도 있다 — 그 경우 회사 주소를 반품 주소로 단정하지 말고, "반품 주소"/"반송 주소"/"교환 주소"/"보내는 곳"처럼 반품·교환 목적임을 밝힌 라벨의 주소만 인정한다(정확한 문구는 몰마다 다르지만 의미가 같으면 인정 — "반품 주소"라는 글자가 그대로 있어야만 인정하는 게 아니다).',
   '고도몰(godomall) 계열은 스킨마다 카테고리 전체보기 메뉴의 클래스명이 다르다(.cate/.ovmenu, .lnb 등 스킨별로 확인된 사례가 있음).',
   '안내성 링크(이용안내/배송안내 등)는 보통 텍스트가 짧다 — "배송"처럼 느슨한 키워드만 보면 "~배송비별도" 같은 상품명에 잘못 걸릴 수 있다.',
   '계좌번호의 자릿수/구간 형식은 은행마다 다르다(예: 농협은 3-4-4-2처럼 구간이 4개인 경우가 있음) — 3구간으로 고정해서 자르면 뒷부분이 잘릴 수 있다.',
+  '택배사/은행 정보가 글자가 아니라 로고 이미지로만 표시된 몰이 있다 — 이런 이미지는 원문에 "[이미지 설명/파일명]"으로 시작하는 절에 그 이미지의 alt 속성 또는 파일명이 따로 정리되어 있으니, 본문에 글자로 없어도 그 절에 택배사/은행 이름이 있으면 그것도 근거로 인정한다.',
+  '카테고리 구조는 헤더 메뉴가 <ul><li>가 아닌 다른 마크업(div, 링크 나열 등)으로 되어 있어 구조적으로 못 뽑아낸 몰도 있다 — 이런 경우 원문의 "[헤더/카테고리 메뉴 텍스트]" 절에 나온 메뉴명들을 나열해 답해도 된다(계층이 불확실하면 "대분류: A, B, C" 처럼 평평하게 적어도 됨 — 아예 확인 안됨으로 답하기 전에 이 절을 먼저 확인한다).',
 ]
 
 /**
@@ -497,7 +501,7 @@ ${contextText.slice(0, 20_000)}`
     })
     const toolUse = response.content.find(b => b.type === 'tool_use')
     if (!toolUse || toolUse.type !== 'tool_use') return null
-    return toolUse.input as MallStructureReport
+    return { ...(toolUse.input as Omit<MallStructureReport, 'generatedBy'>), generatedBy: 'ai' }
   } catch (e) {
     console.error('[generateMallProfileReport] API call failed:', e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : e)
     return null
@@ -536,7 +540,8 @@ function findShippingFee(text: string): string {
 }
 
 function findReturnAddress(text: string): string {
-  const idx = text.search(/반품\s*(주소|받는\s*곳|보내는\s*곳)?|교환\s*(주소|반품)/)
+  // "반송 주소"처럼 "반품"이 아니라 "반송"이라는 단어를 쓰는 몰도 있다(실사용 확인) — 같은 뜻이라 함께 찾는다.
+  const idx = text.search(/반품\s*(주소|받는\s*곳|보내는\s*곳)?|반송\s*(주소)?|교환\s*(주소|반품)/)
   if (idx === -1) return '확인 안됨'
   return text.slice(idx, idx + 100).replace(/\s+/g, ' ').trim()
 }
@@ -594,6 +599,7 @@ export function buildHeuristicMallReport(input: {
       input.hasCascadingOptions && '연쇄옵션 있음',
     ].filter(Boolean).join(', ') || '확인 안됨',
     scrapingNeeds: 'AI 미사용(규칙 기반) 리포트 — 정확도가 AI 분석보다 낮을 수 있으니 실제 페이지와 대조 확인 권장',
+    generatedBy: 'heuristic',
   }
 }
 

@@ -20,6 +20,7 @@ interface MallReport {
   companyContact: string
   bankName: string
   accountNumber: string
+  generatedBy: 'ai' | 'heuristic'
 }
 
 function formatMallReport(r: MallReport): string {
@@ -289,7 +290,15 @@ export function SiteDetailPanel({ params }: Props) {
 
       {!isNew && mallReport && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mt-4">
-          <h2 className="text-sm font-semibold text-gray-700 mb-1">🔍 몰 구조 분석 (참고용, 최근 1건)</h2>
+          <div className="flex items-center gap-2 mb-1">
+            <h2 className="text-sm font-semibold text-gray-700">🔍 몰 구조 분석 (참고용, 최근 1건)</h2>
+            {mallReport.generatedBy === 'heuristic' && (
+              <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700"
+                title="AI 호출이 실패해(크레딧 부족 등) 정규식/키워드 매칭으로 대신 채운 결과입니다 — AI 분석보다 정확도가 낮을 수 있습니다.">
+                ⚠ 규칙 기반 (AI 아님)
+              </span>
+            )}
+          </div>
           <p className="text-xs text-gray-400 mb-3">
             {mallReportUpdatedAt ? `${formatDateTime(mallReportUpdatedAt)} 기준 — ` : ''}
             스크래핑 화면의 &quot;몰 구조 파악&quot;으로 자동 분석된 내용입니다. 정확하다고 확인되면 위 운영 메모에 직접 옮겨 적어주세요.

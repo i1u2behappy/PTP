@@ -122,6 +122,7 @@ interface MallStructureReport {
   companyContact: string
   productPageStructure: string
   scrapingNeeds: string
+  generatedBy: 'ai' | 'heuristic'
 }
 
 /** lib/scraper.ts의 MallProfileSignals와 같은 모양 — "몰 구조 파악" 버튼 결과 표시용. */
@@ -969,7 +970,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                     </colgroup>
                     <thead className="sticky top-0 z-10 bg-gray-50">
                       <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                        {siteOrderedColumns.map(col => {
+                        {siteOrderedColumns.map((col, colIdx) => {
                           const idx = siteSortKeys.findIndex(s => s.key === col.key)
                           const active = idx !== -1
                           return (
@@ -978,7 +979,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                               onDragOver={e => e.preventDefault()}
                               onDrop={() => handleSiteColDrop(col.key)}
                               onDragEnd={() => setSiteDragKey(null)}
-                              className={`relative px-3 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${siteDragKey === col.key ? 'opacity-40' : ''}`}
+                              className={`relative px-3 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${siteDragKey === col.key ? 'opacity-40' : ''} ${colIdx === 0 ? 'sticky left-0 z-20 bg-gray-50' : ''}`}
                               onClick={e => handleSiteSort(col.key, e)} title="드래그: 컬럼 순서 이동 · 클릭: 정렬 · Shift+클릭: 복합 정렬 추가">
                               <span className={active ? 'text-gray-800' : ''}>{col.label}</span>
                               {active && <span className="ml-1 text-teal-500">{siteSortKeys[idx].dir === 'asc' ? '▲' : '▼'}{siteSortKeys.length > 1 ? idx + 1 : ''}</span>}
@@ -990,8 +991,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       </tr>
                       {siteShowFilters && (
                         <tr className="border-b border-gray-200 bg-white">
-                          {siteOrderedColumns.map(col => (
-                            <th key={col.key} className="px-2 py-1.5 font-normal">
+                          {siteOrderedColumns.map((col, colIdx) => (
+                            <th key={col.key} className={`px-2 py-1.5 font-normal ${colIdx === 0 ? 'sticky left-0 z-20 bg-white' : ''}`}>
                               <input value={siteColFilters[col.key] || ''} onChange={e => setSiteColFilters(f => ({ ...f, [col.key]: e.target.value }))}
                                 placeholder="필터..." onClick={e => e.stopPropagation()}
                                 className="w-full border border-gray-200 rounded px-1.5 py-1 text-xs font-normal focus:outline-none focus:ring-1 focus:ring-teal-300" />
@@ -1003,9 +1004,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                     <tbody>
                       {visibleSites.map(s => (
                         <tr key={s.id} onClick={() => selectSite(s.id)}
-                          className="border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors">
-                          {siteOrderedColumns.map(col => (
-                            <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''}`} title={col.key === 'url' || col.key === 'main_items' ? col.getValue(s) : undefined}>
+                          className="group border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors">
+                          {siteOrderedColumns.map((col, colIdx) => (
+                            <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''} ${colIdx === 0 ? 'sticky left-0 z-10 bg-white group-hover:bg-gray-50' : ''}`} title={col.key === 'url' || col.key === 'main_items' ? col.getValue(s) : undefined}>
                               {col.render(s)}
                             </td>
                           ))}
@@ -1110,6 +1111,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   {profileResult.isFirstTime ? '🔍 몰 구조 파악 완료' : profileResult.diffs.length ? '⚠ 이전과 구조가 달라짐' : '✓ 이전과 구조 동일'}
                 </span>
                 <span className="text-xs text-gray-400">상품 {profileResult.signals.sampleCount}건 샘플 기준</span>
+                {profileResult.signals.report && (
+                  profileResult.signals.report.generatedBy === 'heuristic' ? (
+                    <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-100 text-amber-700"
+                      title="AI 호출이 실패해(크레딧 부족 등) 정규식/키워드 매칭으로 대신 채운 결과입니다 — AI 분석보다 정확도가 낮을 수 있습니다.">
+                      ⚠ 규칙 기반 (AI 아님)
+                    </span>
+                  ) : (
+                    <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-teal-100 text-teal-700">🤖 AI 분석</span>
+                  )
+                )}
               </div>
               {profileResult.diffs.length > 0 && (
                 <ul className="mb-3 text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2 space-y-0.5">
@@ -1259,8 +1270,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       <tbody>
                         {categories.map(c => (
                           <tr key={c.href} onClick={() => toggleCategory(c.href)}
-                            className="border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer">
-                            <td className="px-3 py-1.5 w-6">
+                            className="group border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer">
+                            <td className="px-3 py-1.5 w-6 sticky left-0 z-[1] bg-white group-hover:bg-gray-50">
                               <input type="checkbox" checked={isCategorySelected(c.href)} onChange={() => toggleCategory(c.href)} onClick={e => e.stopPropagation()} />
                             </td>
                             <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">{c.text}</td>
@@ -1443,7 +1454,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 <table className="text-xs border-collapse whitespace-nowrap">
                   <thead className="bg-gray-50">
                     <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                      <th className="px-3 py-2 text-left">카테고리</th>
+                      <th className="px-3 py-2 text-left sticky left-0 z-10 bg-gray-50">카테고리</th>
                       <th className="px-3 py-2 text-left">소비자판가</th>
                       <th className="px-3 py-2 text-left">공급가</th>
                       <th className="px-3 py-2 text-left">브랜드</th>
@@ -1468,7 +1479,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   </thead>
                   <tbody>
                     <tr>
-                      <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate" title={previewResult.product.category}>
+                      <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate sticky left-0 z-[1] bg-white" title={previewResult.product.category}>
                         {previewResult.product.category || '-'}
                       </td>
                       <td className="px-3 py-2 text-gray-700">
@@ -1552,15 +1563,15 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 <table className="w-full text-xs border-collapse">
                   <thead className="sticky top-0 z-10 bg-gray-50">
                     <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                      <th className="px-2 py-2 text-left w-14">이미지</th>
+                      <th className="px-2 py-2 text-left w-14 sticky left-0 z-20 bg-gray-50">이미지</th>
                       <th className="px-2 py-2 text-left">상품명</th>
                       <th className="px-2 py-2 text-left w-20">링크</th>
                     </tr>
                   </thead>
                   <tbody>
                     {previewItems.map(item => (
-                      <tr key={item.url} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
-                        <td className="px-2 py-1.5">
+                      <tr key={item.url} className="group border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                        <td className="px-2 py-1.5 sticky left-0 z-10 bg-white group-hover:bg-gray-50">
                           <div className="w-10 h-10 rounded-lg overflow-hidden bg-gray-100">
                             {item.thumbnail ? (
                               // eslint-disable-next-line @next/next/no-img-element

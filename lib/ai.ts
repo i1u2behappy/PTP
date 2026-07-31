@@ -7,9 +7,10 @@ function getClient() {
   return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 }
 
-// "AI모드 스크래핑"(규칙 자동생성 + 옵션 판별)과 "스크랩 조정"(사용자 지적 기반 규칙 생성) 전용 —
-// Anthropic 크레딧을 충전하지 않기로 하고, 이 세 기능에만 국한해 Gemini를 붙여달라고 확정함
-// (나머지 AI 기능 — 상품명 생성/Transform/몰 구조 파악 — 은 그대로 Anthropic).
+// 원래 "AI모드 스크래핑"(규칙 자동생성 + 옵션 판별)과 "스크랩 조정"(사용자 지적 기반 규칙 생성) 전용으로
+// (Anthropic 크레딧을 충전하지 않기로 하고) 도입했다가, "몰 구조 파악"도 Anthropic이 실패하면(크레딧
+// 부족 등) 이 Gemini로 자동 재시도하도록 확장함(2026-07-29) — generateMallProfileReport 참고. 나머지 AI
+// 기능(상품명 생성/Transform)은 여전히 Anthropic 전용.
 function getGeminiClient() {
   return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
 }
@@ -281,7 +282,8 @@ origin)에 없는 완전히 새로운 종류의 정보라도 상관없다. 그 �
  *
  * 사용자 요청으로 이 함수만 Gemini(GEMINI_API_KEY)를 쓴다 — Anthropic API 크레딧을 충전하지 않기로
  * 했고, "스크래핑을 위한 AI모드"에만 국한해서 다른 AI를 붙여달라고 확정함. 나머지 AI 기능(스크랩 조정,
- * 상품명 생성, Transform, 몰 구조 파악)은 전부 그대로 Anthropic을 쓴다 — 전체 교체가 아니다.
+ * 상품명 생성, Transform)은 전부 그대로 Anthropic을 쓴다 — 전체 교체가 아니다. ("몰 구조 파악"은 이후
+ * Anthropic 실패 시 Gemini로 자동 재시도하도록 별도로 확장됨 — generateMallProfileReport 참고.)
  */
 export async function generateAutoExtractionRules(
   mallName: string,
@@ -450,28 +452,10 @@ const MALL_ANALYSIS_KNOWLEDGE = [
   '카테고리 구조는 헤더 메뉴가 <ul><li>가 아닌 다른 마크업(div, 링크 나열 등)으로 되어 있어 구조적으로 못 뽑아낸 몰도 있다 — 이런 경우 원문의 "[헤더/카테고리 메뉴 텍스트]" 절에 나온 메뉴명들을 나열해 답해도 된다(계층이 불확실하면 "대분류: A, B, C" 처럼 평평하게 적어도 됨 — 아예 확인 안됨으로 답하기 전에 이 절을 먼저 확인한다).',
 ]
 
-/**
- * "몰 구조 파악" 기능 — 실제로 수집한 원문(홈/게시판/상품페이지 텍스트)만 근거로 사용자가 알고 싶어하는
- * 11개 항목(URL 계층/카테고리/은행명/계좌번호/택배사/택배비/반품주소/재고관리/연락처/상품페이지 구조/
- * 스크래핑 유의사항)을 채운다. 원문에 없는 내용을 추측하지 않도록 프롬프트에서 명시적으로 금지하고,
- * 확인 못한 항목은 "확인 안됨"으로 답하게 한다. ANTHROPIC_API_KEY가 없거나 원문을 하나도 못 모았으면
- * null(호출부가 report 없이 진행).
- */
-export async function generateMallProfileReport(
-  mallName: string,
-  platform: string,
-  categoryHints: string[],
-  sampleProductUrl: string,
-  contextText: string,
-): Promise<MallStructureReport | null> {
-  if (!process.env.ANTHROPIC_API_KEY || !contextText.trim()) return null
-
-  const properties: Record<string, { type: string; description: string }> = {}
-  MALL_REPORT_FIELDS.forEach(f => {
-    properties[f.key] = { type: 'string', description: `${f.label} — ${f.hint}. 아래 원문에서 확인할 수 없으면 반드시 "확인 안됨"이라고만 답한다(추측 금지).` }
-  })
-
-  const prompt = `몰 '${mallName}'(플랫폼: ${platform})의 실제 페이지에서 수집한 원문이다. 이 내용만 근거로 아래 항목들을 조사하라.
+function buildMallReportPrompt(
+  mallName: string, platform: string, categoryHints: string[], sampleProductUrl: string, contextText: string,
+): string {
+  return `몰 '${mallName}'(플랫폼: ${platform})의 실제 페이지에서 수집한 원문이다. 이 내용만 근거로 아래 항목들을 조사하라.
 추측이나 일반적인 쇼핑몰 상식으로 채우지 말고, 원문에 실제로 있는 내용만 답하라. 원문에 없으면 그 항목은 정확히 "확인 안됨"이라고만 답한다.
 
 [다른 몰들을 분석하며 얻은 참고 지식 — 이 몰이 실제로 그렇다는 뜻은 아니고, 어디를 살펴봐야 할지/어떤
@@ -486,6 +470,20 @@ ${categoryHints.join(', ') || '(확인 안됨)'}
 
 [수집한 원문]
 ${contextText.slice(0, 20_000)}`
+}
+
+/** Anthropic으로 "몰 구조 파악" 리포트를 생성한다. ANTHROPIC_API_KEY가 없거나 크레딧 부족 등으로
+ *  실패하면 null — 호출부(generateMallProfileReport)가 Gemini로 재시도한다. */
+async function generateMallProfileReportAnthropic(
+  mallName: string, platform: string, categoryHints: string[], sampleProductUrl: string, contextText: string,
+): Promise<MallStructureReport | null> {
+  if (!process.env.ANTHROPIC_API_KEY || !contextText.trim()) return null
+
+  const properties: Record<string, { type: string; description: string }> = {}
+  MALL_REPORT_FIELDS.forEach(f => {
+    properties[f.key] = { type: 'string', description: `${f.label} — ${f.hint}. 아래 원문에서 확인할 수 없으면 반드시 "확인 안됨"이라고만 답한다(추측 금지).` }
+  })
+  const prompt = buildMallReportPrompt(mallName, platform, categoryHints, sampleProductUrl, contextText)
 
   try {
     const response = await getClient().messages.create({
@@ -503,9 +501,62 @@ ${contextText.slice(0, 20_000)}`
     if (!toolUse || toolUse.type !== 'tool_use') return null
     return { ...(toolUse.input as Omit<MallStructureReport, 'generatedBy'>), generatedBy: 'ai' }
   } catch (e) {
-    console.error('[generateMallProfileReport] API call failed:', e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : e)
+    console.error('[generateMallProfileReportAnthropic] API call failed:', e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : e)
     return null
   }
+}
+
+/** Anthropic이 안 되면(크레딧 부족 등) Gemini로 같은 리포트를 시도한다 — "AI모드 스크래핑"/"스크랩 조정"과
+ *  같은 GEMINI_API_KEY를 재사용. GEMINI_API_KEY가 없거나 원문이 없으면 null(호출부가 규칙 기반으로 대체). */
+async function generateMallProfileReportGemini(
+  mallName: string, platform: string, categoryHints: string[], sampleProductUrl: string, contextText: string,
+): Promise<MallStructureReport | null> {
+  if (!process.env.GEMINI_API_KEY || !contextText.trim()) return null
+
+  const properties: Record<string, Schema> = {}
+  MALL_REPORT_FIELDS.forEach(f => {
+    properties[f.key] = { type: Type.STRING, description: `${f.label} — ${f.hint}. 아래 원문에서 확인할 수 없으면 반드시 "확인 안됨"이라고만 답한다(추측 금지).` }
+  })
+  const prompt = buildMallReportPrompt(mallName, platform, categoryHints, sampleProductUrl, contextText)
+
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_mall_report',
+          description: '조사한 11개 항목을 각각 문자열로 채운다. 원문에서 확인 못한 항목은 반드시 "확인 안됨"으로 채운다.',
+          parameters: { type: Type.OBJECT, properties, required: MALL_REPORT_FIELDS.map(f => f.key) },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_mall_report'] } },
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) return null
+    return { ...(call.args as Omit<MallStructureReport, 'generatedBy'>), generatedBy: 'ai' }
+  } catch (e) {
+    console.error('[generateMallProfileReportGemini] API call failed:', e instanceof Error ? e.message : e)
+    return null
+  }
+}
+
+/**
+ * "몰 구조 파악" 기능 — 실제로 수집한 원문(홈/게시판/상품페이지 텍스트)만 근거로 사용자가 알고 싶어하는
+ * 11개 항목(URL 계층/카테고리/은행명/계좌번호/택배사/택배비/반품주소/재고관리/연락처/상품페이지 구조/
+ * 스크래핑 유의사항)을 채운다. 원문에 없는 내용을 추측하지 않도록 프롬프트에서 명시적으로 금지하고,
+ * 확인 못한 항목은 "확인 안됨"으로 답하게 한다. Anthropic을 먼저 시도하고, 크레딧 부족 등으로 실패하면
+ * Gemini로 재시도한다(둘 다 실패하거나 원문을 하나도 못 모았으면 null — 호출부가 규칙 기반으로 대체).
+ */
+export async function generateMallProfileReport(
+  mallName: string,
+  platform: string,
+  categoryHints: string[],
+  sampleProductUrl: string,
+  contextText: string,
+): Promise<MallStructureReport | null> {
+  return await generateMallProfileReportAnthropic(mallName, platform, categoryHints, sampleProductUrl, contextText).catch(() => null)
+    ?? await generateMallProfileReportGemini(mallName, platform, categoryHints, sampleProductUrl, contextText).catch(() => null)
 }
 
 const COURIER_NAMES = ['CJ대한통운', '한진택배', '로젠택배', '우체국택배', '롯데택배', '경동택배', '대신택배', '합동택배', '일양로지스', 'CU편의점택배', 'GS Postbox']

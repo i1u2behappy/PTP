@@ -245,8 +245,8 @@ export function ClientDetailPanel({ params }: Props) {
       </div>
 
       <div className="bg-white rounded-2xl border border-gray-200 p-4 mb-4 flex items-center justify-between">
-        <span className="text-xs text-gray-500">이 거래처의 &quot;기준 Master DB&quot; 컬럼 구성은 마이그레이션 메뉴의 전용 화면에서 관리합니다.</span>
-        <button onClick={() => openTab({ id: 'master-schema', type: 'master-schema', title: '기준 Master 테이블 관리', icon: '🧱', closable: true, params: { clientId } })}
+        <span className="text-xs text-gray-500">&quot;기준 Master DB&quot; 컬럼 구성은 거래처 구분 없이 마이그레이션 메뉴의 전용 화면에서 공통으로 관리합니다.</span>
+        <button onClick={() => openTab({ id: 'master-schema', type: 'master-schema', title: '기준 Master 테이블 관리', icon: '🧱', closable: true })}
           className="text-teal-600 text-xs font-semibold hover:underline shrink-0 ml-3">
           🧱 기준 Master 테이블 관리에서 편집 →
         </button>

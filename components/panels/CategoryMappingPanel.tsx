@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
 import { ScrapeScopePicker, type ScrapeScope } from './shared/ScrapeScopePicker'
+import { CoupangCategoryProfileEditor } from './shared/CoupangCategoryProfileEditor'
 
 interface FieldValue { value: string; count: string }
 interface Marketplace { code: string; name: string }
@@ -12,6 +13,7 @@ export function CategoryMappingPanel({ params }: { params?: Record<string, unkno
   const [marketplaces, setMarketplaces] = useState<Marketplace[]>([])
   const [mappings, setMappings] = useState<Record<string, string>>({})
   const [search, setSearch] = useState('')
+  const [coupangProfileTarget, setCoupangProfileTarget] = useState<string | null>(null)
 
   const load = useCallback(() => {
     if (scope.sessionId === '') { setCategories([]); return }
@@ -73,11 +75,18 @@ export function CategoryMappingPanel({ params }: { params?: Record<string, unkno
                         <td className="px-4 py-2 text-xs text-gray-700 sticky left-0 bg-white">{cat.value} <span className="text-gray-300">({cat.count})</span></td>
                         {marketplaces.map(mc => {
                           const key = `${cat.value}::${mc.code}`
+                          const value = mappings[key] ?? ''
                           return (
                             <td key={mc.code} className="px-2 py-2">
-                              <input defaultValue={mappings[key] ?? ''} placeholder="미매핑"
-                                onBlur={e => e.target.value !== (mappings[key] ?? '') && saveCell(cat.value, mc.code, e.target.value)}
-                                className="w-36 border border-gray-200 rounded px-1.5 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-teal-300" />
+                              <div className="flex items-center gap-1">
+                                <input defaultValue={value} placeholder="미매핑"
+                                  onBlur={e => e.target.value !== value && saveCell(cat.value, mc.code, e.target.value)}
+                                  className="w-36 border border-gray-200 rounded px-1.5 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-teal-300" />
+                                {mc.code === 'coupang' && value && (
+                                  <button onClick={() => setCoupangProfileTarget(value)} title="옵션·고시정보 슬롯 매핑"
+                                    className="text-xs text-gray-400 hover:text-teal-500 shrink-0">🎛️</button>
+                                )}
+                              </div>
                             </td>
                           )
                         })}
@@ -89,6 +98,10 @@ export function CategoryMappingPanel({ params }: { params?: Record<string, unkno
             </div>
           )}
         </>
+      )}
+
+      {coupangProfileTarget && (
+        <CoupangCategoryProfileEditor channelCategoryValue={coupangProfileTarget} onClose={() => setCoupangProfileTarget(null)} />
       )}
     </div>
   )

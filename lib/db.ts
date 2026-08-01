@@ -1,6 +1,7 @@
 import { Pool } from 'pg'
 import crypto from 'crypto'
 import { hashPassword } from './auth'
+import { FIXED_FIELD_INFO } from './master/schema'
 
 const pool = new Pool({
   host:     process.env.DB_HOST     || '127.0.0.1',
@@ -414,16 +415,18 @@ export async function initDb() {
     -- 거래처별 커스텀 필드(기준 Master DB에서 정의) 값 저장 — { field_key: value }
     ALTER TABLE product_master ADD COLUMN IF NOT EXISTS custom_fields JSONB DEFAULT '{}';
 
-    -- 거래처별 "기준 Master DB" 타깃 필드 목록 — 엑셀 업로드로 정의, 기존 고정 컬럼 매핑 또는 신규 커스텀 필드
-    CREATE TABLE IF NOT EXISTS client_master_schema_fields (
+    -- "기준 Master DB" 타깃 필드 목록 — 거래처 구분 없이 시스템 전체가 공유하는 단일 기준 테이블 정의.
+    -- 예전엔 client_id로 거래처별로 나눠 가졌으나(client_master_schema_fields), 기준 테이블은 하나만
+    -- 두기로 해서 거래처 구분을 없앴다. 이전 테이블은 비어 있었으므로 데이터 이관 없이 바로 교체한다.
+    DROP TABLE IF EXISTS client_master_schema_fields;
+    CREATE TABLE IF NOT EXISTS master_schema_fields (
       id           SERIAL PRIMARY KEY,
-      client_id    INT NOT NULL REFERENCES supply_clients(id) ON DELETE CASCADE,
       field_key    TEXT NOT NULL,
       field_label  TEXT NOT NULL,
       is_custom    BOOLEAN NOT NULL DEFAULT true,
       sort_order   INT DEFAULT 0,
       created_at   TIMESTAMPTZ DEFAULT NOW(),
-      UNIQUE (client_id, field_key)
+      UNIQUE (field_key)
     );
 
     -- 이미지 레코드 (원본명/정규화명/저장위치)
@@ -605,6 +608,19 @@ export async function initDb() {
       updated_at          TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE (site_id, mall_product_id)
     );
+
+    -- 판매관리코드(상품고유코드) 생성 레시피 — 몰×거래처 조합 하나당 순차 스텝 배열 하나.
+    -- 스텝은 Transform의 rule 개념(rename/조합/AI)을 재사용하되, "TO-BE 컬럼별 규칙(병렬)"이 아니라
+    -- "한 값을 순서대로 가공(직렬)"하는 체인이라 steps를 JSONB 배열로 통째로 저장한다(Power Query
+    -- Applied Steps / OpenRefine 조작이력과 같은 구조 — !specifications/sales-code-recipe.md 참고).
+    CREATE TABLE IF NOT EXISTS sales_code_recipes (
+      id          SERIAL PRIMARY KEY,
+      site_id     INT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+      client_id   INT NOT NULL REFERENCES supply_clients(id) ON DELETE CASCADE,
+      steps       JSONB NOT NULL DEFAULT '[]',
+      updated_at  TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (site_id, client_id)
+    );
   `)
 
   await pool.query(`
@@ -637,6 +653,18 @@ export async function initDb() {
       ('sabangnet', '사방넷', 1000, 0, 3000)
     ON CONFLICT (code) DO NOTHING;
   `)
+
+  // 기준 Master 테이블 관리 화면이 빈 그리드로 열리지 않도록, 고정 컬럼 15개를 기본값으로 미리 채워둔다
+  // — 사용자가 지워도 상관없고, "기본 컬럼 전체 추가" 버튼으로 언제든 다시 채울 수 있다.
+  const schemaFieldCount = await pool.query('SELECT COUNT(*) FROM master_schema_fields')
+  if (Number(schemaFieldCount.rows[0].count) === 0) {
+    for (const [i, f] of FIXED_FIELD_INFO.entries()) {
+      await pool.query(
+        `INSERT INTO master_schema_fields (field_key, field_label, is_custom, sort_order) VALUES ($1,$2,false,$3) ON CONFLICT (field_key) DO NOTHING`,
+        [f.key, f.label, i],
+      )
+    }
+  }
 
   const adminCount = await pool.query('SELECT COUNT(*) FROM users')
   if (Number(adminCount.rows[0].count) === 0) {

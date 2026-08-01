@@ -1,15 +1,25 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { ScrapeScopePicker, type ScrapeScope } from './shared/ScrapeScopePicker'
+import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
 
 interface FieldValue { value: string; count: string }
 type Field = 'brand' | 'manufacturer' | 'origin'
 
+const ALL_FIELDS: Field[] = ['brand', 'manufacturer', 'origin']
 const FIELD_LABELS: Record<Field, string> = { brand: '브랜드', manufacturer: '제조사', origin: '원산지' }
 
 export function BrandOriginPanel({ params }: { params?: Record<string, unknown> }) {
   const [scope, setScope] = useState<ScrapeScope>({ clientId: '', siteId: '', sessionId: '' })
+  const { keys: registeredKeys, loaded: registryLoaded } = useRegisteredFieldKeys()
+  // 기준 Master 테이블에서 뺀 컬럼은 여기서도 탭이 사라진다 — 로딩 전엔 깜빡임 방지로 전체를 보여준다.
+  const availableFields = useMemo(
+    () => registryLoaded ? ALL_FIELDS.filter(f => registeredKeys.has(f)) : ALL_FIELDS,
+    [registryLoaded, registeredKeys],
+  )
   const [field, setField] = useState<Field>('brand')
+  // 선택해둔 필드가 방금 기준 테이블에서 빠졌으면(예: 다른 탭에서 삭제) 조용히 첫 번째 사용 가능한 필드로 대체
+  const effectiveField = availableFields.includes(field) ? field : (availableFields[0] ?? 'brand')
   const [values, setValues] = useState<FieldValue[]>([])
   const [search, setSearch] = useState('')
   const [editing, setEditing] = useState<string | null>(null)
@@ -18,9 +28,9 @@ export function BrandOriginPanel({ params }: { params?: Record<string, unknown> 
   const load = useCallback(() => {
     const result = scope.sessionId === ''
       ? Promise.resolve([])
-      : fetch(`/api/master/field-values?field=${field}&sessionId=${scope.sessionId}`).then(r => r.json())
+      : fetch(`/api/master/field-values?field=${effectiveField}&sessionId=${scope.sessionId}`).then(r => r.json())
     result.then((d: FieldValue[]) => setValues(Array.isArray(d) ? d : [])).catch(() => {})
-  }, [field, scope.sessionId])
+  }, [effectiveField, scope.sessionId])
 
   useEffect(() => { load() }, [load])
 
@@ -34,7 +44,7 @@ export function BrandOriginPanel({ params }: { params?: Record<string, unknown> 
     if (editValue.trim() && editValue !== editing) {
       await fetch('/api/master/field-values', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: scope.sessionId, field, from: editing, to: editValue.trim() }),
+        body: JSON.stringify({ sessionId: scope.sessionId, field: effectiveField, from: editing, to: editValue.trim() }),
       })
       load()
     }
@@ -56,9 +66,9 @@ export function BrandOriginPanel({ params }: { params?: Record<string, unknown> 
       {scope.sessionId === '' ? null : (
         <>
           <div className="flex items-center gap-2 mb-4 shrink-0">
-            {(['brand', 'manufacturer', 'origin'] as Field[]).map(f => (
+            {availableFields.map(f => (
               <button key={f} onClick={() => setField(f)}
-                className={`px-4 py-1.5 text-sm font-semibold rounded-full transition-colors ${field === f ? 'bg-teal-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                className={`px-4 py-1.5 text-sm font-semibold rounded-full transition-colors ${effectiveField === f ? 'bg-teal-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
                 {FIELD_LABELS[f]}
               </button>
             ))}
@@ -66,10 +76,15 @@ export function BrandOriginPanel({ params }: { params?: Record<string, unknown> 
               className="flex-1 max-w-xs border border-gray-300 rounded-full px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </div>
 
-          {values.length === 0 ? (
+          {availableFields.length === 0 ? (
             <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400">
               <div className="text-4xl mb-3">🏭</div>
-              <p className="text-sm">이 세션에 등록된 {FIELD_LABELS[field]} 값이 없습니다.</p>
+              <p className="text-sm">기준 Master 테이블에 브랜드·제조사·원산지 컬럼이 등록되어 있지 않습니다. 기준 Master 테이블 관리에서 먼저 추가해주세요.</p>
+            </div>
+          ) : values.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400">
+              <div className="text-4xl mb-3">🏭</div>
+              <p className="text-sm">이 세션에 등록된 {FIELD_LABELS[effectiveField]} 값이 없습니다.</p>
             </div>
           ) : (
             <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-0 flex flex-col">
@@ -77,7 +92,7 @@ export function BrandOriginPanel({ params }: { params?: Record<string, unknown> 
                 <table className="w-full text-sm border-collapse">
                   <thead className="sticky top-0 z-10 bg-gray-50">
                     <tr className="border-b border-gray-200 text-xs font-semibold text-gray-500">
-                      <th className="px-4 py-3 text-left sticky left-0 z-20 bg-gray-50">{FIELD_LABELS[field]}</th>
+                      <th className="px-4 py-3 text-left sticky left-0 z-20 bg-gray-50">{FIELD_LABELS[effectiveField]}</th>
                       <th className="px-4 py-3 text-left w-24">상품 수</th>
                     </tr>
                   </thead>

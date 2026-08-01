@@ -4,8 +4,8 @@ import { migrateToMaster } from '../master/migrate'
 import { getGuidePairs } from './matching'
 
 /** product_master 고정 컬럼 중 이 기능이 덮어써도 되는 필드만 허용 (target_field를 그대로 SQL에 꽂아 넣으므로
- * 반드시 화이트리스트를 거친다). 거래처가 등록한 커스텀 필드는 이 목록에 없어도 client_master_schema_fields에
- * 있으면 허용된다 — getAllowedTargetFields() 참고. */
+ * 반드시 화이트리스트를 거친다). 커스텀 필드는 이 목록에 없어도 master_schema_fields(거래처 구분 없는 단일
+ * 기준 테이블)에 있으면 허용된다 — getAllowedTargetFields() 참고. */
 export const FIXED_TARGET_FIELDS = new Set([
   'name_final', 'master_category', 'brand', 'manufacturer', 'origin', 'description',
   'cost_price', 'list_price', 'sale_price', 'shipping_fee', 'other_cost',
@@ -15,11 +15,10 @@ const NUMERIC_TARGET_FIELDS = new Set(['cost_price', 'list_price', 'sale_price',
 
 export interface CustomFieldOption { field_key: string; field_label: string }
 
-/** 이 거래처에서 Transform 규칙의 target_field로 고를 수 있는 전체 목록 — 고정 컬럼 + 거래처가 등록한 커스텀 필드. */
-export async function getAllowedTargetFields(clientId: number): Promise<{ fixed: string[]; custom: CustomFieldOption[] }> {
+/** Transform 규칙의 target_field로 고를 수 있는 전체 목록 — 고정 컬럼 + 등록된 커스텀 필드(전체 공유, 거래처 구분 없음). */
+export async function getAllowedTargetFields(): Promise<{ fixed: string[]; custom: CustomFieldOption[] }> {
   const res = await pool.query<CustomFieldOption>(
-    `SELECT field_key, field_label FROM client_master_schema_fields WHERE client_id=$1 AND is_custom ORDER BY sort_order, id`,
-    [clientId],
+    `SELECT field_key, field_label FROM master_schema_fields WHERE is_custom ORDER BY sort_order, id`,
   )
   return { fixed: [...FIXED_TARGET_FIELDS], custom: res.rows }
 }
@@ -48,7 +47,7 @@ const SOURCE_FIELD_KEYS = [
   'description', 'mall_category', 'stock_status', 'stock_qty',
 ] as const
 
-interface MallProductRow {
+export interface MallProductRow {
   id: number
   name_original: string | null
   price: number | null
@@ -63,7 +62,7 @@ interface MallProductRow {
   options: unknown
 }
 
-function buildSourceFields(mp: MallProductRow): Record<string, unknown> {
+export function buildSourceFields(mp: MallProductRow): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const key of SOURCE_FIELD_KEYS) out[key] = mp[key]
   out.options = mp.options
@@ -186,7 +185,7 @@ export async function commitGeneratedRow(generatedRowId: number, clientId: numbe
 
   const rules = await getColumnRules(row.site_id)
   const customFieldsRes = await pool.query<{ field_key: string }>(
-    `SELECT field_key FROM client_master_schema_fields WHERE client_id=$1 AND is_custom`, [clientId],
+    `SELECT field_key FROM master_schema_fields WHERE is_custom`,
   )
   const customFieldKeys = new Set(customFieldsRes.rows.map(r => r.field_key))
   const mapped = rules.filter(r => r.target_field && (FIXED_TARGET_FIELDS.has(r.target_field) || customFieldKeys.has(r.target_field)))

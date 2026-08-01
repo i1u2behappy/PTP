@@ -38,6 +38,9 @@ export function ScrapeScopePicker({ initialSiteId, initialSessionId, onScopeChan
   const [queryClientId, setQueryClientId] = useState<number | ''>('')
   const [querySiteId, setQuerySiteId] = useState<number | ''>(initialSiteId ?? '')
   const [searched, setSearched] = useState(!!initialSiteId)
+  // 스크래핑 목록이 화면 공간을 많이 차지한다는 다른 메뉴(ProductsListPanel)와 같은 요청 — 접으면
+  // 한 줄 요약으로 줄고, 세션 선택은 접기 전 상태 그대로 유지된다. 버튼은 항상 같은 자리(우측 끝)에 고정.
+  const [collapsed, setCollapsed] = useState(false)
 
   useEffect(() => {
     fetch('/api/clients').then(r => r.json()).then((d: Client[]) => setClients(Array.isArray(d) ? d : [])).catch(() => {})
@@ -71,6 +74,10 @@ export function ScrapeScopePicker({ initialSiteId, initialSessionId, onScopeChan
     if (!q) return true
     return s.url.toLowerCase().includes(q) || s.status.toLowerCase().includes(q) || new Date(s.created_at).toLocaleString().toLowerCase().includes(q)
   })
+
+  const selectedSession = sessions.find(s => s.id === selectedSessionId)
+  const selectedSite = selectedSession ? sites.find(s => s.id === selectedSession.site_id) : undefined
+  const selectedClient = selectedSite ? clients.find(c => c.id === selectedSite.client_id) : undefined
 
   function selectClient(id: number | '') {
     setClientId(id)
@@ -107,6 +114,10 @@ export function ScrapeScopePicker({ initialSiteId, initialSessionId, onScopeChan
           className="px-4 py-1.5 bg-teal-500 text-white text-sm font-semibold rounded-full hover:bg-teal-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
           🔍 조회
         </button>
+        <button onClick={() => setCollapsed(v => !v)}
+          className="ml-auto px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full transition-colors shrink-0">
+          {collapsed ? '▼ 목록 펼치기' : '▲ 목록 접기'}
+        </button>
       </div>
 
       {!searched ? (
@@ -120,11 +131,21 @@ export function ScrapeScopePicker({ initialSiteId, initialSessionId, onScopeChan
       ) : (
         <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
           <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-3">
-            <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
-            <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="URL·상태·일시 검색..."
-              className="flex-1 border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+            {collapsed ? (
+              <span className="text-xs text-gray-400 truncate">
+                {selectedSession
+                  ? `선택된 세션: ${selectedClient?.name || '-'} · ${selectedSite?.name || selectedSession.url} · ${new Date(selectedSession.created_at).toLocaleString()}`
+                  : '선택된 세션이 없습니다.'}
+              </span>
+            ) : (
+              <>
+                <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
+                <input value={sessionSearch} onChange={e => setSessionSearch(e.target.value)} placeholder="URL·상태·일시 검색..."
+                  className="flex-1 border border-gray-300 rounded-full px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-teal-400" />
+              </>
+            )}
           </div>
-          <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId} />
+          {!collapsed && <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId} />}
         </div>
       )}
     </div>

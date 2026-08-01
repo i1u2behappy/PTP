@@ -1,6 +1,7 @@
 'use client'
 import { useCallback, useEffect, useState } from 'react'
 import { ScrapeSessionGrid } from './shared/ScrapeSessionGrid'
+import { FIXED_FIELD_INFO } from '../../lib/master/schema'
 
 interface Client { id: number; name: string }
 interface Site { id: number; name: string | null; url: string; client_id: number | null }
@@ -33,14 +34,8 @@ interface LookupEntry { id: number; source_value: string; target_value: string }
 interface MallProduct { id: number; mall_product_code: string; name_original: string; master_product_id: number | null }
 interface GeneratedRow { id: number; mall_product_id: number; product_master_id: number | null; generated_values: Record<string, string>; status: string; mall_product_code: string; name_original: string }
 
-const TARGET_FIELDS: { value: string; label: string }[] = [
-  { value: 'name_final', label: '최종상품명' }, { value: 'master_category', label: '카테고리' },
-  { value: 'brand', label: '브랜드' }, { value: 'manufacturer', label: '제조사' }, { value: 'origin', label: '원산지' },
-  { value: 'description', label: '설명' }, { value: 'cost_price', label: '매입가' }, { value: 'list_price', label: '소비자가' },
-  { value: 'sale_price', label: '판매가' }, { value: 'shipping_fee', label: '배송비' }, { value: 'other_cost', label: '기타비용' },
-  { value: 'stock_status', label: '재고상태' }, { value: 'stock_qty', label: '재고수량' },
-  { value: 'internal_code', label: '관리코드' }, { value: 'sales_code', label: '판매관리코드' },
-]
+// 기준 Master 테이블 관리 화면과 라벨을 통일하기 위해 FIXED_FIELD_INFO(기준 컬럼 15개)를 그대로 재사용한다.
+const TARGET_FIELDS: { value: string; label: string }[] = FIXED_FIELD_INFO.map(f => ({ value: f.key, label: f.label }))
 const SOURCE_FIELDS: { value: string; label: string }[] = [
   { value: 'name_original', label: '원본상품명' }, { value: 'price', label: '가격' }, { value: 'sale_price', label: '할인가' },
   { value: 'brand', label: '브랜드(원본)' }, { value: 'manufacturer', label: '제조사(원본)' }, { value: 'origin', label: '원산지(원본)' },

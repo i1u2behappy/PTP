@@ -1,6 +1,7 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { ScrapeScopePicker, type ScrapeScope } from './shared/ScrapeScopePicker'
+import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
 
 interface MasterRow {
   id: number; name_original: string; name_ai: string | null; name_final: string | null
@@ -8,8 +9,8 @@ interface MasterRow {
   shipping_fee: number | null; other_cost: number | null; target_margin_rate: number | null
 }
 
-const NUMBER_KEYS = ['cost_price', 'list_price', 'sale_price', 'shipping_fee', 'other_cost'] as const
-type NumberKey = typeof NUMBER_KEYS[number]
+const ALL_NUMBER_KEYS = ['cost_price', 'list_price', 'sale_price', 'shipping_fee', 'other_cost'] as const
+type NumberKey = typeof ALL_NUMBER_KEYS[number]
 const COLUMN_LABELS: Record<NumberKey, string> = {
   cost_price: '매입가', list_price: '소비자가', sale_price: '판매가', shipping_fee: '배송비', other_cost: '기타비용',
 }
@@ -21,6 +22,13 @@ function marginOf(row: MasterRow): number | null {
 
 export function PricingManagementPanel({ params }: { params?: Record<string, unknown> }) {
   const [scope, setScope] = useState<ScrapeScope>({ clientId: '', siteId: '', sessionId: '' })
+  const { keys: registeredKeys, loaded: registryLoaded } = useRegisteredFieldKeys()
+  // 기준 Master 테이블에서 뺀 가격 컬럼은 여기서도 컬럼이 사라진다(목표 마진율은 기준 테이블 대상이 아닌
+  // 별도 정책값이라 항상 보여준다). 로딩 전엔 깜빡임 방지로 전체를 보여준다.
+  const numberKeys = useMemo(
+    () => registryLoaded ? ALL_NUMBER_KEYS.filter(k => registeredKeys.has(k)) : ALL_NUMBER_KEYS,
+    [registryLoaded, registeredKeys],
+  )
   const [rows, setRows] = useState<MasterRow[]>([])
   const [search, setSearch] = useState('')
   const [editing, setEditing] = useState<{ id: number; key: NumberKey | 'target_margin_rate' } | null>(null)
@@ -94,7 +102,7 @@ export function PricingManagementPanel({ params }: { params?: Record<string, unk
                   <thead className="sticky top-0 z-10 bg-gray-50">
                     <tr className="border-b border-gray-200 text-gray-500 font-semibold">
                       <th className="px-3 py-2 text-left sticky left-0 bg-gray-50 z-20">상품명</th>
-                      {NUMBER_KEYS.map(k => <th key={k} className="px-3 py-2 text-left">{COLUMN_LABELS[k]}</th>)}
+                      {numberKeys.map(k => <th key={k} className="px-3 py-2 text-left">{COLUMN_LABELS[k]}</th>)}
                       <th className="px-3 py-2 text-left">목표 마진율</th>
                       <th className="px-3 py-2 text-left">예상 마진</th>
                     </tr>
@@ -105,7 +113,7 @@ export function PricingManagementPanel({ params }: { params?: Record<string, unk
                       return (
                         <tr key={row.id} className="border-b border-gray-100 hover:bg-gray-50">
                           <td className="px-3 py-2 text-xs text-gray-700 sticky left-0 bg-white max-w-[220px] truncate">{row.name_final || row.name_ai || row.name_original}</td>
-                          {NUMBER_KEYS.map(k => <Cell key={k} row={row} k={k} />)}
+                          {numberKeys.map(k => <Cell key={k} row={row} k={k} />)}
                           <Cell row={row} k="target_margin_rate" />
                           <td className="px-3 py-2 text-xs font-medium">
                             {margin == null ? '-' : <span className={margin >= 0 ? 'text-emerald-600' : 'text-rose-500'}>₩{margin.toLocaleString()}</span>}

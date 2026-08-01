@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import Image from 'next/image'
 import { useTabs, type Tab } from './TabsContext'
+import { useCurrentUser } from './CurrentUserContext'
 import { DashboardIcon, ClientIcon, StoreIcon, ListIcon, SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ImageEditIcon, ExportIcon, SettingsIcon, TagIcon, MapIcon, CoinIcon, RefreshIcon } from './icons'
 import { CLIENTS_LIST_TAB, SITES_LIST_TAB, MASTER_LIST_TAB, PRODUCTS_LIST_TAB } from './menuTabs'
 
@@ -44,6 +45,7 @@ function NavLeaf({ tab, icon: Icon, nested }: { tab: Tab; icon: IconComponent; n
 
 export function Sidebar() {
   const { openTab } = useTabs()
+  const { isAdmin } = useCurrentUser()
   return (
     <aside className="w-64 shrink-0 bg-white border-r border-slate-100 flex flex-col h-full overflow-y-auto">
       <button onClick={() => openTab(DASHBOARD_TAB)} aria-label="첫페이지로 이동" title="첫페이지로 이동"
@@ -66,7 +68,11 @@ export function Sidebar() {
         {/* 컬럼별 전처리/변환 작업을 단계별 하위 메뉴로 구분. 그룹명 클릭 시 하위 작업 진행현황 대시보드가 열린다 */}
         <NavGroup label="마이그레이션" icon={ReviewIcon} defaultOpen
           tab={{ id: 'migration-dashboard', type: 'migration-dashboard', title: '데이터 마이그 목록', icon: '📊', closable: true }}>
-          <NavLeaf tab={{ id: 'master-schema', type: 'master-schema', title: '기준 Master 테이블 관리', icon: '🧱', closable: true }} icon={ArchiveIcon} nested />
+          {/* 거래처 구분 없는 시스템 전체 공용 기준 테이블이라 admin만 접근하게 한다(2026-08) — 실제 차단은
+              /api/master/schema가 서버에서 한다, 여기는 메뉴 노출만 맞춘다. */}
+          {isAdmin && (
+            <NavLeaf tab={{ id: 'master-schema', type: 'master-schema', title: '기준 Master 테이블 관리', icon: '🧱', closable: true }} icon={ArchiveIcon} nested />
+          )}
           <NavLeaf tab={{ id: 'sales-code', type: 'sales-code', title: '판매관리코드 관리', icon: '💳', closable: true }} icon={TagIcon} nested />
           <NavLeaf tab={{ id: 'category-mapping', type: 'category-mapping', title: '카테고리 매핑', icon: '🗺️', closable: true }} icon={MapIcon} nested />
           <NavLeaf tab={{ id: 'internal-codes', type: 'internal-codes', title: '관리코드 생성', icon: '🏷️', closable: true }} icon={TagIcon} nested />

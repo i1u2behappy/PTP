@@ -5,6 +5,10 @@ import { PRODUCTS_LIST_TAB } from '../shell/menuTabs'
 import { FIXED_FIELD_INFO } from '../../lib/master/schema'
 import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
 
+// lib/extract.ts의 CLAIMED_INFO_LABEL_RE와 같은 목록 — 이 파일은 Playwright 등 서버 전용 코드를 담고
+// 있어 클라이언트 컴포넌트에서 직접 import하지 않고 그대로 복제해 둔다(둘 중 하나를 고치면 같이 맞출 것).
+const CLAIMED_INFO_LABEL_RE = /브랜드|제조사|제조자|원산지|제조국|상품요약정보|영문상품명|유통기한|소비기한|상품코드|정가|판매가|소비자가|시중가|정상가|공급가|도매가|배송비|택배비/i
+
 // 기준 Master 테이블 관리 화면과 같은 라벨을 쓰기 위해 거기서 쓰는 이름을 그대로 가져온다 — 예전엔 이 표만
 // "소비자판가"/"공급가"라고 따로 부르고 있어서 기준 테이블의 "정상가"/"원가"와 같은 값인데 다르게 보였다.
 // FIXED_FIELD_INFO는 로딩 전/미등록 키의 기본값일 뿐, 사용자가 기준 마스터테이블관리에서 라벨을 직접
@@ -1463,20 +1467,37 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   <span className="line-clamp-3">{previewResult.product.detail_text}</span>
                 </div>
               )}
-              {previewResult.product.extra_info.length > 0 && (
-                <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-500">
-                  <span className="text-gray-400">상품정보고시 전체: </span>
-                  {previewResult.product.extra_info.map(({ label, value }) => `${label}: ${value}`).join(' / ')}
-                </div>
-              )}
-              {Object.entries(previewResult.product.custom_fields || {}).filter(([label]) => !(label in pickerRules)).length > 0 && (
-                <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-500">
-                  <span className="text-gray-400">그 외 자동 스캔된 정보: </span>
-                  {Object.entries(previewResult.product.custom_fields)
-                    .filter(([label]) => !(label in pickerRules))
-                    .map(([label, value]) => `${label}: ${value}`).join(' / ')}
-                </div>
-              )}
+              {(() => {
+                // 위 컬럼(기준 마스터테이블 순서로 이미 보여준 것들)에 이미 나온 라벨은 여기서 또
+                // 보여주지 않는다 — 라벨 문구가 완전히 같은 경우(카테고리/상품명 등)뿐 아니라, 몰 페이지
+                // 원문 라벨이 컬럼 라벨과 다르게 적혀 있어도(예: "판매가" vs "규제판가") 같은 개념이면
+                // CLAIMED_INFO_LABEL_RE로 함께 걸러낸다.
+                const shownColumnLabels = new Set([
+                  ...masterOrderedKeys.map(k => registryLabels.get(k) ?? fixedFieldLabel.get(k)).filter(Boolean),
+                  '상품요약정보', '영문상품명',
+                ])
+                const remainingInfo = previewResult.product.extra_info
+                  .filter(({ label }) => !shownColumnLabels.has(label) && !CLAIMED_INFO_LABEL_RE.test(label))
+                return remainingInfo.length > 0 && (
+                  <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-500">
+                    <span className="text-gray-400">상품정보고시 전체: </span>
+                    {remainingInfo.map(({ label, value }) => `${label}: ${value}`).join(' / ')}
+                  </div>
+                )
+              })()}
+              {(() => {
+                // "상품정보고시 전체"가 이미 모든 라벨:값을 보여주므로, 거기 없는 라벨만 여기 추가로 보여준다
+                // (안 그러면 커스텀 필드로 자동 저장된 값이 위 전체 목록과 그대로 겹쳐 중복 표시됐다).
+                const extraInfoLabels = new Set(previewResult.product.extra_info.map(e => e.label))
+                const otherCustom = Object.entries(previewResult.product.custom_fields || {})
+                  .filter(([label]) => !(label in pickerRules) && !extraInfoLabels.has(label))
+                return otherCustom.length > 0 && (
+                  <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-500">
+                    <span className="text-gray-400">그 외 자동 스캔된 정보: </span>
+                    {otherCustom.map(([label, value]) => `${label}: ${value}`).join(' / ')}
+                  </div>
+                )
+              })()}
             </div>
           )}
 

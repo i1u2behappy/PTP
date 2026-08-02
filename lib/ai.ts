@@ -182,7 +182,7 @@ export interface ExtractionRulePart {
   value: string
 }
 
-const EXTRACTION_RULE_FIELDS = ['name', 'price', 'cost_price', 'shipping_fee', 'category', 'brand', 'manufacturer', 'origin'] as const
+export const EXTRACTION_RULE_FIELDS = ['name', 'price', 'cost_price', 'shipping_fee', 'category', 'brand', 'manufacturer', 'origin'] as const
 
 /**
  * "스크랩 조정" 기능용 — 사용자가 지적한 프롬프트("부족한/틀린 부분")+ 지금 잘못 추출된 값 + 실제

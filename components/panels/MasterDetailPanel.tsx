@@ -1,8 +1,10 @@
 'use client'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Image from 'next/image'
 import { useTabs } from '../shell/TabsContext'
 import { MASTER_LIST_TAB } from '../shell/menuTabs'
+import { FIXED_FIELD_INFO } from '../../lib/master/schema'
+import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
 
 interface MasterDetail {
   id: number
@@ -26,6 +28,9 @@ interface MasterDetail {
   status: string
   stock_status: string | null
   stock_qty: number | null
+  internal_code: string | null
+  sales_code: string | null
+  custom_fields: Record<string, string> | null
   thumbnail_locals: string[]
   detail_image_local: string[]
 }
@@ -36,25 +41,49 @@ interface MarketplaceConfig { code: string; name: string; default_commission_rat
 interface ChannelRow { marketplace_code: string; marketplace_name: string; channel_name: string | null; channel_url: string | null }
 interface HistoryRow { stock_status: string | null; stock_qty: number | null; price: number | null; sale_price: number | null; captured_at: string }
 
-const TEXT_FIELDS: { key: 'name_final' | 'master_category' | 'brand' | 'manufacturer' | 'origin' | 'description'; label: string; type: 'text' | 'textarea'; listId?: string }[] = [
-  { key: 'name_final', label: '최종 상품명', type: 'text' },
-  { key: 'master_category', label: '카테고리', type: 'text', listId: 'category-options' },
-  { key: 'brand', label: '브랜드', type: 'text', listId: 'brand-options' },
-  { key: 'manufacturer', label: '제조사', type: 'text' },
-  { key: 'origin', label: '원산지', type: 'text' },
-  { key: 'description', label: '설명', type: 'textarea' },
-]
-const NUMBER_FIELDS: { key: 'cost_price' | 'list_price' | 'sale_price' | 'shipping_fee' | 'other_cost'; label: string }[] = [
-  { key: 'cost_price', label: '매입가' },
-  { key: 'list_price', label: '소비자가' },
-  { key: 'sale_price', label: '판매가' },
-  { key: 'shipping_fee', label: '배송비' },
-  { key: 'other_cost', label: '기타비용' },
-]
+/** 텍스트류 고정 필드의 입력 형태(텍스트/여러 줄/자동완성 목록) — 라벨은 항상 registryLabels(기준
+ *  마스터테이블에서 사용자가 바꿔둔 값)를 우선하고, 이 기본값은 로딩 전/미등록 시 폴백일 뿐이다. */
+const TEXT_FIELD_CONFIG: Record<string, { label: string; type: 'text' | 'textarea'; listId?: string }> = {
+  name_final: { label: '최종 상품명', type: 'text' },
+  master_category: { label: '카테고리', type: 'text', listId: 'category-options' },
+  brand: { label: '브랜드', type: 'text', listId: 'brand-options' },
+  manufacturer: { label: '제조사', type: 'text' },
+  origin: { label: '원산지', type: 'text' },
+  description: { label: '설명', type: 'textarea' },
+}
+const DEFAULT_FIELD_LABEL = new Map(FIXED_FIELD_INFO.map(f => [f.key, f.label]))
+const NUMBER_FIELD_KEYS = ['cost_price', 'list_price', 'sale_price', 'shipping_fee', 'other_cost']
+const COVERED_KEYS = new Set<string>([...Object.keys(TEXT_FIELD_CONFIG), ...NUMBER_FIELD_KEYS])
+const NUMERIC_EXTRA_KEYS = new Set(['stock_qty'])
 
 export function MasterDetailPanel({ params }: { params?: Record<string, unknown> }) {
   const { openTab, activeTabId, bumpRefresh } = useTabs()
+  const { keys: registeredKeys, customKeys: registeredCustomKeys, labels: registryLabels } = useRegisteredFieldKeys()
   const masterId = params?.masterId as number
+  // 기준 마스터테이블관리에 등록된 필드 중, 위 TEXT_FIELDS/NUMBER_FIELDS로 이미 다루지 않는 것들 — 다른
+  // 화면(스크랩 검토 그리드 등)과 마찬가지로 이 화면도 기준 테이블을 그대로 따라가도록, 등록된 필드는
+  // 빠짐없이 여기서 보고 수정할 수 있어야 한다(등록만 해두고 관리할 곳이 없는 컬럼이 없도록).
+  // 고정 컬럼(재고상태/재고수량/몰상품코드/판매관리코드 등)은 product_master 전용 컬럼에, 나머지
+  // 커스텀 필드(옵션/이미지/기타)는 custom_fields JSONB에 저장된다.
+  const extraFixedKeys = useMemo(
+    () => Array.from(registeredKeys).filter(k => !COVERED_KEYS.has(k) && !registeredCustomKeys.has(k)),
+    [registeredKeys, registeredCustomKeys],
+  )
+  const customFieldKeys = useMemo(() => Array.from(registeredCustomKeys), [registeredCustomKeys])
+  // 필드를 어떤 순서로 보여줄지도 기준 마스터테이블관리(master_schema_fields)의 sort_order를 그대로
+  // 따라간다 — 고정/커스텀 구분 없이 등록된 순서대로 섞여 나온다. 등록 안 된 필드(other_cost 등)만
+  // 정렬 기준이 없어 맨 뒤로 밀린다.
+  const orderedFieldKeys = useMemo(() => {
+    const all = [...Object.keys(TEXT_FIELD_CONFIG), ...NUMBER_FIELD_KEYS, ...extraFixedKeys, ...customFieldKeys]
+    const order = Array.from(registryLabels.keys())
+    return all.sort((a, b) => {
+      const ia = order.indexOf(a), ib = order.indexOf(b)
+      if (ia === -1 && ib === -1) return 0
+      if (ia === -1) return 1
+      if (ib === -1) return -1
+      return ia - ib
+    })
+  }, [registryLabels, extraFixedKeys, customFieldKeys])
 
   function backToList() { openTab(MASTER_LIST_TAB) }
   function openProductDetail(mallProductId: number) {
@@ -62,6 +91,7 @@ export function MasterDetailPanel({ params }: { params?: Record<string, unknown>
   }
   const [data, setData] = useState<MasterDetail | null>(null)
   const [form, setForm] = useState<Record<string, string>>({})
+  const [customForm, setCustomForm] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [templates, setTemplates] = useState<NamingTemplate[]>([])
@@ -78,13 +108,16 @@ export function MasterDetailPanel({ params }: { params?: Record<string, unknown>
   const load = useCallback(() => {
     fetch(`/api/master/${masterId}`).then(r => r.json()).then((d: MasterDetail & { target_margin_rate: number | null }) => {
       setData(d)
+      const dAny = d as unknown as Record<string, unknown>
       setForm({
-        ...Object.fromEntries(TEXT_FIELDS.map(f => [f.key, (d[f.key] as string) ?? ''])),
-        ...Object.fromEntries(NUMBER_FIELDS.map(f => [f.key, d[f.key] == null ? '' : String(d[f.key])])),
+        ...Object.fromEntries(Object.keys(TEXT_FIELD_CONFIG).map(k => [k, (dAny[k] as string) ?? ''])),
+        ...Object.fromEntries(NUMBER_FIELD_KEYS.map(k => [k, dAny[k] == null ? '' : String(dAny[k])])),
+        ...Object.fromEntries(extraFixedKeys.map(k => [k, dAny[k] == null ? '' : String(dAny[k])])),
       })
+      setCustomForm(Object.fromEntries(customFieldKeys.map(k => [k, d.custom_fields?.[k] ?? ''])))
       setTargetMarginPct(d.target_margin_rate == null ? '' : String(Math.round(d.target_margin_rate * 100)))
     }).finally(() => setLoading(false))
-  }, [masterId])
+  }, [masterId, extraFixedKeys, customFieldKeys])
 
   useEffect(() => { load() }, [load])
   useEffect(() => {
@@ -111,8 +144,10 @@ export function MasterDetailPanel({ params }: { params?: Record<string, unknown>
     setSaving(true)
     try {
       const body: Record<string, unknown> = {}
-      for (const f of TEXT_FIELDS) body[f.key] = form[f.key]
-      for (const f of NUMBER_FIELDS) body[f.key] = form[f.key].trim() === '' ? null : Number(form[f.key])
+      for (const key of Object.keys(TEXT_FIELD_CONFIG)) body[key] = form[key]
+      for (const key of NUMBER_FIELD_KEYS) body[key] = form[key].trim() === '' ? null : Number(form[key])
+      for (const k of extraFixedKeys) body[k] = NUMERIC_EXTRA_KEYS.has(k) ? (form[k]?.trim() === '' ? null : Number(form[k])) : (form[k] ?? '')
+      if (customFieldKeys.length) body.custom_fields = Object.fromEntries(customFieldKeys.map(k => [k, customForm[k] ?? '']))
       body.target_margin_rate = targetMarginPct.trim() === '' ? null : Number(targetMarginPct) / 100
       await fetch(`/api/master/${masterId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       bumpRefresh('master')
@@ -255,30 +290,30 @@ export function MasterDetailPanel({ params }: { params?: Record<string, unknown>
         </div>
 
         <div className="bg-white rounded-2xl border border-gray-200 p-5 space-y-3">
-          {TEXT_FIELDS.map(f => (
-            <label key={f.key} className="block">
-              <span className="block text-xs text-gray-500 mb-1">{f.label}</span>
-              {f.type === 'textarea' ? (
-                <textarea value={form[f.key] ?? ''} onChange={e => setForm(v => ({ ...v, [f.key]: e.target.value }))} rows={3}
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-              ) : (
-                <input value={form[f.key] ?? ''} onChange={e => setForm(v => ({ ...v, [f.key]: e.target.value }))} list={f.listId}
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-              )}
-            </label>
-          ))}
+          <div className="grid grid-cols-2 gap-3">
+            {orderedFieldKeys.map(key => {
+              const textConfig = TEXT_FIELD_CONFIG[key]
+              const isCustom = customFieldKeys.includes(key)
+              const isNumber = NUMBER_FIELD_KEYS.includes(key) || (!textConfig && !isCustom && NUMERIC_EXTRA_KEYS.has(key))
+              const label = registryLabels.get(key) ?? textConfig?.label ?? DEFAULT_FIELD_LABEL.get(key) ?? key
+              const value = isCustom ? (customForm[key] ?? '') : (form[key] ?? '')
+              const onChange = (v: string) => isCustom ? setCustomForm(m => ({ ...m, [key]: v })) : setForm(m => ({ ...m, [key]: v }))
+              return (
+                <label key={key} className={`block ${textConfig?.type === 'textarea' ? 'col-span-2' : ''}`}>
+                  <span className="block text-xs text-gray-500 mb-1">{label}</span>
+                  {textConfig?.type === 'textarea' ? (
+                    <textarea value={value} onChange={e => onChange(e.target.value)} rows={3}
+                      className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+                  ) : (
+                    <input type={isNumber ? 'number' : 'text'} value={value} onChange={e => onChange(e.target.value)} list={textConfig?.listId}
+                      className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+                  )}
+                </label>
+              )
+            })}
+          </div>
           <datalist id="brand-options">{brandOptions.map(o => <option key={o.value} value={o.value} />)}</datalist>
           <datalist id="category-options">{categoryOptions.map(o => <option key={o.value} value={o.value} />)}</datalist>
-
-          <div className="grid grid-cols-2 gap-3 pt-2 border-t border-gray-100">
-            {NUMBER_FIELDS.map(f => (
-              <label key={f.key} className="block">
-                <span className="block text-xs text-gray-500 mb-1">{f.label}</span>
-                <input type="number" value={form[f.key] ?? ''} onChange={e => setForm(v => ({ ...v, [f.key]: e.target.value }))}
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-              </label>
-            ))}
-          </div>
 
           <div className="text-sm text-gray-600">
             예상 마진 (수수료 제외): {margin == null ? '-' : <span className={`font-semibold ${margin >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>₩{margin.toLocaleString()}</span>}

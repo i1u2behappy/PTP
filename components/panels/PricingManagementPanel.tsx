@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import { ScrapeScopePicker, type ScrapeScope } from './shared/ScrapeScopePicker'
 import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
+import { FIXED_FIELD_INFO } from '../../lib/master/schema'
 
 interface MasterRow {
   id: number; name_original: string; name_ai: string | null; name_final: string | null
@@ -11,9 +12,7 @@ interface MasterRow {
 
 const ALL_NUMBER_KEYS = ['cost_price', 'list_price', 'sale_price', 'shipping_fee', 'other_cost'] as const
 type NumberKey = typeof ALL_NUMBER_KEYS[number]
-const COLUMN_LABELS: Record<NumberKey, string> = {
-  cost_price: '매입가', list_price: '소비자가', sale_price: '판매가', shipping_fee: '배송비', other_cost: '기타비용',
-}
+const DEFAULT_FIELD_LABEL = new Map(FIXED_FIELD_INFO.map(f => [f.key, f.label]))
 
 function marginOf(row: MasterRow): number | null {
   if (row.sale_price == null) return null
@@ -22,13 +21,27 @@ function marginOf(row: MasterRow): number | null {
 
 export function PricingManagementPanel({ params }: { params?: Record<string, unknown> }) {
   const [scope, setScope] = useState<ScrapeScope>({ clientId: '', siteId: '', sessionId: '' })
-  const { keys: registeredKeys, loaded: registryLoaded } = useRegisteredFieldKeys()
+  const { keys: registeredKeys, labels: registryLabels, loaded: registryLoaded } = useRegisteredFieldKeys()
   // 기준 Master 테이블에서 뺀 가격 컬럼은 여기서도 컬럼이 사라진다(목표 마진율은 기준 테이블 대상이 아닌
-  // 별도 정책값이라 항상 보여준다). 로딩 전엔 깜빡임 방지로 전체를 보여준다.
-  const numberKeys = useMemo(
-    () => registryLoaded ? ALL_NUMBER_KEYS.filter(k => registeredKeys.has(k)) : ALL_NUMBER_KEYS,
-    [registryLoaded, registeredKeys],
-  )
+  // 별도 정책값이라 항상 보여준다). 로딩 전엔 깜빡임 방지로 전체를 보여준다. 순서도 기준 마스터테이블의
+  // sort_order를 따라간다(등록 안 된 키만 원래 순서로 맨 뒤에 남는다).
+  const numberKeys = useMemo(() => {
+    const visible = registryLoaded ? ALL_NUMBER_KEYS.filter(k => registeredKeys.has(k)) : [...ALL_NUMBER_KEYS]
+    const order = Array.from(registryLabels.keys())
+    return visible.sort((a, b) => {
+      const ia = order.indexOf(a), ib = order.indexOf(b)
+      if (ia === -1 && ib === -1) return 0
+      if (ia === -1) return 1
+      if (ib === -1) return -1
+      return ia - ib
+    })
+  }, [registryLoaded, registeredKeys, registryLabels])
+  // 라벨도 기준 마스터테이블관리에서 사용자가 직접 바꾼 실제 값을 우선한다(코드에 박아둔 기본값이 아님).
+  const columnLabels = useMemo(() => {
+    const m = new Map(DEFAULT_FIELD_LABEL)
+    registryLabels.forEach((v, k) => m.set(k, v))
+    return m
+  }, [registryLabels])
   const [rows, setRows] = useState<MasterRow[]>([])
   const [search, setSearch] = useState('')
   const [editing, setEditing] = useState<{ id: number; key: NumberKey | 'target_margin_rate' } | null>(null)
@@ -78,7 +91,7 @@ export function PricingManagementPanel({ params }: { params?: Record<string, unk
     <div className="h-full flex flex-col">
       <div className="mb-6 shrink-0">
         <h1 className="text-2xl font-bold text-gray-800">💰 가격 및 이익 관리</h1>
-        <p className="text-xs text-gray-400 mt-1">셀을 눌러 매입가·판매가·목표 마진율을 빠르게 수정합니다. 마켓별 상세 마진은 상품마스터 상세에서 확인하세요.</p>
+        <p className="text-xs text-gray-400 mt-1">셀을 눌러 {columnLabels.get('cost_price')}·{columnLabels.get('sale_price')}·목표 마진율을 빠르게 수정합니다. 마켓별 상세 마진은 상품마스터 상세에서 확인하세요.</p>
       </div>
 
       <ScrapeScopePicker initialSiteId={params?.siteId as number | undefined} initialSessionId={params?.sessionId as number | undefined} onScopeChange={setScope} />
@@ -102,7 +115,7 @@ export function PricingManagementPanel({ params }: { params?: Record<string, unk
                   <thead className="sticky top-0 z-10 bg-gray-50">
                     <tr className="border-b border-gray-200 text-gray-500 font-semibold">
                       <th className="px-3 py-2 text-left sticky left-0 bg-gray-50 z-20">상품명</th>
-                      {numberKeys.map(k => <th key={k} className="px-3 py-2 text-left">{COLUMN_LABELS[k]}</th>)}
+                      {numberKeys.map(k => <th key={k} className="px-3 py-2 text-left">{columnLabels.get(k)}</th>)}
                       <th className="px-3 py-2 text-left">목표 마진율</th>
                       <th className="px-3 py-2 text-left">예상 마진</th>
                     </tr>

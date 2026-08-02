@@ -483,6 +483,25 @@ export async function extractProductRuleBased(
 
   if (extractionRules) {
     for (const [field, rule] of Object.entries(extractionRules)) {
+      // "스크랩 대상 직접지정"에서 ✕(삭제)를 누르면 규칙을 아예 없애는 대신 빈 고정값을 남겨둔다(lib/scraper.ts
+      // 참고) — 사용자가 "이 필드는 값이 없어야 한다"고 명시적으로 확정한 것이므로, 위에서 이미 채워둔
+      // 자동/휴리스틱 추출값을 여기서 강제로 지운다. 그냥 스킵(continue)하면 예전 값이 그대로 남아 미리보기에
+      // 계속 나타나던 문제가 있었다(사용자 지적으로 추가, 2026-08).
+      if (rule.type === 'fixed' && rule.value === '') {
+        if (field === 'price') { result.price = null; result.sale_price = null }
+        else if (field === 'cost_price') result.cost_price = null
+        else if (field === 'shipping_fee') result.shipping_fee = null
+        else if (field === 'stock_qty') result.stock_qty = null
+        else if (field === 'thumbnail_urls') { result.thumbnail_urls = []; result.thumbnail_names = [] }
+        else if (field === 'detail_image_urls') { result.detail_image_urls = []; result.detail_image_names = [] }
+        else if (field === 'name' || field === 'brand' || field === 'manufacturer' || field === 'origin' || field === 'category'
+          || field === 'stock_status' || field === 'english_name' || field === 'summary_info') {
+          result[field] = ''
+        } else {
+          delete result.custom_fields[field]
+        }
+        continue
+      }
       // 대표/상세이미지는 값 하나가 아니라 URL 배열이라 텍스트 기반 나머지 필드와 다르게 다룬다 —
       // 셀렉터는 갤러리 전체를 가리키는 컨테이너(예: ".thumb_area img")로 저장돼 있어 매칭되는 모든
       // img의 src를 모으고, 고정값은 쉼표/줄바꿈으로 구분한 URL 목록으로 취급한다.

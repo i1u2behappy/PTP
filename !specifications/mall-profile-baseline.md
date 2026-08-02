@@ -660,3 +660,67 @@ INSERT/DELETE 방식은 폐기.
 
 **검증**: `tsc --noEmit`/`eslint` 클린. 다만 이번 수정은 실제 몰 페이지 라이브 테스트 없이 코드 리뷰로
 진행됐다 — 다음 "몰 구조 파악" 실행 시 실제로 카테고리/택배사/반품주소가 개선됐는지 사용자 확인 필요.
+
+## 로그인 확인의 자동 "구조 변화 감지"를 스크래핑 메뉴에서 마이그레이션3_연속관리로 이동 (2026-08)
+
+사용자 지시: "스크래핑 메뉴에 로그인확인 클릭 시 몰 변동사항을 체크하는 기능을 이 메뉴에서 전부 빼고,
+일단 이 기능을 '마이그레이션3_연속관리' 메뉴에 옮겨놔줘." — 로그인 확인마다 조용히 도는 가벼운 구조
+변화 감지(`runMallProfileCheck`, "몰 구조 파악" 버튼의 거래정보 분석과는 별개)를 완전히 다른 메뉴로 이전.
+
+### 스크래핑 메뉴에서 제거
+
+- `app/api/scrape/login-confirm/route.ts`: `runMallProfileCheck` 호출 제거(currentUrl만 반환).
+- `lib/scrape/run.ts`: 실제 스크랩 시작 시점의 동일 체크(`runMallProfileCheckForScrape`) 호출도 제거.
+- 더 이상 아무도 안 부르게 된 `runMallProfileCheck`, `isProfileCheckInProgress`/`profileCheckInProgress`
+  (globalThis Set), `app/api/scrape/profile-check-status/route.ts`를 orphan 정리 차원에서 함께 삭제.
+- `ScraperPanel.tsx`: 관련 폴링(`profileCheckPending`, 버튼 `animate-pulse`)과 "⚠ 바로 직전 로그인확인
+  때보다..." 표시 전부 제거. "몰 구조 파악" 버튼(`runMallStructureReport`, 거래정보 AI 분석)은 완전히
+  별개 기능이라 그대로 둠 — Mall 상세관리의 "몰 구조 분석" 참고 카드도 그대로 작동.
+
+### '마이그레이션3_연속관리'로 이동
+
+- `app/api/master/mall-structure-check/route.ts`(신규): 로그인 창을 열어둘 필요 없이, 저장된 몰
+  URL/계정정보(`sites.login_id`/`login_pw_encrypted`, `lib/scheduler.ts`의 예약 재스크랩과 같은 패턴으로
+  복호화)로 브라우저 컨텍스트를 새로 열어 `runMallProfileCheckForScrape`를 호출한다. 결과는 이전과
+  동일하게 `site_memos`에도 남는다.
+- `ContinuousMigrationPanel.tsx`: "🔍 변동 감지"(재고/옵션/이미지/가격, 기존 기능) 버튼 옆에 "🔍 몰 구조
+  체크" 버튼을 추가 — 클릭 시 위 라우트를 호출해 결과(최초 저장/변경 감지 내역/변경 없음)를 그 아래
+  카드로 표시. 두 "감지"는 서로 다른 개념(재고 등 상품 데이터 값 변동 vs 몰 페이지 자체의 구조 변화)임을
+  상단 설명 문구에 명시.
+
+### 배경 이슈 — 로그인 세션 만료 감지 + 자동 대응
+
+이 작업 도중 사용자가 별도로 물은 질문("로그인확인 이후 창을 닫은 경우, 스크랩미리보기는 정상적으로
+스크랩이 되는 상태인가?")에서 파생된 후속 요청("자동으로 로그인 창을 다시 띄워주던가 해야지")도 같은
+시점에 함께 구현했다 — `lib/scraper.ts`의 `loginIfNeeded`가 이제 "이 시도가 끝난 뒤에도 로그인폼이
+보이는지"(boolean)를 반환하고, `collectProductUrls`/`previewCatalog`가 이 신호를 `needsLogin`으로
+결과에 실어 보낸다:
+- **미리보기(사용자가 화면을 보고 있을 때)**: `ScraperPanel.tsx`가 `needsLogin: true`를 받으면 자동으로
+  로그인 창을 다시 띄우고 "⚠ 로그인 세션이 끊긴 상태로 미리보기가 된 것 같습니다" 배너를 보여준다.
+- **예약된 자동 재스크랩(아무도 안 보고 있을 때)**: `scrapeCatalogPage`가 목록/상품 페이지 로그인 체크에서
+  이 신호를 받으면(세션당 한 번만) `site_memos`에 "⚠ 로그인 세션이 끊긴 상태로 스크랩된 것으로 보입니다"
+  경고를 남긴다. 이 경고를 보여줄 곳이 마땅치 않다는 걸 발견해(예전엔 `profile-check-status`가
+  ScraperPanel에 표시했는데 위에서 그 폴링 자체를 제거함), `app/api/sites/[id]/route.ts` GET 응답에
+  `latest_memo`(site_memos 최신 1건)를 추가하고 `SiteDetailPanel.tsx`가 그 내용이 "⚠"로 시작하면 상단에
+  경고 배너로 보여주도록 새로 연결했다 — Mall 상세관리를 열 때마다 백그라운드에서 감지된 미해결 이슈를
+  놓치지 않게 된다.
+
+### 검증
+
+`tsc --noEmit`/`eslint` 변경 파일 전체 통과. 실제 브라우저로 로그인 후 몰 구조를 훑는 동작이라 직접
+클릭 테스트는 못 함 — 로직 경로(DB 조회 → 자격증명 복호화 → `runMallProfileCheckForScrape` 호출)는
+`lib/scheduler.ts`가 쓰는 것과 동일한 패턴으로 맞춰 검증을 대신함.
+
+### 관련 파일
+
+**신규**: `app/api/master/mall-structure-check/route.ts`
+
+**삭제**: `app/api/scrape/profile-check-status/route.ts`
+
+**수정**: `app/api/scrape/login-confirm/route.ts`, `lib/scrape/run.ts`, `lib/scrape/mallProfile.ts`,
+`lib/scraper.ts`, `components/panels/ScraperPanel.tsx`, `components/panels/ContinuousMigrationPanel.tsx`,
+`app/api/sites/[id]/route.ts`, `components/panels/SiteDetailPanel.tsx`
+
+### 상태
+
+**완료 (2026-08).**

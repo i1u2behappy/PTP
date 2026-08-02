@@ -15,6 +15,12 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   )
   if (!res.rows.length) return NextResponse.json({ error: 'not found' }, { status: 404 })
   const site = res.rows[0]
+  // 로그인 세션 끊김 등 백그라운드(예약 재스크랩)에서 감지된 경고를 아무도 못 보고 지나치지 않도록,
+  // Mall 상세관리를 열 때마다 가장 최근 메모를 같이 보여준다(site_memos, lib/scraper.ts 참고).
+  const memoRes = await pool.query<{ content: string; created_at: string }>(
+    `SELECT content, created_at FROM site_memos WHERE site_id=$1 ORDER BY created_at DESC LIMIT 1`, [id],
+  )
+  const latestMemo = memoRes.rows[0]
   return NextResponse.json({
     id: site.id, name: site.name, url: site.url, login_url: site.login_url, login_id: site.login_id,
     login_pw: decryptSecret(site.login_pw_encrypted, site.login_pw_iv),
@@ -33,6 +39,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     // "몰 구조 파악"의 거래정보 리포트(있으면) — SiteDetailPanel이 운영 메모 아래 참고용으로 표시한다.
     mall_report: site.scrape_profile?.report ?? null,
     mall_report_updated_at: site.scrape_profile_updated_at,
+    latest_memo: latestMemo ? { content: latestMemo.content, createdAt: latestMemo.created_at } : null,
     profile_dir: profileDir(site.id),
   })
 }

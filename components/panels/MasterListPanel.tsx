@@ -1,8 +1,10 @@
 'use client'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import Image from 'next/image'
 import { useTabs } from '../shell/TabsContext'
 import { MASTER_LIST_TAB, PRODUCTS_LIST_TAB } from '../shell/menuTabs'
+import { FIXED_FIELD_INFO } from '../../lib/master/schema'
+import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
 
 interface MasterRow {
   id: number
@@ -27,9 +29,13 @@ interface MasterRow {
   thumbnail_locals: string[]
 }
 
+const DEFAULT_FIELD_LABEL = new Map(FIXED_FIELD_INFO.map(f => [f.key, f.label]))
 const EDITABLE_NUMBER_KEYS = ['cost_price', 'list_price', 'sale_price', 'shipping_fee', 'other_cost'] as const
 type EditableKey = typeof EDITABLE_NUMBER_KEYS[number] | 'master_category' | 'brand' | 'manufacturer' | 'origin'
 const LIST_ID: Partial<Record<EditableKey, string>> = { brand: 'ml-brand-options', master_category: 'ml-category-options' }
+/** 체크박스/이미지/최종상품명(맨 앞)과 마진/재고/상태/상세(맨 뒤)는 그리드 전용 UI라 고정해두고,
+ *  그 사이의 이 필드들만 기준 마스터테이블의 sort_order대로 재배치한다(컴포넌트 내부 orderedEditableKeys 참고). */
+const REORDERABLE_KEYS: EditableKey[] = ['master_category', 'brand', 'manufacturer', 'origin', 'cost_price', 'list_price', 'sale_price', 'shipping_fee', 'other_cost']
 
 interface FieldValue { value: string; count: string }
 
@@ -42,6 +48,22 @@ function marginOf(row: MasterRow): number | null {
 
 export function MasterListPanel() {
   const { openTab, refreshSignals, bumpRefresh } = useTabs()
+  const { labels: registryLabels } = useRegisteredFieldKeys()
+  const fixedFieldLabel = useMemo(() => {
+    const m = new Map(DEFAULT_FIELD_LABEL)
+    registryLabels.forEach((v, k) => m.set(k, v))
+    return m
+  }, [registryLabels])
+  const orderedEditableKeys = useMemo(() => {
+    const order = Array.from(registryLabels.keys())
+    return [...REORDERABLE_KEYS].sort((a, b) => {
+      const ia = order.indexOf(a), ib = order.indexOf(b)
+      if (ia === -1 && ib === -1) return 0
+      if (ia === -1) return 1
+      if (ib === -1) return -1
+      return ia - ib
+    })
+  }, [registryLabels])
   const [rows, setRows] = useState<MasterRow[]>([])
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<Set<number>>(new Set())
@@ -257,7 +279,7 @@ export function MasterListPanel() {
                 <input type="checkbox" checked={notReadyOnly} onChange={e => setNotReadyOnly(e.target.checked)} />
                 보완 필요한 상품만 보기
               </label>
-              <span className="text-xs text-gray-400">클릭해서 셀 수정 · 마진 = 판매가 - 매입가 - 기타비용</span>
+              <span className="text-xs text-gray-400">클릭해서 셀 수정 · 마진 = {fixedFieldLabel.get('sale_price')} - {fixedFieldLabel.get('cost_price')} - {fixedFieldLabel.get('other_cost')}</span>
             </div>
             <div className="overflow-auto flex-1 min-h-0">
               <table className="text-xs border-collapse whitespace-nowrap">
@@ -265,16 +287,10 @@ export function MasterListPanel() {
                   <tr className="border-b border-gray-200 text-gray-500 font-semibold">
                     <th className="w-10 px-3 py-2"><input type="checkbox" checked={selected.size === visibleRows.length && visibleRows.length > 0} onChange={selectAll} /></th>
                     <th className="w-14 px-2 py-2 text-left">이미지</th>
-                    <th className="px-3 py-2 text-left sticky left-0 bg-gray-50 z-20">최종상품명</th>
-                    <th className="px-3 py-2 text-left">카테고리</th>
-                    <th className="px-3 py-2 text-left">브랜드</th>
-                    <th className="px-3 py-2 text-left">제조사</th>
-                    <th className="px-3 py-2 text-left">원산지</th>
-                    <th className="px-3 py-2 text-left">매입가</th>
-                    <th className="px-3 py-2 text-left">소비자가</th>
-                    <th className="px-3 py-2 text-left">판매가</th>
-                    <th className="px-3 py-2 text-left">배송비</th>
-                    <th className="px-3 py-2 text-left">기타비용</th>
+                    <th className="px-3 py-2 text-left sticky left-0 bg-gray-50 z-20">{fixedFieldLabel.get('name_final')}</th>
+                    {orderedEditableKeys.map(key => (
+                      <th key={key} className="px-3 py-2 text-left">{fixedFieldLabel.get(key)}</th>
+                    ))}
                     <th className="px-3 py-2 text-left">마진</th>
                     <th className="px-3 py-2 text-left">재고</th>
                     <th className="px-3 py-2 text-left">상태</th>
@@ -306,15 +322,10 @@ export function MasterListPanel() {
                             </button>
                           </div>
                         </td>
-                        <EditableCell row={row} k="master_category" label="카테고리 (몰 원본: 없으면 자동 대체)" />
-                        <EditableCell row={row} k="brand" label="브랜드" />
-                        <EditableCell row={row} k="manufacturer" label="제조사" />
-                        <EditableCell row={row} k="origin" label="원산지" />
-                        <EditableCell row={row} k="cost_price" label="매입가" />
-                        <EditableCell row={row} k="list_price" label="소비자가" />
-                        <EditableCell row={row} k="sale_price" label="판매가" />
-                        <EditableCell row={row} k="shipping_fee" label="배송비" />
-                        <EditableCell row={row} k="other_cost" label="기타비용" />
+                        {orderedEditableKeys.map(key => (
+                          <EditableCell key={key} row={row} k={key}
+                            label={key === 'master_category' ? '카테고리 (몰 원본: 없으면 자동 대체)' : fixedFieldLabel.get(key)!} />
+                        ))}
                         <td className="px-3 py-2 text-xs font-medium">
                           {margin == null ? '-' : <span className={margin >= 0 ? 'text-emerald-600' : 'text-rose-500'}>₩{margin.toLocaleString()}</span>}
                         </td>

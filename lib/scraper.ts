@@ -267,8 +267,9 @@ export async function openUrlInLoginWindow(siteId: number, url: string): Promise
   await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
 }
 
-/** 사용자가 명시적으로 닫을 때만 호출 — 로그인 확인 시에는 창을 닫지 않는다 */
-export async function closeLoginWindow(siteId: number) {
+/** 새 로그인 창을 열기 전 기존 창을 정리할 때만 내부적으로 쓴다(openLoginWindow/openManualLoginWindow 참고) —
+ *  이 함수를 직접 호출하는 API 라우트는 없다. */
+async function closeLoginWindow(siteId: number) {
   const context = openSessions.get(siteId)
   if (context) {
     await context.close().catch(() => {})
@@ -491,13 +492,14 @@ async function solveCaptchaIfPresent(page: Page) {
   } catch { /* 캡차 풀이 실패는 로그인 실패로 이어질 뿐, 스크래핑 전체를 죽이지 않는다 */ }
 }
 
+/** 반환값 true = 이 시도가 끝난 뒤에도 로그인폼이 여전히 보임(세션이 끊겼는데 자동으로 못 고쳤다는 뜻) —
+ *  호출부가 "로그인이 필요한 상태로 스크랩되고 있다"를 감지하는 데 쓴다(아이디/비번이 없어 애초에 시도조차
+ *  안 한 경우도 true — 둘 다 "이 스크랩 결과가 비로그인 상태일 수 있다"는 같은 의미이기 때문). */
 async function loginIfNeeded(
   page: import('playwright').Page,
   opts: { url: string; loginId?: string; loginPw?: string; loginIdSelector?: string; loginPwSelector?: string; loginBtnSelector?: string },
   { autoSubmit = true }: { autoSubmit?: boolean } = {},
-) {
-  if (!opts.loginId || !opts.loginPw) return
-
+): Promise<boolean> {
   // name*="id" 등은 hidden/checkbox 필드(예: SNS연동용 hidden input, "아이디 저장" 체크박스)도 함께 매칭될 수 있어
   // type="text"/"email"로 좁혀서 실제 입력 가능한 필드만 고른다.
   const idSel = opts.loginIdSelector || 'input[type="email"], input[type="text"][name*="id" i], input[type="text"][name*="email" i], input[type="text"][name*="user" i]'
@@ -511,35 +513,42 @@ async function loginIfNeeded(
   // networkidle은 채팅위젯/분석 스크립트의 지속 연결 때문에 타임아웃까지 다 채우고 넘어가는 사이트가 많아 'load'로 대체
   await page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
   const idEl = page.locator(idSel).first()
-  if (await idEl.isVisible({ timeout: 5_000 }).catch(() => false)) {
-    await idEl.fill(opts.loginId)
-    const pwEl = page.locator(pwSel).first()
-    await pwEl.fill(opts.loginPw)
+  if (!(await idEl.isVisible({ timeout: 5_000 }).catch(() => false))) return false // 로그인폼 자체가 안 보임 = 이미 로그인된 상태
 
-    await solveCaptchaIfPresent(page)
+  // 아이디/비번을 안 맡겨둔 몰(직접로그인 필수 등)은 여기서 자동으로 고칠 수 없다 — 로그인폼이 보인다는
+  // 사실 자체가 "지금 로그아웃 상태"라는 신호이므로, 시도 없이도 true를 돌려줘 호출부가 알아채게 한다.
+  if (!opts.loginId || !opts.loginPw) return true
 
-    // autoSubmit=false(로그인 창을 직접 여는 경우)는 아이디/비번만 채워두고, 실제 로그인 버튼 클릭은 사용자가 직접 한다.
-    if (!autoSubmit) return
+  await idEl.fill(opts.loginId)
+  const pwEl = page.locator(pwSel).first()
+  await pwEl.fill(opts.loginPw)
 
-    let clicked = false
-    for (const sel of btnSelectors) {
-      const btn = page.locator(sel).first()
-      if (await btn.isVisible({ timeout: 2_000 }).catch(() => false)) {
-        await btn.click()
-        clicked = true
-        break
-      }
+  await solveCaptchaIfPresent(page)
+
+  // autoSubmit=false(로그인 창을 직접 여는 경우)는 아이디/비번만 채워두고, 실제 로그인 버튼 클릭은 사용자가 직접 한다.
+  if (!autoSubmit) return true
+
+  let clicked = false
+  for (const sel of btnSelectors) {
+    const btn = page.locator(sel).first()
+    if (await btn.isVisible({ timeout: 2_000 }).catch(() => false)) {
+      await btn.click()
+      clicked = true
+      break
     }
-    if (!clicked) await pwEl.press('Enter')
-
-    await page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
-    // 로그인 성공 페이지가 뜬 뒤 클라이언트 스크립트가 지연 리다이렉트를 거는 몰이 있다(예: 로그인
-    // 처리 화면을 잠깐 보여준 뒤 setTimeout으로 원래 페이지로 이동) — 'load' 이벤트만 보고 함수가
-    // 반환되면, 호출한 쪽이 바로 이어서 하는 page.evaluate()가 그 지연 리다이렉트와 겹쳐
-    // "Execution context was destroyed" 오류로 죽는 게 실제로 발견됐다(펫투비). 네트워크가 짧게라도
-    // 잠잠해질 때까지 한 번 더 기다려 그 지연 리다이렉트가 이 함수 밖으로 나가기 전에 끝나게 한다.
-    await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {})
   }
+  if (!clicked) await pwEl.press('Enter')
+
+  await page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
+  // 로그인 성공 페이지가 뜬 뒤 클라이언트 스크립트가 지연 리다이렉트를 거는 몰이 있다(예: 로그인
+  // 처리 화면을 잠깐 보여준 뒤 setTimeout으로 원래 페이지로 이동) — 'load' 이벤트만 보고 함수가
+  // 반환되면, 호출한 쪽이 바로 이어서 하는 page.evaluate()가 그 지연 리다이렉트와 겹쳐
+  // "Execution context was destroyed" 오류로 죽는 게 실제로 발견됐다(펫투비). 네트워크가 짧게라도
+  // 잠잠해질 때까지 한 번 더 기다려 그 지연 리다이렉트가 이 함수 밖으로 나가기 전에 끝나게 한다.
+  await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {})
+
+  // 제출 후에도 로그인폼이 여전히 보이면 재로그인 실패(비번 변경/캡차/계정 잠김 등)로 본다.
+  return await idEl.isVisible({ timeout: 3_000 }).catch(() => false)
 }
 
 interface DomOption { name: string; values: string[] }
@@ -799,10 +808,6 @@ async function siteInfo(siteId: number): Promise<{ name: string; url: string }> 
 // page.exposeFunction은 같은 Page 인스턴스에 같은 이름으로 두 번 부르면 에러가 난다 — "스크랩 대상 직접지정 시작"을
 // 여러 번 눌러도 안전하도록 이미 노출한 Page를 기억해둔다.
 const pickerExposedPages = new WeakSet<Page>()
-// 미리보기 자동 재실행(refreshPreviewSingle)처럼 같은 탭이 다시 navigate되면 주입된 패널/리스너가
-// 통째로 사라진다(page.evaluate는 그 문서에만 심어지고, 새 문서로 넘어가면 초기화됨) — 페이지가 새로
-// 로드될 때마다 자동으로 다시 주입해, 값 하나 저장한 뒤에도 계속 이어서 지정할 수 있게 한다.
-const pickerNavHandlers = new WeakMap<Page, () => void>()
 
 /**
  * "스크랩 대상 직접지정" 기능 — 실제로 열려있는 몰 페이지(로그인 확인된 openSessions 창)에 클릭식 엘리먼트 피커를
@@ -848,43 +853,25 @@ export async function startElementPicker(
         [payload.field, JSON.stringify({ type: payload.type, value: payload.value }), siteId],
       )
     })
-    await page.exposeFunction('ptpDeletePick', async (field: string) => {
-      await pool.query(`UPDATE sites SET extraction_rules = COALESCE(extraction_rules, '{}'::jsonb) - $1::text WHERE id=$2`, [field, siteId])
-    })
     pickerExposedPages.add(page)
   }
 
-  // 재주입(페이지 리로드) 때마다 최신 extraction_rules를 다시 읽어 넘긴다 — 저장 직후 미리보기 자동
-  // 재실행이 이 페이지를 리로드시키므로, 목록의 "등록됨" 표시가 항상 DB 상태와 맞도록.
-  // previewProduct(미리보기 값)는 "스크랩 대상 직접지정" 시작 시점의 스냅샷을 그대로 재사용한다 —
-  // 다시 최신화하려면 종료 후 다시 시작하면 된다(그때 새 미리보기 값을 다시 넘겨받음).
-  async function inject() {
-    const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(
-      'SELECT extraction_rules FROM sites WHERE id=$1', [siteId],
-    )
-    await page.evaluate(injectElementPicker, { previewProduct: previewProduct || null, extractionRules: res.rows[0]?.extraction_rules || {} })
-  }
-
-  if (!pickerNavHandlers.has(page)) {
-    const onLoad = () => { inject().catch(() => {}) }
-    page.on('load', onLoad)
-    pickerNavHandlers.set(page, onLoad)
-  }
-
-  await inject()
-  return true
-}
-
-/** "완료" — 주입된 피커의 하이라이트/클릭 리스너와 안내 패널을 제거한다. */
-export async function stopElementPicker(siteId: number): Promise<boolean> {
-  const context = openSessions.get(siteId)
-  if (!context) return false
-  const pages = context.pages()
-  const page = pages[pages.length - 1]
-  if (!page) return false
-  const onLoad = pickerNavHandlers.get(page)
-  if (onLoad) { page.off('load', onLoad); pickerNavHandlers.delete(page) }
-  await page.evaluate(() => (window as unknown as { __ptpPickerTeardown?: () => void }).__ptpPickerTeardown?.()).catch(() => {})
+  // "스크랩 대상 직접지정"을 누른 이 순간에만 주입한다 — 그 뒤로 이 탭이 다른 페이지로 이동해도 패널이
+  // 저절로 다시 뜨지 않는다(예전엔 페이지 로드마다 자동 재주입했는데, 사용자가 다 쓰고 다른 페이지를
+  // 둘러볼 때도 패널이 계속 따라 나타나 번거롭다는 지적으로 제거함, 2026-08). 다시 지정하려면 이 버튼을
+  // 다시 누르면 된다.
+  const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(
+    'SELECT extraction_rules FROM sites WHERE id=$1', [siteId],
+  )
+  // 기준 마스터테이블관리에서 사용자가 직접 바꾼 라벨(예: cost_price를 "원가" 대신 "공급가")과 배치한
+  // 순서를 이 패널의 필드 목록에도 그대로 반영한다 — 그래야 "직접지정" 화면과 기준 테이블을 나란히
+  // 보며 비교/수정할 수 있다.
+  const labelsRes = await pool.query<{ field_key: string; field_label: string }>(
+    'SELECT field_key, field_label FROM master_schema_fields ORDER BY sort_order, id',
+  )
+  const masterLabels = Object.fromEntries(labelsRes.rows.map(r => [r.field_key, r.field_label]))
+  const masterOrder = labelsRes.rows.map(r => r.field_key)
+  await page.evaluate(injectElementPicker, { previewProduct: previewProduct || null, extractionRules: res.rows[0]?.extraction_rules || {}, masterLabels, masterOrder })
   return true
 }
 
@@ -894,12 +881,13 @@ export async function stopElementPicker(siteId: number): Promise<boolean> {
 function injectElementPicker(seed?: {
   previewProduct: Record<string, unknown> | null
   extractionRules: Record<string, { type: 'label' | 'selector' | 'fixed' | 'multi'; value: string }>
+  masterLabels?: Record<string, string>
+  masterOrder?: string[]
 }) {
   const w = window as unknown as {
     __ptpPickerActive?: boolean
     __ptpPickerTeardown?: () => void
     ptpSavePick: (payload: { field: string; type: 'label' | 'selector' | 'fixed' | 'multi'; value: string }) => Promise<void>
-    ptpDeletePick: (field: string) => Promise<void>
   }
   // 이전 인스턴스가 (정상 종료 대신) 남아있으면 조용히 무시하지 않고 먼저 정리한다 — teardown이
   // 페이지 이동과 겹쳐 조용히 실패한 채로 __ptpPickerActive만 true로 남으면, 그 뒤로 "스크랩 대상
@@ -920,13 +908,40 @@ function injectElementPicker(seed?: {
   const lastValueLocal: Record<string, string> = {}
   // "직접 입력" 칸을 펼쳐둔 필드 집합 — 평소엔 접어둬 목록이 덜 복잡해 보이게 한다.
   const expandedInputs = new Set<string>()
+  // 아직 DB 반영이 끝나지 않은 저장 요청들 — teardown이 끝나기 전에 다 기다린다(saveField 참고).
+  const pendingSaves: Promise<void>[] = []
 
-  const CANONICAL_FIELDS: [string, string][] = [
+  // 기준 마스터테이블관리(master_schema_fields)에 대응 필드가 등록돼 있으면 그 라벨을 그대로 쓴다 —
+  // 없는 필드(영문상품명/상품요약정보 등, 기준 테이블 대상이 아닌 값)만 기존 기본 라벨로 남긴다.
+  const masterLabels = seed?.masterLabels || {}
+  const PICKER_TO_MASTER_KEY: Record<string, string> = {
+    name: 'name_final', price: 'list_price', cost_price: 'cost_price', shipping_fee: 'shipping_fee',
+    category: 'master_category', brand: 'brand', manufacturer: 'manufacturer', origin: 'origin',
+    stock_status: 'stock_status', stock_qty: 'stock_qty',
+    thumbnail_urls: 'top_img', detail_image_urls: 'detail_img',
+  }
+  const DEFAULT_CANONICAL_LABELS: [string, string][] = [
     ['name', '상품명'], ['price', '가격(소비자가)'], ['cost_price', '공급가/원가'], ['shipping_fee', '배송비'],
     ['category', '카테고리'], ['brand', '브랜드'], ['manufacturer', '제조사'], ['origin', '원산지'],
     ['stock_status', '재고상태'], ['stock_qty', '재고수량'], ['english_name', '영문상품명'], ['summary_info', '상품요약정보'],
     ['thumbnail_urls', '대표이미지'], ['detail_image_urls', '상세이미지'],
   ]
+  const relabeled: [string, string][] = DEFAULT_CANONICAL_LABELS.map(([key, defaultLabel]) => {
+    const masterKey = PICKER_TO_MASTER_KEY[key]
+    const liveLabel = masterKey ? masterLabels[masterKey] : undefined
+    return [key, liveLabel || defaultLabel]
+  })
+  // 컬럼 순서도 기준 마스터테이블관리에서 정렬해둔 순서를 그대로 따라간다 — 대응 필드가 없는 것(영문상품명/
+  // 상품요약정보 등)은 정렬 기준이 없으니 원래 순서 그대로 맨 뒤로 보낸다.
+  const masterOrder = seed?.masterOrder || []
+  const CANONICAL_FIELDS: [string, string][] = [...relabeled].sort((a, b) => {
+    const idxA = masterOrder.indexOf(PICKER_TO_MASTER_KEY[a[0]])
+    const idxB = masterOrder.indexOf(PICKER_TO_MASTER_KEY[b[0]])
+    if (idxA === -1 && idxB === -1) return 0
+    if (idxA === -1) return 1
+    if (idxB === -1) return -1
+    return idxA - idxB
+  })
   // 대표/상세이미지는 이미지가 여러 장이라 클릭한 요소 하나만이 아니라 그 갤러리 전체(같은 부모 아래
   // img들)를 가리키는 셀렉터가 필요하다 — 일반 텍스트 필드와 다른 값 하나=요소 하나 모델이라 별도 취급.
   const IMAGE_FIELDS = new Set(['thumbnail_urls', 'detail_image_urls'])
@@ -1087,8 +1102,22 @@ function injectElementPicker(seed?: {
   function saveField(field: string, type: 'label' | 'selector' | 'fixed' | 'multi', value: string, displayValue: string) {
     rulesLocal[field] = { type, value }
     lastValueLocal[field] = displayValue
-    void w.ptpSavePick({ field, type, value })
+    // 저장 자체는 화면을 안 막도록 fire-and-forget이지만, teardown(피커 저장/종료)이 이 promise를 기다릴 수
+    // 있게 목록에 담아둔다 — 안 담으면 "종료"를 누른 직후 실행되는 미리보기 재조회가 아직 DB에 반영 안 된
+    // 값을 읽어와, 방금 지정한 게 미리보기에 안 바뀐 것처럼 보이는 문제가 있었다(실사용 재현됨).
+    pendingSaves.push(w.ptpSavePick({ field, type, value }).catch(() => {}))
     logLine(field)
+  }
+
+  // 규칙을 아예 지워버리면(미지정) 자동/AI 추출이 다시 이 필드를 채울 수 있다 — "이 필드는 값이 없어야
+  // 한다"는 명시적 결정을 남기려면 빈 고정값 규칙을 저장해 자동 추출도 AI모드(runAutoAnalysis)도 다시
+  // 건드리지 못하게 해야 한다. 이미 지정된 필드의 ✕(삭제)뿐 아니라, 아직 지정한 적 없지만 자동값이
+  // 보이는 필드에서 "그 자동값을 없애고 싶다"는 요청에도 똑같이 쓴다.
+  function forceEmpty(field: string) {
+    rulesLocal[field] = { type: 'fixed', value: '' }
+    lastValueLocal[field] = ''
+    pendingSaves.push(w.ptpSavePick({ field, type: 'fixed', value: '' }).catch(() => {}))
+    logLine(`🚫 ${field}`)
   }
 
   // 이미 지정돼 있는 필드를 클릭식으로 다시 지정하면(예: 상품명이 브랜드+모델명 두 요소로 나뉜 몰),
@@ -1157,9 +1186,13 @@ function injectElementPicker(seed?: {
       const expanded = expandedInputs.has(key)
       const rowBg = armed ? '#eff6ff' : rule ? '#f0fdfa' : '#fff'
       const rowBorder = armed ? '#60a5fa' : rule ? '#5eead4' : '#eee'
+      // 고정값인데 값이 빈 문자열 = 사용자가 ✕(삭제)로 "이 필드는 값이 없어야 한다"고 명시적으로 확정한
+      // 상태 — 자동/AI 추출이 다시 채우지 못하게 막는 용도라 일반 "고정값"과 뱃지/문구를 다르게 보여준다.
+      const isForcedEmpty = rule?.type === 'fixed' && rule.value === ''
       let badgeText = ''
       if (rule) {
-        if (rule.type === 'label') badgeText = '📋 라벨'
+        if (isForcedEmpty) badgeText = '🚫 값 없음 고정'
+        else if (rule.type === 'label') badgeText = '📋 라벨'
         else if (rule.type === 'fixed') badgeText = '✏️ 고정값'
         else if (rule.type === 'multi') {
           let partCount = 0
@@ -1170,12 +1203,23 @@ function injectElementPicker(seed?: {
       const badge = rule
         ? `<span style="font-size:10px;background:#fff;color:#0d9488;border:1px solid #5eead4;border-radius:8px;padding:1px 6px;white-space:nowrap">${badgeText}</span>`
         : ''
-      const valueLine = rule
-        ? `<div style="font-size:12px;color:#0d9488;font-weight:600;margin:3px 0;word-break:break-all">${esc(lastValueLocal[key] ?? currentValue(key)) || '(값 없음)'}</div>`
-        : `<div style="font-size:10px;color:#bbb;margin:3px 0">미지정</div>`
+      // 규칙이 없어도(미지정) 지금 자동/휴리스틱 추출로 잡힌 값이 있으면 같이 보여준다 — 안 그러면
+      // "미지정"이라 값 자체가 없는 줄 알았는데 미리보기엔 값이 나와 있어 혼란스럽다는 지적이 있었다.
+      // 자동값도 없으면(진짜 빈 값) 굳이 "(값 없음)"을 안 붙이고 "미지정"만 보여준다.
+      const autoValue = !rule ? currentValue(key) : ''
+      const valueLine = isForcedEmpty
+        ? `<div style="font-size:12px;color:#e11d48;font-weight:600;margin:3px 0">항상 빈 값 (자동/AI 추출 안 함)</div>`
+        : rule
+          ? `<div style="font-size:12px;color:#0d9488;font-weight:600;margin:3px 0;word-break:break-all">${esc(lastValueLocal[key] ?? currentValue(key)) || '(값 없음)'}</div>`
+          : autoValue
+            ? `<div style="font-size:10px;color:#bbb;margin:3px 0">미지정 · 자동값: <span style="color:#888">${esc(autoValue)}</span></div>`
+            : `<div style="font-size:10px;color:#bbb;margin:3px 0">미지정</div>`
       const delBtn = rule
         ? `<button class="ptp-row-del" data-field="${esc(key)}" title="삭제" style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">✕</button>`
-        : ''
+        : autoValue
+          ? `<button class="ptp-row-clear-auto" data-field="${esc(key)}" title="자동으로 잡힌 값을 무시하고 항상 빈 값으로 고정합니다"
+              style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">🚫 자동값 제거</button>`
+          : ''
       const armBtnStyle = armed
         ? 'flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb'
         : rule
@@ -1255,13 +1299,10 @@ function injectElementPicker(seed?: {
       })
     })
     fieldListEl.querySelectorAll<HTMLButtonElement>('.ptp-row-del').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const field = btn.dataset.field!
-        delete rulesLocal[field]
-        delete lastValueLocal[field]
-        void w.ptpDeletePick(field)
-        renderFieldList()
-      })
+      btn.addEventListener('click', () => { forceEmpty(btn.dataset.field!); renderFieldList() })
+    })
+    fieldListEl.querySelectorAll<HTMLButtonElement>('.ptp-row-clear-auto').forEach(btn => {
+      btn.addEventListener('click', () => { forceEmpty(btn.dataset.field!); renderFieldList() })
     })
     fieldListEl.querySelector('#ptp-new-field-arm')!.addEventListener('click', () => {
       const nameEl = fieldListEl.querySelector<HTMLInputElement>('#ptp-new-field-name')!
@@ -1310,11 +1351,11 @@ function injectElementPicker(seed?: {
   document.addEventListener('mouseover', onMouseOver, true)
   document.addEventListener('click', onClick, true)
 
-  w.__ptpPickerTeardown = () => {
+  w.__ptpPickerTeardown = async () => {
     // 각 줄에 열어둔 채 저장 버튼을 안 누른 입력값(직접 입력 칸, 새 컬럼 이름/값)이 있으면 닫기 전에
-    // 마저 저장한다 — 타이핑만 하고 저장을 안 누른 채 닫아서 값이 유실되는 걸 막는다. 패널의 "피커
-    // 저장" 버튼과, PTP 화면의 "스크랩 대상 직접지정 종료"(stopElementPicker가 이 함수를 원격으로
-    // 호출) 둘 다 같은 teardown을 타므로, 여기 한 곳에 둬야 어느 쪽으로 끝내도 동일하게 동작한다.
+    // 마저 저장한다 — 타이핑만 하고 저장을 안 누른 채 닫아서 값이 유실되는 걸 막는다. 패널 자체의
+    // 닫기(✕) 버튼이 유일한 종료 경로다 — PTP 화면 쪽엔 더 이상 별도의 "종료" 버튼이 없다(2026-08,
+    // 패널을 닫아도 창을 옮겨다니면 계속 다시 뜨던 게 번거롭다는 지적으로 자동 재주입 자체를 없앴다).
     fieldListEl.querySelectorAll<HTMLInputElement>('.ptp-row-input').forEach(input => {
       const value = input.value.trim()
       if (value) appendOrSaveField(input.dataset.field!, { type: 'fixed', value }, value)
@@ -1331,6 +1372,10 @@ function injectElementPicker(seed?: {
     panel.remove()
     w.__ptpPickerActive = false
     w.__ptpPickerTeardown = undefined
+    // 방금 위에서 마저 저장한 것들을 포함해, 아직 DB에 안 끝난 저장이 있으면 여기서 다 끝날 때까지
+    // 기다린다 — 패널을 닫자마자 사용자가 바로 "스크랩 미리보기"를 눌러도 이번 세션에서 지정한 값이
+    // 이미 DB에 반영돼 있도록 보장한다.
+    await Promise.all(pendingSaves)
   }
 }
 
@@ -1624,7 +1669,7 @@ const PLATFORM_PROFILES: Record<MallPlatform, PlatformProfile> = {
 }
 
 /** 페이지의 meta/스크립트/URL 패턴을 보고 어떤 쇼핑몰 구축 플랫폼인지 추정한다. */
-export async function detectMallPlatform(page: Page): Promise<MallPlatform> {
+async function detectMallPlatform(page: Page): Promise<MallPlatform> {
   return page.evaluate(() => {
     const generator = (document.querySelector('meta[name="generator"]')?.getAttribute('content') || '').toLowerCase()
     const hosts = Array.from(document.querySelectorAll('script[src], link[href]'))
@@ -1789,6 +1834,9 @@ interface CollectedLinks {
   categoryByUrl: Map<string, CategoryLabel>
   /** 목록 페이지에서 바로 얻을 수 있는 상품명/썸네일 (실제 상품 페이지를 열지 않아 빠른 미리보기용) */
   linkInfo: Map<string, { name: string; thumbnail: string }>
+  /** 목록 페이지 자체가 로그인 세션 끊김으로 보임(로그인폼이 계속 보임) — true면 이 결과 자체가
+   *  비로그인 상태로 얻어졌을 수 있다는 뜻 */
+  needsLogin: boolean
 }
 
 // 사용자가 최대 페이지 수를 지정하지 않으면 "다음 페이지" 링크가 더 이상 없을 때까지 끝까지 따라간다 —
@@ -1829,15 +1877,16 @@ function withPageParam(url: string, pageNum: number): string {
 /** 목록 페이지(들)을 순회하며 제품 URL 후보를 모은다. 실제 상품 추출은 하지 않는다(테스트/실행 공용 로직). */
 async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<CollectedLinks> {
   if (opts.productUrls?.length) {
-    return { urls: opts.productUrls, platform: 'unknown', categoryByUrl: new Map(), linkInfo: new Map() }
+    return { urls: opts.productUrls, platform: 'unknown', categoryByUrl: new Map(), linkInfo: new Map(), needsLogin: false }
   }
 
   const listingUrls = (opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])).map(resetToFirstPage)
   const maxPages = Math.max(1, opts.maxPages || AUTO_PAGINATION_CAP)
 
+  let needsLogin = false
   if (opts.url || opts.categoryUrls?.length) {
     await page.goto(listingUrls[0], { waitUntil: 'load', timeout: 30_000 })
-    await loginIfNeeded(page, { url: listingUrls[0], ...opts })
+    needsLogin = await loginIfNeeded(page, { url: listingUrls[0], ...opts })
     // 로그인 필수 페이지는 로그인 폼으로 리다이렉트되므로, 로그인 시도 후 원래 목표 페이지로 다시 이동한다.
     if (opts.loginId && page.url() !== listingUrls[0]) {
       await page.goto(listingUrls[0], { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
@@ -1941,7 +1990,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
   const excludeSet  = new Set(opts.excludeUrls || [])
   const urls = [...productUrlSet].filter(h => !listingSet.has(h) && !excludeSet.has(h))
 
-  return { urls, platform, categoryByUrl, linkInfo }
+  return { urls, platform, categoryByUrl, linkInfo, needsLogin }
 }
 
 /**
@@ -1971,6 +2020,9 @@ export interface CatalogPreviewResult {
   preview: ScrapeResult | null
   /** 나머지 상품들의 목록 페이지 기준 정보(상품명/썸네일) — 실제로 열어보지 않아 빠르다 */
   items: CatalogPreviewItem[]
+  /** true면 로그인 세션이 끊긴 채로(또는 아예 로그인 안 된 채로) 이 결과를 얻었을 수 있다 —
+   *  화면에서 로그인 창을 다시 띄우도록 안내하는 데 쓴다. */
+  needsLogin: boolean
 }
 
 /**
@@ -1982,15 +2034,16 @@ export interface CatalogPreviewResult {
  */
 export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPreviewResult> {
   return withContext(opts, async page => {
-    const { urls, platform, linkInfo, categoryByUrl } = await collectProductUrls(page, { ...opts, maxPages: undefined })
+    const { urls, platform, linkInfo, categoryByUrl, needsLogin: listingNeedsLogin } = await collectProductUrls(page, { ...opts, maxPages: undefined })
     const items: CatalogPreviewItem[] = urls.map(url => ({
       url, name: linkInfo.get(url)?.name || '', thumbnail: linkInfo.get(url)?.thumbnail || '',
     }))
-    if (!urls.length) return { total: 0, platform, preview: null, items: [] }
+    if (!urls.length) return { total: 0, platform, preview: null, items: [], needsLogin: listingNeedsLogin }
 
     const firstUrl = urls[0]
     await page.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 })
-    await loginIfNeeded(page, { url: firstUrl, ...opts })
+    const productNeedsLogin = await loginIfNeeded(page, { url: firstUrl, ...opts })
+    const needsLogin = listingNeedsLogin || productNeedsLogin
     if (opts.loginId && page.url() !== firstUrl) {
       await page.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     }
@@ -2006,10 +2059,10 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
       const ai = await applyAiModeRules(page, opts.siteId, firstUrl, opts, domOptions)
       if (ai) {
         applyCategoryOverride(ai.product, categoryByUrl.get(firstUrl), ai.rules)
-        return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product: ai.product }, items }
+        return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product: ai.product }, items, needsLogin }
       }
     }
-    return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product }, items }
+    return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product }, items, needsLogin }
   })
 }
 
@@ -2033,7 +2086,20 @@ export async function scrapeCatalogPage(
   onItem: (event: CatalogItemEvent) => Promise<void> | void,
 ): Promise<CatalogScrapeSummary> {
   return withContext(opts, async (page, context) => {
-    const { urls: productUrls, categoryByUrl } = await collectProductUrls(page, opts)
+    const { urls: productUrls, categoryByUrl, needsLogin: listingNeedsLogin } = await collectProductUrls(page, opts)
+
+    // 예약된 자동 재스크랩처럼 아무도 화면을 안 보고 있는 상황에서 로그인이 끊긴 채로 스크랩되면, 그
+    // 사실을 사용자가 나중에라도 알 수 있어야 한다 — 사이트 메모에 한 번만 남긴다(상품마다 남기면 도배됨).
+    let loginIssueNoted = false
+    async function noteLoginIssueOnce() {
+      if (loginIssueNoted || !opts.siteId) return
+      loginIssueNoted = true
+      await pool.query(
+        `INSERT INTO site_memos (site_id, content) VALUES ($1, $2)`,
+        [opts.siteId, '⚠ 로그인 세션이 끊긴 상태로 스크랩된 것으로 보입니다 — 다시 로그인해주세요.'],
+      ).catch(() => {})
+    }
+    if (listingNeedsLogin) await noteLoginIssueOnce()
 
     // 목록에서 상품 링크를 하나도 찾지 못했다 — 카테고리가 아니라 개별 상품 URL을 잘못 카탈로그 모드로
     // 넣었을 수 있으니, 이미 열려있는 이 페이지 자체를 상품 1건으로 보고 스크랩한다.
@@ -2068,7 +2134,7 @@ export async function scrapeCatalogPage(
           await workerPage.goto(pUrl, { waitUntil: 'load', timeout: 30_000 })
           // 장시간 카탈로그 스크랩 중 세션이 만료되면 로그인 페이지로 리다이렉트되는 몰이 있다 — 매 상품마다
           // 재로그인을 시도해 세션을 회복하고(이미 로그인돼 있으면 아이디 필드가 없어 즉시 지나간다), 원래 상품 페이지로 되돌아간다.
-          await loginIfNeeded(workerPage, { url: pUrl, ...opts })
+          if (await loginIfNeeded(workerPage, { url: pUrl, ...opts })) await noteLoginIssueOnce()
           if (opts.loginId && workerPage.url() !== pUrl) {
             await workerPage.goto(pUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
           }

@@ -2,7 +2,36 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useTabs } from '../../shell/TabsContext'
 import { useCurrentUser } from '../../shell/CurrentUserContext'
+import { useRegisteredFieldKeys } from './useRegisteredFieldKeys'
+import { FIXED_FIELD_INFO } from '../../../lib/master/schema'
 import type { ExtractedProduct } from '@/lib/ai'
+
+// 기준 Master 테이블 관리와 같은 라벨을 쓴다 — 사용자가 그 화면에서 라벨을 직접 바꿔둔 경우(예: cost_price를
+// "원가" 대신 "공급가"로) 있으므로 FIXED_FIELD_INFO는 로딩 전/미등록 키의 기본값일 뿐, 실제 라벨은
+// useRegisteredFieldKeys가 돌려주는 DB 값을 우선한다 (컴포넌트 내부 fixedFieldLabel 계산 참고).
+const DEFAULT_FIELD_LABEL = new Map(FIXED_FIELD_INFO.map(f => [f.key, f.label]))
+/** ColumnDef.key(그리드 내부 컬럼명) -> master_schema_fields.field_key(라벨/정렬 기준 조회 키) —
+ *  라벨뿐 아니라 기본 컬럼 순서도 이 매핑을 통해 기준 마스터테이블의 sort_order를 따라간다(아래
+ *  reorderByMaster 참고). 그리드 전용 운영 컬럼(스크래핑 일시/URL/누락 데이터/마이그레이션 상태 등,
+ *  기준 테이블에 대응 필드가 없는 것)은 매핑하지 않고 원래 상대 위치에 그대로 둔다. */
+const COLUMN_TO_MASTER_KEY: Record<string, string> = {
+  name_original: 'name_final', mall_category: 'master_category', price: 'list_price', cost_price: 'cost_price',
+  shipping_fee: 'shipping_fee', brand: 'brand', manufacturer: 'manufacturer', origin: 'origin', description: 'description',
+  thumbnail_names: 'top_img', detail_image_urls: 'detail_img', stock_status: 'stock_status', stock_qty: 'stock_qty',
+}
+
+/** colOrder 중 기준 마스터테이블에 대응 필드가 있는 것만 그 sort_order대로 서로 재배치한다 — 대응이
+ *  없는(그리드 전용) 컬럼은 원래 있던 자리에 그대로 남는다. 사용자가 드래그로 이미 순서를 바꿔둔 뒤에는
+ *  호출하지 않는다(개인화 유지, 컴포넌트 내부 호출부 참고). */
+function reorderByMaster(order: string[], masterOrder: string[]): string[] {
+  const positions = order.map((k, i) => (COLUMN_TO_MASTER_KEY[k] ? i : -1)).filter(i => i !== -1)
+  if (!positions.length) return order
+  const sortedKeys = positions.map(i => order[i])
+    .sort((a, b) => masterOrder.indexOf(COLUMN_TO_MASTER_KEY[a]) - masterOrder.indexOf(COLUMN_TO_MASTER_KEY[b]))
+  const next = [...order]
+  positions.forEach((pos, idx) => { next[pos] = sortedKeys[idx] })
+  return next
+}
 
 interface RawExtra {
   thumbnail_names?: string[]
@@ -112,16 +141,16 @@ const COLUMNS_BEFORE_OPTIONS: ColumnDef[] = [
   { key: 'mall_product_code', label: '상품코드', getValue: p => p.mall_product_code },
   { key: 'name_original', label: '상품명', getValue: p => p.name_original },
   { key: 'mall_category', label: '카테고리', getValue: p => p.mall_category },
-  { key: 'price', label: '소비자판가', getValue: p => p.price },
-  // 공급가(거래처가 받는 도매가)는 소비자판가(오픈마켓 노출 판매가)와 다른 값이다 — mall_products의
-  // sale_price 컬럼은 항상 price와 같은 값이라(실제 공급가가 아님) 여기 쓰면 안 되고, 몰 페이지에서
-  // "도매가/공급가" 라벨로 별도 추출한 raw_data.cost_price를 써야 한다(lib/extract.ts 참고).
-  { key: 'cost_price', label: '공급가', getValue: p => p.raw_data?.cost_price ?? null },
-  { key: 'shipping_fee', label: '배송비', getValue: p => p.raw_data?.shipping_fee ?? null },
+  { key: 'price', label: DEFAULT_FIELD_LABEL.get('list_price')!, getValue: p => p.price },
+  // 공급가(거래처가 받는 도매가, 기준 테이블의 "원가")는 정상가(오픈마켓 노출 판매가)와 다른 값이다 —
+  // mall_products의 sale_price 컬럼은 항상 price와 같은 값이라(실제 공급가가 아님) 여기 쓰면 안 되고,
+  // 몰 페이지에서 "도매가/공급가" 라벨로 별도 추출한 raw_data.cost_price를 써야 한다(lib/extract.ts 참고).
+  { key: 'cost_price', label: DEFAULT_FIELD_LABEL.get('cost_price')!, getValue: p => p.raw_data?.cost_price ?? null },
+  { key: 'shipping_fee', label: DEFAULT_FIELD_LABEL.get('shipping_fee')!, getValue: p => p.raw_data?.shipping_fee ?? null },
   { key: 'brand', label: '브랜드', getValue: p => p.brand },
   { key: 'manufacturer', label: '제조사', getValue: p => p.manufacturer },
   { key: 'origin', label: '원산지', getValue: p => p.origin },
-  { key: 'description', label: '설명', getValue: p => p.description },
+  { key: 'description', label: DEFAULT_FIELD_LABEL.get('description')!, getValue: p => p.description },
   { key: 'thumbnail_names', label: '대표이미지', getValue: p => (p.thumbnail_urls || []).join(', ') },
   { key: 'detail_image_urls', label: '상세이미지', getValue: p => (p.detail_image_urls || []).join(', ') },
 ]
@@ -193,6 +222,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
   const scopeQuery = sessionId ? `sessionId=${sessionId}` : ''
   const { openTab, activeTabId, refreshSignals, bumpRefresh } = useTabs()
   const { isAdmin } = useCurrentUser()
+  const { customKeys: registeredCustomKeys, labels: registryLabels } = useRegisteredFieldKeys()
   const [items, setItems] = useState<StagingRow[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [discarding, setDiscarding] = useState(false)
@@ -209,6 +239,13 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
   const [colOrder, setColOrder] = useState<string[]>(loadColOrder)
   const [dragKey, setDragKey] = useState<string | null>(null)
+  // 사용자가 드래그로 순서를 바꾼 적이 없으면(저장된 값 없음) 기준 마스터테이블 순서가 로드되는 대로
+  // 그 순서를 기본값으로 한 번 반영한다 — 이미 순서를 바꿔둔 사용자의 개인화는 그대로 유지한다.
+  const hadSavedOrderRef = useRef(typeof window !== 'undefined' && localStorage.getItem(COL_ORDER_KEY) !== null)
+  useEffect(() => {
+    if (hadSavedOrderRef.current || registryLabels.size === 0) return
+    setColOrder(prev => reorderByMaster(prev, Array.from(registryLabels.keys())))
+  }, [registryLabels])
 
   const [showAdjust, setShowAdjust] = useState(false)
   const [adjustPrompt, setAdjustPrompt] = useState('')
@@ -236,13 +273,14 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     opts.forEach((o, i) => { if (o?.values?.length) last = i + 1 })
     return Math.max(max, last)
   }, 0)
-  // "스크랩 조정"으로 추가된 커스텀 컬럼들 — 정해진 스키마가 없어, 로드된 데이터에 실제로 값이 있는
-  // 필드명을 모아 옵션 컬럼과 같은 방식으로 동적으로 추가한다.
+  // "스크랩 조정"으로 추가된 커스텀 컬럼들 — 로드된 데이터에 실제로 값이 있는 필드명에 더해, 기준 Master
+  // 테이블 관리에 등록된 커스텀 필드도 함께 포함한다 — 아직 스크랩 데이터에 값이 하나도 없어도(등록만
+  // 해두고 값은 나중에 채우는 경우) 빈 컬럼으로라도 미리 보여야 기준 테이블과 그리드가 어긋나지 않는다.
   const customFieldKeys = useMemo(() => {
-    const keys = new Set<string>()
+    const keys = new Set<string>(registeredCustomKeys)
     items.forEach(p => Object.keys(p.raw_data?.custom_fields || {}).forEach(k => keys.add(k)))
     return Array.from(keys)
-  }, [items])
+  }, [items, registeredCustomKeys])
 
   const columns = useMemo<ColumnDef[]>(() => {
     const optionColumns: ColumnDef[] = Array.from({ length: maxOptionCount }, (_, i) => ({
@@ -255,8 +293,13 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
       label: key,
       getValue: p => p.raw_data?.custom_fields?.[key] ?? '',
     }))
-    return [...COLUMNS_BEFORE_OPTIONS, ...optionColumns, ...COLUMNS_AFTER_OPTIONS, ...customColumns]
-  }, [maxOptionCount, customFieldKeys])
+    const merged = [...COLUMNS_BEFORE_OPTIONS, ...optionColumns, ...COLUMNS_AFTER_OPTIONS, ...customColumns]
+    return merged.map(c => {
+      const masterKey = COLUMN_TO_MASTER_KEY[c.key]
+      const liveLabel = masterKey ? registryLabels.get(masterKey) : undefined
+      return liveLabel ? { ...c, label: liveLabel } : c
+    })
+  }, [maxOptionCount, customFieldKeys, registryLabels])
 
   useEffect(() => {
     try { localStorage.setItem(COL_ORDER_KEY, JSON.stringify(colOrder)) } catch {}
@@ -944,8 +987,8 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
               ) : (
                 <>
                   <p>상품명: {adjustPreview.name || '-'}</p>
-                  <p>가격: {adjustPreview.price != null ? `₩${adjustPreview.price.toLocaleString()}` : '-'}</p>
-                  <p>공급가(도매가): {adjustPreview.cost_price != null ? `₩${adjustPreview.cost_price.toLocaleString()}` : '-'}</p>
+                  <p>{registryLabels.get('list_price') ?? DEFAULT_FIELD_LABEL.get('list_price')}: {adjustPreview.price != null ? `₩${adjustPreview.price.toLocaleString()}` : '-'}</p>
+                  <p>{registryLabels.get('cost_price') ?? DEFAULT_FIELD_LABEL.get('cost_price')}(도매가): {adjustPreview.cost_price != null ? `₩${adjustPreview.cost_price.toLocaleString()}` : '-'}</p>
                   <p>배송비: {adjustPreview.shipping_fee != null ? formatMoneyOrRange(adjustPreview.shipping_fee) : '-'}</p>
                   <p>카테고리: {adjustPreview.category || '-'}</p>
                   <p>브랜드/제조사/원산지: {[adjustPreview.brand, adjustPreview.manufacturer, adjustPreview.origin].filter(Boolean).join(' / ') || '-'}</p>

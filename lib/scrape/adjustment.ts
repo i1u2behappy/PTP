@@ -1,5 +1,5 @@
 import pool from '../db'
-import { generateExtractionRules, generateAutoExtractionRules, type ExtractedProduct, type ExtractionRule } from '../ai'
+import { generateExtractionRules, generateAutoExtractionRules, EXTRACTION_RULE_FIELDS, type ExtractedProduct, type ExtractionRule } from '../ai'
 
 /**
  * "스크랩 조정" 기능의 공용 계약 — 스크랩 방식(현재 일반모드/개발자모드, 앞으로 추가될 어떤 방식이든)은
@@ -47,15 +47,26 @@ export async function runAdjustment(
  * 8개 필드 전체에 대한 추출 규칙을 만들고 그 몰의 영구 규칙(sites.extraction_rules)으로 저장한다.
  * 몰 구조는 자주 바뀌지 않으니 이렇게 한 번만 분석해두면, 이후 같은 몰의 다른 상품은 이 저장된 규칙으로
  * AI 재호출 없이 빠르게 재사용된다 — runAdjustment와 핵심 저장 로직(mergeRulesIntoSite)을 공유한다.
+ *
+ * 이미 규칙이 있는 필드(스크랩 대상 직접지정으로 사람이 클릭해 확정했거나, 이전 AI 분석이 이미 만들어둔
+ * 것)는 절대 다시 덮어쓰지 않는다 — 예전엔 미리보기/스크랩을 할 때마다 이 8개 필드를 매번 새로 분석해
+ * 그대로 저장해버려서, 방금 "스크랩 대상 직접지정"으로 저장한 규칙이 곧바로 AI 결과에 덮여 사라지는
+ * 문제가 있었다(2026-08 사용자 실측 발견 — 위 주석의 "AI 재호출 없이 재사용"이라는 의도가 실제로는
+ * 구현돼 있지 않았다). 8개 필드가 이미 다 채워져 있으면 AI를 아예 호출하지 않는다.
  */
 export async function runAutoAnalysis(siteId: number, pageText: string): Promise<AdjustmentResult> {
-  const res = await pool.query<{ name: string | null; scrape_profile: Record<string, unknown> | null }>(
-    `SELECT name, scrape_profile FROM sites WHERE id=$1`, [siteId],
+  const res = await pool.query<{ name: string | null; scrape_profile: Record<string, unknown> | null; extraction_rules: Record<string, ExtractionRule> | null }>(
+    `SELECT name, scrape_profile, extraction_rules FROM sites WHERE id=$1`, [siteId],
   )
   const site = res.rows[0]
   if (!site) throw new Error('mall not found')
 
-  const rules = await generateAutoExtractionRules(site.name || `site${siteId}`, pageText, site.scrape_profile)
+  const existing = site.extraction_rules || {}
+  const missingFields = EXTRACTION_RULE_FIELDS.filter(f => !existing[f])
+  if (!missingFields.length) return { rules: {}, merged: existing }
+
+  const generated = await generateAutoExtractionRules(site.name || `site${siteId}`, pageText, site.scrape_profile)
+  const rules = Object.fromEntries(Object.entries(generated).filter(([field]) => missingFields.includes(field as typeof EXTRACTION_RULE_FIELDS[number])))
   const merged = await mergeRulesIntoSite(siteId, rules)
   return { rules, merged }
 }

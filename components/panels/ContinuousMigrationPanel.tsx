@@ -35,6 +35,9 @@ export function ContinuousMigrationPanel() {
   const [detecting, setDetecting] = useState(false)
   const [migrating, setMigrating] = useState(false)
   const [searched, setSearched] = useState(false)
+  const [structureChecking, setStructureChecking] = useState(false)
+  const [structureCheckResult, setStructureCheckResult] = useState<{ diffs: string[]; isFirstTime: boolean } | null>(null)
+  const [structureCheckError, setStructureCheckError] = useState('')
 
   useEffect(() => {
     fetch('/api/clients').then(r => r.json()).then((d: Client[]) => setClients(Array.isArray(d) ? d : [])).catch(() => {})
@@ -56,6 +59,26 @@ export function ContinuousMigrationPanel() {
       setDetecting(false)
     }
   }, [siteId])
+
+  async function checkMallStructure() {
+    if (siteId === '') return
+    setStructureChecking(true)
+    setStructureCheckResult(null)
+    setStructureCheckError('')
+    try {
+      const res = await fetch('/api/master/mall-structure-check', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteId }),
+      })
+      const d = await res.json()
+      if (!res.ok) { setStructureCheckError(d.error || '몰 구조 체크에 실패했습니다'); return }
+      setStructureCheckResult(d as { diffs: string[]; isFirstTime: boolean })
+    } catch {
+      setStructureCheckError('몰 구조 체크에 실패했습니다')
+    } finally {
+      setStructureChecking(false)
+    }
+  }
 
   function toggleSelect(id: number) {
     setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
@@ -90,6 +113,8 @@ export function ContinuousMigrationPanel() {
         <p className="text-xs text-gray-400 mt-1">
           이미 상품마스터로 만들어 거래처에 제공한 몰 품목 중, 몰 쪽에서 재고·옵션·이미지·가격이 바뀐 것을 찾아
           선택적으로 다시 마이그레이션합니다. 신규 상품 자체는 기존 &quot;마이그레이션&quot; 메뉴에서 처리해주세요.
+          &quot;몰 구조 체크&quot;는 이 품목들과 별개로, 몰 페이지 자체의 구조(카테고리/옵션 형태/재고 표기 방식 등)가
+          바뀌었는지 확인합니다(과거 스크래핑 메뉴 &quot;로그인 확인&quot;마다 자동으로 돌던 기능을 이쪽으로 옮김).
         </p>
       </div>
 
@@ -107,7 +132,7 @@ export function ContinuousMigrationPanel() {
           {/* 몰을 바꾸면 이전 몰의 "변동 감지" 결과(changes/selected)를 그대로 두지 않는다 — 안 그러면
               다시 감지를 누르기 전까지 화면엔 이전 몰의 행이 남아있고, 그 상태로 "선택 반영"을 누르면
               지금 고른 몰과 이전 몰의 상품 id가 섞인 요청이 나간다. */}
-          <select value={siteId} onChange={e => { setSiteId(e.target.value ? Number(e.target.value) : ''); setChanges([]); setSelected(new Set()); setSearched(false) }}
+          <select value={siteId} onChange={e => { setSiteId(e.target.value ? Number(e.target.value) : ''); setChanges([]); setSelected(new Set()); setSearched(false); setStructureCheckResult(null); setStructureCheckError('') }}
             className="border border-gray-300 rounded-xl px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
             <option value="">몰을 선택하세요</option>
             {filteredSites.map(s => <option key={s.id} value={s.id}>{s.name || s.url}</option>)}
@@ -117,6 +142,11 @@ export function ContinuousMigrationPanel() {
           className="px-4 py-1.5 bg-teal-500 text-white text-sm font-semibold rounded-full hover:bg-teal-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
           {detecting ? '감지 중...' : '🔍 변동 감지'}
         </button>
+        <button onClick={checkMallStructure} disabled={siteId === '' || structureChecking}
+          title="몰 페이지 자체의 구조(카테고리/옵션 형태/재고 표기 방식 등)가 바뀌었는지 확인합니다 — 재고·옵션·가격 값 변동과는 별개입니다."
+          className="px-4 py-1.5 bg-white border border-teal-400 text-teal-600 hover:bg-teal-50 text-sm font-semibold rounded-full disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+          {structureChecking ? '몰 구조 체크 중...' : '🔍 몰 구조 체크'}
+        </button>
         {searched && changes.length > 0 && (
           <button onClick={migrateSelected} disabled={!selected.size || migrating}
             className="px-4 py-1.5 bg-emerald-600 text-white text-sm font-semibold rounded-full hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
@@ -124,6 +154,27 @@ export function ContinuousMigrationPanel() {
           </button>
         )}
       </div>
+
+      {structureCheckError && (
+        <p className="text-xs text-rose-500 mb-4 shrink-0">{structureCheckError}</p>
+      )}
+      {structureCheckResult && (
+        <div className="bg-white rounded-2xl border border-gray-200 p-4 mb-4 shrink-0">
+          <div className="flex items-center gap-2 mb-1">
+            <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
+              structureCheckResult.isFirstTime ? 'bg-teal-100 text-teal-700'
+                : structureCheckResult.diffs.length ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
+              {structureCheckResult.isFirstTime ? '🔍 최초 기준정보 저장 완료'
+                : structureCheckResult.diffs.length ? '⚠ 몰 구조 변경 감지' : '✅ 변경사항 없음'}
+            </span>
+          </div>
+          {structureCheckResult.diffs.length > 0 && (
+            <ul className="text-xs text-amber-600 space-y-0.5 mt-1">
+              {structureCheckResult.diffs.map((d, i) => <li key={i}>• {d}</li>)}
+            </ul>
+          )}
+        </div>
+      )}
 
       {!searched ? (
         <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 flex-1">

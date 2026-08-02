@@ -1,20 +1,6 @@
 import pool from '../db'
 import { profileMallStructure, profileMallStructureForScrape, type MallProfileSignals, type ScrapeOptions } from '../scraper'
 
-// 로그인 확인 직후 이 몰의 백그라운드 구조 체크가 아직 도는 중인지 추적한다 — 그 사이 사용자가 같은
-// 로그인 창(탭)을 쓰는 다른 기능(미리보기/요소 지정 등)을 누르면 페이지 이동이 서로 겹쳐 조용히
-// 결과가 틀어질 수 있어(실측: 겹치면 둘 중 하나의 page.goto가 net::ERR_ABORTED로 조용히 실패), "로그인
-// 확인" 버튼을 깜빡이게 해 사용자가 끝날 때까지 기다리도록 안내한다. globalThis에 두는 이유는 다른
-// 세션 상태(openSessions 등)와 같다 — 개발서버 핫리로드로 모듈이 재평가돼도 진행 중 여부가 유지되도록.
-declare global {
-  var __profileCheckInProgress: Set<number> | undefined
-}
-const profileCheckInProgress = globalThis.__profileCheckInProgress ?? (globalThis.__profileCheckInProgress = new Set<number>())
-
-export function isProfileCheckInProgress(siteId: number): boolean {
-  return profileCheckInProgress.has(siteId)
-}
-
 function summarizeProfile(p: MallProfileSignals): string {
   return [
     `플랫폼: ${p.platform}`,
@@ -58,7 +44,7 @@ function describeDiff(prev: MallProfileSignals, next: MallProfileSignals): strin
   return diffs
 }
 
-export interface ProfileCheckResult {
+interface ProfileCheckResult {
   signals: MallProfileSignals
   /** 기준정보가 이미 있었는데 이번에 달라진 점 — 최초 프로파일링이면 항상 빈 배열. */
   diffs: string[]
@@ -111,25 +97,8 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
 }
 
 /**
- * 로그인 확인마다 백그라운드로 호출한다 — 상품/홈페이지 "구조 변화 감지" 전용(deep=false 고정, 결제계좌·
- * 택배사 같은 거래정보 분석은 하지 않는다). 로그인 창(openSessions)이 열려있어야 동작한다 — 직접로그인
- * 필수 몰처럼 추적되는 세션이 없으면 아무 일도 하지 않으므로, 그 경우를 위해 runMallProfileCheckForScrape가 있다.
- * "몰 구조 파악" 버튼은 용도가 다른(거래정보 분석) runMallStructureReport를 대신 쓴다.
- */
-export async function runMallProfileCheck(siteId: number): Promise<ProfileCheckResult | null> {
-  profileCheckInProgress.add(siteId)
-  try {
-    const next = await profileMallStructure(siteId, false)
-    if (!next) return null
-    return applyProfileResult(siteId, next, false)
-  } finally {
-    profileCheckInProgress.delete(siteId)
-  }
-}
-
-/**
  * "몰 구조 파악" 버튼 전용 — 결제계좌/택배사/업체연락처/URL 계층 등 거래정보를 AI로 분석한다(deep=true).
- * runMallProfileCheck(로그인 확인 자동 체크, 구조 변화 감지 전용)와는 용도가 다르다: 사용자가 직접
+ * runMallProfileCheckForScrape(구조 변화 감지 전용)와는 용도가 다르다: 사용자가 직접
  * "각각 다른 용도로 파악하고 리포팅"하도록 분리해달라고 확정함.
  */
 export async function runMallStructureReport(siteId: number): Promise<ProfileCheckResult | null> {
@@ -139,8 +108,11 @@ export async function runMallStructureReport(siteId: number): Promise<ProfileChe
 }
 
 /**
- * 실제 스크래핑 시작마다 백그라운드로 호출한다. openSessions 추적 여부와 무관하게 그 스크랩이 쓸 브라우저
- * 컨텍스트를 그대로 재사용해 프로파일링하므로, 직접로그인 필수 몰을 포함한 모든 몰 유형에서 동작한다.
+ * 몰 구조("구조 변화 감지" 전용, 결제계좌·택배사 같은 거래정보 분석은 안 함) 변경 여부를 확인한다 —
+ * 원래는 스크래핑 메뉴의 "로그인 확인" 클릭마다 자동으로 돌았는데, '마이그레이션3_연속관리'로 옮겨
+ * 사용자가 그 화면에서 직접 실행하도록 바꿨다(2026-08). 로그인 창(openSessions)을 열어둘 필요 없이,
+ * 저장된 계정정보로 이 스크랩이 쓸 브라우저 컨텍스트를 새로 열어 프로파일링하므로 직접로그인 필수 몰을
+ * 포함한 모든 몰 유형에서 동작한다.
  */
 export async function runMallProfileCheckForScrape(opts: ScrapeOptions): Promise<ProfileCheckResult | null> {
   if (!opts.siteId) return null

@@ -2,6 +2,14 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useTabs } from '../shell/TabsContext'
 import { PRODUCTS_LIST_TAB } from '../shell/menuTabs'
+import { FIXED_FIELD_INFO } from '../../lib/master/schema'
+import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
+
+// 기준 Master 테이블 관리 화면과 같은 라벨을 쓰기 위해 거기서 쓰는 이름을 그대로 가져온다 — 예전엔 이 표만
+// "소비자판가"/"공급가"라고 따로 부르고 있어서 기준 테이블의 "정상가"/"원가"와 같은 값인데 다르게 보였다.
+// FIXED_FIELD_INFO는 로딩 전/미등록 키의 기본값일 뿐, 사용자가 기준 마스터테이블관리에서 라벨을 직접
+// 바꿔둔 경우(예: "원가"→"공급가") 실제로는 useRegisteredFieldKeys가 돌려주는 DB 값이 우선해야 한다.
+const DEFAULT_FIELD_LABEL = new Map(FIXED_FIELD_INFO.map(f => [f.key, f.label]))
 
 type Status = 'idle' | 'running' | 'done' | 'error' | 'stopped'
 type LoginStep = 'none' | 'opened' | 'confirmed'
@@ -71,6 +79,12 @@ const PLATFORM_LABELS: Record<string, string> = {
 // 유지되도록 site+sessionId만 남겨두고, 되돌아왔을 때 서버에서 최신 상태를 다시 조회해 복원한다.
 const LAST_SESSION_KEY = 'scrape.scraper.lastSession'
 
+// 스크랩을 아직 시작하지 않은 단계(몰 선택/시작 URL/카테고리 목록 입력, 미리보기 전)도 다른 메뉴에 갔다
+// 오면 언마운트로 사라지는 건 마찬가지다(사용자 실측 발견) — LAST_SESSION_KEY는 "스크랩이 실제로
+// 시작된 뒤"에만 채워지므로 그 전 단계는 별도로 남겨둔다. 미리보기 결과도 다른 메뉴 갔다 돌아오면
+// 사라져 있다는 지적으로(재조회하려면 다시 몰 페이지에 접속해야 해 느리다) 폼 값과 함께 그대로 남겨둔다.
+const FORM_STATE_KEY = 'scrape.scraper.formState'
+
 interface ItemLogRow {
   id: number
   url: string
@@ -84,6 +98,7 @@ interface PreviewProduct {
   price: number | null
   sale_price: number | null
   cost_price: number | null
+  shipping_fee: number | string | null
   brand: string
   manufacturer: string
   origin: string
@@ -107,6 +122,38 @@ interface PreviewItem {
   url: string
   name: string
   thumbnail: string
+}
+
+/** 기준 마스터테이블 필드 키 하나를 미리보기의 실제 스크랩 값으로 풀어낸다 — 표에 보여줄 값이 없는
+ *  컬럼(내부관리코드/판매관리코드/마켓별카테고리 등, 스크랩 시점엔 절대 채워지지 않고 후속 절차에서
+ *  채워지는 값)은 '-'로 비워둔다(사용자 정책: "값이 없는 컬럼은 비워둘 것"). */
+function previewValueFor(product: PreviewProduct, sourceUrl: string, fieldKey: string, registryLabels: Map<string, string>): string {
+  const money = (n: number | string | null) => n == null ? '-' : typeof n === 'number' ? `₩${n.toLocaleString()}` : n
+  switch (fieldKey) {
+    case 'name_final': return product.name || '-'
+    case 'product_url': return sourceUrl || '-'
+    case 'master_category': return product.category || '-'
+    case 'cost_price': return money(product.cost_price)
+    case 'list_price': return money(product.price)
+    case 'sale_price': return money(product.sale_price)
+    case 'brand': return product.brand || '-'
+    case 'manufacturer': return product.manufacturer || '-'
+    case 'origin': return product.origin || '-'
+    case '1_option': return product.options[0]?.values.join(', ') || '-'
+    case '2_option': return product.options[1]?.values.join(', ') || '-'
+    case '3_option': return product.options[2]?.values.join(', ') || '-'
+    case 'top_img': return product.thumbnail_urls.length ? `${product.thumbnail_urls.length}장 — ${product.thumbnail_names.join(', ')}` : '-'
+    case 'detail_img': return product.detail_image_urls.length ? `${product.detail_image_urls.length}장 — ${product.detail_image_names.join(', ')}` : '-'
+    case 'description': return product.description || '-'
+    case 'shipping_fee': return money(product.shipping_fee)
+    case 'stock_status': return product.stock_status || '-'
+    case 'stock_qty': return product.stock_qty != null ? `${product.stock_qty}개` : '-'
+    // 내부관리코드/판매관리코드/마켓별카테고리 등은 스크랩 시점엔 값이 없는 후속 절차용 컬럼 — 기본값 '-'로 빠진다.
+    default: {
+      const label = registryLabels.get(fieldKey) || fieldKey
+      return product.custom_fields?.[fieldKey] ?? product.custom_fields?.[label] ?? '-'
+    }
+  }
 }
 
 /** lib/ai.ts의 MallStructureReport와 같은 모양. */
@@ -163,6 +210,18 @@ interface DevModeSession {
 
 export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const { openTab, bumpRefresh } = useTabs()
+  const { labels: registryLabels } = useRegisteredFieldKeys()
+  const fixedFieldLabel = useMemo(() => {
+    const m = new Map(DEFAULT_FIELD_LABEL)
+    registryLabels.forEach((v, k) => m.set(k, v))
+    return m
+  }, [registryLabels])
+  // 미리보기 표의 컬럼 구성/순서는 기준 마스터테이블관리(master_schema_fields)를 그대로 따라간다 —
+  // 등록 순서(sort_order)대로 보여주고, 아직 레지스트리가 안 불러와졌으면 기본 15개 순서로 잠깐 대체한다.
+  const masterOrderedKeys = useMemo(
+    () => registryLabels.size > 0 ? Array.from(registryLabels.keys()) : FIXED_FIELD_INFO.map(f => f.key),
+    [registryLabels],
+  )
   const initialSiteId = params?.siteId as number | undefined
   const initialClientId = params?.clientId as number | undefined
   const [sites, setSites]         = useState<Site[]>([])
@@ -181,10 +240,6 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [loginPw, setLoginPw]     = useState('')
   const [loginStep, setLoginStep] = useState<LoginStep>('none')
   const [loginBusy, setLoginBusy] = useState(false)
-  // 로그인 확인 직후 백그라운드 구조 체크가 도는 동안 true — 그 사이 사용자가 같은 탭을 쓰는 다른 기능을
-  // 누르면 페이지 이동이 겹쳐 조용히 결과가 틀어질 수 있어(실측 확인됨), "로그인 확인" 버튼을 깜빡여
-  // 끝날 때까지 기다리도록 안내한다.
-  const [profileCheckPending, setProfileCheckPending] = useState(false)
 
   const [profileResult, setProfileResult] = useState<ProfileCheckResult | null>(null)
   const [profileLoading, setProfileLoading] = useState(false)
@@ -196,18 +251,15 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   const [targetUrl, setTargetUrl]           = useState('')
   const [categoryUrlsText, setCategoryUrlsText] = useState('')
-  const [nextPageSelector, setNextPageSelector] = useState('')
-  const [maxPages, setMaxPages]             = useState<number | ''>('')
-  const [delayMs, setDelayMs]               = useState(1000)
-  const [concurrency, setConcurrency]       = useState(1)
 
   const [categories, setCategories]         = useState<{ href: string; text: string }[]>([])
   const [categoriesLoading, setCategoriesLoading] = useState(false)
   const [detectedPlatform, setDetectedPlatform] = useState<string | null>(null)
 
   const [previewResult, setPreviewResult]   = useState<{ sourceUrl: string; product: PreviewProduct } | null>(null)
-  const previewResultRef = useRef(previewResult)
-  useEffect(() => { previewResultRef.current = previewResult }, [previewResult])
+  // 미리보기 결과가 로그인 세션이 끊긴 상태로 얻어진 것 같을 때(창을 닫은 뒤 세션 만료 등) — 자동으로
+  // 로그인 창을 다시 띄우고 이 배너로 재확인을 안내한다.
+  const [sessionExpiredWarning, setSessionExpiredWarning] = useState(false)
   const [previewTotal, setPreviewTotal]     = useState<number | null>(null)
   const [previewItems, setPreviewItems]     = useState<PreviewItem[]>([])
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -225,10 +277,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   const progressSectionRef = useRef<HTMLDivElement>(null)
 
-  const [mode, setMode]           = useState<'single' | 'catalog'>('catalog')
   const [aiMode, setAiMode]       = useState(true)
-  const [scrapeMode, setScrapeMode] = useState<'full' | 'incremental'>('full')
-  const [linkSel, setLinkSel]     = useState('')
   const [status, setStatus]       = useState<Status>('idle')
   const [sessionId, setSessionId] = useState<number | null>(null)
   const [progress, setProgress]   = useState<{ saved: number; total: number; error?: string }>({ saved: 0, total: 0 })
@@ -253,22 +302,55 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (initialSiteId) { selectSite(initialSiteId); return }
     if (initialClientId) return
     const raw = localStorage.getItem(LAST_SESSION_KEY)
-    if (!raw) return
+    if (raw) {
+      try {
+        const saved = JSON.parse(raw) as { site: Site; sessionId: number }
+        fetch(`/api/scrape/status?sessionId=${saved.sessionId}`).then(r => r.json()).then((d: { status: string; product_count: number; saved_count: number; error?: string }) => {
+          setSelectedSite(saved.site)
+          setSessionId(saved.sessionId)
+          setStatus(d.status as Status)
+          setProgress({ saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error })
+        }).catch(() => {})
+        // 진행 로그(URL별 성공/실패)는 탭 전환으로 언마운트됐다 돌아와도 그대로 보여야 하므로 같이 복원한다.
+        fetch(`/api/scrape/log?sessionId=${saved.sessionId}`).then(r => r.json()).then((rows: ItemLogRow[]) => {
+          if (Array.isArray(rows)) setItemLog(rows)
+        }).catch(() => {})
+        return
+      } catch { /* 손상된 저장값은 무시하고 아래 폼 상태 복원으로 진행 */ }
+    }
+    // 아직 스크랩을 시작하지 않은 단계(위 세션 복원 대상이 없음)라도, 몰 선택/시작 URL/카테고리 목록만은
+    // 그대로 이어서 볼 수 있도록 복원한다. selectSite가 site.url로 targetUrl을 기본값으로 초기화해버리므로,
+    // 그 뒤에 저장해둔 실제 값으로 다시 덮어쓴다.
+    const formRaw = localStorage.getItem(FORM_STATE_KEY)
+    if (!formRaw) return
     try {
-      const saved = JSON.parse(raw) as { site: Site; sessionId: number }
-      fetch(`/api/scrape/status?sessionId=${saved.sessionId}`).then(r => r.json()).then((d: { status: string; product_count: number; saved_count: number; error?: string }) => {
-        setSelectedSite(saved.site)
-        setSessionId(saved.sessionId)
-        setStatus(d.status as Status)
-        setProgress({ saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error })
-      }).catch(() => {})
-      // 진행 로그(URL별 성공/실패)는 탭 전환으로 언마운트됐다 돌아와도 그대로 보여야 하므로 같이 복원한다.
-      fetch(`/api/scrape/log?sessionId=${saved.sessionId}`).then(r => r.json()).then((rows: ItemLogRow[]) => {
-        if (Array.isArray(rows)) setItemLog(rows)
-      }).catch(() => {})
+      const saved = JSON.parse(formRaw) as {
+        siteId: number; targetUrl: string; categoryUrlsText: string
+        previewResult?: { sourceUrl: string; product: PreviewProduct } | null
+        previewTotal?: number | null
+        previewItems?: PreviewItem[]
+        detectedPlatform?: string | null
+      }
+      selectSite(saved.siteId).then(() => {
+        setTargetUrl(saved.targetUrl)
+        setCategoryUrlsText(saved.categoryUrlsText)
+        if (saved.previewResult) setPreviewResult(saved.previewResult)
+        if (saved.previewTotal != null) setPreviewTotal(saved.previewTotal)
+        if (saved.previewItems?.length) setPreviewItems(saved.previewItems)
+        if (saved.detectedPlatform) setDetectedPlatform(saved.detectedPlatform)
+      })
     } catch { /* 손상된 저장값은 무시 */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 마운트 시 1회만: initialSiteId는 탭 생성 시 고정되는 값
   }, [])
+
+  // 위 복원의 짝 — 몰을 고르거나 시작 URL/카테고리 목록을 입력할 때, 그리고 미리보기 결과가 나올 때마다 저장해둔다.
+  useEffect(() => {
+    if (!selectedSite) return
+    localStorage.setItem(FORM_STATE_KEY, JSON.stringify({
+      siteId: selectedSite.id, targetUrl, categoryUrlsText,
+      previewResult, previewTotal, previewItems, detectedPlatform,
+    }))
+  }, [selectedSite, targetUrl, categoryUrlsText, previewResult, previewTotal, previewItems, detectedPlatform])
 
   const filteredSites = useMemo(() => {
     const q = siteQuery.trim().toLowerCase()
@@ -395,8 +477,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   // 이 몰이 "일반모드"(PTP 자동화) / "개발자모드"(크롬 확장) 중 무엇인지 — 아직 정해지지 않았으면(null)
   // 어느 흐름도 보여주지 않고 선택부터 받는다. PC인증 등으로 자동 로그인이 근본적으로 안 되는 몰인지는
-  // 실제로 겪어보기 전엔 알 수 없어(이미 여러 번 확인된 사실), 최초 스크랩 시점에 사용자가 한 번 고르게
-  // 한다. 아래 재스크랩 "전체/증분" 선택과는 별개 개념이라 이름을 다르게 둔다(scrapeMode는 이미 그 용도로 씀).
+  // 실제로 겪어보기 전엔 알 수 없어(이미 여러 번 확인된 사실), 최초 스크랩 시점에 사용자가 한 번 고르게 한다.
   const mallMode = !selectedSite ? null
     : selectedSite.manual_login_required === null ? 'undetermined'
     : selectedSite.manual_login_required ? 'devmode' : 'normal'
@@ -460,7 +541,6 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setLoginId(full.login_id || '')
     setLoginPw(full.login_pw || '')
     setLoginStep('none')
-    setProfileCheckPending(false)
     // 이 몰에 예전에 "스크랩 대상 직접지정"으로 등록해둔 컬럼이 있으면, 피커를 켜지 않은 채 바로 미리보기만
     // 해도 그리드에 컬럼으로 나오도록 미리 채워둔다(그리드는 이 목록에 있는 필드만 컬럼으로 보여준다).
     setPickerRules(full.extraction_rules || {})
@@ -472,7 +552,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPreviewResult(null)
     setPreviewTotal(null)
     setPreviewItems([])
-    setScrapeMode('full')
+    setSessionExpiredWarning(false)
     setDevModeStarted(false)
     // AI모드는 일반모드에선 그냥 로컬 상태(기본 켜짐)지만, 개발자모드는 확장이 실행 시점마다 서버에서
     // 값을 물어봐야 해서 DB에 저장해둔 값을 그대로 복원한다.
@@ -532,30 +612,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       setProfileResult(null)
       setProfileError('')
       setPickerActive(false)
-      setProfileCheckPending(true)
+      setSessionExpiredWarning(false)
       await refreshPickerRules()
     } finally {
       setLoginBusy(false)
     }
   }
 
-  // 로그인 확인마다 도는 백그라운드 구조 체크가 끝날 때까지 짧게 폴링 — 끝나면 버튼 깜빡임을 멈춘다.
-  useEffect(() => {
-    if (!profileCheckPending || !selectedSite) return
-    let cancelled = false
-    const id = setInterval(async () => {
-      const res = await fetch(`/api/scrape/profile-check-status?siteId=${selectedSite.id}`).catch(() => null)
-      if (cancelled || !res?.ok) return
-      const d = await res.json() as { inProgress: boolean }
-      if (!d.inProgress) setProfileCheckPending(false)
-    }, 1_000)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [profileCheckPending, selectedSite])
-
-  /** "몰 구조 파악" — 로그인 확인 시마다 조용히 도는 백그라운드 프로파일링을 그 자리에서 즉시 실행해
-   *  결과를 화면에 보여준다(같은 로직, app/api/sites/[id]/profile이 lib/scrape/mallProfile.ts의
-   *  runMallProfileCheck를 그대로 재사용). 새 몰을 등록한 직후 카테고리/상품 구조가 어떤지 바로 확인하고
-   *  싶을 때 로그인 확인마다의 자동 체크를 기다리지 않아도 되도록. */
+  /** "몰 구조 파악" — 결제계좌/택배사 등 거래정보를 AI로 분석해(app/api/sites/[id]/profile →
+   *  runMallStructureReport) 그 자리에서 즉시 결과를 보여준다. 몰 구조 "변경 감지"는 이 메뉴가 아니라
+   *  '마이그레이션3_연속관리'에서 한다(2026-08 이전). */
   async function handleProfileMall() {
     if (!selectedSite) return
     setProfileLoading(true)
@@ -593,37 +659,6 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       if (!res.ok) { alert(d.error || '스크랩 대상 직접지정을 시작하지 못했습니다'); return }
       setPickerActive(true)
       await refreshPickerRules()
-    } finally {
-      setPickerBusy(false)
-    }
-  }
-
-  /** 미리보기로 열어본 그 상품 하나만 다시 추출해 previewResult를 갱신한다 — 스크랩 대상 직접지정으로 규칙을 새로
-   *  저장했을 때, 고친 값이 미리보기 테이블에 곧바로 반영되도록. */
-  async function refreshPreviewSingle() {
-    if (!selectedSite || !previewResultRef.current) return
-    const res = await fetch('/api/scrape/preview', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        url: previewResultRef.current.sourceUrl, siteId: selectedSite.id,
-        loginId: loginId || undefined, loginPw: loginPw || undefined,
-      }),
-    })
-    if (!res.ok) return
-    const d = await res.json() as { sourceUrl: string; product: PreviewProduct }
-    setPreviewResult(d)
-  }
-
-  async function handleStopPicker() {
-    if (!selectedSite) return
-    setPickerBusy(true)
-    try {
-      await fetch(`/api/sites/${selectedSite.id}/picker/stop`, { method: 'POST' })
-      setPickerActive(false)
-      // 미리보기 반영은 작업 중(폴링)마다가 아니라 여기서 딱 한 번만 — 예전엔 지정할 때마다 미리보기가
-      // 자동 재실행되면서 몰 페이지(피커가 떠있는 바로 그 탭)가 다시 로드돼, 지정 하나 할 때마다 화면이
-      // 깜빡이고 필드 목록 스크롤이 맨 위로 올라가 버렸다(사용자 보고: 여러 개 연달아 지정하기 불편함).
-      await refreshPreviewSingle()
     } finally {
       setPickerBusy(false)
     }
@@ -696,39 +731,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setCategoryUrlsText(allSelected ? '' : categories.map(c => c.href).join('\n'))
   }
 
-  const canPreview = mode === 'catalog'
-    ? (!!targetUrl.trim() || categoryUrlsText.trim().length > 0)
-    : !!targetUrl.trim()
+  const canPreview = !!targetUrl.trim() || categoryUrlsText.trim().length > 0
 
-  function applyCatalogPreview(d: { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[] }) {
+  function applyCatalogPreview(d: { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; needsLogin?: boolean }) {
     setPreviewTotal(d.total)
     setDetectedPlatform(d.platform || null)
     setPreviewItems((d.items || []).slice(d.preview ? 1 : 0)) // 첫 상품은 위 상세 카드에 이미 나오니 그리드에서는 제외
     if (d.preview) setPreviewResult(d.preview)
+    setSessionExpiredWarning(!!d.needsLogin)
+    if (d.needsLogin) handleOpenLogin()
   }
 
-  /** 주어진 url을 목록 페이지로 간주해 상품 개수 + 첫 상품을 찾아본다. 찾으면 true. */
-  async function tryPreviewAsListing(url: string): Promise<boolean> {
-    if (!selectedSite) return false
-    const res = await fetch('/api/scrape/preview-catalog', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, loginId: loginId || undefined, loginPw: loginPw || undefined, siteId: selectedSite.id }),
-    })
-    if (!res.ok) return false
-    const d = await res.json() as { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[] }
-    applyCatalogPreview(d)
-    return !!d.preview
-  }
-
-  /**
-   * 단일 상품 모드: 시작 URL을 상품 페이지로 보고 바로 미리본다. 실패하면(목록/로그인 페이지 등 상품 페이지가
-   * 아니었을 수 있음) 그 URL을 목록 페이지로 다시 간주해 첫 상품을 찾아본다 — 어떤 URL을 넣어도 직접 하나하나
-   * 열어보지 않고 빠르게 확인할 수 있도록 자동으로 폴백한다.
-   * 카탈로그(목록) 모드: 목록에서 상품 개수를 세는 것과 첫 상품 미리보기를 한 번의 요청(한 브라우저 세션)으로 같이 처리한다
-   * — 예전에는 "테스트 실행"과 "미리보기"가 별도 버튼/요청이라 세션을 두 번 열어야 해서 느렸다. 개수는 페이징 끝까지
-   * 따라가 실제 전체 개수를 보여주고, 나머지 상품은 (열어보지 않고) 목록 정보만 그리드로 함께 보여준다.
-   */
   /** 개발자모드 공용 — 이전 결과를 비우고 last_adjustment_preview를 폴링만 시작한다. 실제 캡처는 사용자가
    *  몰 탭에서 확장(팝업 또는 우클릭)을 실행해야 일어난다 — "미리보기"뿐 아니라 "스크랩 대상 직접지정"의
    *  adjust/capture도 같은 컬럼에 재추출 결과를 저장하므로 이 폴링 하나로 둘 다 받는다. 채워지면 일반모드와
@@ -794,6 +807,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     }
   }
 
+  /** 목록에서 상품 개수를 세는 것과 첫 상품 미리보기를 한 번의 요청(한 브라우저 세션)으로 같이 처리한다
+   * — 예전에는 "테스트 실행"과 "미리보기"가 별도 버튼/요청이라 세션을 두 번 열어야 해서 느렸다. 개수는
+   * 페이징 끝까지 따라가 실제 전체 개수를 보여주고, 나머지 상품은 (열어보지 않고) 목록 정보만 그리드로
+   * 함께 보여준다. 시작 URL이 목록이 아니라 상품 페이지 하나뿐이어도 scrapeCatalogPage가 그 페이지 자체를
+   * 상품 1건으로 처리해 그대로 동작한다. */
   async function handlePreview() {
     if (!selectedSite || !canPreview) return
     setPreviewLoading(true)
@@ -801,35 +819,20 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPreviewTotal(null)
     setPreviewItems([])
     try {
-      if (mode === 'catalog') {
-        const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
-        const res = await fetch('/api/scrape/preview-catalog', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: categoryUrls.length ? undefined : (targetUrl || undefined),
-            categoryUrls: categoryUrls.length ? categoryUrls : undefined,
-            nextPageSelector: nextPageSelector || undefined,
-            loginId: loginId || undefined, loginPw: loginPw || undefined,
-            productLinkSelector: linkSel || undefined, siteId: selectedSite.id, aiMode,
-          }),
-        })
-        if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`확인 실패: ${e.error || res.status}`); return }
-        const d = await res.json() as { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[] }
-        applyCatalogPreview(d)
-      } else {
-        const res = await fetch('/api/scrape/preview', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: targetUrl, siteId: selectedSite.id, loginId: loginId || undefined, loginPw: loginPw || undefined, aiMode }),
-        })
-        if (res.ok) {
-          const d = await res.json() as { sourceUrl: string; product: PreviewProduct }
-          setPreviewResult(d)
-        } else if (!(await tryPreviewAsListing(targetUrl))) {
-          alert('상품 정보를 찾지 못했습니다. 시작 URL을 확인해주세요.')
-        }
-      }
+      const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
+      const res = await fetch('/api/scrape/preview-catalog', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: categoryUrls.length ? undefined : (targetUrl || undefined),
+          categoryUrls: categoryUrls.length ? categoryUrls : undefined,
+          loginId: loginId || undefined, loginPw: loginPw || undefined,
+          siteId: selectedSite.id, aiMode,
+        }),
+      })
+      if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`확인 실패: ${e.error || res.status}`); return }
+      const d = await res.json() as { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; needsLogin?: boolean }
+      applyCatalogPreview(d)
     } finally {
       setPreviewLoading(false)
     }
@@ -860,12 +863,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       body: JSON.stringify({
         url: categoryUrls.length ? undefined : (targetUrl || undefined),
         categoryUrls: categoryUrls.length ? categoryUrls : undefined,
-        nextPageSelector: mode === 'catalog' ? (nextPageSelector || undefined) : undefined,
-        maxPages: mode === 'catalog' && maxPages !== '' ? maxPages : undefined,
-        delayMs: mode === 'catalog' ? delayMs : undefined,
-        concurrency: mode === 'catalog' ? concurrency : undefined,
+        // 페이지당 지연은 몰 차단 방지를 위한 안전값을 그대로 유지한다(예전엔 사용자가 조절할 수 있었지만
+        // 실제로 건드릴 필요가 없어 UI에서 제거) — 다음페이지 셀렉터/최대 페이지 수/동시 처리 개수는
+        // 플랫폼별 자동 감지(cafe24 등)와 기본값(끝까지 자동, 순차 처리)으로 대체된다.
+        delayMs: 1000,
         loginId: loginId || undefined, loginPw: loginPw || undefined,
-        mode, scrapeMode, productLinkSelector: linkSel || undefined, siteId: selectedSite.id,
+        mode: 'catalog', siteId: selectedSite.id,
       }),
     })
     const data = await res.json() as { sessionId: number }
@@ -1073,8 +1076,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 : (loginStep === 'opened' || loginStep === 'confirmed' ? '몰 페이지 다시 열기' : '몰 페이지 열기')}
             </button>
             <button onClick={handleConfirmLogin} disabled={loginBusy || loginStep === 'none'}
-              title={profileCheckPending ? '몰 구조를 백그라운드에서 확인 중입니다 — 끝날 때까지 다른 버튼은 잠시 기다려주세요' : undefined}
-              className={`px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${profileCheckPending ? 'animate-pulse-glow' : ''}`}>
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
               {needsLogin ? '로그인 확인' : '확인'}
             </button>
             {loginStep === 'confirmed' && (
@@ -1177,71 +1179,30 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       {/* 스크랩 대상 */}
       {selectedSite && mallMode === 'normal' && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-          <div className="flex flex-wrap items-start justify-between gap-6 mb-1">
-            <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">스크랩 모드</div>
-              <div className="flex gap-3">
-                {(['catalog', 'single'] as const).map(m => (
-                  <button key={m} onClick={() => { setMode(m); setPreviewResult(null); setPreviewTotal(null); setPreviewItems([]) }}
-                    className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${mode === m ? 'bg-teal-500 text-white border-teal-500' : 'bg-white text-gray-600 border-gray-300 hover:border-teal-400'}`}>
-                    {m === 'single' ? '단일 상품 페이지' : '카테고리/목록 페이지'}
-                  </button>
-                ))}
-              </div>
+          {loginStep === 'confirmed' && (
+            <div className="flex items-center justify-between gap-3 bg-teal-50 border border-teal-100 rounded-xl px-4 py-2.5 mb-2">
+              <p className="text-xs text-teal-700">💡 로그인 창에서 원하는 페이지로 이동했다면, 그 페이지를 시작 URL로 바로 가져올 수 있습니다.</p>
+              <button onClick={handleRefreshCurrentUrl} title="로그인 창에서 현재 보고 있는 페이지로 시작 URL 갱신"
+                className="px-4 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors shrink-0 flex items-center gap-1">
+                <span aria-hidden="true">↻</span> 현재 페이지 가져오기
+              </button>
             </div>
-            <div>
-              <div className="text-sm font-semibold text-gray-700 mb-2">재스크랩 방식</div>
-              <div className="flex gap-3">
-                {([
-                  { id: 'full' as const, label: '전체 재스크랩' },
-                  { id: 'incremental' as const, label: '증분 (변동사항만)' },
-                ]).map(m => (
-                  <button key={m.id} onClick={() => setScrapeMode(m.id)}
-                    className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${scrapeMode === m.id ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-600 border-gray-300 hover:border-emerald-400'}`}>
-                    {m.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-          {scrapeMode === 'incremental' && (
-            <p className="text-xs text-gray-500 mb-3">
-              이전에 스크랩된 상품 중 재고/가격이 바뀐 것만 이력에 남기고, 이번 회차에 안 보이는 기존 상품은 단종 추정으로 표시합니다.
-            </p>
           )}
           <div className="flex gap-2 mb-1 items-end">
             <label className="flex-1 block">
-              <span className="block text-xs text-gray-500 mb-1">
-                시작 URL {loginStep === 'confirmed' && '(로그인 창에서 이동한 페이지를 그대로 사용할 수 있습니다)'}
-              </span>
+              <span className="block text-xs text-gray-500 mb-1">시작 URL</span>
               <input value={targetUrl} onChange={e => setTargetUrl(e.target.value)}
                 placeholder="https://shop.example.com/products/123"
-                disabled={mode === 'catalog' && categoryUrlsText.trim().length > 0}
+                disabled={categoryUrlsText.trim().length > 0}
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 disabled:bg-gray-100 disabled:text-gray-400" />
             </label>
-            {loginStep === 'confirmed' && (
-              <button onClick={handleRefreshCurrentUrl} title="로그인 창에서 현재 보고 있는 페이지로 갱신"
-                className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full transition-colors shrink-0">
-                현재 페이지로
-              </button>
-            )}
           </div>
-          {mode === 'catalog' ? (
-            <p className="text-xs text-amber-600 mb-3 min-h-[1em]">
-              {categoryUrlsText.trim().length > 0 &&
-                '아래 카테고리 URL 목록이 입력되어 있어 위 시작 URL은 무시되고 카테고리 목록만 스크랩됩니다.'}
-            </p>
-          ) : <div className="mb-3" />}
+          <p className="text-xs text-amber-600 mb-3 min-h-[1em]">
+            {categoryUrlsText.trim().length > 0 &&
+              '아래 카테고리 URL 목록이 입력되어 있어 위 시작 URL은 무시되고 카테고리 목록만 스크랩됩니다.'}
+          </p>
 
-          {mode === 'catalog' && (
-            <>
-              <label className="block">
-                <span className="block text-xs text-gray-500 mb-1">제품 링크 CSS 셀렉터 (비워두면 이미지가 있는 링크만 자동으로 제품으로 인식)</span>
-                <input value={linkSel} onChange={e => setLinkSel(e.target.value)}
-                  placeholder=".product-list a, .item-card a"
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 mb-3" />
-              </label>
-
+          <>
               <div className="flex items-center justify-between mb-1">
                 <label htmlFor="category-urls" className="block text-xs text-gray-500">카테고리 URL 목록 (한 줄에 하나씩, 입력 시 위 시작 URL 대신 각각 스크랩)</label>
                 <button type="button" onClick={handleLoadCategories} disabled={categoriesLoading || !targetUrl}
@@ -1287,34 +1248,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               <textarea id="category-urls" value={categoryUrlsText} onChange={e => setCategoryUrlsText(e.target.value)} rows={3}
                 placeholder={'https://shop.example.com/category/food\nhttps://shop.example.com/category/beauty'}
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 mb-3" />
-
-              <div className="grid grid-cols-4 gap-3 mb-4">
-                <label className="block">
-                  <span className="block text-xs text-gray-500 mb-1">다음 페이지 셀렉터 (페이지네이션, 선택)</span>
-                  <input value={nextPageSelector} onChange={e => setNextPageSelector(e.target.value)}
-                    placeholder=".pagination .next"
-                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-                </label>
-                <label className="block">
-                  <span className="block text-xs text-gray-500 mb-1">최대 페이지 수 (비워두면 끝까지 자동)</span>
-                  <input type="number" min={1} placeholder="자동" value={maxPages}
-                    onChange={e => setMaxPages(e.target.value === '' ? '' : Math.max(1, Number(e.target.value) || 1))}
-                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-                </label>
-                <label className="block">
-                  <span className="block text-xs text-gray-500 mb-1">상품 페이지 간 지연 (ms, 차단 방지)</span>
-                  <input type="number" min={0} step={100} value={delayMs} onChange={e => setDelayMs(Math.max(0, Number(e.target.value) || 0))}
-                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-                </label>
-                <label className="block">
-                  <span className="block text-xs text-gray-500 mb-1">동시 처리 개수 (빠르지만 차단 위험↑)</span>
-                  <input type="number" min={1} max={8} value={concurrency} onChange={e => setConcurrency(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
-                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-                </label>
-              </div>
-
             </>
-          )}
         </div>
       )}
 
@@ -1349,13 +1283,23 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 {previewLoading ? (mallMode === 'devmode' ? '대기 중...' : aiMode ? 'AI 분석 중...' : '확인 중...') : '🔍 스크랩 미리보기'}
               </button>
               {(mallMode === 'devmode' || loginStep === 'confirmed') && (
-                pickerActive ? (
-                  <button onClick={mallMode === 'devmode' ? () => setPickerActive(false) : handleStopPicker} disabled={pickerBusy}
-                    className="px-4 py-2 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
-                    🎯 스크랩 대상 직접지정 종료
-                  </button>
+                mallMode === 'devmode' ? (
+                  pickerActive ? (
+                    <button onClick={() => setPickerActive(false)} disabled={pickerBusy}
+                      className="px-4 py-2 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+                      🎯 스크랩 대상 직접지정 종료
+                    </button>
+                  ) : (
+                    <button onClick={() => setPickerActive(true)} disabled={pickerBusy}
+                      className="px-4 py-2 bg-white border border-teal-400 text-teal-600 hover:bg-teal-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
+                      🎯 스크랩 대상 직접지정
+                    </button>
+                  )
                 ) : (
-                  <button onClick={mallMode === 'devmode' ? () => setPickerActive(true) : handleStartPicker} disabled={pickerBusy}
+                  // 창을 닫으면(패널의 ✕) 다시 저절로 뜨지 않는다 — 다시 지정하려면 이 버튼을 다시 눌러야
+                  // 한다(자동 재주입을 없앤 것과 맞물린 설계, lib/scraper.ts 참고). 그래서 "종료" 버튼이
+                  // 따로 없고, 이 버튼 하나로 몇 번이든 다시 열 수 있다.
+                  <button onClick={handleStartPicker} disabled={pickerBusy}
                     className="px-4 py-2 bg-white border border-teal-400 text-teal-600 hover:bg-teal-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
                     🎯 스크랩 대상 직접지정
                   </button>
@@ -1363,6 +1307,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               )}
             </div>
           </div>
+
+          {sessionExpiredWarning && (
+            <p className="text-xs text-amber-600 bg-amber-50 rounded-lg px-3 py-2 mb-3">
+              ⚠ 로그인 세션이 끊긴 상태로 미리보기가 된 것 같습니다 — 로그인 창을 다시 열었으니, 그 창에서
+              로그인 후 &quot;로그인 확인&quot;을 누르고 미리보기를 다시 시도해주세요.
+            </p>
+          )}
 
           {mallMode === 'devmode' && previewLoading && (
             <p className="text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2 mb-3">
@@ -1396,20 +1347,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             <p className="text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2 mb-3">
               🎯 로그인 창에 뜬 &quot;PTP 스크랩 대상 직접지정&quot; 패널에서 값을 클릭하거나, 패널의 목록에서
               바로 값을 입력해 지정하세요{Object.keys(pickerRules).length > 0 && ` — 지금까지 ${Object.keys(pickerRules).length}개 지정됨`}.
-              다 되면 위 &quot;스크랩 대상 직접지정 종료&quot;를 누르세요.
+              다 되면 패널의 ✕로 닫으면 되고, 지정한 값은 그대로 저장됩니다. 다시 열려면 위
+              &quot;스크랩 대상 직접지정&quot; 버튼을 다시 누르세요.
             </p>
           )}
 
-          {mallMode === 'normal' && mode === 'catalog' && !canPreview && (
+          {mallMode === 'normal' && !canPreview && (
             <p className="text-xs text-gray-400">시작 URL 또는 카테고리 목록을 입력하면 카테고리 내 상품 개수와 첫 상품 페이지를 바로 확인할 수 있습니다.</p>
-          )}
-          {mallMode === 'normal' && mode === 'single' && !canPreview && (
-            <p className="text-xs text-gray-400">시작 URL을 입력하면 실제로 열어서 추출될 내용을 미리 확인할 수 있습니다.</p>
           )}
 
           {previewTotal !== null && (
             <p className="text-xs text-gray-600 mb-2">
-              {mode === 'single' && '(입력한 URL이 상품 페이지가 아니라 목록으로 인식됨) '}
               스크랩 대상 상품 <strong>{previewTotal}</strong>개 발견
               {detectedPlatform && ` — 감지된 몰 유형: ${PLATFORM_LABELS[detectedPlatform] || detectedPlatform}`}
               {previewTotal === 0 && <span className="text-rose-500"> (매칭되는 상품 링크가 없습니다. 셀렉터나 시작 URL을 확인해주세요.)</span>}
@@ -1452,82 +1400,61 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               </div>
               <div className="overflow-x-auto">
                 <table className="text-xs border-collapse whitespace-nowrap">
-                  <thead className="bg-gray-50">
-                    <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                      <th className="px-3 py-2 text-left sticky left-0 z-10 bg-gray-50">카테고리</th>
-                      <th className="px-3 py-2 text-left">소비자판가</th>
-                      <th className="px-3 py-2 text-left">공급가</th>
-                      <th className="px-3 py-2 text-left">브랜드</th>
-                      <th className="px-3 py-2 text-left">제조사</th>
-                      <th className="px-3 py-2 text-left">원산지</th>
-                      <th className="px-3 py-2 text-left">옵션1</th>
-                      <th className="px-3 py-2 text-left">옵션2</th>
-                      <th className="px-3 py-2 text-left">재고</th>
-                      <th className="px-3 py-2 text-left">대표이미지</th>
-                      <th className="px-3 py-2 text-left">상세이미지</th>
-                      <th className="px-3 py-2 text-left">상품요약정보</th>
-                      <th className="px-3 py-2 text-left">영문상품명</th>
-                      {previewResult.product.options
-                        .filter(o => !/^option[12]$/i.test(o.name))
-                        .map(o => (
-                          <th key={o.name} className="px-3 py-2 text-left">{o.name}</th>
-                        ))}
-                      {Object.keys(previewResult.product.custom_fields || {})
-                        .filter(label => label in pickerRules)
-                        .map(label => <th key={label} className="px-3 py-2 text-left">🎯 {label}</th>)}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate sticky left-0 z-[1] bg-white" title={previewResult.product.category}>
-                        {previewResult.product.category || '-'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700">
-                        {previewResult.product.price != null ? `₩${previewResult.product.price.toLocaleString()}` : <span className="text-rose-500">찾지 못함</span>}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700">
-                        {previewResult.product.cost_price != null ? `₩${previewResult.product.cost_price.toLocaleString()}` : '-'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700">{previewResult.product.brand || '-'}</td>
-                      <td className="px-3 py-2 text-gray-700">{previewResult.product.manufacturer || '-'}</td>
-                      <td className="px-3 py-2 text-gray-700">{previewResult.product.origin || '-'}</td>
-                      <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate" title={previewResult.product.options[0]?.values.join(', ')}>
-                        {previewResult.product.options[0]?.values.join(', ') || '-'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate" title={previewResult.product.options[1]?.values.join(', ')}>
-                        {previewResult.product.options[1]?.values.join(', ') || '-'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700">
-                        {previewResult.product.stock_status || '-'}{previewResult.product.stock_qty != null && ` (${previewResult.product.stock_qty}개)`}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={previewResult.product.thumbnail_names.join(', ')}>
-                        {previewResult.product.thumbnail_urls.length}장 — {previewResult.product.thumbnail_names.join(', ') || '-'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={previewResult.product.detail_image_names.join(', ')}>
-                        {previewResult.product.detail_image_urls.length}장 — {previewResult.product.detail_image_names.join(', ') || '-'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate" title={previewResult.product.summary_info}>
-                        {previewResult.product.summary_info || '-'}
-                      </td>
-                      <td className="px-3 py-2 text-gray-700 max-w-[160px] truncate" title={previewResult.product.english_name}>
-                        {previewResult.product.english_name || '-'}
-                      </td>
-                      {previewResult.product.options
-                        .filter(o => !/^option[12]$/i.test(o.name))
-                        .map(o => (
-                          <td key={o.name} className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={o.values.join(', ')}>
-                            {o.values.join(', ')}
-                          </td>
-                        ))}
-                      {Object.entries(previewResult.product.custom_fields || {})
-                        .filter(([label]) => label in pickerRules)
-                        .map(([label, value]) => (
-                          <td key={label} className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={value}>
-                            {value}
-                          </td>
-                        ))}
-                    </tr>
-                  </tbody>
+                  {(() => {
+                    // 옵션1~3은 기준 테이블 컬럼으로 이미 다뤄지니(위 masterOrderedKeys), 그 뒤에 남는
+                    // 옵션(4번째부터)만 별도 컬럼으로 덧붙인다.
+                    const extraOptions = previewResult.product.options.slice(3)
+                    const registeredLabelSet = new Set(masterOrderedKeys.map(k => registryLabels.get(k)).filter(Boolean))
+                    const extraCustom = Object.entries(previewResult.product.custom_fields || {})
+                      .filter(([label]) => label in pickerRules && !masterOrderedKeys.includes(label) && !registeredLabelSet.has(label))
+                    return (
+                      <>
+                        <thead className="bg-gray-50">
+                          <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+                            {masterOrderedKeys.map((key, i) => (
+                              <th key={key} className={`px-3 py-2 text-left ${i === 0 ? 'sticky left-0 z-10 bg-gray-50' : ''}`}>
+                                {registryLabels.get(key) || fixedFieldLabel.get(key) || key}
+                              </th>
+                            ))}
+                            {extraOptions.map((o, i) => <th key={`opt-${i}`} className="px-3 py-2 text-left">{o.name}</th>)}
+                            <th className="px-3 py-2 text-left">상품요약정보</th>
+                            <th className="px-3 py-2 text-left">영문상품명</th>
+                            {extraCustom.map(([label]) => <th key={label} className="px-3 py-2 text-left">🎯 {label}</th>)}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr>
+                            {masterOrderedKeys.map((key, i) => {
+                              const value = previewValueFor(previewResult.product, previewResult.sourceUrl, key, registryLabels)
+                              return (
+                                <td key={key}
+                                  className={`px-3 py-2 text-gray-700 max-w-[200px] truncate ${i === 0 ? 'sticky left-0 z-[1] bg-white' : ''}`}
+                                  title={value}>
+                                  {value}
+                                </td>
+                              )
+                            })}
+                            {extraOptions.map((o, i) => (
+                              <td key={`opt-${i}`} className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={o.values.join(', ')}>
+                                {o.values.join(', ')}
+                              </td>
+                            ))}
+                            <td className="px-3 py-2 text-gray-700 max-w-[200px] truncate" title={previewResult.product.summary_info}>
+                              {previewResult.product.summary_info || '-'}
+                            </td>
+                            <td className="px-3 py-2 text-gray-700 max-w-[160px] truncate" title={previewResult.product.english_name}>
+                              {previewResult.product.english_name || '-'}
+                            </td>
+                            {extraCustom.map(([label, value]) => (
+                              <td key={label} className="px-3 py-2 text-gray-700 max-w-[240px] truncate" title={value}>
+                                {value}
+                              </td>
+                            ))}
+                          </tr>
+                        </tbody>
+                      </>
+                    )
+                  })()}
                 </table>
               </div>
               {previewResult.product.detail_text && (

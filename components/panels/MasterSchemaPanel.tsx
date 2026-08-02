@@ -6,22 +6,18 @@ import { FIXED_FIELD_INFO } from '../../lib/master/schema'
 
 interface SchemaField { field_key: string; field_label: string; is_custom: boolean }
 
-const fixedInfoByKey = new Map(FIXED_FIELD_INFO.map(f => [f.key, f]))
-/** 커스텀 필드는 스크래핑 원본에 대응 컬럼이 있을 수 없다(정의상 새로 만든 값) — 고정 필드만
- *  FIXED_FIELD_INFO.mallSource로 스크래핑 자동 매칭 여부를 판정한다. */
-function matchInfo(f: SchemaField): { matched: boolean; label: string } {
-  if (f.is_custom) return { matched: false, label: '커스텀 · 직접 입력 필요' }
-  const info = fixedInfoByKey.get(f.field_key)
-  return info?.mallSource
-    ? { matched: true, label: `자동 매칭 · mall_products.${info.mallSource}` }
-    : { matched: false, label: '스크래핑에 없음 · 직접 입력 필요' }
-}
+/** 기준 마스터테이블의 모든 컬럼은 동등한 "고정 컬럼"이고, 전부 스크래핑 시 자동매칭을 우선 시도한다 —
+ *  라벨 기반 매칭(lib/extract.ts의 info-row 스캔)이 컬럼 종류를 안 가리고 이미 동작하므로, 예전처럼
+ *  "커스텀 필드는 자동매칭 대상이 아니다"로 미리 단정하지 않는다(2026-08, 사용자 지적으로 변경 — 실제로는
+ *  커스텀 필드도 몰 페이지에 같은 라벨이 있으면 자동으로 채워지고 있었다). 값을 못 찾으면 그냥 비워두고,
+ *  필요하면 "스크랩 대상 직접지정"으로 보완한다. */
+const AUTO_MATCH_LABEL = '자동 매칭'
 
 /**
  * 마이그레이션 하위 메뉴 첫 번째 — "기준 Master 테이블"의 컬럼 구성을 등록·편집한다. 거래처별로 따로
  * 가져가지 않는 시스템 전체 단일 기준 테이블이다(master_schema_fields, 거래처 구분 없음).
- * 기준(product_master) 고정 컬럼 중 스크래핑 원본(mall_products)에 그대로 대응되는 건 자동 매칭 배지로,
- * 대응이 없는 건("직접 입력 필요") 후속 절차(Transform/연속관리 등)에서 채워야 함을 한눈에 보여준다.
+ * 모든 컬럼을 동등한 고정 컬럼·자동 매칭 대상으로 다룬다 — 값을 못 찾은 컬럼은 비워두고, 필요하면
+ * 스크래핑 화면의 "스크랩 대상 직접지정"으로 사용자가 직접 보완한다.
  * 컬럼별 실제 마이그레이션 방식(AI 생성/값 매핑/그대로 복사/합성)은 몰마다 원본 데이터가 달라
  * 마이그레이션2_Transform에서 몰을 고른 뒤 설정한다 — 여기서는 스키마(컬럼 목록) 자체만 관리한다.
  */
@@ -34,6 +30,8 @@ export function MasterSchemaPanel() {
   const [saved, setSaved] = useState(false)
   const lastRowRef = useRef<HTMLTableRowElement | null>(null)
   const pendingScroll = useRef(false)
+  // 필드 키 입력이 포커스를 받을 때의 값 — 원래 고정 필드 키를 실제로 바꾼 채 blur했는지 판단하는 기준.
+  const editingKeyRef = useRef('')
 
   // 방금 추가한 커스텀 필드가 목록 맨 아래로 들어가면 안 보일 수 있어, 렌더된 직후 그 행으로 스크롤한다.
   useEffect(() => {
@@ -67,7 +65,7 @@ export function MasterSchemaPanel() {
     setDragKey(null)
   }
   function addCustomField() {
-    setFields(prev => [...prev, { field_key: `custom_${prev.length + 1}`, field_label: '', is_custom: true }])
+    setFields(prev => [...prev, { field_key: `field_${prev.length + 1}`, field_label: '', is_custom: true }])
     pendingScroll.current = true
   }
   function addAllFixedFields() {
@@ -112,8 +110,8 @@ export function MasterSchemaPanel() {
         <h1 className="text-2xl font-bold text-gray-800">🧱 기준 Master 테이블 관리</h1>
         <p className="text-xs text-gray-400 mt-1">
           거래처 구분 없이 시스템 전체가 공유하는 단일 &quot;기준 Master DB&quot; 컬럼 구성을 여기서 등록·편집합니다.
-          각 컬럼이 스크래핑 원본에서 자동으로 채워지는지, 아니면 후속 절차(Transform 등)로 직접 채워야 하는지
-          매칭 배지로 바로 확인할 수 있습니다.
+          모든 컬럼은 동등한 고정 컬럼이며, 스크래핑 시 자동으로 값 매칭을 먼저 시도합니다 — 값을 못 찾으면
+          비워두고, 필요하면 스크래핑 화면의 &quot;스크랩 대상 직접지정&quot;으로 직접 보완하면 됩니다.
         </p>
       </div>
 
@@ -124,7 +122,7 @@ export function MasterSchemaPanel() {
             📋 기본 컬럼 전체 추가
           </button>
           <button onClick={addCustomField} className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full transition-colors">
-            ➕ 커스텀 필드 추가
+            ➕ 필드 추가
           </button>
           <button onClick={saveFields} disabled={saving}
             className="ml-auto px-4 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
@@ -136,7 +134,10 @@ export function MasterSchemaPanel() {
           <p className="text-xs text-gray-400 mb-3">등록된 필드가 없습니다. 위 버튼으로 기본 컬럼을 채우거나 커스텀 필드를 추가해보세요.</p>
         ) : (
           <div className="border border-gray-100 rounded-xl overflow-hidden mb-3 flex-1 min-h-0 flex flex-col">
-            <p className="text-[11px] text-gray-400 bg-gray-50 px-3 py-1.5 border-b border-gray-100 shrink-0">⠿ 아이콘을 드래그하면 필드 순서를 바꿀 수 있습니다.</p>
+            <p className="text-[11px] text-gray-400 bg-gray-50 px-3 py-1.5 border-b border-gray-100 shrink-0">
+              ⠿ 아이콘을 드래그하면 필드 순서를 바꿀 수 있습니다. 필드 키는 모든 행에서 수정할 수 있으며,
+              원래 고정 컬럼 키를 바꾸는 경우엔 시스템 매핑에 영향을 줄 수 있어 한 번 더 확인합니다.
+            </p>
             <div className="overflow-auto flex-1 min-h-0">
               <table className="w-full text-xs border-collapse">
                 <thead className="sticky top-0 z-10 bg-gray-50">
@@ -151,7 +152,6 @@ export function MasterSchemaPanel() {
                 </thead>
                 <tbody>
                   {fields.map((f, i) => {
-                    const info = matchInfo(f)
                     return (
                       <tr key={i} ref={i === fields.length - 1 ? lastRowRef : undefined}
                         onDragOver={e => e.preventDefault()}
@@ -170,17 +170,27 @@ export function MasterSchemaPanel() {
                         </td>
                         <td className="px-3 py-2">
                           <input value={f.field_key} onChange={e => updateField(i, { field_key: e.target.value })}
-                            disabled={!f.is_custom}
-                            className="w-full border border-gray-200 rounded px-2 py-1 text-xs font-mono disabled:bg-gray-50 disabled:text-gray-400" />
+                            onFocus={e => { editingKeyRef.current = e.target.value }}
+                            onBlur={e => {
+                              const before = editingKeyRef.current
+                              if (!f.is_custom && e.target.value !== before) {
+                                const ok = confirm(
+                                  `"${before}"는 스크래핑 매핑·마이그레이션 등 시스템 여러 곳에서 이 문자열 그대로 참조하는 원래 고정 컬럼 키입니다.\n` +
+                                  `"${e.target.value}"로 바꾸면 그 매핑이 끊어져 값이 채워지지 않을 수 있습니다. 정말 변경하시겠습니까?`,
+                                )
+                                if (!ok) updateField(i, { field_key: before })
+                              }
+                            }}
+                            className="w-full border border-gray-200 rounded px-2 py-1 text-xs font-mono" />
                         </td>
                         <td className="px-3 py-2">
-                          <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${f.is_custom ? 'bg-violet-50 text-violet-600' : 'bg-sky-50 text-sky-600'}`}>
-                            {f.is_custom ? '커스텀' : '고정 컬럼'}
+                          <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-600">
+                            고정 컬럼
                           </span>
                         </td>
                         <td className="px-3 py-2">
-                          <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${info.matched ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
-                            {info.label}
+                          <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-600">
+                            {AUTO_MATCH_LABEL}
                           </span>
                         </td>
                         <td className="px-3 py-2">

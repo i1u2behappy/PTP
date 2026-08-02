@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useTabs } from './TabsContext'
 import { TAB_ICONS } from './icons'
 
-const TAB_WIDTH = 117
+// 메뉴명이 길면 한 줄 말줄임(...)으로 잘려 안 보이던 것을, 글자를 줄이고 2줄로 감싸 전체가 보이게 한다.
+const TAB_WIDTH = 128
 const MORE_WIDTH = 40
 const GAP = 4
 
@@ -51,7 +52,7 @@ export function TabBar() {
   }
 
   return (
-    <div ref={containerRef} className="h-11 w-full shrink-0 bg-white border-t border-slate-100 flex items-stretch px-2">
+    <div ref={containerRef} className="h-10 w-full shrink-0 bg-white border-t border-slate-100 flex items-stretch px-2">
       <div role="tablist" aria-label="열린 작업 탭" className="flex-1 min-w-0 flex items-stretch gap-1 overflow-hidden">
         {visibleTabs.map((tab, i) => {
           const isActive = tab.id === activeTabId
@@ -73,10 +74,11 @@ export function TabBar() {
               }}
               onClick={() => setActive(tab.id)}
               style={{ width: TAB_WIDTH }}
-              className={`group flex items-center gap-1.5 my-1.5 px-3 rounded-full text-sm shrink-0 transition-colors select-none cursor-pointer
+              className={`group relative flex items-start gap-1.5 my-0.5 pt-2 px-2.5 rounded-2xl text-sm shrink-0 transition-colors select-none cursor-pointer
                 ${isActive ? 'bg-teal-50 text-teal-700 font-semibold' : 'text-slate-600 font-medium hover:bg-slate-50 hover:text-slate-900'}`}>
+              {isActive && <span aria-hidden="true" className="absolute top-0 left-2 right-2 h-[3px] rounded-full bg-teal-500" />}
               <span aria-hidden="true" className="shrink-0">{Icon ? <Icon active={isActive} /> : tab.icon}</span>
-              <span className="whitespace-nowrap truncate min-w-0 flex-1">{tab.title}</span>
+              <span className="min-w-0 flex-1 text-[11px] leading-tight line-clamp-2 break-words">{tab.title}</span>
               {tab.closable && (
                 <button type="button" onClick={e => { e.stopPropagation(); closeTab(tab.id) }}
                   aria-label={`${tab.title} 탭 닫기`} tabIndex={-1}

@@ -68,6 +68,7 @@ export function SiteDetailPanel({ params }: Props) {
   const [mallReport, setMallReport] = useState<MallReport | null>(null)
   const [mallReportUpdatedAt, setMallReportUpdatedAt] = useState<string | null>(null)
   const [memo, setMemo] = useState('')
+  const [latestMemo, setLatestMemo] = useState<{ content: string; createdAt: string } | null>(null)
 
   useEffect(() => {
     fetch('/api/clients').then(r => r.json()).then((d: ClientOption[]) => { if (Array.isArray(d)) setClients(d) }).catch(() => {})
@@ -80,6 +81,7 @@ export function SiteDetailPanel({ params }: Props) {
       custom_name_selector: string | null; custom_price_selector: string | null; custom_thumbnail_selector: string | null
       auto_scrape_enabled: boolean; auto_scrape_hour: number | null; manual_login_required: boolean | null; main_items: string | null
       mall_report: MallReport | null; mall_report_updated_at: string | null; memo: string | null
+      latest_memo: { content: string; createdAt: string } | null
     }) => {
       setName(d.name || ''); setMainItems(d.main_items || ''); setUrl(d.url); setLoginUrl(d.login_url || ''); setLoginId(d.login_id || ''); setLoginPw(d.login_pw || '')
       setClientId(d.client_id ?? '')
@@ -89,6 +91,7 @@ export function SiteDetailPanel({ params }: Props) {
       setManualLoginRequired(d.manual_login_required)
       setMallReport(d.mall_report); setMallReportUpdatedAt(d.mall_report_updated_at)
       setMemo(d.memo || '')
+      setLatestMemo(d.latest_memo)
     }).finally(() => setLoading(false))
   }, [siteId, isNew])
 
@@ -160,6 +163,12 @@ export function SiteDetailPanel({ params }: Props) {
           </button>
         </div>
       </div>
+
+      {latestMemo?.content.startsWith('⚠') && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 mb-4 text-sm text-amber-700">
+          {latestMemo.content} <span className="text-xs text-amber-500">({formatDateTime(latestMemo.createdAt)})</span>
+        </div>
+      )}
 
       <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
         <div className="grid grid-cols-2 gap-3 mb-3">

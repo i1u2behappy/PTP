@@ -3,6 +3,7 @@ import pool from '@/lib/db'
 
 const ALLOWED = [
   'name_final', 'master_category', 'brand', 'manufacturer', 'origin', 'description', 'options', 'sales_code',
+  'internal_code', 'stock_status', 'stock_qty',
   'cost_price', 'list_price', 'sale_price', 'shipping_fee', 'other_cost', 'target_margin_rate', 'status',
 ]
 
@@ -34,6 +35,13 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   const vals: unknown[] = []
   for (const key of ALLOWED) {
     if (key in body) { vals.push(key === 'options' ? JSON.stringify(body[key]) : body[key]); sets.push(`${key}=$${vals.length}`) }
+  }
+  // 기준 마스터테이블관리에서 등록한 커스텀 필드(전용 컬럼이 없는 값)는 product_master.custom_fields
+  // JSONB에 담는다 — 통째로 갈아끼우면 여기서 안 보낸 다른 커스텀 값(스크랩 시 자동으로 채워진 값 등)이
+  // 지워지므로, 기존 값 위에 병합한다.
+  if (body.custom_fields && typeof body.custom_fields === 'object') {
+    vals.push(JSON.stringify(body.custom_fields))
+    sets.push(`custom_fields = COALESCE(custom_fields, '{}'::jsonb) || $${vals.length}::jsonb`)
   }
   if (!sets.length) return NextResponse.json({ error: 'no fields' }, { status: 400 })
   vals.push(id)

@@ -1,5 +1,6 @@
 import pool from '../db'
 import { profileMallStructure, profileMallStructureForScrape, type MallProfileSignals, type ScrapeOptions } from '../scraper'
+import { runAutoAnalysis } from './adjustment'
 
 function summarizeProfile(p: MallProfileSignals): string {
   return [
@@ -49,6 +50,9 @@ interface ProfileCheckResult {
   /** 기준정보가 이미 있었는데 이번에 달라진 점 — 최초 프로파일링이면 항상 빈 배열. */
   diffs: string[]
   isFirstTime: boolean
+  /** "몰 구조 파악" 직후 자동으로 채워진 추출규칙 필드명 — 미리보기/스크랩이 이제 이 몰의 구조를
+   *  실제로 참조한다는 것을 사용자가 확인할 수 있도록. deep=false(구조 변화 감지)에서는 항상 빈 배열. */
+  autoRuleFields: string[]
 }
 
 /** 새로 샘플링한 프로파일을 기준정보와 비교해 DB에 반영한다. 기준정보가 없으면 이번 결과를 기준으로
@@ -67,23 +71,25 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
   // 그대로 유지한다(사용자가 화면에서 이유도 모른 채 리포트 품질이 나빠지는 것을 방지).
   else if (next.report?.generatedBy === 'heuristic' && prev?.report?.generatedBy === 'ai') next.report = prev.report
 
+  // sampleProductPageText는 아래(runMallStructureReport)에서 추출규칙 자동생성에만 쓰는 임시 값 —
+  // 원문 그대로라 용량이 커 기준정보로 영구 저장하지 않는다.
   await pool.query(
     `UPDATE sites SET scrape_profile = $1, scrape_profile_updated_at = NOW() WHERE id = $2`,
-    [JSON.stringify(next), siteId],
+    [JSON.stringify({ ...next, sampleProductPageText: undefined }), siteId],
   )
 
   // "몰 구조 파악"(deep)은 site_memos("운영 메모")에 아무것도 쓰지 않는다 — 운영 메모는 사용자가 직접
   // 기록·수정하는 공간으로 두고, 이 결과는 SiteDetailPanel이 sites.scrape_profile에서 직접 읽어 운영
   // 메모 아래에 "최근 1건"짜리 참고용 표시로만 보여준다(사용자가 그 내용을 보고 필요한 걸 운영 메모에
   // 직접 옮겨 적는 용도). 로그인 확인 전용 "구조 변경 감지" 메모와도 완전히 분리된다.
-  if (deep) return { signals: next, diffs: [], isFirstTime: !prev }
+  if (deep) return { signals: next, diffs: [], isFirstTime: !prev, autoRuleFields: [] }
 
   if (!prev) {
     await pool.query(
       `INSERT INTO site_memos (site_id, content) VALUES ($1, $2)`,
       [siteId, `🔍 상품페이지 구조 파악 완료 (샘플 ${next.sampleCount}건): ${summarizeProfile(next)}`],
     )
-    return { signals: next, diffs: [], isFirstTime: true }
+    return { signals: next, diffs: [], isFirstTime: true, autoRuleFields: [] }
   }
 
   const diffs = describeDiff(prev, next)
@@ -93,18 +99,32 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
       [siteId, `⚠ 상품페이지 구조 변경 감지: ${diffs.join(' / ')}`],
     )
   }
-  return { signals: next, diffs, isFirstTime: false }
+  return { signals: next, diffs, isFirstTime: false, autoRuleFields: [] }
 }
 
 /**
  * "몰 구조 파악" 버튼 전용 — 결제계좌/택배사/업체연락처/URL 계층 등 거래정보를 AI로 분석한다(deep=true).
  * runMallProfileCheckForScrape(구조 변화 감지 전용)와는 용도가 다르다: 사용자가 직접
  * "각각 다른 용도로 파악하고 리포팅"하도록 분리해달라고 확정함.
+ *
+ * 파악만 하고 끝나면 미리보기/스크랩은 여전히 예전 sites.extraction_rules만 보고 도는 채로 남아
+ * 이 결과가 실제로 반영되지 않는 문제가 있었다(사용자 지적: "몰구조파악 한 내용은 이후 미리보기나
+ * 스크래핑 할 때 반드시 참조가 되어야해") — AI모드를 켜거나 "스크랩 조정"을 따로 눌러야만 참조되던
+ * 것을, 몰 구조 파악 직후 자동으로 runAutoAnalysis(기존 값이 있는 필드는 덮어쓰지 않음)를 돌려
+ * sites.extraction_rules를 즉시 채운다 — 이후 모든 미리보기/스크랩이 자동으로 이 규칙을 쓴다.
  */
 export async function runMallStructureReport(siteId: number): Promise<ProfileCheckResult | null> {
   const next = await profileMallStructure(siteId, true)
   if (!next) return null
-  return applyProfileResult(siteId, next, true)
+  const result = await applyProfileResult(siteId, next, true)
+
+  if (next.sampleProductPageText) {
+    try {
+      const { rules } = await runAutoAnalysis(siteId, next.sampleProductPageText)
+      result.autoRuleFields = Object.keys(rules)
+    } catch { /* Gemini 호출 실패 등 — 몰 구조 파악 자체는 이미 성공했으니 결과를 막지 않는다 */ }
+  }
+  return result
 }
 
 /**

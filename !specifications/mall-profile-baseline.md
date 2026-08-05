@@ -724,3 +724,81 @@ INSERT/DELETE 방식은 폐기.
 ### 상태
 
 **완료 (2026-08).**
+
+## 진짜양말 실사용 — 랜딩 페이지 상품 0건 + 카테고리 링크 순회 발견 + 몰구조파악→추출규칙 자동연결 (2026-08-05)
+
+사용자가 진짜양말(jinzzaocks.net, 카페24)에서 처음 "몰 구조 파악"을 돌려보고 세 가지를 순서대로 제보했다:
+"별 정보가 없어, 카테고리 구조도 안 나오고" → (1차 수정 후) "카테고리가 '사은품양말' 만 나오는데" →
+이어서 "몰구조파악 한 내용은 이후 미리보기나 스크래핑 할 때 반드시 참조가 되어야해".
+
+### 원인 1 — 등록된 몰 URL이 배너 전용 랜딩 페이지
+
+`sites.scrape_profile`을 직접 조회해 원인을 확인: `sampleCount: 1`, `sampleProductUrl`이 상품이 아니라
+홈페이지(`https://jinzzaocks.net/`) 자체였다. 이 몰의 홈페이지는 이미지 메뉴/배너만 있고 상품 링크가
+0개(실제 상품은 `#category` 메뉴를 눌러 들어간 `/product/list.html?cate_no=...`에만 있음) — 기존
+`sampleMallProfile`은 상품이 0개면 그냥 포기하고 "홈페이지 자체를 상품 1건"으로 취급해 카테고리/옵션/
+재고 등 거의 모든 신호가 비어버렸다.
+
+**수정**: `findCategoryLinkCandidates(page)`(신규, `lib/scraper.ts`) — `scanCategoryMenu`와 같은 후보
+영역(`[class*="cat"]`/`lnb`/`snb`/`ovmenu`/`gnb`/`nav`)에서 이번엔 이름이 아니라 링크(href)를 모은다.
+시작 페이지에서 상품이 0개면 이 후보 링크들을 실제로 열어 `collectProductUrls`를 재시도한다. 실제
+사이트로 검증: `#category` 메뉴 후보 중 `cate_no=523`으로 들어가니 상품 480개 + 카테고리 라벨("홈 >
+업데이트")이 정상 인식됨을 확인.
+
+### 원인 2 — 카테고리가 "사은품양말" 하나로만 쏠림
+
+원인 1 수정 후 재확인 결과, 후보 링크 하나(`cate_no=406`, "사은품양말")에서 첫 성공을 거두면 그 자리에서
+`break`하고 샘플 6건을 전부 그 카테고리에서만 채우고 있었다 — 게다가 이 몰의 헤더 메뉴는 `alt` 없는
+이미지 스프라이트(`menu_01.gif`처럼 파일명도 무의미)라 `scanCategoryMenu`의 텍스트 기반 스캔은 애초에
+`categoryMenuNames: []`로 아무것도 못 읽었고, 유일한 대체 신호였던 샘플 브레드크럼(`categoryPaths`)마저
+한 카테고리로 몰려 리포트의 "카테고리 구조"가 "사은품양말" 하나로만 나왔다.
+
+**근본 수정 — 메뉴를 못 읽어도 "링크"는 있다는 점을 이용**: `discoverCategoriesByVisitingLinks(page,
+links)`(신규, `lib/scraper.ts`) — 메뉴 자체가 이미지/아이콘이라 이름을 못 읽어도, `findCategoryLinkCandidates`로
+얻은 링크로 실제 들어가 그 목록 페이지가 사용자에게 보여주는 카테고리 라벨(브레드크럼/타이틀, 사람이
+봐야 하니 메뉴와 달리 거의 항상 실제 텍스트)을 `detectCategoryLabel`로 읽어 대신 채운다.
+`scanCategoryMenu`가 빈 배열을 반환하는 deep 호출에서만 실행(무거운 작업이라 로그인 확인/스크랩 시작의
+가벼운 체크에서는 안 함). 실제 사이트로 검증: 후보 링크 15개(`findCategoryLinkCandidates`의 상한을
+8→15로 확대)를 전부 방문해 **업데이트/사은품양말/남자양말/여자양말/아동양말/면 100%양말/겨울양말/
+브랜드양말/땡처리/깔창/기모바지/아이스바지/시즌잡화/양말주문제작/양말선물세트** 15개 카테고리를 정확히
+읽어냄을 확인 — 이 기법은 메뉴가 이미지든 JS 렌더링이든 아이콘 폰트든 "링크"만 있으면 통하는 범용
+기법이라 다른 몰에도 일반적으로 적용된다.
+
+**곁들여**: 상품 0건 재시도(원인 1) 자체도 첫 성공 후보에서 멈추지 않고, 후보마다 최대 2건씩만 담아
+여러 카테고리에 걸쳐 6건을 채우도록 바꿨다. 또한 이 두 수정을 넣으며 순서 버그도 같이 고쳤다 — 카테고리
+메뉴/후보 스캔(`scanCategoryMenu`/`findCategoryLinkCandidates`/`discoverCategoriesByVisitingLinks`)과
+`gatherMallContextText`는 반드시 시작 페이지(`startUrl`)에서 먼저 끝내야 하는데, 원인 1의 첫 구현이
+상품 재시도를 그보다 앞에 둬서 페이지가 이미 다른 곳으로 이동한 뒤에 메뉴를 스캔하려던 버그가 있었다 —
+스캔류를 전부 먼저 하도록 순서를 바로잡았다.
+
+### 자동연결 — "몰구조파악" 결과가 미리보기/스크랩에 반드시 참조되도록
+
+사용자 지적: "몰구조파악 한 내용은 이후 미리보기나 스크래핑 할 때 반드시 참조가 되어야해." 기존엔
+`scrape_profile`이 "AI모드" 토글을 켠 상품이나 "스크랩 조정"을 따로 눌렀을 때만 AI 프롬프트 컨텍스트로
+쓰였을 뿐, 정작 모든 미리보기/스크랩이 실제로 읽는 `sites.extraction_rules`에는 자동으로 반영되지
+않았다. 사용자가 두 방식(① 몰구조파악 직후 자동 추출규칙 생성 vs ② 스크래핑 로직 자체를 구조 신호
+인지형으로 ) 중 ①(추천)을 선택.
+
+- `lib/scrape/mallProfile.ts`의 `runMallStructureReport`(=="몰 구조 파악" 버튼)가 프로파일링 직후
+  `runAutoAnalysis(siteId, sampleProductPageText)`("AI모드 스크래핑"이 쓰던 것과 동일한 함수, Gemini)를
+  호출해 `sites.extraction_rules`의 빈 필드만 채운다 — 이미 값이 있는 필드(사람이 확정했거나 이전 AI
+  분석이 채운 것)는 덮어쓰지 않는다(`runAutoAnalysis` 기존 규칙 그대로 재사용). 이후 모든 미리보기/스크랩은
+  `extraction_rules`를 그대로 읽으므로, "AI모드" 토글이나 "스크랩 조정" 클릭 없이도 자동 반영된다.
+- `lib/scraper.ts`의 `MallProfileSignals`에 `sampleProductPageText?: string`(deep 전용, 첫 성공 샘플의
+  원문) 추가 — 규칙 생성에만 쓰고 `scrape_profile`에는 저장하지 않는다(`applyProfileResult`가
+  `JSON.stringify({ ...next, sampleProductPageText: undefined })`로 제외, JSON.stringify는 undefined
+  값 키를 자동으로 뺀다).
+- `ProfileCheckResult`에 `autoRuleFields: string[]` 추가, `ScraperPanel.tsx` 결과 카드에 "✓ 추출규칙
+  자동 생성됨: name, price, ..." 배지를 추가해 실제 반영 여부를 화면에서 바로 확인 가능하게 했다.
+
+### 검증
+
+`tsc --noEmit`/`eslint` 변경 파일 전체 통과. 진짜양말 실제 사이트로 두 원인 모두 재현·확인(카테고리
+링크 드릴인 480개 상품/"홈 > 업데이트" 라벨 확인, 링크 순회로 15개 카테고리 전부 확인). 자동
+추출규칙연결(`runAutoAnalysis` 호출)은 기존에 이미 검증된 함수를 재사용하는 조합이라 개별 요소는
+검증됐지만, 실제 로그인 세션으로 버튼을 눌러 전체 파이프라인이 끝까지 도는 것까지는 확인 못함 — 다음
+"몰 구조 파악" 실행 시 결과 카드의 "추출규칙 자동 생성됨" 배지로 확인 필요.
+
+### 관련 파일
+
+**수정**: `lib/scraper.ts`, `lib/scrape/mallProfile.ts`, `components/panels/ScraperPanel.tsx`

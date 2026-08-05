@@ -199,6 +199,7 @@ interface ProfileCheckResult {
   signals: MallProfileSignals
   diffs: string[]
   isFirstTime: boolean
+  autoRuleFields: string[]
 }
 
 /** 개발자모드(크롬 확장) 몰의 새 세션 감지용 — /api/sessions?siteId= 응답 중 필요한 필드만. */
@@ -1132,6 +1133,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 <ul className="mb-3 text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2 space-y-0.5">
                   {profileResult.diffs.map(d => <li key={d}>· {d}</li>)}
                 </ul>
+              )}
+              {profileResult.autoRuleFields.length > 0 && (
+                <p className="mb-3 text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2">
+                  ✓ 이 결과로 추출규칙 자동 생성됨: {profileResult.autoRuleFields.join(', ')} — 이후 미리보기/스크랩부터 바로 적용됩니다.
+                </p>
               )}
               {profileResult.signals.report ? (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">

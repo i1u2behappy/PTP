@@ -764,6 +764,10 @@ export interface MallProfileSignals {
    *  수집한 원문(홈 하단 회사정보 + 이용안내·공지 등 게시판 + 상품페이지) 기반으로 AI가 요약한 리포트.
    *  ANTHROPIC_API_KEY 미설정이거나 원문을 하나도 못 모았으면 null. */
   report: MallStructureReport | null
+  /** deep 호출에서 첫 성공 샘플의 원문(product page innerText) — "몰 구조 파악" 직후 자동으로
+   *  추출규칙(runAutoAnalysis)을 생성할 때만 쓰고 DB에는 저장하지 않는다(applyProfileResult에서 제외).
+   *  가벼운 구조변화감지(deep=false)에서는 항상 undefined. */
+  sampleProductPageText?: string
 }
 
 const MALL_PROFILE_SAMPLE_SIZE = 6
@@ -1406,19 +1410,53 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
     platform = collected.platform
     categoryByUrl = collected.categoryByUrl
   } catch { /* 카탈로그로 인식되지 않으면 아래에서 현재 페이지를 상품 페이지 1건으로 취급 */ }
-  if (!sampleUrls.length) sampleUrls = [startUrl]
-  // 카탈로그로 인식되지 않아 platform이 못 잡혔으면(위 예외로 빠진 경우), 지금 보고 있는 페이지 자체에서
-  // 다시 감지한다 — 상품 상세페이지도 플랫폼 감지에 필요한 generator/스크립트 태그는 대부분 그대로 갖고 있다.
-  if (platform === 'unknown') platform = await detectMallPlatform(page).catch(() => 'unknown' as MallPlatform)
-  // 아직 상품 샘플로 이동하기 전(현재 page가 startUrl), 헤더 내비게이션에서 전체 카테고리 메뉴를 스캔한다 —
-  // 이동 후엔 이 몰의 헤더가 안 보일 수 있어 반드시 여기서 먼저 해야 한다.
-  const categoryMenuNames = await scanCategoryMenu(page)
+
+  // 아직 페이지 이동 전(현재 page가 startUrl) — 카테고리 메뉴/후보 링크 스캔은 반드시 여기서 먼저 한다.
+  // 아래(랜딩 페이지 재시도)가 실제로 페이지를 이동시키므로, 이동 후로 미루면 이 몰의 헤더가 안 보일 수 있다.
+  const categoryLinkCandidates = await findCategoryLinkCandidates(page)
+  let categoryMenuNames = await scanCategoryMenu(page)
+  // 메뉴가 텍스트로 못 읽는 형태(이미지 스프라이트 등, 실사용 확인: 진짜양말)면, 후보 링크로 실제 들어가
+  // 그 목록 페이지 자신의 카테고리 라벨을 대신 읽는다(discoverCategoriesByVisitingLinks 참고). 페이지를
+  // 여러 번 더 열어야 해 무거운 작업이라 deep("몰 구조 파악" 버튼)에서만 한다.
+  if (deep && !categoryMenuNames.length && categoryLinkCandidates.length) {
+    categoryMenuNames = await discoverCategoriesByVisitingLinks(page, categoryLinkCandidates)
+    await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+  }
   // 같은 이유로, 상품 샘플로 이동하기 전에 지금 페이지(홈/목록)의 하단 회사정보와 이용안내·공지 등
   // 게시판 링크를 먼저 훑어 원문을 모아둔다 — 결제계좌/택배사/연락처는 상품페이지가 아니라 이런 정적
   // 페이지에 있다(실사용 몰 확인됨). deep(=="몰 구조 파악" 버튼)에서만 하는 무거운 작업이라 로그인
   // 확인/스크랩 시작마다 도는 가벼운 체크에서는 건너뛴다. 페이지 이동이 있어 시간이 들 수 있어 실패해도
   // 나머지 흐름은 계속한다.
   const contextText = deep ? await gatherMallContextText(page).catch(() => '') : ''
+
+  // 등록된 몰 URL이 배너/메뉴만 있는 랜딩 페이지라 상품 링크가 0개인 몰도 있다(실사용 확인: 진짜양말 —
+  // 홈페이지엔 이미지 스프라이트 메뉴만 있고 상품은 그 메뉴를 눌러 들어간 카테고리 목록에만 있음). 그대로
+  // 포기하면 홈페이지 자체를 "상품 1건"으로 취급해 카테고리/옵션/재고 등 거의 모든 신호가 비어버리므로,
+  // 위에서 찾은 카테고리 후보 링크를 몇 개 따라 들어가 재시도한다. 후보 하나에서만 다 채우면 그 카테고리
+  // 하나로 구조가 쏠려버리므로(실사용 확인: "사은품양말"만 나옴), 후보마다 최대 2건씩만 담아 여러
+  // 카테고리에 걸쳐 샘플링한다.
+  if (!sampleUrls.length) {
+    const urls: string[] = []
+    const mergedByUrl = new Map<string, CategoryLabel>()
+    for (const link of categoryLinkCandidates) {
+      if (urls.length >= MALL_PROFILE_SAMPLE_SIZE) break
+      try {
+        const collected = await collectProductUrls(page, { url: link, maxPages: 1 })
+        platform = collected.platform
+        for (const u of collected.urls.slice(0, 2)) {
+          if (urls.length >= MALL_PROFILE_SAMPLE_SIZE || urls.includes(u)) continue
+          urls.push(u)
+          const label = collected.categoryByUrl.get(u)
+          if (label) mergedByUrl.set(u, label)
+        }
+      } catch { /* 이 후보 링크가 안되면 다음 후보로 */ }
+    }
+    if (urls.length) { sampleUrls = urls; categoryByUrl = mergedByUrl }
+  }
+  if (!sampleUrls.length) sampleUrls = [startUrl]
+  // 카탈로그로 인식되지 않아 platform이 못 잡혔으면(위 예외로 빠진 경우), 지금 보고 있는 페이지 자체에서
+  // 다시 감지한다 — 상품 상세페이지도 플랫폼 감지에 필요한 generator/스크립트 태그는 대부분 그대로 갖고 있다.
+  if (platform === 'unknown') platform = await detectMallPlatform(page).catch(() => 'unknown' as MallPlatform)
 
   const signals: MallProfileSignals = {
     sampleCount: 0, platform, sampleProductUrl: sampleUrls[0], hasMainImages: false, hasDetailImages: false,
@@ -1462,6 +1500,7 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
         const imageHints = await page.evaluate(collectImageHintsScript, null).catch(() => [] as string[])
         productContextText = `[샘플 상품페이지: ${url}]\n${bodyText.replace(/\s+/g, ' ').trim().slice(0, 4_000)}`
           + (imageHints.length ? `\n\n[샘플 상품페이지 이미지 설명/파일명]\n${imageHints.join(', ')}` : '')
+        signals.sampleProductPageText = bodyText
       }
     } catch { /* 개별 샘플 실패는 건너뛰고 다음 샘플로 */ }
   }
@@ -1753,6 +1792,56 @@ async function scanCategoryMenu(page: Page): Promise<string[]> {
     }
     return []
   }).catch(() => [])
+}
+
+/** 시작 페이지에 상품 링크가 0개일 때(배너 전용 랜딩 페이지) 따라 들어가볼 카테고리 후보 링크를 모은다.
+ *  scanCategoryMenu와 같은 후보 영역(cat/lnb/snb/ovmenu/gnb/nav)을 쓰되, 이름이 아니라 링크(href)를 모은다
+ *  — 메뉴가 이미지 스프라이트(alt 없음)라 이름은 못 뽑아도 링크는 href로 그대로 얻을 수 있다. */
+async function findCategoryLinkCandidates(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const TIERS = [
+      '[class*="cat" i], [id*="cat" i]',
+      '[class*="lnb" i], [id*="lnb" i], [class*="snb" i], [id*="snb" i], [class*="ovmenu" i]',
+      '[class*="gnb" i], [id*="gnb" i], nav',
+    ]
+    const origin = location.origin
+    const current = location.href.replace(/\/+$/, '')
+    const seen = new Set<string>()
+    const result: string[] = []
+    for (const tier of TIERS) {
+      let roots: Element[]
+      try { roots = Array.from(document.querySelectorAll(tier)) } catch { continue }
+      for (const root of roots) {
+        Array.from(root.querySelectorAll('a[href]')).forEach(a => {
+          const href = (a as HTMLAnchorElement).href
+          if (!href.startsWith(origin)) return
+          const norm = href.replace(/\/+$/, '')
+          if (norm === current || norm === origin || seen.has(norm)) return
+          seen.add(norm)
+          result.push(href)
+        })
+      }
+      if (result.length) return result.slice(0, 15)
+    }
+    return result
+  }).catch(() => [])
+}
+
+/** scanCategoryMenu가 메뉴 텍스트를 못 읽을 때(이미지 스프라이트/아이콘 폰트 메뉴 등이라 <li> 안에 글자가
+ *  전혀 없는 경우, 실사용 확인: 진짜양말 — alt 없는 메뉴 이미지라 이름이 마크업 어디에도 없음)의 대안이다.
+ *  메뉴 자체는 못 읽어도 "링크"(href)는 findCategoryLinkCandidates로 얻을 수 있으니, 그 링크로 실제
+ *  들어가 목적지 목록 페이지 자신이 보여주는 카테고리 라벨(브레드크럼/타이틀 — 사용자가 봐야 하는 화면이라
+ *  메뉴와 달리 거의 항상 실제 텍스트로 존재한다)을 detectCategoryLabel로 읽어 대신 채운다. */
+async function discoverCategoriesByVisitingLinks(page: Page, links: string[]): Promise<string[]> {
+  const names = new Set<string>()
+  for (const link of links) {
+    try {
+      await page.goto(link, { waitUntil: 'load', timeout: 15_000 })
+      const { category } = await detectCategoryLabel(page)
+      if (category) names.add(category)
+    } catch { /* 이 링크가 안되면 다음 링크로 */ }
+  }
+  return [...names]
 }
 
 interface CategoryLabel {

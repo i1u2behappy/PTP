@@ -32,3 +32,12 @@ input[type='checkbox'], input[type='radio'] {
 .animate-pulse-glow {
   animation: pulse-glow 1.2s ease-in-out infinite;
 }
+
+/* 클릭이 실제로 먹혔는지 안 보여 답답하다는 피드백 — 앱 전체 버튼에 눌림 피드백을 한 번에 적용 */
+button:not(:disabled) {
+  transition: transform .08s ease, opacity .08s ease;
+}
+button:not(:disabled):active {
+  transform: scale(0.96);
+  opacity: 0.75;
+}

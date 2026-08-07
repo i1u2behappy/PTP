@@ -249,6 +249,23 @@ export function getOpenPageUrl(siteId: number): string | null {
 }
 
 /**
+ * "로그인 확인" 시 로그인 창을 등록해둔 몰 URL로 이동시킨다 — 로그인 후 랜딩된 페이지(마이페이지 등)가
+ * 로그인 URL과 다른 몰(예: 시즌백)에서는 로그인 확인 후에도 스크랩 대상 페이지가 아닌 곳에 머물러 있었다.
+ * 새 탭을 열지 않고 기존 탭을 재사용한다(startElementPicker와 동일한 이유 — 탭이 계속 쌓이는 문제 방지).
+ */
+export async function navigateOpenPageTo(siteId: number, url: string): Promise<string | null> {
+  const context = openSessions.get(siteId)
+  if (!context) return null
+  const pages = context.pages()
+  const page = pages.length ? pages[pages.length - 1] : await context.newPage()
+  if (page.url() !== url) {
+    await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+  }
+  await page.bringToFront().catch(() => {})
+  return page.url()
+}
+
+/**
  * 미리보기 화면의 "열기" 버튼처럼, 로그인된 상태로 특정 상품 페이지를 확인하고 싶을 때 쓴다. 로그인 창이
  * 열려있으면 그 창(세션 쿠키를 가진 그 브라우저)에 새 탭을 띄워 이동시킨다. 사용자가 창을 닫아 열려있는
  * 로그인 창이 없어도, 같은 프로필 디렉터리에 남아있는 예전 로그인 쿠키를 그대로 재사용해 새 창을 띄운다
@@ -2163,10 +2180,17 @@ export interface CatalogItemEvent {
   error?: string
 }
 
+export interface ConcurrencyLogEntry {
+  at: string
+  level: number
+  reason: 'ramp_up' | 'block_detected'
+}
+
 export interface CatalogScrapeSummary {
   total: number
   saved: number
   stopped: boolean
+  concurrencyLog: ConcurrencyLogEntry[]
 }
 
 /** 목록 페이지(들)에서 제품 URL 수집 후 각각 스크랩. 카테고리 여러 개 + 페이지네이션 + 중지 + 이미 스크랩한 상품 제외 + 동시 처리 지원 */
@@ -2202,11 +2226,11 @@ export async function scrapeCatalogPage(
       await applyStockByOption(page, product)
       if (product.price == null && !product.thumbnail_urls.length) {
         await onItem({ done: 0, total: 0, url: singleUrl, result: null, error: '상품 링크를 찾지 못함 (카테고리도 개별 상품도 아닌 것으로 추정)' })
-        return { total: 0, saved: 0, stopped: false }
+        return { total: 0, saved: 0, stopped: false, concurrencyLog: [] }
       }
       const result: ScrapeResult = { sourceUrl: singleUrl, product }
       await onItem({ done: 1, total: 1, url: singleUrl, result })
-      return { total: 1, saved: 1, stopped: false }
+      return { total: 1, saved: 1, stopped: false, concurrencyLog: [] }
     }
 
     let saved = 0
@@ -2214,10 +2238,20 @@ export async function scrapeCatalogPage(
     let stopped = false
     let lastError: unknown = null
     let cursor = 0
-    const concurrency = Math.max(1, Math.min(opts.concurrency || 1, 8))
 
-    async function scrapeOne(workerPage: Page, pUrl: string): Promise<ScrapeResult | null> {
+    // 적응형 동시성(AIMD, TCP 혼잡제어와 같은 원리) — 몰마다 안전한 동시 요청 수가 달라 사용자가 직접
+    // 숫자를 고르게 하던 것을 대체한다. 1(가장 안전)부터 시작해 연속 성공이 쌓이면 서서히 올리고, 차단으로
+    // 추정되는 응답(아래 scrapeOne의 "차단 또는 일시 오류로 추정" 판정)이 나오면 즉시 1로 낮추고 잠시 쉰다.
+    // ponytail: RAMP_UP_STREAK/MAX_CONCURRENCY/쿨다운 값은 임의로 정한 안전 마진 — 실제로 몰별 반응을 보며 조정.
+    const MAX_CONCURRENCY = 8
+    const RAMP_UP_STREAK = 5
+    let activeLimit = 1
+    let okStreak = 0
+    const concurrencyLog: ConcurrencyLogEntry[] = []
+
+    async function scrapeOne(workerPage: Page, pUrl: string): Promise<{ result: ScrapeResult | null; blocked: boolean }> {
       let lastProduct: ExtractedProduct | null = null
+      let blocked = false
       for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
         try {
           await workerPage.goto(pUrl, { waitUntil: 'load', timeout: 30_000 })
@@ -2237,10 +2271,11 @@ export async function scrapeCatalogPage(
           // 가격과 이미지가 둘 다 없으면 실제 상품 페이지가 아니라 봇 차단/오류 안내 페이지를 받았을 가능성이
           // 높다 (빠른 연속 요청을 감지해 안내 페이지로 대신 응답하는 몰이 있음) — 그대로 저장하지 않고 재시도한다.
           if (product.price == null && product.cost_price == null && !product.thumbnail_urls.length) {
+            blocked = true
             throw new Error('가격/이미지를 모두 찾지 못함 (차단 또는 일시 오류로 추정)')
           }
           applyCategoryOverride(product, categoryByUrl.get(pUrl), opts.extractionRules)
-          return { sourceUrl: pUrl, product }
+          return { result: { sourceUrl: pUrl, product }, blocked: false }
         } catch (err) {
           lastError = err
           if (attempt < RETRY_COUNT) await sleep(2_000 * (attempt + 1) + Math.random() * 2_000)
@@ -2250,21 +2285,43 @@ export async function scrapeCatalogPage(
         const aiProduct = await tryAiFallback(workerPage, lastProduct)
         if (aiProduct) {
           applyCategoryOverride(aiProduct, categoryByUrl.get(pUrl), opts.extractionRules)
-          return { sourceUrl: pUrl, product: aiProduct }
+          return { result: { sourceUrl: pUrl, product: aiProduct }, blocked }
         }
       }
-      return null
+      return { result: null, blocked }
     }
 
-    async function worker(workerPage: Page) {
+    async function worker(workerIndex: number, workerPage: Page) {
       while (true) {
         if (isStopRequested(opts.sessionId)) { stopped = true; return }
+        // 이 워커의 순번이 현재 활성 한도보다 높으면(아직 한도가 안 올라왔거나 방금 차단으로 낮아졌으면)
+        // 새 탭을 열어둔 채로 대기만 한다 — 한도가 올라오면 자동으로 다시 작업을 받는다.
+        while (workerIndex >= activeLimit) {
+          if (isStopRequested(opts.sessionId)) { stopped = true; return }
+          if (cursor >= productUrls.length) return
+          await sleep(500)
+        }
         const i = cursor++
         if (i >= productUrls.length) return
         if (i > 0) await throttle(opts.delayMs)
 
         const pUrl = productUrls[i]
-        const result = await scrapeOne(workerPage, pUrl)
+        const { result, blocked } = await scrapeOne(workerPage, pUrl)
+        if (blocked) {
+          okStreak = 0
+          if (activeLimit > 1) {
+            activeLimit = 1
+            concurrencyLog.push({ at: new Date().toISOString(), level: 1, reason: 'block_detected' })
+            await sleep(5_000) // 차단 감지 시 바로 다음 상품으로 넘어가지 않고 잠시 쉬어 몰의 rate-limit이 풀릴 시간을 준다
+          }
+        } else if (result) {
+          okStreak++
+          if (okStreak >= RAMP_UP_STREAK && activeLimit < MAX_CONCURRENCY) {
+            activeLimit++
+            okStreak = 0
+            concurrencyLog.push({ at: new Date().toISOString(), level: activeLimit, reason: 'ramp_up' })
+          }
+        }
         if (result) saved++
         done++
         await onItem({
@@ -2274,11 +2331,11 @@ export async function scrapeCatalogPage(
       }
     }
 
-    const workerCount = Math.min(concurrency, productUrls.length || 1)
+    const workerCount = Math.min(MAX_CONCURRENCY, productUrls.length || 1)
     const workerPages = await Promise.all(
       Array.from({ length: workerCount }, (_, idx) => (idx === 0 ? page : context.newPage())),
     )
-    await Promise.all(workerPages.map(p => worker(p)))
+    await Promise.all(workerPages.map((p, idx) => worker(idx, p)))
     await Promise.all(workerPages.slice(1).map(p => p.close().catch(() => {})))
 
     if (opts.sessionId !== undefined) stopRequests.delete(opts.sessionId)
@@ -2288,7 +2345,82 @@ export async function scrapeCatalogPage(
       throw new Error(`상품 링크 ${productUrls.length}개를 찾았지만 모두 추출에 실패했습니다: ${reason}`)
     }
 
-    return { total: productUrls.length, saved, stopped }
+    return { total: productUrls.length, saved, stopped, concurrencyLog }
+  })
+}
+
+export interface RecheckTarget {
+  id: number
+  sourceUrl: string
+  mallProductCode: string
+}
+
+export interface RecheckResult {
+  mallProductId: number
+  mallProductCode: string
+  /** null이면 확인 실패 — error 참고. 몰 페이지가 가격/이미지 둘 다 없으면 품목삭제(또는 차단)로 추정한다. */
+  product: ExtractedProduct | null
+  error?: string
+}
+
+/**
+ * "마이그레이션3_연속관리"의 컬럼별 재수집(현재 상태 체킹) 전용 — 이미 확정된 상품을 대상으로 몰에 다시
+ * 방문해 현재 값을 가볍게 확인한다(이미지 파일 다운로드는 하지 않는다 — 호출부가 필요한 컬럼만 비교/반영).
+ * scrapeCatalogPage와 같은 방식으로 컨텍스트를 한 번만 열어 여러 탭으로 동시에 처리한다 — 직접로그인
+ * 필수 몰은 withContext를 상품마다 새로 부르면 프로필 디렉터리 잠금 충돌이 나므로, 반드시 컨텍스트를
+ * 재사용해야 한다(scrapeSingleProduct를 여기서 그대로 여러 번 호출하지 않는 이유).
+ */
+export async function recheckMallProducts(opts: ScrapeOptions, targets: RecheckTarget[]): Promise<RecheckResult[]> {
+  return withContext(opts, async (page, context) => {
+    const results: RecheckResult[] = []
+    let cursor = 0
+    const concurrency = Math.max(1, Math.min(opts.concurrency || 4, 8))
+
+    async function recheckOne(workerPage: Page, target: RecheckTarget): Promise<RecheckResult> {
+      for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
+        try {
+          await workerPage.goto(target.sourceUrl, { waitUntil: 'load', timeout: 30_000 })
+          await loginIfNeeded(workerPage, { url: target.sourceUrl, ...opts })
+          if (opts.loginId && workerPage.url() !== target.sourceUrl) {
+            await workerPage.goto(target.sourceUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+          }
+          await waitForExtractableContent(workerPage)
+          const product = await extractProductRuleBased(workerPage, target.sourceUrl, undefined, opts.extractionRules)
+          const domOptions = await extractOptionsFromDom(workerPage)
+          if (domOptions.options.length) product.options = domOptions.options
+          if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
+          await applyStockByOption(workerPage, product)
+          // 가격/공급가/이미지가 전부 없으면 상품 페이지가 아니라 품목삭제(또는 차단) 안내 페이지로 추정
+          // (scrapeCatalogPage의 scrapeOne과 같은 판정 기준).
+          if (product.price == null && product.cost_price == null && !product.thumbnail_urls.length) {
+            throw new Error('가격/이미지를 모두 찾지 못함 (품목삭제 또는 차단으로 추정)')
+          }
+          return { mallProductId: target.id, mallProductCode: target.mallProductCode, product }
+        } catch (err) {
+          if (attempt < RETRY_COUNT) { await sleep(2_000 * (attempt + 1)); continue }
+          return { mallProductId: target.id, mallProductCode: target.mallProductCode, product: null, error: err instanceof Error ? err.message : String(err) }
+        }
+      }
+      return { mallProductId: target.id, mallProductCode: target.mallProductCode, product: null, error: '알 수 없는 오류' }
+    }
+
+    async function worker(workerPage: Page) {
+      while (true) {
+        const i = cursor++
+        if (i >= targets.length) return
+        if (i > 0) await throttle(opts.delayMs)
+        results.push(await recheckOne(workerPage, targets[i]))
+      }
+    }
+
+    const workerCount = Math.min(concurrency, targets.length || 1)
+    const workerPages = await Promise.all(
+      Array.from({ length: workerCount }, (_, idx) => (idx === 0 ? page : context.newPage())),
+    )
+    await Promise.all(workerPages.map(p => worker(p)))
+    await Promise.all(workerPages.slice(1).map(p => p.close().catch(() => {})))
+
+    return results
   })
 }
 

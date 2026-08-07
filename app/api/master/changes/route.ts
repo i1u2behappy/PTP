@@ -32,6 +32,8 @@ interface Row {
 export async function GET(req: NextRequest) {
   const siteId = Number(req.nextUrl.searchParams.get('siteId'))
   if (!siteId) return NextResponse.json({ error: 'siteId required' }, { status: 400 })
+  // all=1: 변동 여부와 무관하게 이 몰의 확정 상품을 전부 반환 — "현재 상태 체킹(재수집)" 대상 선택용
+  const includeAll = req.nextUrl.searchParams.get('all') === '1'
 
   const res = await pool.query<Row>(
     `SELECT mp.id AS mall_product_id, pm.id AS master_id, pm.client_id, mp.name_original, mp.mall_product_code,
@@ -76,7 +78,7 @@ export async function GET(req: NextRequest) {
       lastScrapedAt: r.last_scraped_at, updatedAt: r.updated_at,
       reasons, priceOnly: reasons.length > 0 && reasons.every(x => x.includes('참고용')),
     }
-  }).filter(c => c.reasons.length > 0)
+  }).filter(c => includeAll || c.reasons.length > 0)
 
   return NextResponse.json(changes)
 }

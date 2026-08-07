@@ -6,8 +6,10 @@ export async function GET(req: NextRequest) {
   const sessionId = req.nextUrl.searchParams.get('sessionId')
   if (!sessionId) return NextResponse.json({ error: 'sessionId required' }, { status: 400 })
 
+  // 실패 건은 재시도 대상이라 성공 건에 밀려 캡(200) 밖으로 사라지면 안 된다 — 항상 먼저 채운다.
   const res = await pool.query(
-    `SELECT id, url, status, error, created_at FROM scrape_item_log WHERE session_id=$1 ORDER BY id DESC LIMIT 200`,
+    `SELECT id, url, status, error, created_at FROM scrape_item_log WHERE session_id=$1
+     ORDER BY (status = 'failed') DESC, id DESC LIMIT 200`,
     [sessionId],
   )
   return NextResponse.json(res.rows)

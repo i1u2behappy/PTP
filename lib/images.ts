@@ -46,7 +46,7 @@ export async function resolveScrapeFolderPath(sessionId: number): Promise<string
 }
 
 /** 폴더명: "몰_스크래핑날짜_회차" — 회차는 그 몰의 그 날짜(달력 기준) 내 몇 번째 스크랩 세션인지. */
-async function resolveScrapeFolderName(sessionId: number): Promise<string> {
+export async function resolveScrapeFolderName(sessionId: number): Promise<string> {
   const res = await pool.query<{ site_id: number; created_at: string; site_name: string | null }>(
     `SELECT ss.site_id, ss.created_at, s.name AS site_name
      FROM scrape_sessions ss JOIN sites s ON s.id = ss.site_id
@@ -131,22 +131,24 @@ export async function downloadProductImages(
   mallProductId: number,
   productCode: string,
   productName: string,
-  sessionId: number,
+  folderName: string,
   siteId?: number,
 ): Promise<{ thumbnails: SavedImage[]; details: SavedImage[] }> {
-  const folderName = await resolveScrapeFolderName(sessionId)
   const thumbnails: (SavedImage | undefined)[] = []
   const details: (SavedImage | undefined)[] = []
   const failed: { url: string; type: 'thumb' | 'detail'; idx: number; slot: (SavedImage | undefined)[] }[] = []
 
-  for (let i = 0; i < thumbnailUrls.length; i++) {
-    try { thumbnails[i] = await saveNormalizedImage(await fetchImageBytes(thumbnailUrls[i]), thumbnailUrls[i], folderName, productCode, productName, 'thumb', i + 1) }
-    catch { failed.push({ url: thumbnailUrls[i], type: 'thumb', idx: i + 1, slot: thumbnails }) }
-  }
-  for (let i = 0; i < detailUrls.length; i++) {
-    try { details[i] = await saveNormalizedImage(await fetchImageBytes(detailUrls[i]), detailUrls[i], folderName, productCode, productName, 'detail', i + 1) }
-    catch { failed.push({ url: detailUrls[i], type: 'detail', idx: i + 1, slot: details }) }
-  }
+  // 이미지마다 네트워크 요청+리사이즈를 순서대로 기다리면(예전 for await) 상품 하나에 이미지가 여러 장일 때
+  // 그만큼 곱으로 느려진다 — 서로 독립적인 작업이라 동시에 진행한다(실사용 확인: 확정 작업이 오래 걸리는
+  // 주된 원인 중 하나).
+  await Promise.all(thumbnailUrls.map(async (url, i) => {
+    try { thumbnails[i] = await saveNormalizedImage(await fetchImageBytes(url), url, folderName, productCode, productName, 'thumb', i + 1) }
+    catch { failed.push({ url, type: 'thumb', idx: i + 1, slot: thumbnails }) }
+  }))
+  await Promise.all(detailUrls.map(async (url, i) => {
+    try { details[i] = await saveNormalizedImage(await fetchImageBytes(url), url, folderName, productCode, productName, 'detail', i + 1) }
+    catch { failed.push({ url, type: 'detail', idx: i + 1, slot: details }) }
+  }))
 
   if (failed.length && siteId) {
     const recovered = await fetchViaLoginSession(siteId, failed.map(f => f.url)).catch(() => new Map<string, Buffer>())

@@ -169,11 +169,8 @@ export function ProductsListPanel() {
         </>
       )}
 
-      {/* 하단: 선택한 스크래핑의 전체 컬럼 상세 그리드 (병합 여부 무관, 확인/검증용) — "스크랩 조정"도 여기,
-          실제 확정(병합) 버튼 옆에 있다: 스크랩된 데이터를 확정하기 전에 미흡한 부분을 조정하는 흐름이라서. */}
-      <StagingItemsGrid sessionId={selectedSessionId}
-        siteId={selectedSession?.site_id} siteName={selectedSession?.site_name}
-        manualLoginRequired={selectedSession?.site_manual_login_required} />
+      {/* 하단: 선택한 스크래핑의 전체 컬럼 상세 그리드 (병합 여부 무관, 확인/검증용) */}
+      <StagingItemsGrid sessionId={selectedSessionId} />
 
       <div className="mt-3 flex items-center justify-between text-xs text-gray-400 shrink-0">
         <p>선택한 세션: {selectedSession ? new Date(selectedSession.created_at).toLocaleString() : '-'}</p>

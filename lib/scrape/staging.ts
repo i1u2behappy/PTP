@@ -2,7 +2,7 @@ import pool from '../db'
 import type { ScrapeResult } from '../scraper'
 import type { ExtractedProduct } from '../ai'
 import { upsertMallProduct, markMissingAsDiscontinued } from './incremental'
-import { downloadProductImages } from '../images'
+import { downloadProductImages, resolveScrapeFolderName } from '../images'
 import { migrateToMaster } from '../master/migrate'
 
 export interface StageOptions {
@@ -129,6 +129,12 @@ async function checkSessionCompletion(sessionId: number) {
   }
 }
 
+// 한 건씩 순서대로 기다리면(예전 for await) 상품마다 여러 번의 DB 왕복 + 이미지 다운로드가 곱으로 쌓여
+// 확정 건수가 많을수록 그만큼 느려진다(실사용 확인: 스크래핑만큼 확정도 오래 걸림) — 서로 다른 상품은
+// 독립적인 작업이라 몇 건씩 묶어 동시에 처리한다. 너무 크게 잡으면 DB 커넥션 풀(기본 10개)이 부족해져
+// 오히려 대기시간이 늘 수 있어 여유 있게 6으로 제한한다.
+const MERGE_CONCURRENCY = 6
+
 /**
  * 스테이징 항목을 실제 mall_products에 반영한다. 이미 상품마스터로 가공된 상품(is_already_migrated)은
  * force가 아닌 한 데이터를 덮어쓰지 않는다 — 대신 "이번 세션에도 보였다"는 사실만 반영해 단종 판정을
@@ -140,6 +146,9 @@ export async function mergeStagingItems(ids: number[], opts: { force?: boolean }
   const noClient: number[] = []
   const touchedSessions = new Set<number>()
   const siteClientCache = new Map<number, number | null>()
+  // 세션(스크랩 건) 하나 안의 상품 수백 개가 전부 같은 이미지 저장 폴더를 쓰는데, resolveScrapeFolderName은
+  // 그 자체로 DB 조회 2번이다 — 상품마다 매번 다시 물어보지 않고 세션당 한 번만 계산해 재사용한다.
+  const folderNameCache = new Map<number, Promise<string>>()
 
   async function clientIdForSite(siteId: number): Promise<number | null> {
     if (siteClientCache.has(siteId)) return siteClientCache.get(siteId)!
@@ -149,10 +158,16 @@ export async function mergeStagingItems(ids: number[], opts: { force?: boolean }
     return clientId
   }
 
-  for (const id of ids) {
+  function folderNameForSession(sessionId: number): Promise<string> {
+    let p = folderNameCache.get(sessionId)
+    if (!p) { p = resolveScrapeFolderName(sessionId); folderNameCache.set(sessionId, p) }
+    return p
+  }
+
+  async function mergeOne(id: number) {
     const res = await pool.query<StagingRow>(`SELECT * FROM scrape_staging_items WHERE id=$1 AND status='pending'`, [id])
     const row = res.rows[0]
-    if (!row) continue
+    if (!row) return
     touchedSessions.add(row.session_id)
 
     if (row.is_already_migrated && !opts.force) {
@@ -163,16 +178,21 @@ export async function mergeStagingItems(ids: number[], opts: { force?: boolean }
           [row.session_id, row.matched_mall_product_id],
         )
       }
-      continue
+      return
     }
 
     const { id: mallProductId } = await upsertMallProduct({ siteId: row.site_id, sessionId: row.session_id }, toScrapeResult(row))
-    await downloadProductImages(row.thumbnail_urls || [], row.detail_image_urls || [], mallProductId, row.mall_product_code, row.name_original, row.session_id, row.site_id)
+    const folderName = await folderNameForSession(row.session_id)
+    await downloadProductImages(row.thumbnail_urls || [], row.detail_image_urls || [], mallProductId, row.mall_product_code, row.name_original, folderName, row.site_id)
     const clientId = await clientIdForSite(row.site_id)
     if (clientId != null) await migrateToMaster([mallProductId], clientId)
     else noClient.push(id)
     await pool.query(`UPDATE scrape_staging_items SET status='merged', matched_mall_product_id=$2, updated_at=NOW() WHERE id=$1`, [id, mallProductId])
     merged.push(id)
+  }
+
+  for (let i = 0; i < ids.length; i += MERGE_CONCURRENCY) {
+    await Promise.all(ids.slice(i, i + MERGE_CONCURRENCY).map(mergeOne))
   }
 
   for (const sid of touchedSessions) await checkSessionCompletion(sid)

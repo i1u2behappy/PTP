@@ -1,15 +1,17 @@
 'use client'
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useTabs } from '../../shell/TabsContext'
-import { useCurrentUser } from '../../shell/CurrentUserContext'
 import { useRegisteredFieldKeys } from './useRegisteredFieldKeys'
 import { FIXED_FIELD_INFO } from '../../../lib/master/schema'
-import type { ExtractedProduct } from '@/lib/ai'
 
 // 기준 Master 테이블 관리와 같은 라벨을 쓴다 — 사용자가 그 화면에서 라벨을 직접 바꿔둔 경우(예: cost_price를
 // "원가" 대신 "공급가"로) 있으므로 FIXED_FIELD_INFO는 로딩 전/미등록 키의 기본값일 뿐, 실제 라벨은
 // useRegisteredFieldKeys가 돌려주는 DB 값을 우선한다 (컴포넌트 내부 fixedFieldLabel 계산 참고).
 const DEFAULT_FIELD_LABEL = new Map(FIXED_FIELD_INFO.map(f => [f.key, f.label]))
+// lib/extract.ts의 CLAIMED_INFO_LABEL_RE와 같은 목록 — 그 파일은 Playwright 등 서버 전용 코드를 담고 있어
+// 클라이언트 컴포넌트에서 import하지 않고 복제해 둔다(ScraperPanel.tsx와 동일한 패턴). 하나를 고치면 셋 다
+// 맞춰야 한다.
+const CLAIMED_INFO_LABEL_RE = /브랜드|제조사|제조자|원산지|제조국|상품요약정보|영문상품명|유통기한|소비기한|상품코드|정가|판매가|소비자가|시중가|정상가|공급가|도매가|배송비|택배비/i
 /** ColumnDef.key(그리드 내부 컬럼명) -> master_schema_fields.field_key(라벨/정렬 기준 조회 키) —
  *  라벨뿐 아니라 기본 컬럼 순서도 이 매핑을 통해 기준 마스터테이블의 sort_order를 따라간다(아래
  *  reorderByMaster 참고). 그리드 전용 운영 컬럼(스크래핑 일시/URL/누락 데이터/마이그레이션 상태 등,
@@ -18,6 +20,7 @@ const COLUMN_TO_MASTER_KEY: Record<string, string> = {
   name_original: 'name_final', mall_category: 'master_category', price: 'list_price', cost_price: 'cost_price',
   shipping_fee: 'shipping_fee', brand: 'brand', manufacturer: 'manufacturer', origin: 'origin', description: 'description',
   thumbnail_names: 'top_img', detail_image_urls: 'detail_img', stock_status: 'stock_status', stock_qty: 'stock_qty',
+  source_url: 'product_url',
 }
 
 /** colOrder 중 기준 마스터테이블에 대응 필드가 있는 것만 그 sort_order대로 서로 재배치한다 — 대응이
@@ -210,29 +213,16 @@ function loadColOrder(): string[] {
 }
 
 /** 수집확인/데이터 마이그 목록 등에서 공용으로 쓰는, 스크랩 세션의 전체 컬럼 상세 그리드 (병합 여부 무관 조회용).
- *  sessionId가 "선택 병합"된 세션이면 서버(/api/scrape-staging)가 그 그룹 전체를 함께 내려준다.
- *  siteId/manualLoginRequired/siteName은 "스크랩 조정" 기능용 — 셋 다 있어야(호출부가 몰 정보를 알 때만)
- *  그 버튼이 보인다(예: 데이터 마이그 목록 화면은 아직 안 넘겨줘서 자연히 숨겨짐). */
-export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteName }: {
+ *  sessionId가 "선택 병합"된 세션이면 서버(/api/scrape-staging)가 그 그룹 전체를 함께 내려준다. */
+export function StagingItemsGrid({ sessionId }: {
   sessionId: number | ''
-  siteId?: number
-  manualLoginRequired?: boolean | null
-  siteName?: string | null
 }) {
   const scopeQuery = sessionId ? `sessionId=${sessionId}` : ''
   const { openTab, activeTabId, refreshSignals, bumpRefresh } = useTabs()
-  const { isAdmin } = useCurrentUser()
   const { customKeys: registeredCustomKeys, labels: registryLabels } = useRegisteredFieldKeys()
   const [items, setItems] = useState<StagingRow[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
-  const [discarding, setDiscarding] = useState(false)
   const [merging, setMerging] = useState(false)
-  const [includeMigrated, setIncludeMigrated] = useState(false)
-  const [issuesOnly, setIssuesOnly] = useState(false)
-  // 선택한 상품이 몇 개 안 되는데 그리드 전체(수십~수백 건)가 화면을 다 차지해, 그 아래(비교 카드 등)가
-  // 안 보인다는 요청 — 켜면 선택된 행만 남기고 나머지는 숨긴다. 끄면 즉시 원래대로 전체가 다시 보인다.
-  // 선택이 전부 풀리는 지점(선택 해제/선택 무시/확정)마다 같이 꺼서, 그리드가 텅 빈 채 남지 않게 한다.
-  const [showOnlySelected, setShowOnlySelected] = useState(false)
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [sortKeys, setSortKeys] = useState<SortKey[]>([])
   const [showFilters, setShowFilters] = useState(false)
@@ -247,25 +237,6 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     setColOrder(prev => reorderByMaster(prev, Array.from(registryLabels.keys())))
   }, [registryLabels])
 
-  const [showAdjust, setShowAdjust] = useState(false)
-  const [adjustPrompt, setAdjustPrompt] = useState('')
-  // 비워두면 기존 컬럼 조정, 채우면 그 이름으로 완전히 새로운 컬럼을 추가해달라는 요청이 된다.
-  const [adjustNewField, setAdjustNewField] = useState('')
-  const [adjustBusy, setAdjustBusy] = useState(false)
-  const [adjustMessage, setAdjustMessage] = useState<string | null>(null)
-  // 몇 번이든 반복해서 조정할 수 있다 — 이 카운트가 1 이상이면(정상모드=최소 1건 테스트 성공,
-  // 개발자모드=최소 1번 재기동으로 규칙 확인 성공) "조정 확정"이 활성화된다.
-  const [adjustRoundCount, setAdjustRoundCount] = useState(0)
-  // 개발자모드는 백엔드가 재추출을 못 하니, "개발자모드 재기동"으로 확인한 최신 학습 규칙을 대신 보여준다.
-  const [adjustRules, setAdjustRules] = useState<Record<string, { type: string; value: string }> | null>(null)
-  // 확장이 캡처한 페이지를 새 규칙으로 재추출한 미리보기 — 규칙 텍스트가 아니라 실제 값으로 확인하고 싶다는
-  // 요청 반영. 서버가 캡처 시점에 만들어 sites.last_adjustment_preview에 저장해둔 걸 재기동이 읽어온다.
-  const [adjustPreview, setAdjustPreview] = useState<ExtractedProduct | null>(null)
-  // 뒤 화면(그리드)을 참조하면서 조정할 수 있게, 모달을 드래그로 옮길 수 있게 한다 — null이면 기본
-  // 위치(가운데)에 두고, 한 번이라도 드래그하면 그 좌표를 그대로 기억한다.
-  const [adjustPos, setAdjustPos] = useState<{ left: number; top: number } | null>(null)
-  const adjustDragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
-
   // 옵션1/옵션2/... 컬럼은 실제 값(values)이 있는 항목만 세고, 빈 옵션 슬롯만으로는 컬럼을 만들지 않는다.
   const maxOptionCount = items.reduce((max, p) => {
     const opts = p.options || []
@@ -273,14 +244,22 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     opts.forEach((o, i) => { if (o?.values?.length) last = i + 1 })
     return Math.max(max, last)
   }, 0)
-  // "스크랩 조정"으로 추가된 커스텀 컬럼들 — 로드된 데이터에 실제로 값이 있는 필드명에 더해, 기준 Master
+  // 스크랩 시 실제로 값이 있는 커스텀 필드명에 더해, 기준 Master
   // 테이블 관리에 등록된 커스텀 필드도 함께 포함한다 — 아직 스크랩 데이터에 값이 하나도 없어도(등록만
   // 해두고 값은 나중에 채우는 경우) 빈 컬럼으로라도 미리 보여야 기준 테이블과 그리드가 어긋나지 않는다.
+  // 이미 전용 컬럼(위 COLUMN_TO_MASTER_KEY)이나 동적 옵션 컬럼이 보여주는 것과 같은 개념의 마스터
+  // 필드는 커스텀 컬럼으로 또 만들지 않는다 — 예: product_url은 URL 컬럼(source_url)과, 1_option~
+  // 3_option은 실제 옵션명 기준 동적 컬럼과 중복이라 여기서 제외한다.
+  const claimedMasterKeys = useMemo(() => new Set([
+    ...Object.values(COLUMN_TO_MASTER_KEY),
+    ...Array.from({ length: maxOptionCount }, (_, i) => `${i + 1}_option`),
+  ]), [maxOptionCount])
+
   const customFieldKeys = useMemo(() => {
     const keys = new Set<string>(registeredCustomKeys)
     items.forEach(p => Object.keys(p.raw_data?.custom_fields || {}).forEach(k => keys.add(k)))
-    return Array.from(keys)
-  }, [items, registeredCustomKeys])
+    return Array.from(keys).filter(k => !claimedMasterKeys.has(k))
+  }, [items, registeredCustomKeys, claimedMasterKeys])
 
   const columns = useMemo<ColumnDef[]>(() => {
     const optionColumns: ColumnDef[] = Array.from({ length: maxOptionCount }, (_, i) => ({
@@ -290,15 +269,27 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     }))
     const customColumns: ColumnDef[] = customFieldKeys.map(key => ({
       key: `custom_${key}`,
-      label: key,
+      label: registryLabels.get(key) ?? key,
       getValue: p => p.raw_data?.custom_fields?.[key] ?? '',
     }))
     const merged = [...COLUMNS_BEFORE_OPTIONS, ...optionColumns, ...COLUMNS_AFTER_OPTIONS, ...customColumns]
-    return merged.map(c => {
+    const labeled = merged.map(c => {
       const masterKey = COLUMN_TO_MASTER_KEY[c.key]
       const liveLabel = masterKey ? registryLabels.get(masterKey) : undefined
       return liveLabel ? { ...c, label: liveLabel } : c
     })
+    // "상품정보고시 전체"(extra_info)는 이미 다른 컬럼(전용 필드든, 커스텀 필드로 자동 추가된 컬럼이든)으로
+    // 보여주는 라벨과 겹치면 그 라벨은 빼고 보여준다 — 스크랩 미리보기(ScraperPanel.tsx)와 같은 기준
+    // (다른 컬럼 라벨과 완전히 같거나 CLAIMED_INFO_LABEL_RE 동의어에 걸리면 제외)을 그대로 적용한다.
+    const shownLabels = new Set(labeled.filter(c => c.key !== 'extra_info').map(c => c.label))
+    return labeled.map(c => c.key === 'extra_info'
+      ? {
+          ...c,
+          getValue: (p: StagingRow) => (p.raw_data?.extra_info || [])
+            .filter(e => !shownLabels.has(e.label) && !CLAIMED_INFO_LABEL_RE.test(e.label))
+            .map(e => `${e.label}: ${e.value}`).join(' / '),
+        }
+      : c)
   }, [maxOptionCount, customFieldKeys, registryLabels])
 
   useEffect(() => {
@@ -363,28 +354,16 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
   useEffect(() => { loadItems() }, [loadItems, refreshSignals.products, refreshSignals.staging])
 
   /* eslint-disable react-hooks/set-state-in-effect */
-  useEffect(() => { setSelected(new Set()); setShowOnlySelected(false) }, [scopeQuery])
-  // "스크랩 조정" 모달은 백드롭이 없어 열어둔 채로 뒤 그리드에서 다른 세션/몰을 고를 수 있다 — 그대로 두면
-  // siteId가 바뀌어도 모달은 이전 몰의 메시지/학습된 규칙/미리보기를 계속 보여줘 헷갈린다. 범위가 바뀌면
-  // 모달을 닫고 상태를 비워, 다시 열 때(openAdjust) 새 몰 기준으로 시작하게 한다.
-  useEffect(() => {
-    setShowAdjust(false)
-    setAdjustMessage(null)
-    setAdjustRoundCount(0)
-    setAdjustRules(null)
-    setAdjustPreview(null)
-  }, [siteId, sessionId])
+  useEffect(() => { setSelected(new Set()) }, [scopeQuery])
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const issuesFiltered = issuesOnly ? items.filter(p => missingFields(p).length > 0) : items
-  const filteredItems = issuesFiltered.filter(p => columns.every(col => {
+  const filteredItems = items.filter(p => columns.every(col => {
     const f = filters[col.key]
     if (!f) return true
     return String(col.getValue(p) ?? '').toLowerCase().includes(f.toLowerCase())
   }))
-  const selectionFiltered = showOnlySelected ? filteredItems.filter(p => selected.has(p.id)) : filteredItems
   const visibleItems = sortKeys.length
-    ? [...selectionFiltered].sort((a, b) => {
+    ? [...filteredItems].sort((a, b) => {
         for (const { key, dir } of sortKeys) {
           const col = columns.find(c => c.key === key)
           if (!col) continue
@@ -393,7 +372,7 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
         }
         return 0
       })
-    : selectionFiltered
+    : filteredItems
 
   function handleSort(key: string, e: { shiftKey: boolean }) {
     setSortKeys(prev => {
@@ -419,32 +398,25 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
 
   const tableWidth = 40 + orderedColumns.reduce((sum, col) => sum + (colWidths[col.key] ?? widthFor(col.key)), 0) + 40
 
-  // "스크랩 조정" 모달에서 실제 몰 페이지와 컬럼별로 비교할 목록 — 그리드에 실제 보이는 데이터 컬럼을
-  // 그대로 재사용한다(아이콘/상태 등 데이터가 아닌 컬럼만 제외). 커스텀 컬럼이 추가되면 자동으로 같이 뜬다.
-  const compareColumns = orderedColumns.filter(c => !['thumbnail_img', 'file', 'created_at', 'missing', 'migration_status'].includes(c.key))
-  function formatCompareValue(col: ColumnDef, p: StagingRow): string {
-    const v = col.getValue(p)
-    if (v == null || v === '') return '-'
-    if (col.key === 'price' || col.key === 'cost_price' || col.key === 'shipping_fee') {
-      if (typeof v === 'number' || (col.key === 'shipping_fee' && typeof v === 'string')) return formatMoneyOrRange(v)
-    }
-    return String(v)
-  }
-
+  // 예전엔 이미 상품마스터로 확정된 적 있는 상품(is_already_migrated)을 선택 대상에서 뺐는데, 사용자
+  // 지시로 뒤집었다 — "스크랩 Raw 확인"은 세션(스크랩 건)별로 확정하는 화면이라, 이번에 새로 스크랩한
+  // 내용이면 예전에 확정된 적이 있어도 그 내용 기준으로 다시 확정할 수 있어야 한다(최신 스크랩값으로
+  // 덮어쓰는 것이 오히려 의도된 동작). "예전 확정 이력 대비 신규/변경분만" 판단은 이 화면이 아니라
+  // 별도 메뉴(연속관리 등)에서 필요할 때 다루기로 함 — is_already_migrated 데이터 자체는 그대로 남겨
+  // 참고용 배지(아래 "이미가공됨" 표시)로만 계속 보여준다.
   function isSelectable(p: StagingRow) {
-    if (p.status !== 'pending') return false
-    if (p.is_already_migrated && !includeMigrated) return false
-    return true
+    return p.status === 'pending'
   }
 
   function toggleSelect(id: number) {
     setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
   }
   const selectableItems = visibleItems.filter(isSelectable)
+  // status !== 'pending'인 행(이미 이 세션에서 확정했거나 건너뛰기한 행)은 여전히 선택 대상에서 빠진다 —
+  // is_already_migrated와는 별개로, 같은 행을 두 번 확정할 수는 없으니 이유를 밝혀둔다.
+  const alreadyMergedCount = visibleItems.filter(p => p.status !== 'pending').length
   function selectAll() {
-    const turningOff = selected.size === selectableItems.length
-    setSelected(turningOff ? new Set() : new Set(selectableItems.map(p => p.id)))
-    if (turningOff) setShowOnlySelected(false)
+    setSelected(selected.size === selectableItems.length ? new Set() : new Set(selectableItems.map(p => p.id)))
   }
 
   function openDetail(p: StagingRow) {
@@ -477,170 +449,22 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     setMerging(true)
     try {
       const ids = [...selected]
+      // force: true — 이 화면은 스크랩 건(세션) 단위로 확정하는 화면이라, 예전에 이미 상품마스터로
+      // 확정된 적 있는 상품(is_already_migrated)이라도 이번에 새로 스크랩한 값 기준으로 다시 확정한다.
       const res = await fetch('/api/scrape-staging/merge', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids, force: includeMigrated }),
+        body: JSON.stringify({ ids, force: true }),
       })
       const d = await res.json() as { merged: number[]; skipped: { id: number; reason: string }[]; noClient?: number[] }
-      if (d.skipped?.length) {
-        alert(`${d.skipped.length}개는 이미 가공된 상품이라 확정되지 않았습니다. "이미 가공된 상품도 포함"을 켜고 다시 시도하세요.`)
-      }
       if (d.noClient?.length) {
         alert(`${d.noClient.length}개는 몰에 거래처가 연결되어 있지 않아 상품마스터로 반영되지 않았습니다. Mall 상세관리에서 거래처를 먼저 지정해주세요.`)
       }
       setSelected(new Set())
-      setShowOnlySelected(false)
       bumpRefresh('products')
       bumpRefresh('staging')
       loadItems()
     } finally {
       setMerging(false)
-    }
-  }
-
-  async function discardSelected() {
-    if (!selected.size || !confirm(`선택한 ${selected.size}개 항목을 무시(삭제)할까요? 아직 확정 전인 항목만 대상입니다.`)) return
-    setDiscarding(true)
-    try {
-      await Promise.all([...selected].map(id => fetch(`/api/scrape-staging/${id}`, { method: 'DELETE' })))
-      setSelected(new Set())
-      setShowOnlySelected(false)
-      bumpRefresh('staging')
-      loadItems()
-    } finally {
-      setDiscarding(false)
-    }
-  }
-
-  function openAdjust() {
-    setShowAdjust(true)
-    setAdjustPrompt('')
-    setAdjustNewField('')
-    setAdjustMessage(null)
-    setAdjustRoundCount(0)
-    setAdjustRules(null)
-    setAdjustPreview(null)
-    setAdjustPos(null)
-  }
-
-  /** 조정 모달 제목 표시줄을 눌러서 끄는 드래그 — 컬럼 폭 조절(startResize)과 같은 방식(마우스 이동/뗌을
-   *  document에 직접 붙였다 뗀다). 뒤에 있는 그리드 내용을 보면서 조정할 수 있도록 위치를 옮길 수 있게 한다. */
-  function startAdjustDrag(e: React.MouseEvent) {
-    const panel = (e.currentTarget as HTMLElement).closest('[data-adjust-panel]') as HTMLElement | null
-    if (!panel) return
-    const rect = panel.getBoundingClientRect()
-    adjustDragRef.current = { offsetX: e.clientX - rect.left, offsetY: e.clientY - rect.top }
-    function onMove(ev: MouseEvent) {
-      if (!adjustDragRef.current) return
-      setAdjustPos({ left: ev.clientX - adjustDragRef.current.offsetX, top: ev.clientY - adjustDragRef.current.offsetY })
-    }
-    function onUp() {
-      adjustDragRef.current = null
-      document.removeEventListener('mousemove', onMove)
-      document.removeEventListener('mouseup', onUp)
-    }
-    document.addEventListener('mousemove', onMove)
-    document.addEventListener('mouseup', onUp)
-  }
-
-  /** "스크랩 조정 개시" — 몇 번이든 반복 가능하다. 속도를 위해 지금 그리드 맨 위에 보이는 상품 1건만
-   *  대상으로 규칙을 만들고 테스트해본다(일반모드, 매번 실제로 재추출해 그리드에 반영). 개발자모드는
-   *  백엔드가 페이지를 못 열어보니 프롬프트만 저장해두고, 사용자가 실제 상품 페이지에서 확장 우클릭
-   *  메뉴를 실행한 뒤 "개발자모드 재기동"으로 결과를 확인해야 한다. */
-  async function handleAdjustStart() {
-    if (!siteId || !adjustPrompt.trim()) return
-    setAdjustBusy(true)
-    setAdjustMessage(null)
-    // 새 컬럼명을 지정했으면 작은따옴표로 감싸 프롬프트에 명시한다 — AI가 그 이름 그대로 필드명(key)을
-    // 쓰도록 lib/ai.ts의 generateExtractionRules 프롬프트가 이 표기를 인식한다.
-    const composedPrompt = adjustNewField.trim()
-      ? `'${adjustNewField.trim()}' 필드 추가: ${adjustPrompt.trim()}`
-      : adjustPrompt.trim()
-    try {
-      if (manualLoginRequired) {
-        // 지금 화면에 보이는(방금 스크랩한 세션의) 맨 위 상품 id를 같이 보낸다 — 안 그러면 확장이 우클릭
-        // 시 "이 몰에서 가장 최근에 스크랩된 미확정 상품"을 대신 골라서, 사용자가 지금 보고 있는 세션이
-        // 아니라 다른 세션의 상품을 테스트해버릴 수 있었다.
-        const res = await fetch(`/api/sites/${siteId}/adjust/prompt`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt: composedPrompt, itemId: visibleItems[0]?.id }),
-        })
-        if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
-        setAdjustMessage(`✓ 프롬프트를 저장했습니다. 이제 ${siteName || '이 몰'}의 아무 페이지에서나(로그인된 상태) 마우스 우클릭 → "PTP 조정 테스트 실행"을 실행한 뒤, 아래 "개발자모드 재기동"을 눌러 결과를 확인하세요.`)
-        setAdjustPreview(null) // 새 라운드 — 이전 미리보기는 지금 프롬프트와 무관해졌으니 지운다
-      } else {
-        const target = visibleItems[0]
-        if (!target) { setAdjustMessage('테스트할 상품이 없습니다.'); return }
-        const res = await fetch(`/api/sites/${siteId}/adjust`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ itemId: target.id, prompt: composedPrompt }),
-        })
-        const data = await res.json() as { updated?: number; failed?: { error: string }[]; error?: string }
-        if (!res.ok) throw new Error(data.error || `서버 오류 (${res.status})`)
-        if (data.failed?.length) throw new Error(data.failed[0].error)
-        setAdjustRoundCount(c => c + 1)
-        setAdjustMessage(`✓ ${adjustRoundCount + 1}번째 테스트 완료 — 아래 "현재 추출된 값"에서 확인하고, 더 고칠 부분이 있으면 다시 입력해 계속 조정하세요.`)
-        loadItems()
-      }
-    } catch (e) {
-      setAdjustMessage(`실패: ${e instanceof Error ? e.message : e}`)
-    } finally {
-      setAdjustBusy(false)
-    }
-  }
-
-  /** "개발자모드 재기동" — 사용자가 실제 브라우저에서 확장 우클릭("PTP 조정 테스트 실행")을 실행한 뒤
-   *  여기로 돌아와 누른다. PTP는 그 캡처가 실제로 언제 끝났는지 알 방법이 없어서(백엔드가 그 몰 페이지를
-   *  스스로 못 열어보는 게 개발자모드의 정의), 사용자가 명시적으로 "지금 확인해줘"라고 하는 이 버튼이
-   *  유일한 체크포인트다 — 그 몰의 최신 학습 규칙과, 캡처한 페이지를 그 규칙으로 재추출한 미리보기 값을
-   *  함께 불러와 보여준다. */
-  async function handleDevRestart() {
-    if (!siteId) return
-    setAdjustBusy(true)
-    setAdjustMessage(null)
-    try {
-      const res = await fetch(`/api/sites/${siteId}`)
-      if (!res.ok) throw new Error(`서버 오류 (${res.status})`)
-      const data = await res.json() as {
-        extraction_rules?: Record<string, { type: string; value: string }>
-        last_adjustment_preview?: ExtractedProduct | null
-      }
-      setAdjustRules(data.extraction_rules || {})
-      setAdjustPreview(data.last_adjustment_preview || null)
-      setAdjustRoundCount(c => c + 1)
-      setAdjustMessage(data.last_adjustment_preview
-        ? '✓ 캡처한 페이지를 새 규칙으로 재추출한 미리보기 값을 확인했습니다 — 아래에서 확인하고, 더 고칠 부분이 있으면 다시 입력해 계속 조정하세요.'
-        : '아직 캡처된 미리보기가 없습니다 — 2단계(실제 페이지에서 "PTP 조정 테스트 실행")를 먼저 실행했는지 확인하세요.')
-    } catch (e) {
-      setAdjustMessage(`실패: ${e instanceof Error ? e.message : e}`)
-    } finally {
-      setAdjustBusy(false)
-    }
-  }
-
-  /** "조정 확정" — 지금까지 반복한 조정 결과를, 이 세션뿐 아니라 이 몰에서 기 스크랩했지만 아직 미확정인
-   *  전체 상품(다른 세션 포함)에 적용한다(일반모드). 개발자모드는 백엔드가 전체를 다시 스크랩할 수 없으니
-   *  확장을 다시 실행하라는 안내만 보여준다("개발자모드 재기동"으로 이미 규칙 확인을 거쳤으므로 여기서
-   *  다시 물어보지 않는다). */
-  async function handleAdjustConfirm() {
-    if (!siteId) return
-    if (manualLoginRequired) {
-      setAdjustMessage('카테고리 페이지에서 확장 아이콘을 다시 눌러 전체를 재스크랩해주세요 — 개발자모드는 기존 항목을 그 자리에서 못 고치고 새 세션으로 다시 수집합니다.')
-      return
-    }
-    setAdjustBusy(true)
-    setAdjustMessage(null)
-    try {
-      const res = await fetch(`/api/sites/${siteId}/adjust/confirm`, { method: 'POST' })
-      const data = await res.json() as { updated?: number; error?: string }
-      if (!res.ok) throw new Error(data.error || `서버 오류 (${res.status})`)
-      setAdjustMessage(`✓ 이 몰의 미확정 상품 전체 ${data.updated ?? 0}개 항목을 재추출했습니다.`)
-      bumpRefresh('staging')
-      loadItems()
-    } catch (e) {
-      setAdjustMessage(`실패: ${e instanceof Error ? e.message : e}`)
-    } finally {
-      setAdjustBusy(false)
     }
   }
 
@@ -666,8 +490,6 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
     a.click()
   }
 
-  const totalIssues = items.filter(p => missingFields(p).length > 0).length
-
   if (items.length === 0) {
     return (
       <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400 shrink-0">
@@ -678,25 +500,13 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
   }
 
   return (
-    <>
     <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-0 flex flex-col">
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 shrink-0 flex-wrap gap-2">
         <div className="flex items-center gap-3 text-xs text-gray-600">
           <label className="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={selected.size === selectableItems.length && selectableItems.length > 0} onChange={selectAll} />
-            전체 선택 ({selectableItems.length}개 선택 가능{(hasFilters || sortKeys.length > 0 || issuesOnly || showOnlySelected) && ` · 전체 ${items.length}개 중 ${visibleItems.length}개 표시`})
-          </label>
-          <label className="flex items-center gap-1.5 border-l border-gray-200 pl-3 cursor-pointer">
-            <input type="checkbox" checked={issuesOnly} onChange={e => setIssuesOnly(e.target.checked)} />
-            누락된 데이터만 {totalIssues > 0 && `(${totalIssues}개)`}
-          </label>
-          <label className="flex items-center gap-1.5 border-l border-gray-200 pl-3 cursor-pointer">
-            <input type="checkbox" checked={includeMigrated} onChange={e => setIncludeMigrated(e.target.checked)} />
-            이미 가공된 상품도 포함
-          </label>
-          <label className="flex items-center gap-1.5 border-l border-gray-200 pl-3 cursor-pointer">
-            <input type="checkbox" checked={showOnlySelected} disabled={!selected.size} onChange={e => setShowOnlySelected(e.target.checked)} />
-            선택한 것만 보기{selected.size > 0 && ` (${selected.size}개)`}
+            전체 선택 ({selectableItems.length}개 선택 가능{(hasFilters || sortKeys.length > 0) && ` · 전체 ${items.length}개 중 ${visibleItems.length}개 표시`}
+            {alreadyMergedCount > 0 && ` · 이미확정됨 ${alreadyMergedCount}개 제외`})
           </label>
         </div>
         <div className="flex gap-2">
@@ -714,18 +524,6 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
             className="px-4 py-1.5 bg-gray-100 text-gray-600 text-xs font-semibold rounded-full hover:bg-gray-200 transition-colors">
             📥 엑셀 다운로드
           </button>
-          {isAdmin && selected.size > 0 && (
-            <button onClick={discardSelected} disabled={discarding}
-              className="px-4 py-1.5 bg-rose-50 text-rose-600 text-xs font-semibold rounded-full hover:bg-rose-100 disabled:opacity-50 transition-colors">
-              🗑 선택 무시 ({selected.size})
-            </button>
-          )}
-          {siteId != null && (
-            <button onClick={openAdjust}
-              className="px-4 py-1.5 bg-white border border-gray-300 text-gray-600 text-xs font-semibold rounded-full hover:border-teal-400 transition-colors">
-              🔧 스크랩 조정
-            </button>
-          )}
           <button onClick={handleMerge} disabled={!selected.size || merging}
             className="px-4 py-1.5 bg-teal-500 text-white text-xs font-semibold rounded-full hover:bg-teal-600 disabled:opacity-40 transition-colors">
             {merging ? '확정 중...' : `확정 (스크랩검수 후) (${selected.size})`}
@@ -781,11 +579,11 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
             )}
           </thead>
           <tbody>
-            {visibleItems.map(p => {
+            {(() => { const extraInfoCol = columns.find(c => c.key === 'extra_info'); return visibleItems.map(p => {
               const missing = missingFields(p)
               const stockByOptionText = (p.raw_data?.stock_by_option || []).map(r => `${r.option}: ${r.qty}개`).join(', ')
               const optionCombinationsText = formatOptionCombinations(p.raw_data?.option_combinations)
-              const extraInfoText = (p.raw_data?.extra_info || []).map(e => `${e.label}: ${e.value}`).join(' / ')
+              const extraInfoText = String(extraInfoCol?.getValue(p) ?? '')
               const canOpen = !!p.matched_mall_product_id
               const statusLabel = STATUS_LABELS[p.status] || { text: p.status, cls: 'text-gray-400' }
               const selectable = isSelectable(p)
@@ -894,134 +692,10 @@ export function StagingItemsGrid({ sessionId, siteId, manualLoginRequired, siteN
                   )}
                 </td>
               </tr>
-            )})}
+            )})})()}
           </tbody>
         </table>
       </div>
     </div>
-
-    {showAdjust && siteId != null && (
-      <div className="fixed z-50"
-        style={adjustPos ? { left: adjustPos.left, top: adjustPos.top } : { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }}>
-        <div data-adjust-panel className="bg-white rounded-2xl border border-gray-200 shadow-2xl p-6 w-[32rem] max-w-[calc(100vw-2rem)] max-h-[85vh] overflow-y-auto">
-          <div className="flex items-center gap-2 mb-1">
-            <div className="flex items-center gap-2 flex-1 cursor-move select-none" onMouseDown={startAdjustDrag} title="여기를 눌러 드래그하면 위치를 옮길 수 있습니다">
-              <h2 className="text-lg font-bold text-gray-800">🔧 스크랩 조정</h2>
-              <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${manualLoginRequired ? 'bg-amber-100 text-amber-700' : 'bg-teal-100 text-teal-700'}`}>
-                {manualLoginRequired ? '🧩 개발자모드' : '🤖 일반모드'}
-              </span>
-              <span className="text-gray-300 text-xs">✥ 드래그해서 옮기기</span>
-            </div>
-            <button onClick={() => setShowAdjust(false)} className="text-gray-400 hover:text-gray-600 text-sm shrink-0">닫기</button>
-          </div>
-
-          {/* 모드마다 절차가 완전히 다르므로(일반모드=자동, 개발자모드=브라우저 수동 조작 필요),
-              헷갈리지 않게 지금 몰의 모드에 맞는 안내만 번호 순서로 보여준다. 만족할 때까지 몇 번이든
-              반복해도 되고, 확정은 그 다음이라는 걸 명확히 한다. */}
-          {manualLoginRequired ? (
-            <ol className="text-xs text-gray-500 list-decimal list-inside space-y-1 mb-3">
-              <li>비교·입력 — 아래 값을 몰 페이지와 비교하고 프롬프트 입력(새 컬럼은 이름도 입력) 후 <b className="text-gray-600">스크랩 조정 개시</b>(프롬프트 저장만).</li>
-              <li>반영 — 이 몰 아무 페이지에서나 우클릭 → <b className="text-gray-600">PTP 조정 테스트 실행</b>.</li>
-              <li>확인 — <b className="text-gray-600">개발자모드 재기동</b>으로 미리보기 값 확인, 만족할 때까지 1~2 반복.</li>
-              <li>확정 — <b className="text-gray-600">조정 확정</b> 후 안내대로 확장으로 전체 재스크랩.</li>
-            </ol>
-          ) : (
-            <ol className="text-xs text-gray-500 list-decimal list-inside space-y-1 mb-3">
-              <li>비교·입력 — 아래 값을 몰 페이지와 비교하고 프롬프트 입력(새 컬럼은 이름도 입력).</li>
-              <li>테스트 — <b className="text-gray-600">스크랩 조정 개시</b>로 맨 위 상품 1건 재추출해 값 확인.</li>
-              <li>반복 — 원하는 값이 나올 때까지 1~2 반복.</li>
-              <li>확정 — <b className="text-gray-600">조정 확정</b>으로 이 몰의 미확정 상품 전체에 반영.</li>
-            </ol>
-          )}
-          <p className="text-[11px] text-gray-400 mb-4">확정한 내용은 앞으로 이 몰을 스크랩할 때도 계속 적용되는 규칙으로 저장됩니다.</p>
-
-          <label className="block text-xs text-gray-500 mb-1">새 컬럼 추가 (선택 — 기존 컬럼을 고칠 때는 비워두세요)</label>
-          <input value={adjustNewField} onChange={e => setAdjustNewField(e.target.value)}
-            placeholder="예: 소재, 세탁방법"
-            className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 mb-2" />
-
-          <textarea value={adjustPrompt} onChange={e => setAdjustPrompt(e.target.value)} rows={4}
-            placeholder={adjustNewField.trim()
-              ? `예: 상품정보고시 표에서 '${adjustNewField.trim()}' 라벨의 값을 가져와줘.`
-              : '예: 가격은 도매가격이 아니라 소비자가에서 가져와야 해. 배송비도 배송비 라벨에서 가져와줘.'}
-            className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 mb-3" />
-
-          {adjustMessage && <p className="text-xs text-gray-600 mb-3">{adjustMessage}</p>}
-
-          <div className="flex gap-2 mb-4">
-            <button onClick={handleAdjustStart} disabled={adjustBusy || !adjustPrompt.trim()}
-              className="flex-1 py-2.5 rounded-xl bg-teal-500 text-white text-sm font-semibold hover:bg-teal-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-              {adjustBusy ? '처리 중...' : '스크랩 조정 개시'}
-            </button>
-            {manualLoginRequired && (
-              <button onClick={handleDevRestart} disabled={adjustBusy}
-                className="flex-1 py-2.5 rounded-xl bg-white border border-gray-300 text-gray-700 text-sm font-semibold hover:border-teal-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-                개발자모드 재기동
-              </button>
-            )}
-          </div>
-
-          {visibleItems[0] && (
-            <div className="bg-gray-50 rounded-xl p-3 mb-4 text-xs text-gray-600 space-y-1 max-h-56 overflow-y-auto">
-              <div className="flex items-center justify-between sticky -top-3 bg-gray-50 pb-1">
-                <span className="font-semibold text-gray-700">현재 추출된 값 (맨 위 1건 · 미리보기)</span>
-                {visibleItems[0].source_url && (
-                  <button type="button" onClick={() => handleOpenSourceUrl(visibleItems[0].source_url!)} className="text-teal-500 hover:underline">
-                    몰 상품 페이지 열기 ↗
-                  </button>
-                )}
-              </div>
-              {compareColumns.map(col => (
-                <p key={col.key} className="truncate" title={formatCompareValue(col, visibleItems[0])}>
-                  <span className="text-gray-400">{col.label}:</span> {formatCompareValue(col, visibleItems[0])}
-                </p>
-              ))}
-            </div>
-          )}
-
-          {manualLoginRequired && adjustRoundCount > 0 && (
-            <div className="bg-teal-50 rounded-xl p-3 mb-4 text-xs text-gray-600 space-y-1">
-              <span className="font-semibold text-gray-700">미리보기 (캡처한 페이지를 새 규칙으로 재추출)</span>
-              {!adjustPreview ? (
-                <p className="text-gray-400">아직 캡처된 미리보기가 없습니다 — 2단계(실제 페이지에서 &quot;PTP 조정 테스트 실행&quot;)를 먼저 실행하세요.</p>
-              ) : (
-                <>
-                  <p>상품명: {adjustPreview.name || '-'}</p>
-                  <p>{registryLabels.get('list_price') ?? DEFAULT_FIELD_LABEL.get('list_price')}: {adjustPreview.price != null ? `₩${adjustPreview.price.toLocaleString()}` : '-'}</p>
-                  <p>{registryLabels.get('cost_price') ?? DEFAULT_FIELD_LABEL.get('cost_price')}(도매가): {adjustPreview.cost_price != null ? `₩${adjustPreview.cost_price.toLocaleString()}` : '-'}</p>
-                  <p>배송비: {adjustPreview.shipping_fee != null ? formatMoneyOrRange(adjustPreview.shipping_fee) : '-'}</p>
-                  <p>카테고리: {adjustPreview.category || '-'}</p>
-                  <p>브랜드/제조사/원산지: {[adjustPreview.brand, adjustPreview.manufacturer, adjustPreview.origin].filter(Boolean).join(' / ') || '-'}</p>
-                  {Object.entries(adjustPreview.custom_fields || {}).map(([field, value]) => (
-                    <p key={field}>{field}: {value}</p>
-                  ))}
-                </>
-              )}
-            </div>
-          )}
-
-          {manualLoginRequired && adjustRules && (
-            <div className="bg-gray-50 rounded-xl p-3 mb-4 text-xs text-gray-600 space-y-1">
-              <span className="font-semibold text-gray-700">지금까지 학습된 규칙 (참고용)</span>
-              {Object.keys(adjustRules).length === 0 ? (
-                <p className="text-gray-400">아직 만들어진 규칙이 없습니다.</p>
-              ) : (
-                Object.entries(adjustRules).map(([field, rule]) => (
-                  <p key={field}>{field}: {rule.type === 'label' ? `라벨 "${rule.value}"` : `셀렉터 "${rule.value}"`}</p>
-                ))
-              )}
-            </div>
-          )}
-
-          <button onClick={handleAdjustConfirm}
-            disabled={adjustBusy || adjustRoundCount === 0}
-            title={adjustRoundCount === 0 ? '먼저 "스크랩 조정 개시"로 최소 1번 조정해보세요' : undefined}
-            className="w-full py-2.5 rounded-xl bg-gray-800 text-white text-sm font-semibold hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-            조정 확정 (만족스러우면)
-          </button>
-        </div>
-      </div>
-    )}
-    </>
   )
 }

@@ -18,6 +18,17 @@ interface ChangeRow {
   priceOnly: boolean
 }
 
+type RecheckField = 'code' | 'price' | 'cost_price' | 'stock' | 'options' | 'images'
+const RECHECK_FIELDS: { key: RecheckField; label: string }[] = [
+  { key: 'code', label: '상품코드 (품목삭제 확인)' },
+  { key: 'price', label: '가격' },
+  { key: 'cost_price', label: '공급가' },
+  { key: 'stock', label: '재고' },
+  { key: 'options', label: '옵션' },
+  { key: 'images', label: '이미지' },
+]
+interface RecheckResultRow { mallProductId: number; mallProductCode: string; reasons: string[] }
+
 /**
  * 마이그레이션3_연속관리 — 이미 상품마스터로 만들어져 거래처에 제공 중인 상품을, 몰에서 다시 스크랩한
  * 최신 값과 비교해 재고/옵션/이미지/가격이 바뀐 것만 골라 보여주고, 선택한 것만 다시 마이그레이션(상품
@@ -38,6 +49,12 @@ export function ContinuousMigrationPanel() {
   const [structureChecking, setStructureChecking] = useState(false)
   const [structureCheckResult, setStructureCheckResult] = useState<{ diffs: string[]; isFirstTime: boolean } | null>(null)
   const [structureCheckError, setStructureCheckError] = useState('')
+  const [loadingAll, setLoadingAll] = useState(false)
+  const [recheckFields, setRecheckFields] = useState<Set<RecheckField>>(new Set())
+  const [recheckTarget, setRecheckTarget] = useState<'all' | 'selected'>('all')
+  const [rechecking, setRechecking] = useState(false)
+  const [recheckResults, setRecheckResults] = useState<RecheckResultRow[] | null>(null)
+  const [recheckError, setRecheckError] = useState('')
 
   useEffect(() => {
     fetch('/api/clients').then(r => r.json()).then((d: Client[]) => setClients(Array.isArray(d) ? d : [])).catch(() => {})
@@ -59,6 +76,50 @@ export function ContinuousMigrationPanel() {
       setDetecting(false)
     }
   }, [siteId])
+
+  // "선택한 상품만" 재수집 대상을 고르려면 변동 여부와 무관한 전체 확정 상품 목록이 필요하다 — 기존
+  // "변동 감지" 테이블/체크박스를 그대로 재사용한다(changes?all=1).
+  async function loadAllConfirmed() {
+    if (siteId === '') return
+    setLoadingAll(true)
+    try {
+      const res = await fetch(`/api/master/changes?siteId=${siteId}&all=1`)
+      const d = await res.json() as ChangeRow[]
+      setChanges(Array.isArray(d) ? d : [])
+      setSelected(new Set())
+      setSearched(true)
+    } finally {
+      setLoadingAll(false)
+    }
+  }
+
+  function toggleRecheckField(key: RecheckField) {
+    setRecheckFields(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n })
+  }
+
+  async function runRecheck() {
+    if (siteId === '' || !recheckFields.size) return
+    if (recheckTarget === 'selected' && !selected.size) return
+    setRechecking(true)
+    setRecheckError('')
+    setRecheckResults(null)
+    try {
+      const res = await fetch('/api/master/recheck', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          siteId, fields: Array.from(recheckFields),
+          mallProductIds: recheckTarget === 'selected' ? Array.from(selected) : undefined,
+        }),
+      })
+      const d = await res.json()
+      if (!res.ok) { setRecheckError(d.error || '체킹에 실패했습니다'); return }
+      setRecheckResults(d.results as RecheckResultRow[])
+    } catch {
+      setRecheckError('체킹에 실패했습니다')
+    } finally {
+      setRechecking(false)
+    }
+  }
 
   async function checkMallStructure() {
     if (siteId === '') return
@@ -152,6 +213,60 @@ export function ContinuousMigrationPanel() {
             className="px-4 py-1.5 bg-emerald-600 text-white text-sm font-semibold rounded-full hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
             {migrating ? '반영 중...' : `선택 재마이그레이션 (${selected.size})`}
           </button>
+        )}
+      </div>
+
+      <div className="bg-white rounded-2xl border border-gray-200 p-4 mb-4 shrink-0">
+        <p className="text-xs text-gray-400 mb-2">
+          현재 상태 체킹(재수집) — 몰에 다시 방문해 고른 컬럼만 가볍게 확인합니다(&quot;변동 감지&quot;는 저장된
+          데이터끼리 비교만 하고 몰을 다시 방문하지 않습니다). &quot;상품코드&quot;를 고르면 페이지 자체가 사라진
+          품목을 &quot;단종(추정)&quot;으로 표시합니다.
+        </p>
+        <div className="flex flex-wrap items-center gap-4 mb-3">
+          {RECHECK_FIELDS.map(f => (
+            <label key={f.key} className="flex items-center gap-1.5 text-sm text-gray-600">
+              <input type="checkbox" checked={recheckFields.has(f.key)} onChange={() => toggleRecheckField(f.key)} />
+              {f.label}
+            </label>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-4 mb-3">
+          <label className="flex items-center gap-1.5 text-sm text-gray-600">
+            <input type="radio" name="recheckTarget" checked={recheckTarget === 'all'} onChange={() => setRecheckTarget('all')} />
+            전체 확정 상품
+          </label>
+          <label className="flex items-center gap-1.5 text-sm text-gray-600">
+            <input type="radio" name="recheckTarget" checked={recheckTarget === 'selected'} onChange={() => setRecheckTarget('selected')} />
+            선택한 상품만 ({selected.size}개 선택됨)
+          </label>
+          {recheckTarget === 'selected' && (
+            <button onClick={loadAllConfirmed} disabled={siteId === '' || loadingAll}
+              className="text-xs text-teal-600 hover:underline disabled:opacity-40 disabled:cursor-not-allowed">
+              {loadingAll ? '불러오는 중...' : '📋 전체 확정 상품 목록에서 고르기'}
+            </button>
+          )}
+        </div>
+        <button onClick={runRecheck}
+          disabled={siteId === '' || !recheckFields.size || rechecking || (recheckTarget === 'selected' && !selected.size)}
+          className="px-4 py-1.5 bg-indigo-500 text-white text-sm font-semibold rounded-full hover:bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+          {rechecking ? '체킹 중...' : '🔎 현재 상태 체킹(재수집)'}
+        </button>
+        {recheckError && <p className="text-xs text-rose-500 mt-2">{recheckError}</p>}
+        {recheckResults && (
+          recheckResults.length === 0 ? (
+            <p className="text-xs text-emerald-600 mt-3">✅ 확인한 항목 모두 저장된 값과 동일합니다 — 변경 없음.</p>
+          ) : (
+            <ul className="text-xs space-y-1 mt-3">
+              {recheckResults.map(r => (
+                <li key={r.mallProductId} className="text-gray-700">
+                  <span className="font-semibold">{r.mallProductCode}</span>
+                  {r.reasons.map((reason, i) => (
+                    <span key={i} className={reason.startsWith('단종') ? 'text-rose-600' : 'text-amber-600'}> · {reason}</span>
+                  ))}
+                </li>
+              ))}
+            </ul>
+          )
         )}
       </div>
 

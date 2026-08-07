@@ -11,7 +11,6 @@ export interface RunScrapingOpts {
   nextPageSelector?: string
   maxPages?: number
   delayMs?: number
-  concurrency?: number
   loginId?: string
   loginPw?: string
   productLinkSelector?: string
@@ -54,7 +53,6 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
   const scrapeOpts = {
     url: opts.url, categoryUrls: opts.categoryUrls, productUrls: opts.productUrls,
     nextPageSelector: opts.nextPageSelector, maxPages: opts.maxPages, delayMs: opts.delayMs,
-    concurrency: opts.concurrency,
     loginId: opts.loginId, loginPw: opts.loginPw, productLinkSelector: opts.productLinkSelector, siteId,
     excludeUrls: scrapeMode === 'incremental' ? [] : excluded.rows.map(r => r.source_url), sessionId,
     nameSelector: site?.custom_name_selector || undefined,
@@ -79,7 +77,7 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
     return
   }
 
-  const { total, stopped } = await scrapeCatalogPage(scrapeOpts, async ({ total, url, result, error }) => {
+  const { total, stopped, concurrencyLog } = await scrapeCatalogPage(scrapeOpts, async ({ total, url, result, error }) => {
     await pool.query(`UPDATE scrape_sessions SET product_count=$1 WHERE id=$2`, [total, sessionId])
     await pool.query(
       `INSERT INTO scrape_item_log (session_id, url, status, error) VALUES ($1,$2,$3,$4)`,
@@ -91,7 +89,7 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
   // 단종 추정 판정은 스테이징 결과가 실제 병합된 뒤에만 의미가 있으므로 여기서 하지 않는다
   // (lib/scrape/staging.ts의 mergeSessionStaging에서 병합 시점에 수행).
   await pool.query(
-    `UPDATE scrape_sessions SET status=$1, product_count=$2 WHERE id=$3`,
-    [stopped ? 'stopped' : 'done', total, sessionId],
+    `UPDATE scrape_sessions SET status=$1, product_count=$2, concurrency_log=$3 WHERE id=$4`,
+    [stopped ? 'stopped' : 'done', total, JSON.stringify(concurrencyLog), sessionId],
   )
 }

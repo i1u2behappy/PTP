@@ -107,7 +107,7 @@ export function MasterSchemaPanel() {
   return (
     <div className="h-full max-w-4xl flex flex-col">
       <div className="mb-6 shrink-0">
-        <h1 className="text-2xl font-bold text-gray-800">🧱 기준 Master 테이블 관리</h1>
+        <h1 className="text-2xl font-bold text-gray-800">🧱 기준 마스터테이블 관리</h1>
         <p className="text-xs text-gray-400 mt-1">
           거래처 구분 없이 시스템 전체가 공유하는 단일 &quot;기준 Master DB&quot; 컬럼 구성을 여기서 등록·편집합니다.
           모든 컬럼은 동등한 고정 컬럼이며, 스크래핑 시 자동으로 값 매칭을 먼저 시도합니다 — 값을 못 찾으면

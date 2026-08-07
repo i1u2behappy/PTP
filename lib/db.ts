@@ -11,6 +11,17 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD || 'postgres',
   // DB가 잠깐 안 닿을 때(Docker 재시작, 네트워크 문제 등) 무한정 멈추는 대신 몇 초 안에 에러로 실패하게 한다.
   connectionTimeoutMillis: 5000,
+  // PC가 절전모드로 들어가면 이 풀에 남아있던 기존 연결이 "좀비"가 된다 — Node 프로세스가 멈춰있는 동안
+  // WSL2/Docker 네트워크 쪽에서는 연결이 끊겨도, 다시 켰을 때 Node는 그걸 모른 채 그대로 재사용하려
+  // 한다(실사용 확인: PC를 안 쓰다가 다시 켜면 "도커 재시작" 배너가 뜨는데, Docker/Postgres 자체는
+  // 멀쩡했다). idleTimeoutMillis 기본값(10초)은 Node가 실행 중일 때만 흐르는 타이머라 절전 중엔 사실상
+  // 멈춰있어 못 믿는다 — keepAlive로 좀비가 되기 전에 OS가 먼저 끊어주게 하고, query_timeout으로 그래도
+  // 좀비를 붙잡으면 무한정 멈추는 대신 몇 초 안에 에러로 실패해 풀에서 제거되게 한다(이 두 가지가 없으면
+  // 앱 전체 어디서든 쿼리가 영원히 멈출 수 있었다 — 지금까지는 우연히 상태확인 화면 자체의 3초 타임아웃
+  // 덕에 "도커 재시작" 배너로만 보였을 뿐).
+  keepAlive: true,
+  idleTimeoutMillis: 30_000,
+  query_timeout: 8_000,
 })
 
 // pg Pool은 idle 커넥션이 예기치 않게 끊기면(DB 재시작, 네트워크 단절 등) 'error' 이벤트를 낸다 —
@@ -263,6 +274,9 @@ export async function initDb() {
     CREATE SEQUENCE IF NOT EXISTS scrape_session_merge_seq;
     ALTER TABLE scrape_sessions ADD COLUMN IF NOT EXISTS merge_group_id INTEGER;
     ALTER TABLE scrape_sessions ADD COLUMN IF NOT EXISTS merged_at TIMESTAMPTZ;
+    -- 적응형 동시성(scrapeCatalogPage)이 이번 회차에 동시 처리 수를 올리거나(연속 성공) 차단 감지로
+    -- 다시 낮춘 시점들을 기록 — 스크래핑 후 "간략히" 확인할 수 있게 세션에 남긴다.
+    ALTER TABLE scrape_sessions ADD COLUMN IF NOT EXISTS concurrency_log JSONB DEFAULT '[]';
     CREATE INDEX IF NOT EXISTS idx_scrape_sessions_merge_group ON scrape_sessions(merge_group_id) WHERE merge_group_id IS NOT NULL;
     -- Mall 상세관리 목록(GET /api/sites)이 몰마다 "가장 최근 세션" 하나를 LATERAL로 조회하는데,
     -- site_id에 인덱스가 없어 scrape_sessions가 쌓일수록 몰 수만큼 순차 스캔이 반복돼 점점 느려졌다.

@@ -79,7 +79,7 @@ export function BrandOriginPanel({ params }: { params?: Record<string, unknown> 
           {availableFields.length === 0 ? (
             <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400">
               <div className="text-4xl mb-3">🏭</div>
-              <p className="text-sm">기준 Master 테이블에 브랜드·제조사·원산지 컬럼이 등록되어 있지 않습니다. 기준 Master 테이블 관리에서 먼저 추가해주세요.</p>
+              <p className="text-sm">기준 Master 테이블에 브랜드·제조사·원산지 컬럼이 등록되어 있지 않습니다. 기준 마스터테이블 관리에서 먼저 추가해주세요.</p>
             </div>
           ) : values.length === 0 ? (
             <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center text-gray-400">

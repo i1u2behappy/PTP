@@ -6,8 +6,14 @@ export async function GET(req: NextRequest) {
   if (!sessionId) return NextResponse.json({ error: 'sessionId required' }, { status: 400 })
 
   const res = await pool.query(
-    `SELECT s.id, s.status, s.product_count, s.error, s.created_at,
+    `SELECT s.id, s.status, s.product_count, s.error, s.created_at, s.concurrency_log,
             (SELECT COUNT(*) FROM scrape_staging_items si WHERE si.session_id = s.id) AS saved_count,
+            -- 진행 화면의 "수집 성공/실패" 개수 표시용 — /api/scrape/log는 화면에 다 그리기엔 너무 많을 수
+            -- 있어 최근 200건만 돌려주는데(성능), 그 캡 걸린 목록의 length를 그대로 개수로 쓰면 실제로는
+            -- 200건 넘게 처리됐어도 화면엔 항상 최대 200개로만 보인다(실사용 확인: 총 323개 수집완료인데
+            -- "수집 성공"은 200개로 표시됨) — 개수는 캡 없이 정확히 세고, 목록 표시만 따로 캡을 건다.
+            (SELECT COUNT(*) FROM scrape_item_log l WHERE l.session_id = s.id AND l.status = 'success') AS success_count,
+            (SELECT COUNT(*) FROM scrape_item_log l WHERE l.session_id = s.id AND l.status = 'failed') AS failed_count,
             (SELECT MAX(created_at) FROM scrape_item_log l WHERE l.session_id = s.id) AS last_activity
      FROM scrape_sessions s
      WHERE s.id = $1`,

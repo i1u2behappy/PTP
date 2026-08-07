@@ -16,7 +16,7 @@ interface DueSite {
   login_id: string | null
   login_pw_encrypted: string | null
   login_pw_iv: string | null
-  last_scrape_config: { mode: 'single' | 'catalog'; url?: string; categoryUrls?: string[]; productLinkSelector?: string; nextPageSelector?: string; maxPages?: number; delayMs?: number; concurrency?: number } | null
+  last_scrape_config: { mode: 'single' | 'catalog'; url?: string; categoryUrls?: string[]; productLinkSelector?: string; nextPageSelector?: string; maxPages?: number; delayMs?: number } | null
 }
 
 async function checkSchedules() {
@@ -49,7 +49,7 @@ async function triggerScheduledScrape(site: DueSite) {
   await runScraping(sessionId, {
     mode: config.mode, url: config.url, categoryUrls: config.categoryUrls,
     productLinkSelector: config.productLinkSelector, nextPageSelector: config.nextPageSelector,
-    maxPages: config.maxPages, delayMs: config.delayMs, concurrency: config.concurrency,
+    maxPages: config.maxPages, delayMs: config.delayMs,
     loginId: site.login_id || undefined,
     loginPw: decryptSecret(site.login_pw_encrypted, site.login_pw_iv) || undefined,
     scrapeMode: 'incremental',

@@ -12,7 +12,6 @@ interface ScrapeRequestBody {
   nextPageSelector?: string
   maxPages?: number
   delayMs?: number
-  concurrency?: number
   loginId?: string
   loginPw?: string
   mode: 'single' | 'catalog'
@@ -48,7 +47,7 @@ export async function POST(req: NextRequest) {
       JSON.stringify({
         mode: body.mode, url: body.url, categoryUrls: body.categoryUrls,
         productLinkSelector: body.productLinkSelector, nextPageSelector: body.nextPageSelector,
-        maxPages: body.maxPages, delayMs: body.delayMs, concurrency: body.concurrency,
+        maxPages: body.maxPages, delayMs: body.delayMs,
       }),
       body.siteId,
     ])

@@ -11,14 +11,14 @@ const PUBLIC_PATHS = ['/login', '/logo.jpg', '/icon.jpg']
 // 단계에서도 DbHealthBanner가 이 두 엔드포인트를 써야 한다 — 세션 쿠키가 있어야만 닿을 수 있으면 정작
 // 로그인이 막힌 상황에서 배너/재시작 버튼이 무용지물이 된다.
 const PUBLIC_API_PREFIXES = [
-  '/api/auth/', '/api/scrape/extension-ingest', '/api/sites/resolve', '/api/scrape/stop-requested', '/api/scrape/failed-urls',
+  '/api/auth/', '/api/scrape/extension-ingest', '/api/sites/resolve', '/api/scrape/stop-requested',
   '/api/health/db', '/api/system/restart-docker', '/api/system/restart-server',
 ]
-// adjust/capture는 몰 id가 경로 중간에 끼어 있어(/api/sites/{id}/adjust/capture) 단순 prefix로 못 걸러
-// 정규식으로 따로 둔다 — "스크랩 조정"(개발자모드 2단계)에서 확장이 세션 쿠키 없이 호출한다.
-// preview-capture도 같은 이유(개발자모드 "스크래핑 전 단건 미리보기") — 확장이 세션 쿠키 없이 호출.
+// 몰 id가 경로 중간에 끼어 있어(/api/sites/{id}/...) 단순 prefix로 못 걸러 정규식으로 따로 둔다 — 개발자모드
+// 크롬 확장이 세션 쿠키 없이 호출하는 엔드포인트들. preview-capture(스크래핑 전 단건 미리보기),
+// picker/rule(스크랩 대상 직접지정, Runtime.addBinding 경유 저장).
 const PUBLIC_API_PATTERNS = [
-  /^\/api\/sites\/\d+\/adjust\/capture$/, /^\/api\/sites\/\d+\/adjust\/target$/, /^\/api\/sites\/\d+\/preview-capture$/,
+  /^\/api\/sites\/\d+\/preview-capture$/, /^\/api\/sites\/\d+\/picker\/rule$/,
 ]
 
 export function proxy(request: NextRequest) {

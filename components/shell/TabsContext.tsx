@@ -30,10 +30,24 @@ interface TabsState {
   goBack: () => void
   refreshSignals: Record<RefreshScope, number>
   bumpRefresh: (scope: RefreshScope) => void
+  /** 지금 활성 탭(메뉴)이 "다음에 뭘 눌러야 하는지" 안내하는 한 줄 문구 — 각 패널이 자신의 내부 진행
+   *  상태(예: 스크래핑 화면의 몰선택→로그인→몰구조파악→미리보기→시작)를 보고 직접 계산해 넣는다.
+   *  탭을 벗어나면 그 패널이 언마운트되며 null로 되돌려야 한다(그렇지 않으면 안내가 다른 화면까지 따라옴). */
+  guidance: string | null
+  setGuidance: (text: string | null) => void
+  /** 데스크톱에서 메뉴바를 아이콘만 보이는 좁은 폭으로 접어 본문을 더 크게 볼 수 있게 하는 수동 토글 —
+   *  다음 방문에도 유지되도록 localStorage에 저장한다. */
+  sidebarCollapsed: boolean
+  setSidebarCollapsed: (v: boolean | ((prev: boolean) => boolean)) => void
+  /** 좁은 화면(모바일)에서 평소엔 숨겨두는 메뉴바를 햄버거 버튼으로 열고 닫는 상태 — 화면 크기에 따라
+   *  달라지는 일시적 상태라 저장하지 않는다(새로고침/화면 확대 시 항상 닫힌 상태로 시작). */
+  mobileSidebarOpen: boolean
+  setMobileSidebarOpen: (v: boolean | ((prev: boolean) => boolean)) => void
 }
 
 const DASHBOARD_TAB: Tab = { id: 'dashboard', type: 'dashboard', title: '대시보드', icon: '📊', closable: false }
 const STORAGE_KEY = 'scrape.tabs.v1'
+const SIDEBAR_COLLAPSED_KEY = 'scrape.sidebar.collapsed'
 const MAX_HISTORY = 20
 
 function sameTab(a: Tab | undefined, b: Tab | undefined): boolean {
@@ -48,6 +62,18 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
   const [activeTabId, setActiveTabId] = useState(DASHBOARD_TAB.id)
   const [hydrated, setHydrated] = useState(false)
   const [refreshSignals, setRefreshSignals] = useState<Record<RefreshScope, number>>({ sites: 0, products: 0, master: 0, staging: 0, clients: 0 })
+  const [guidance, setGuidance] = useState<string | null>(null)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1') setSidebarCollapsed(true)
+  }, [])
+  /* eslint-enable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? '1' : '0')
+  }, [sidebarCollapsed])
 
   // "뒤로가기" 히스토리 — 실제 화면 전환(탭 id/type/params 변경)이 있을 때만 이전 화면을 쌓는다.
   // setOpenTabs/setHistory의 함수형 업데이터 안에서 서로를 호출하면(중첩 setState) StrictMode 재실행 시
@@ -147,7 +173,9 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo<TabsState>(() => ({
     openTabs, activeTabId, openTab, closeTab, setActive, canGoBack: history.length > 0, goBack, refreshSignals, bumpRefresh,
-  }), [openTabs, activeTabId, openTab, closeTab, setActive, history.length, goBack, refreshSignals, bumpRefresh])
+    guidance, setGuidance, sidebarCollapsed, setSidebarCollapsed, mobileSidebarOpen, setMobileSidebarOpen,
+  }), [openTabs, activeTabId, openTab, closeTab, setActive, history.length, goBack, refreshSignals, bumpRefresh, guidance,
+      sidebarCollapsed, mobileSidebarOpen])
 
   return <TabsCtx.Provider value={value}>{children}</TabsCtx.Provider>
 }

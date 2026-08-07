@@ -66,3 +66,26 @@ message... deadline has elapsed`)나고 있었고, 단순 API 라우트 하나 �
   스케줄 타입(`Daily`) 확인.
 - 알약 실시간 검사로 인한 근본적인 속도 저하 자체는 알약 예외 등록(사용자가 직접 실행)이 아직 완료
   안 됐다면 계속 남아있을 수 있음 — 등록 후 체감 속도 재확인 권장.
+
+## 재발 및 근본 조치 — Turbopack → webpack 전환 (2026-08-07)
+
+알약 예외 등록이 끝나지 않은 채로 매일 새벽 4시 자동 재기동 직후(새로 비운 캐시로 `app/globals.css`를
+처음부터 다시 컴파일하는 시점) 같은 FATAL panic이 재발했고, 이번엔 panic 이후 프로세스가 완전히
+멈춰버렸다(`Get-Process` CPU 델타 0%, 어떤 요청에도 응답 없음 — DB/Docker는 정상이었고 순수하게 이
+프로세스만 죽어있었음). 재시작 스크립트로 되살려도 새 프로세스가 첫 요청(`/api/health/db`) 컴파일
+과정에서 90초 안에 다시 같은 방식으로 멈추는 것을 반복 확인 — 알약 예외 등록 없이는 재시작만으로는
+근본적으로 해결되지 않음을 확인했다.
+
+- **조치**: `package.json`의 `dev`/`dev:clean`을 `next dev --webpack`으로 바꿔 Turbopack 자체를
+  개발 모드에서 쓰지 않도록 전환(Next.js 16 CLI에 `--webpack` 옵션 존재, `next dev --help`로 확인).
+  같은 조건에서 webpack 모드는 첫 컴파일 포함 정상적으로 응답(`GET /api/health/db 200`)해 재현하지
+  않음을 확인.
+- **트레이드오프**: 개발 중 hot reload/컴파일 속도가 Turbopack보다 느릴 수 있음(webpack이 원래
+  더 느림) — 그래도 "몇 시간~하루씩 서버가 완전히 죽어있는" 문제보다는 낫다고 판단. 알약 예외
+  등록을 완료하면 다시 Turbopack으로 되돌리는 것도 고려 가능(`package.json`에서 `--webpack` 제거).
+- `scripts/restart-dev-server.ps1`/`start-dev-server.cmd`는 모두 `npm run dev:clean`을 호출하는
+  방식이라 별도 수정 없이 이 전환이 그대로 적용된다.
+- [components/shell/DbHealthBanner.tsx](../components/shell/DbHealthBanner.tsx)의 "PTP 서버
+  재시작" 버튼은, 서버가 완전히 멈춘 경우 그 재시작 요청조차 같은 죽은 프로세스가 처리해야 해서
+  응답이 영영 안 올 수 있다는 점을 놓치고 있었다(타임아웃 없이 무한정 "재시작 중..." 표시) — 6초
+  타임아웃을 추가해, 응답이 없으면 "브라우저로는 더 해볼 수 없다"는 것을 바로 알려주도록 수정.

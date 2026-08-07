@@ -10,9 +10,8 @@
 const PTP_ORIGIN = 'http://127.0.0.1:3000'
 const INGEST_ENDPOINT = `${PTP_ORIGIN}/api/scrape/extension-ingest`
 const RESOLVE_ENDPOINT = `${PTP_ORIGIN}/api/sites/resolve`
-const ADJUST_CAPTURE_ENDPOINT_BASE = `${PTP_ORIGIN}/api/sites`
+const SITE_API_BASE = `${PTP_ORIGIN}/api/sites`
 const STOP_REQUESTED_ENDPOINT = `${PTP_ORIGIN}/api/scrape/stop-requested`
-const FAILED_URLS_ENDPOINT = `${PTP_ORIGIN}/api/scrape/failed-urls`
 const MAX_PRODUCTS = 300 // 안전장치 — 이 이상은 세션을 나눠서 다시 실행
 
 let siteId = null
@@ -29,7 +28,10 @@ async function resolveSite(hostname) {
   if (!res.ok) return null
   const data = await res.json()
   if (data.id == null) return null
-  return { id: data.id, extractionRules: data.extractionRules || {}, aiPreviewMode: !!data.aiPreviewMode }
+  return {
+    id: data.id, extractionRules: data.extractionRules || {}, aiPreviewMode: !!data.aiPreviewMode,
+    masterLabels: data.masterLabels || {}, masterOrder: data.masterOrder || [], previewProduct: data.previewProduct || null,
+  }
 }
 
 /** PTP의 "스크래핑 중지" 버튼은 서버 인메모리 Set에 요청만 남겨둔다(일반모드는 서버 자신이 그 루프를
@@ -48,6 +50,25 @@ async function checkStopRequested(sid) {
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)) }
 function throttle() { return delay(1200 + Math.random() * 1200) }
+
+/** MV3 서비스워커는 idle이면 크롬이 죽였다가 재시작하는데, 그때 이 파일의 최상위 상태(pickerSessions 등)는
+ *  전부 초기화돼도 브라우저가 실제로 붙여둔 디버거 연결 자체는 그대로 남는다 — 그래서 재시작 후 다시
+ *  attach를 시도하면 "자기 자신의 이전 연결"을 기억 못 한 채 "Another debugger is already attached"로
+ *  실패한다(실제 발견된 사례). 실패하면 한 번 detach 후 재시도해 자기 자신의 낡은 연결이면 회복하고,
+ *  진짜 다른 디버거(예: F12 개발자도구)가 붙어있는 경우에만 에러를 그대로 알린다. */
+async function attachDebugger(tabId) {
+  try {
+    await chrome.debugger.attach({ tabId }, '1.3')
+  } catch (e) {
+    if (!/already attached/i.test(e.message)) throw e
+    await chrome.debugger.detach({ tabId }).catch(() => {})
+    try {
+      await chrome.debugger.attach({ tabId }, '1.3')
+    } catch {
+      throw new Error(`${e.message} — 이 탭에서 개발자도구(F12)가 열려있다면 닫고 다시 시도하세요.`)
+    }
+  }
+}
 
 async function evalInTab(tabId, expression) {
   const res = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
@@ -87,9 +108,17 @@ const COLLECT_LINKS_EXPR = `(() => {
     if (/goods_view\\.php/i.test(href) && /[?&]goodsno=/i.test(href)) return true
     return false
   }
-  const links = Array.from(document.querySelectorAll('a[href*="/product/"], a[href*="detail.htm"], a[href*="goods_view"]'))
-    .map(a => a.href).filter(href => href && isProductLink(href))
-  const uniqueLinks = [...new Set(links)]
+  // 목록(카테고리) 페이지에서 "미리보기"의 나머지 목록에 쓸 상품명/썸네일도 같이 모은다 — lib/scraper.ts의
+  // collectProductUrls(scanCurrentPage)와 같은 방식(썸네일 img의 alt, 없으면 링크 텍스트).
+  const anchors = Array.from(document.querySelectorAll('a[href*="/product/"], a[href*="detail.htm"], a[href*="goods_view"]'))
+    .filter(a => a.href && isProductLink(a.href))
+  const linkInfo = new Map()
+  anchors.forEach(a => {
+    if (linkInfo.has(a.href)) return
+    const img = a.querySelector('img')
+    linkInfo.set(a.href, { name: (img?.alt || a.textContent || '').trim(), thumbnail: img?.src || '' })
+  })
+  const uniqueLinks = [...linkInfo.keys()]
 
   // 다음 페이지 — 카페24 표준 페이지네이션(.ec-base-paginate, 현재 페이지 a.this 다음 번호)을 먼저
   // 시도하고, 없으면 고도몰 표준(.paginate a.next), 그래도 없으면 "다음"/"next" 글자가 들어간 링크
@@ -140,7 +169,7 @@ const COLLECT_LINKS_EXPR = `(() => {
     if (category || brandFromCategory) break
   }
 
-  return { links: uniqueLinks, nextUrl, category, brandFromCategory }
+  return { links: uniqueLinks, linkInfo: Object.fromEntries(linkInfo), nextUrl, category, brandFromCategory }
 })()`
 
 // 상품 상세 페이지 추출 — lib/extract.ts의 규칙기반 추출과 같은 원칙(ld+json → og 태그 →
@@ -497,7 +526,7 @@ async function startScrape(tab, site) {
   sessionId = null
 
   try {
-    await chrome.debugger.attach({ tabId: tab.id }, '1.3')
+    await attachDebugger(tab.id)
   } catch (e) {
     console.log('[PTP] debugger attach 실패:', e.message)
     return { ok: false, error: `디버거 연결 실패: ${e.message}` }
@@ -508,95 +537,71 @@ async function startScrape(tab, site) {
   return { ok: true }
 }
 
-// "스크랩 조정" 2단계 — 사용자가 PTP에 프롬프트를 먼저 입력해두고(1단계, /api/sites/{id}/adjust/prompt),
-// 이 몰의 아무 페이지에서나(로그인된 상태) 이 우클릭 메뉴를 실행하면, 확장이 PTP에 "지금 테스트해야 할
-// 상품 페이지가 어디냐"고 물어본 뒤 그 URL로 직접 이동해 캡처한다 — 정확한 상품 페이지를 사용자가 직접
-// 찾아 들어갈 필요가 없다(일반모드가 그리드 맨 위 1건을 자동으로 테스트하는 것과 같은 원칙).
-// 백엔드가 이 몰의 페이지를 스스로 못 열어보는 게 개발자모드의 정의라, 이 캡처가 유일한 통로다.
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({ id: 'ptp-adjust', title: 'PTP 조정 테스트 실행', contexts: ['page'] }, () => void chrome.runtime.lastError)
-  chrome.contextMenus.create({ id: 'ptp-preview', title: 'PTP 미리보기 실행', contexts: ['page'] }, () => void chrome.runtime.lastError)
-  chrome.contextMenus.create({ id: 'ptp-retry-failed', title: 'PTP 실패 상품 재수집', contexts: ['page'] }, () => void chrome.runtime.lastError)
+  chrome.contextMenus.create({ id: 'ptp-preview', title: 'PTP 스크랩 미리보기 실행', contexts: ['page'] }, () => void chrome.runtime.lastError)
+  chrome.contextMenus.create({ id: 'ptp-picker', title: 'PTP 스크랩 대상 직접지정', contexts: ['page'] }, () => void chrome.runtime.lastError)
 })
 
-// "실패 상품만 재수집" — 일반모드의 "실패 재시도" 버튼과 같은 목적이지만, 개발자모드는 PTP 백엔드가
-// 스스로 재시도를 못 돌리므로 이 몰의 아무 페이지에서 우클릭하면 실행되는 형태로 만들었다. 실패했다가
-// 그 뒤로 한 번도 성공 못 한 URL만(PTP가 계산) 새 세션으로 다시 방문한다 — 이미 성공한 상품은 다시
-// 스크랩하지 않는다.
-async function retryFailed(tab) {
-  const hostname = new URL(tab.url).hostname
-  const site = await resolveSite(hostname).catch(() => null)
-  if (!site) {
-    const msg = `"${hostname}"은 PTP Mall 관리에 "크롬익스텐션-개발자모드"로 등록돼 있지 않습니다.`
-    console.log('[PTP]', msg)
-    return { ok: false, error: msg }
-  }
-  const data = await fetch(`${FAILED_URLS_ENDPOINT}?siteId=${site.id}`).then(r => r.json()).catch(() => null)
-  const urls = data?.urls || []
-  if (!urls.length) {
-    console.log('[PTP] 재수집할 실패 상품이 없습니다.')
-    return { ok: false, error: '재수집할 실패 상품이 없습니다' }
-  }
-  console.log(`[PTP] 실패 상품 재수집 시작 — ${urls.length}개`)
-
-  siteId = site.id
-  extractionRules = site.extractionRules
-  sessionId = null // 재시도는 새 세션으로 기록한다 — 예전 실패 기록과 섞이지 않도록.
-
-  try {
-    await chrome.debugger.attach({ tabId: tab.id }, '1.3')
-  } catch (e) {
-    console.log('[PTP] 재수집 실패(디버거 연결 안 됨):', e.message)
-    return { ok: false, error: `디버거 연결 실패: ${e.message}` }
-  }
-  // 실패 상품이 많으면 몇 분씩 걸릴 수 있어(URL마다 1.2~2.4초 대기) startScrape와 같은 이유로 완료를
-  // 기다리지 않고 백그라운드로 흘려보낸다 — 팝업은 "시작했다"는 응답만 받는다.
-  ;(async () => {
-    try {
-      let processed = 0
-      for (const url of urls) {
-        if (await checkStopRequested(sessionId)) {
-          console.log('[PTP] 중지 요청을 확인해 재수집을 멈춥니다.')
-          break
-        }
-        await navigate(tab.id, url)
-        try {
-          const product = await evalInTab(tab.id, buildExtractExpr(extractionRules))
-          const result = await report(url, product)
-          console.log(`[PTP] 재수집 ${++processed}/${urls.length} 저장:`, product.name, result)
-        } catch (e) {
-          console.log('[PTP] 재수집 실패:', url, e.message)
-          await reportFailure(url, e.message).catch(() => {})
-        }
-        await throttle()
-      }
-      console.log(`[PTP] 실패 상품 재수집 완료 — 총 ${urls.length}개 시도`)
-    } finally {
-      await reportDone()
-      await navigate(tab.id, tab.url).catch(() => {})
-      await chrome.debugger.detach({ tabId: tab.id }).catch(() => {})
+/** 카테고리(목록) 페이지부터 다음 페이지까지 따라가며 상품 링크 전체를 모은다 — "스크랩 미리보기 실행"이
+ *  일반모드의 previewCatalog처럼 정확한 총 개수를 보여줄 수 있게 끝까지 페이징한다(run()과 같은 루프
+ *  구조, MAX_PRODUCTS 안전장치 공유). 지금 페이지 자체가 이미 상품 상세 페이지라 링크가 하나도 안
+ *  잡히면 빈 목록을 그대로 돌려준다 — 호출부(runPreview)가 그 경우 지금 페이지 자체를 상품 1건으로
+ *  처리한다. */
+async function collectCategoryLinks(tabId) {
+  const linkOrder = []
+  const linkInfo = {}
+  const categoryByUrl = {}
+  let pages = 0
+  while (linkOrder.length < MAX_PRODUCTS && pages < 50) {
+    const { links, linkInfo: pageLinkInfo, nextUrl, category, brandFromCategory } = await evalInTab(tabId, COLLECT_LINKS_EXPR)
+    for (const href of links) {
+      if (href in linkInfo) continue
+      linkOrder.push(href)
+      linkInfo[href] = pageLinkInfo[href] || { name: '', thumbnail: '' }
+      if (category) categoryByUrl[href] = { category, brandFromCategory }
     }
-  })()
-  return { ok: true, count: urls.length }
+    pages++
+    if (!nextUrl) break
+    await navigate(tabId, nextUrl)
+    await throttle()
+  }
+  return { links: linkOrder, linkInfo, categoryByUrl }
 }
 
-/** "PTP 미리보기 실행" — 스크랩을 아직 한 번도 안 한 몰이라도, 지금 보고 있는 상품 페이지 그대로 캡처해
- * 규칙기반(+aiPreviewMode면 AI모드) 추출 결과를 보여준다. "조정"과 달리 프롬프트도 기존 스크랩 세션도
- * 필요 없다 — 지금 이 페이지 그대로, 이동 없이 캡처한다. */
+/** "스크랩 미리보기 실행" — 일반모드의 "스크랩 미리보기"(previewCatalog)와 같은 절차: 지금 보고 있는
+ *  페이지가 카테고리(목록)면 링크를 끝까지 모아 총 개수를 세고, 첫 상품을 열어 전체 상세를 캡처하고,
+ *  나머지는 목록 페이지 정보(상품명/썸네일)만 돌려준다. 지금 페이지 자체가 이미 상품 상세 페이지(링크가
+ *  하나도 안 잡힘)면 그 페이지 하나만 상품 1건으로 캡처한다. 끝나면 원래 보고 있던 페이지로 되돌아간다. */
 async function runPreview(tab, site, aiMode) {
   try {
-    await chrome.debugger.attach({ tabId: tab.id }, '1.3')
+    await attachDebugger(tab.id)
   } catch (e) {
     console.log('[PTP] 미리보기 실패(디버거 연결 안 됨):', e.message)
     return { ok: false, error: `디버거 연결 실패: ${e.message}` }
   }
+  const startUrl = tab.url
   try {
+    const { links, linkInfo, categoryByUrl } = await collectCategoryLinks(tab.id)
+    let firstUrl = startUrl
+    let items = []
+    let total
+    if (links.length > 0) {
+      firstUrl = links[0]
+      total = links.length
+      items = links.slice(1).map(href => ({ url: href, name: linkInfo[href]?.name || '', thumbnail: linkInfo[href]?.thumbnail || '' }))
+      await navigate(tab.id, firstUrl)
+    }
     const html = await evalInTab(tab.id, '(() => document.documentElement.outerHTML.slice(0, 200000))()')
-    const res = await fetch(`${ADJUST_CAPTURE_ENDPOINT_BASE}/${site.id}/preview-capture`, {
+    const cat = categoryByUrl[firstUrl]
+    const res = await fetch(`${SITE_API_BASE}/${site.id}/preview-capture`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: tab.url, html, aiMode: !!aiMode }),
+      body: JSON.stringify({
+        url: firstUrl, html, aiMode: !!aiMode, total, items,
+        category: cat?.category || '', brandFromCategory: cat?.brandFromCategory || '',
+      }),
     })
     const data = await res.json()
+    if (firstUrl !== startUrl) await navigate(tab.id, startUrl).catch(() => {})
     if (!res.ok) { console.log('[PTP] 미리보기 실패:', data.error || res.status); return { ok: false, error: data.error || String(res.status) } }
     console.log('[PTP] 미리보기 완료:', data.preview)
     return { ok: true, preview: data.preview }
@@ -608,44 +613,517 @@ async function runPreview(tab, site, aiMode) {
   }
 }
 
-/** "PTP 조정 테스트 실행" 본체 — 우클릭 메뉴와 팝업 버튼이 공유한다. */
-async function runAdjust(tab, site) {
-  // 프롬프트는 PTP 화면(일반모드와 같은 자리)에서 미리 입력해 저장해둔다 — 여기서는 그 값이 있는지와
-  // 어느 상품 페이지를 테스트해야 하는지만 물어본다.
-  const target = await fetch(`${ADJUST_CAPTURE_ENDPOINT_BASE}/${site.id}/adjust/target`).then(r => r.json()).catch(() => null)
-  if (!target?.prompt) {
-    const msg = 'PTP 스크랩 조정 화면에서 프롬프트를 먼저 입력하고 "지정 개시"를 눌러주세요.'
-    console.log('[PTP]', msg)
-    return { ok: false, error: msg }
-  }
-  // 이 몰을 아직 한 번도 스크랩하지 않았으면(테스트할 미확정 상품이 없으면) 다른 URL로 이동하는 대신
-  // 지금 보고 있는 이 페이지를 그대로 테스트 대상으로 삼는다 — 사용자가 이미 상품 페이지를 열어둔
-  // 상태로 실행했다고 가정한다.
-  const testUrl = target.testUrl || tab.url
+// "스크랩 대상 직접지정" — 일반모드(lib/scraper.ts의 injectElementPicker)와 완전히 같은 클릭식 피커
+// UI를 몰 탭에 그대로 심는다. Playwright의 page.exposeFunction 대신 CDP의 Runtime.addBinding을 쓴다 —
+// 둘 다 "페이지 안에서 부르면 확장/서버로 전달되는 함수를 심어둔다"는 점에서 동일한 메커니즘이다.
+// 다만 addBinding은 편도(페이지→확장)라 페이지 쪽에서 저장 완료를 await할 수 없다 — 그래서 페이지는
+// 저장을 쏘아두기만 하고(fire-and-forget), "닫기"를 누르면 별도 바인딩(ptpPickerClose)으로 신호만
+// 보낸다. 실제로 "아직 저장 중인 게 다 끝날 때까지 기다렸다가 디버거를 뗀다"는 이 함수(백그라운드)가
+// pickerSessions로 추적해서 대신 해준다.
+const pickerSessions = new Map() // tabId -> { siteId, pendingSaves: Promise[] }
 
+// siteId는 pickerSessions(서비스워커 메모리)가 아니라 페이지가 보내는 payload 자체에 실어 받는다 —
+// 서비스워커가 유휴 상태로 재시작되면 pickerSessions는 비어버리지만(위 attachDebugger 주석 참고),
+// CDP addBinding은 그대로 살아있어 페이지의 저장 클릭은 계속 이벤트를 쏜다. session이 없어도 어디에
+// 저장할지(siteId)는 payload로 알 수 있어야 저장이 조용히 유실되지 않는다. session은 "닫기" 시 아직
+// 끝나지 않은 저장을 기다렸다 디버거를 떼는 용도로만 best-effort로 쓴다.
+function pickerBindingListener(source, method, params) {
+  if (method !== 'Runtime.bindingCalled') return
+  const session = pickerSessions.get(source.tabId)
+  if (params.name === 'ptpSavePick') {
+    const payload = JSON.parse(params.payload)
+    const save = fetch(`${SITE_API_BASE}/${payload.siteId}/picker/rule`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    }).catch(() => {})
+    session?.pendingSaves.push(save)
+  } else if (params.name === 'ptpPickerClose') {
+    (async () => {
+      if (session) await Promise.all(session.pendingSaves)
+      pickerSessions.delete(source.tabId)
+      await chrome.debugger.detach({ tabId: source.tabId }).catch(() => {})
+    })()
+  }
+}
+chrome.debugger.onEvent.addListener(pickerBindingListener)
+
+/** 실제 몰 페이지 안에서 실행되는 함수 — lib/scraper.ts의 injectElementPicker와 같은 UI/동작을
+ *  그대로 옮긴 것이다(같은 코드를 두 곳에 두는 이유: Next 서버 코드↔크롬 확장은 서로 import를 못 하는
+ *  별개 런타임). 하나를 고치면 다른 하나도 맞춰야 한다. .toString()으로 그대로 문자열화해 Runtime.evaluate에
+ *  실어 보내므로 이 함수 본문은 반드시 순수 JS여야 한다(TS 타입/제네릭 금지). */
+function pickerPageScript(seed) {
+  const w = window
+  if (w.__ptpPickerActive) w.__ptpPickerTeardown?.()
+  w.__ptpPickerActive = true
+
+  const previewProduct = seed?.previewProduct || null
+  const siteIdLocal = seed?.siteId
+  const rulesLocal = { ...(seed?.extractionRules || {}) }
+  let armedField = null
+  const lastValueLocal = {}
+  const expandedInputs = new Set()
+
+  const masterLabels = seed?.masterLabels || {}
+  const PICKER_TO_MASTER_KEY = {
+    name: 'name_final', price: 'list_price', cost_price: 'cost_price', shipping_fee: 'shipping_fee',
+    category: 'master_category', brand: 'brand', manufacturer: 'manufacturer', origin: 'origin',
+    stock_status: 'stock_status', stock_qty: 'stock_qty',
+    thumbnail_urls: 'top_img', detail_image_urls: 'detail_img',
+  }
+  const DEFAULT_CANONICAL_LABELS = [
+    ['name', '상품명'], ['price', '가격(소비자가)'], ['cost_price', '공급가/원가'], ['shipping_fee', '배송비'],
+    ['category', '카테고리'], ['brand', '브랜드'], ['manufacturer', '제조사'], ['origin', '원산지'],
+    ['stock_status', '재고상태'], ['stock_qty', '재고수량'], ['english_name', '영문상품명'], ['summary_info', '상품요약정보'],
+    ['thumbnail_urls', '대표이미지'], ['detail_image_urls', '상세이미지'],
+  ]
+  const relabeled = DEFAULT_CANONICAL_LABELS.map(([key, defaultLabel]) => {
+    const masterKey = PICKER_TO_MASTER_KEY[key]
+    const liveLabel = masterKey ? masterLabels[masterKey] : undefined
+    return [key, liveLabel || defaultLabel]
+  })
+  const masterOrder = seed?.masterOrder || []
+  const CANONICAL_FIELDS = [...relabeled].sort((a, b) => {
+    const idxA = masterOrder.indexOf(PICKER_TO_MASTER_KEY[a[0]])
+    const idxB = masterOrder.indexOf(PICKER_TO_MASTER_KEY[b[0]])
+    if (idxA === -1 && idxB === -1) return 0
+    if (idxA === -1) return 1
+    if (idxB === -1) return -1
+    return idxA - idxB
+  })
+  const IMAGE_FIELDS = new Set(['thumbnail_urls', 'detail_image_urls'])
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+  }
+
+  function currentValue(field) {
+    if (!previewProduct) return ''
+    const p = previewProduct
+    switch (field) {
+      case 'price': return p.price != null ? `₩${Number(p.price).toLocaleString()}` : ''
+      case 'cost_price': return p.cost_price != null ? `₩${Number(p.cost_price).toLocaleString()}` : ''
+      case 'shipping_fee': return p.shipping_fee != null ? String(p.shipping_fee) : ''
+      case 'stock_qty': return p.stock_qty != null ? String(p.stock_qty) : ''
+      case 'thumbnail_urls': return Array.isArray(p.thumbnail_urls) && p.thumbnail_urls.length ? `이미지 ${p.thumbnail_urls.length}장` : ''
+      case 'detail_image_urls': return Array.isArray(p.detail_image_urls) && p.detail_image_urls.length ? `이미지 ${p.detail_image_urls.length}장` : ''
+      case 'name': case 'category': case 'brand': case 'manufacturer': case 'origin':
+      case 'stock_status': case 'english_name': case 'summary_info':
+        return p[field] || ''
+      default: {
+        const custom = p.custom_fields
+        return custom?.[field] || ''
+      }
+    }
+  }
+
+  let hovered = null
+  const HOVER_OUTLINE = '2px solid #14b8a6'
+
+  function onMouseOver(e) {
+    if (!armedField) return
+    const el = e.target
+    if (el === panel || panel.contains(el)) return
+    if (hovered && hovered !== el) hovered.style.outline = ''
+    hovered = el
+    hovered.style.outline = HOVER_OUTLINE
+  }
+
+  function detectLabel(target) {
+    let el = target
+    for (let i = 0; i < 4 && el; i++, el = el.parentElement) {
+      if (el.tagName === 'DD') {
+        const dt = el.previousElementSibling
+        if (dt && dt.tagName === 'DT') return (dt.textContent || '').trim()
+      }
+      if (el.tagName === 'TD') {
+        const tr = el.closest('tr')
+        const th = tr?.querySelector('th')
+        if (th) return (th.textContent || '').trim()
+      }
+    }
+    return null
+  }
+
+  function computeSelector(target) {
+    if (target.id) return '#' + CSS.escape(target.id)
+    const parts = []
+    let node = target
+    let depth = 0
+    while (node && node.tagName !== 'BODY' && depth < 6) {
+      let sel = node.tagName.toLowerCase()
+      if (node.className && typeof node.className === 'string' && node.className.trim()) {
+        const cls = node.className.trim().split(/\s+/).filter(Boolean).slice(0, 2)
+        if (cls.length) sel += '.' + cls.map(c => CSS.escape(c)).join('.')
+      }
+      const parent = node.parentElement
+      if (parent) {
+        const siblings = Array.from(parent.children).filter(s => s.tagName === node.tagName)
+        if (siblings.length > 1) sel += `:nth-of-type(${siblings.indexOf(node) + 1})`
+      }
+      parts.unshift(sel)
+      const candidate = parts.join(' > ')
+      if (document.querySelectorAll(candidate).length === 1) return candidate
+      node = parent
+      depth++
+    }
+    return parts.join(' > ')
+  }
+
+  function computeGallerySelector(target) {
+    const container = target.tagName === 'IMG' ? (target.parentElement || target) : target
+    return computeSelector(container) + ' img'
+  }
+
+  const panel = document.createElement('div')
+  panel.id = 'ptp-picker-panel'
+  panel.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483647;background:#fff;border:2px solid #14b8a6;'
+    + 'border-radius:12px;padding:12px;width:320px;font:12px/1.4 -apple-system,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);color:#333'
+  panel.innerHTML = `
+    <button id="ptp-picker-x" title="닫기" style="position:absolute;top:6px;right:8px;background:none;border:0;color:#999;font-size:16px;line-height:1;cursor:pointer;padding:2px 4px">✕</button>
+    <div id="ptp-picker-drag" style="margin-bottom:6px;cursor:move;user-select:none;padding-right:20px">
+      <div style="font-size:9px;color:#999;letter-spacing:.02em">PTP 직접지정 패널 (개발자모드)</div>
+      <div style="font-weight:600">⠿ 🎯 스크랩 대상 직접지정</div>
+    </div>
+    <div style="font-size:10px;color:#888;margin-bottom:6px;line-height:1.5">① 필드 선택 → ② 몰 화면에서 값 클릭 → ③ 자동 저장 — 반복하세요</div>
+    <div id="ptp-picker-status" style="color:#2563eb;font-weight:600;margin-bottom:8px;display:none"></div>
+    <div id="ptp-picker-fieldlist" style="max-height:320px;overflow-y:auto;border-top:1px solid #eee;border-bottom:1px solid #eee;margin:8px 0;padding:4px 0"></div>
+    <div id="ptp-picker-log" style="margin-top:4px;color:#0d9488;max-height:50px;overflow:auto"></div>
+    <button id="ptp-picker-close" style="margin-top:8px;width:100%;background:#14b8a6;color:#fff;border:0;border-radius:6px;padding:6px;cursor:pointer">💾 피커 저장</button>
+  `
+  document.body.appendChild(panel)
+
+  // 버튼이 많고 연달아 눌러야 하는 패널이라, 클릭이 실제로 먹혔는지 안 보여 답답하다는 피드백 —
+  // 패널 전체에 위임 리스너 하나만 걸어 눌린 버튼을 잠깐 눌림 상태로 보여준다. 필드 목록은
+  // renderFieldList()가 매번 innerHTML을 통째로 새로 그리므로(버튼별 리스너 재부착), 패널(고정 요소)에
+  // 걸어야 재렌더링 후에도 계속 살아있다.
+  panel.addEventListener('click', e => {
+    const btn = e.target.closest('button')
+    if (!btn || !panel.contains(btn)) return
+    btn.style.transition = 'transform .08s ease, opacity .08s ease'
+    btn.style.transform = 'scale(0.93)'
+    btn.style.opacity = '0.65'
+    setTimeout(() => { btn.style.transform = ''; btn.style.opacity = '' }, 120)
+  })
+
+  const dragHandle = panel.querySelector('#ptp-picker-drag')
+  let dragOffsetX = 0
+  let dragOffsetY = 0
+  function onDragMove(e) {
+    const maxLeft = window.innerWidth - panel.offsetWidth
+    const maxTop = window.innerHeight - panel.offsetHeight
+    panel.style.left = Math.min(Math.max(0, e.clientX - dragOffsetX), Math.max(0, maxLeft)) + 'px'
+    panel.style.top = Math.min(Math.max(0, e.clientY - dragOffsetY), Math.max(0, maxTop)) + 'px'
+    panel.style.right = 'auto'
+  }
+  function onDragEnd() {
+    document.removeEventListener('mousemove', onDragMove)
+    document.removeEventListener('mouseup', onDragEnd)
+  }
+  dragHandle.addEventListener('mousedown', e => {
+    const rect = panel.getBoundingClientRect()
+    dragOffsetX = e.clientX - rect.left
+    dragOffsetY = e.clientY - rect.top
+    document.addEventListener('mousemove', onDragMove)
+    document.addEventListener('mouseup', onDragEnd)
+    e.preventDefault()
+  })
+
+  const statusEl = panel.querySelector('#ptp-picker-status')
+  const logEl = panel.querySelector('#ptp-picker-log')
+  const fieldListEl = panel.querySelector('#ptp-picker-fieldlist')
+
+  function logLine(field) {
+    const line = document.createElement('div')
+    line.textContent = `✓ ${field}`
+    logEl.prepend(line)
+  }
+
+  function updateStatus() {
+    if (armedField) {
+      const label = (CANONICAL_FIELDS.find(([k]) => k === armedField)?.[1]) || armedField
+      statusEl.textContent = `👉 "${label}" 지정 중 — 몰 화면에서 값을 클릭하세요`
+      statusEl.style.display = 'block'
+    } else {
+      statusEl.textContent = ''
+      statusEl.style.display = 'none'
+    }
+  }
+
+  function saveField(field, type, value, displayValue) {
+    rulesLocal[field] = { type, value }
+    lastValueLocal[field] = displayValue
+    // Runtime.addBinding은 편도라 여기서 await할 수 없다 — 쏘아두기만 하면 백그라운드가 실제 저장을
+    // 책임지고, "닫기"를 누를 때 ptpPickerClose로 그 완료를 기다린 뒤 디버거를 뗀다.
+    window.ptpSavePick(JSON.stringify({ field, type, value, siteId: siteIdLocal }))
+    logLine(field)
+  }
+
+  function forceEmpty(field) {
+    rulesLocal[field] = { type: 'fixed', value: '' }
+    lastValueLocal[field] = ''
+    window.ptpSavePick(JSON.stringify({ field, type: 'fixed', value: '', siteId: siteIdLocal }))
+    logLine(`🚫 ${field}`)
+  }
+
+  function appendOrSaveField(field, part, displayValue) {
+    const existing = rulesLocal[field]
+    if (!existing || IMAGE_FIELDS.has(field)) {
+      saveField(field, part.type, part.value, displayValue)
+      return
+    }
+    let parts
+    if (existing.type === 'multi') {
+      try { parts = JSON.parse(existing.value) } catch { parts = [] }
+    } else {
+      parts = [{ type: existing.type, value: existing.value }]
+    }
+    parts.push(part)
+    const combinedDisplay = [lastValueLocal[field], displayValue].filter(Boolean).join(' ')
+    saveField(field, 'multi', JSON.stringify(parts), combinedDisplay)
+  }
+
+  function appendImagePart(field, selector) {
+    const existing = rulesLocal[field]
+    let parts
+    if (existing?.type === 'multi') {
+      try { parts = JSON.parse(existing.value) } catch { parts = [] }
+    } else if (existing) {
+      parts = [{ type: existing.type, value: existing.value }]
+    } else {
+      parts = []
+    }
+    parts.push({ type: 'selector', value: selector })
+    const totalCount = parts.reduce((sum, p) => sum + (p.type === 'selector' ? document.querySelectorAll(p.value).length : 0), 0)
+    const display = totalCount ? `이미지 ${totalCount}장` : '(이미지를 찾지 못함)'
+    if (parts.length > 1) saveField(field, 'multi', JSON.stringify(parts), display)
+    else saveField(field, 'selector', selector, display)
+  }
+
+  function elementDisplayText(el) {
+    const clone = el.cloneNode(true)
+    clone.querySelectorAll('.layer_area, [style*="display:none" i], [style*="display: none" i], #ptp-picker-panel').forEach(n => n.remove())
+    return (clone.textContent || '').trim().slice(0, 60)
+  }
+
+  function renderFieldList() {
+    const extraFields = Object.keys(rulesLocal).filter(k => !CANONICAL_FIELDS.some(([key]) => key === k))
+    const allFields = [...CANONICAL_FIELDS.map(([k, l]) => ({ key: k, label: l })), ...extraFields.map(k => ({ key: k, label: k }))]
+    const rowsHtml = allFields.map(({ key, label }) => {
+      const rule = rulesLocal[key]
+      const armed = armedField === key
+      const expanded = expandedInputs.has(key)
+      const rowBg = armed ? '#eff6ff' : rule ? '#f0fdfa' : '#fff'
+      const rowBorder = armed ? '#60a5fa' : rule ? '#5eead4' : '#eee'
+      const isForcedEmpty = rule?.type === 'fixed' && rule.value === ''
+      let badgeText = ''
+      if (rule) {
+        if (isForcedEmpty) badgeText = '🚫 값 없음 고정'
+        else if (rule.type === 'label') badgeText = '📋 라벨'
+        else if (rule.type === 'fixed') badgeText = '✏️ 고정값'
+        else if (rule.type === 'multi') {
+          let partCount = 0
+          try { partCount = JSON.parse(rule.value).length } catch { partCount = 0 }
+          badgeText = `🧩 ${partCount}개 결합`
+        } else badgeText = '🔗 셀렉터'
+      }
+      const badge = rule
+        ? `<span style="font-size:10px;background:#fff;color:#0d9488;border:1px solid #5eead4;border-radius:8px;padding:1px 6px;white-space:nowrap">${badgeText}</span>`
+        : ''
+      const autoValue = !rule ? currentValue(key) : ''
+      const valueLine = isForcedEmpty
+        ? `<div style="font-size:12px;color:#e11d48;font-weight:600;margin:3px 0">항상 빈 값 (자동/AI 추출 안 함)</div>`
+        : rule
+          ? `<div style="font-size:12px;color:#0d9488;font-weight:600;margin:3px 0;word-break:break-all">${esc(lastValueLocal[key] ?? currentValue(key)) || '(값 없음)'}</div>`
+          : autoValue
+            ? `<div style="font-size:10px;color:#bbb;margin:3px 0">미지정 · 자동값: <span style="color:#888">${esc(autoValue)}</span></div>`
+            : `<div style="font-size:10px;color:#bbb;margin:3px 0">미지정</div>`
+      const delBtn = rule
+        ? `<button class="ptp-row-del" data-field="${esc(key)}" title="삭제" style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">✕</button>`
+        : autoValue
+          ? `<button class="ptp-row-clear-auto" data-field="${esc(key)}" title="자동으로 잡힌 값을 무시하고 항상 빈 값으로 고정합니다"
+              style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">🚫 자동값 제거</button>`
+          : ''
+      const armBtnStyle = armed
+        ? 'flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb'
+        : rule
+          ? 'background:#fff;color:#2563eb;border:1px solid #2563eb'
+          : 'flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb'
+      const inputRow = expanded ? `
+          <div style="display:flex;gap:4px;margin-top:5px">
+            <input class="ptp-row-input" data-field="${esc(key)}" placeholder="값 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
+            <button class="ptp-row-save" data-field="${esc(key)}" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">저장</button>
+          </div>` : ''
+      return `
+        <div style="padding:7px 7px;margin:3px 0;border:1px solid ${rowBorder};background:${rowBg};border-radius:8px">
+          <div style="display:flex;justify-content:space-between;gap:4px;align-items:baseline">
+            <span style="font-size:11px">${rule ? '✅' : '⬜'} <b style="font-size:11px">${esc(label)}</b></span>
+            ${badge}
+          </div>
+          ${valueLine}
+          <div style="display:flex;gap:4px;align-items:center;margin-top:2px">
+            <button class="ptp-row-arm" data-field="${esc(key)}"
+              title="${rule ? '이미 지정된 값에 새 요소(이미지)를 이어붙입니다 — 바꾸려면 먼저 ✕로 지우세요' : ''}"
+              style="${armBtnStyle};border-radius:5px;padding:4px 6px;font-size:10px;cursor:pointer">
+              ${armed ? '❌ 클릭 대기 취소' : !rule ? '🎯 클릭해서 지정하기' : IMAGE_FIELDS.has(key) ? '🎯 이미지 추가' : '🎯 요소 추가'}
+            </button>
+            ${delBtn}
+          </div>
+          <a class="ptp-row-toggle" data-field="${esc(key)}" style="display:inline-block;margin-top:4px;font-size:10px;color:#888;text-decoration:underline;cursor:pointer">
+            ${expanded ? '접기' : '값 직접 입력하기'}
+          </a>
+          ${inputRow}
+        </div>
+      `
+    }).join('') + `
+      <div style="padding:7px 7px;margin:3px 0;border:1px dashed #ccc;border-radius:8px">
+        <div style="font-size:10px;color:#888;margin-bottom:4px">새 컬럼 만들기</div>
+        <input id="ptp-new-field-name" placeholder="컬럼명 (예: 택배사)" style="width:100%;margin-bottom:4px;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px;box-sizing:border-box" />
+        <div style="display:flex;gap:4px">
+          <button id="ptp-new-field-arm" style="flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb;border-radius:5px;padding:4px 6px;font-size:10px;cursor:pointer">🎯 클릭해서 지정하기</button>
+        </div>
+        <div style="display:flex;gap:4px;margin-top:4px">
+          <input id="ptp-new-field-value" placeholder="또는 값 직접 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
+          <button id="ptp-new-field-add" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">저장</button>
+        </div>
+      </div>
+    `
+    const prevScrollTop = fieldListEl.scrollTop
+    fieldListEl.innerHTML = rowsHtml
+    fieldListEl.scrollTop = prevScrollTop
+
+    fieldListEl.querySelectorAll('.ptp-row-arm').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const field = btn.dataset.field
+        armedField = armedField === field ? null : field
+        if (hovered) { hovered.style.outline = ''; hovered = null }
+        renderFieldList()
+        updateStatus()
+      })
+    })
+    fieldListEl.querySelectorAll('.ptp-row-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const field = btn.dataset.field
+        if (expandedInputs.has(field)) expandedInputs.delete(field); else expandedInputs.add(field)
+        renderFieldList()
+      })
+    })
+    fieldListEl.querySelectorAll('.ptp-row-save').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const field = btn.dataset.field
+        const input = fieldListEl.querySelector(`.ptp-row-input[data-field="${CSS.escape(field)}"]`)
+        const value = input?.value.trim()
+        if (!value) return
+        appendOrSaveField(field, { type: 'fixed', value }, value)
+        expandedInputs.delete(field)
+        renderFieldList()
+      })
+    })
+    fieldListEl.querySelectorAll('.ptp-row-del').forEach(btn => {
+      btn.addEventListener('click', () => { forceEmpty(btn.dataset.field); renderFieldList() })
+    })
+    fieldListEl.querySelectorAll('.ptp-row-clear-auto').forEach(btn => {
+      btn.addEventListener('click', () => { forceEmpty(btn.dataset.field); renderFieldList() })
+    })
+    fieldListEl.querySelector('#ptp-new-field-arm').addEventListener('click', () => {
+      const nameEl = fieldListEl.querySelector('#ptp-new-field-name')
+      const field = nameEl.value.trim()
+      if (!field) { nameEl.focus(); return }
+      armedField = armedField === field ? null : field
+      if (hovered) { hovered.style.outline = ''; hovered = null }
+      renderFieldList()
+      updateStatus()
+    })
+    fieldListEl.querySelector('#ptp-new-field-add').addEventListener('click', () => {
+      const nameEl = fieldListEl.querySelector('#ptp-new-field-name')
+      const valueEl = fieldListEl.querySelector('#ptp-new-field-value')
+      const field = nameEl.value.trim()
+      const value = valueEl.value.trim()
+      if (!field || !value) return
+      appendOrSaveField(field, { type: 'fixed', value }, value)
+      renderFieldList()
+    })
+  }
+  renderFieldList()
+
+  function onClick(e) {
+    const el = e.target
+    if (el === panel || panel.contains(el)) return
+    if (!armedField) return
+    e.preventDefault()
+    e.stopPropagation()
+
+    if (IMAGE_FIELDS.has(armedField)) {
+      appendImagePart(armedField, computeGallerySelector(el))
+    } else {
+      const label = detectLabel(el)
+      const rule = label ? { type: 'label', value: label } : { type: 'selector', value: computeSelector(el) }
+      appendOrSaveField(armedField, rule, elementDisplayText(el))
+    }
+    armedField = null
+    renderFieldList()
+    updateStatus()
+    if (hovered) { hovered.style.outline = ''; hovered = null }
+  }
+
+  panel.querySelector('#ptp-picker-close').addEventListener('click', () => w.__ptpPickerTeardown?.())
+  panel.querySelector('#ptp-picker-x').addEventListener('click', () => w.__ptpPickerTeardown?.())
+
+  document.addEventListener('mouseover', onMouseOver, true)
+  document.addEventListener('click', onClick, true)
+
+  w.__ptpPickerTeardown = () => {
+    fieldListEl.querySelectorAll('.ptp-row-input').forEach(input => {
+      const value = input.value.trim()
+      if (value) appendOrSaveField(input.dataset.field, { type: 'fixed', value }, value)
+    })
+    const newNameEl = fieldListEl.querySelector('#ptp-new-field-name')
+    const newValueEl = fieldListEl.querySelector('#ptp-new-field-value')
+    if (newNameEl?.value.trim() && newValueEl?.value.trim()) {
+      appendOrSaveField(newNameEl.value.trim(), { type: 'fixed', value: newValueEl.value.trim() }, newValueEl.value.trim())
+    }
+    document.removeEventListener('mouseover', onMouseOver, true)
+    document.removeEventListener('click', onClick, true)
+    onDragEnd()
+    if (hovered) hovered.style.outline = ''
+    panel.remove()
+    w.__ptpPickerActive = false
+    w.__ptpPickerTeardown = undefined
+    // 백그라운드에 "닫혔다"고 알려, 지금까지 쏘아둔 저장이 다 끝날 때까지 기다렸다가 디버거를 떼게 한다.
+    window.ptpPickerClose()
+  }
+}
+
+function buildPickerScript(seed) {
+  return `(${pickerPageScript.toString()})(${JSON.stringify(seed)})`
+}
+
+/** "스크랩 대상 직접지정" 시작 — 몰 탭에 디버거를 붙이고 ptpSavePick/ptpPickerClose 바인딩을 건 뒤
+ *  클릭식 피커를 주입한다. 사용자가 패널을 닫을 때까지(ptpPickerClose) 디버거를 계속 붙여둔다 —
+ *  addBinding이 살아있으려면 CDP 세션이 유지돼야 하기 때문이다(일반모드는 로그인 창이 열려있는 동안
+ *  page.exposeFunction이 계속 살아있는 것과 같은 이치). */
+async function runPicker(tab, site) {
+  // attach와 addBinding은 매번 다시 한다 — "이미 세션이 잡혀있으니 건너뛴다"는 최적화를 시도했다가
+  // pickerSessions(메모리)에만 남은 낡은 기록을 보고 실제로는 없는 바인딩을 "있다"고 오판해
+  // window.ptpSavePick 자체가 안 만들어지는 문제가 실제로 발생했다(패널은 뜨는데 저장은 전부 실패).
+  // attachDebugger가 이미 붙어있는 경우(자기 자신의 이전 연결)를 detach 후 재시도로 알아서
+  // 회복하므로, 매번 새로 attach+addBinding해도 안전하고 더 확실하다.
   try {
-    await chrome.debugger.attach({ tabId: tab.id }, '1.3')
+    await attachDebugger(tab.id)
   } catch (e) {
-    console.log('[PTP] 조정 테스트 실패(디버거 연결 안 됨):', e.message)
+    console.log('[PTP] 피커 시작 실패(디버거 연결 안 됨):', e.message)
     return { ok: false, error: `디버거 연결 실패: ${e.message}` }
   }
   try {
-    if (testUrl !== tab.url) await navigate(tab.id, testUrl)
-    const html = await evalInTab(tab.id, '(() => document.documentElement.outerHTML.slice(0, 200000))()')
-    const res = await fetch(`${ADJUST_CAPTURE_ENDPOINT_BASE}/${site.id}/adjust/capture`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: testUrl, html }),
-    })
-    const data = await res.json()
-    if (testUrl !== tab.url) await navigate(tab.id, tab.url).catch(() => {}) // 원래 있던 페이지로 되돌려놓는다
-    if (!res.ok) { console.log('[PTP] 조정 테스트 실패:', data.error || res.status); return { ok: false, error: data.error || String(res.status) } }
-    console.log('[PTP] 조정 테스트 완료 — 갱신된 규칙:', data.rules)
-    return { ok: true, rules: data.rules, preview: data.preview }
+    await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.addBinding', { name: 'ptpSavePick' })
+    await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.addBinding', { name: 'ptpPickerClose' })
+    pickerSessions.set(tab.id, { siteId: site.id, pendingSaves: [] })
+    const seed = { previewProduct: site.previewProduct, extractionRules: site.extractionRules, masterLabels: site.masterLabels, masterOrder: site.masterOrder, siteId: site.id }
+    await evalInTab(tab.id, buildPickerScript(seed))
+    return { ok: true }
   } catch (e) {
-    console.log('[PTP] 조정 테스트 중 오류:', e.message)
-    return { ok: false, error: e.message }
-  } finally {
+    pickerSessions.delete(tab.id)
     await chrome.debugger.detach({ tabId: tab.id }).catch(() => {})
+    console.log('[PTP] 피커 시작 중 오류:', e.message)
+    return { ok: false, error: e.message }
   }
 }
 
@@ -654,7 +1132,7 @@ async function runAdjust(tab, site) {
 // chrome.runtime.onMessage)이고, 컨텍스트메뉴는 우클릭이 정상 동작하는 몰을 위한 보조 경로로만 남긴다.
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (!tab?.id || !tab.url) return
-  if (info.menuItemId === 'ptp-retry-failed') { await retryFailed(tab); return }
+  if (info.menuItemId !== 'ptp-preview' && info.menuItemId !== 'ptp-picker') return
 
   const hostname = new URL(tab.url).hostname
   const site = await resolveSite(hostname).catch(() => null)
@@ -663,10 +1141,10 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return
   }
   if (info.menuItemId === 'ptp-preview') await runPreview(tab, site, site.aiPreviewMode)
-  else if (info.menuItemId === 'ptp-adjust') await runAdjust(tab, site)
+  else await runPicker(tab, site)
 })
 
-/** 팝업(popup.js)이 보내는 메시지 — 우클릭이 막힌 몰에서도 4개 기능 모두를 쓸 수 있는 기본 경로.
+/** 팝업(popup.js)이 보내는 메시지 — 우클릭이 막힌 몰에서도 기능을 쓸 수 있는 기본 경로.
  *  탭 조회는 popup.js가 이미 자신이 매인 창 기준으로 끝내고 tabId/tabUrl로 넘겨준다 — 이 서비스 워커
  *  자신은 "현재 창"이라는 개념이 없어(특정 창에 매인 UI가 아니다) 여기서 다시 chrome.tabs.query를
  *  하면 어느 창 기준인지 불확실해진다. */
@@ -675,15 +1153,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (!msg.tabId || !msg.tabUrl) { sendResponse({ ok: false, error: '활성 탭을 찾을 수 없습니다' }); return }
     const tab = { id: msg.tabId, url: msg.tabUrl }
 
-    if (msg.action === 'retry-failed') { sendResponse(await retryFailed(tab) || { ok: true }); return }
-
     const hostname = new URL(tab.url).hostname
     const site = await resolveSite(hostname).catch(() => null)
     if (!site) { sendResponse({ ok: false, error: `"${hostname}"은 PTP Mall 관리에 "크롬익스텐션-개발자모드"로 등록돼 있지 않습니다` }); return }
 
     if (msg.action === 'start') sendResponse(await startScrape(tab, site))
     else if (msg.action === 'preview') sendResponse(await runPreview(tab, site, site.aiPreviewMode))
-    else if (msg.action === 'adjust') sendResponse(await runAdjust(tab, site))
+    else if (msg.action === 'picker') sendResponse(await runPicker(tab, site))
     else sendResponse({ ok: false, error: `알 수 없는 action: ${msg.action}` })
   })()
   return true // 비동기 sendResponse를 쓰겠다는 표시

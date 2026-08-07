@@ -27,7 +27,7 @@ async function run(action, busyText) {
     const res = await chrome.runtime.sendMessage({ action, tabId: tab.id, tabUrl: tab.url })
     if (res?.ok) {
       setStatus(action === 'start' ? '✓ 시작했습니다 — PTP 화면에서 진행상황을 확인하세요.'
-        : action === 'retry-failed' ? `✓ 재수집 시작 — ${res.count ?? 0}개.`
+        : action === 'picker' ? '✓ 몰 탭에 직접지정 패널이 열렸습니다 — 그 패널에서 값을 클릭해 지정하세요.'
         : '✓ 완료했습니다 — PTP 화면에서 결과를 확인하세요.', 'ok')
     } else {
       setStatus(`✗ ${res?.error || '알 수 없는 오류'}`, 'error')
@@ -39,7 +39,6 @@ async function run(action, busyText) {
   }
 }
 
-document.getElementById('btn-start').addEventListener('click', () => run('start', '스크랩을 시작합니다...'))
 document.getElementById('btn-preview').addEventListener('click', () => run('preview', '지금 페이지를 캡처하는 중...'))
-document.getElementById('btn-adjust').addEventListener('click', () => run('adjust', '조정 테스트 캡처 중...'))
-document.getElementById('btn-retry').addEventListener('click', () => run('retry-failed', '실패 상품을 조회하는 중...'))
+document.getElementById('btn-start').addEventListener('click', () => run('start', '스크랩을 시작합니다...'))
+document.getElementById('btn-picker').addEventListener('click', () => run('picker', '직접지정 패널을 여는 중...'))

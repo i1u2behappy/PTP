@@ -152,6 +152,16 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
       })
     : filteredSessions
 
+  // 지금 필터/정렬로 보이는 세션들만 대상으로 전체 선택/해제한다 — 이미 체크된 게 전부면 끄고, 아니면 켠다.
+  function handleSelectAll() {
+    if (!onToggleCheck) return
+    const allChecked = visibleSessions.length > 0 && visibleSessions.every(s => checkedIds?.has(s.id))
+    visibleSessions.forEach(s => {
+      const checked = checkedIds?.has(s.id) ?? false
+      if (allChecked ? checked : !checked) onToggleCheck(s.id)
+    })
+  }
+
   function handleSort(key: string, e: { shiftKey: boolean }) {
     setSortKeys(prev => {
       const idx = prev.findIndex(s => s.key === key)
@@ -195,7 +205,11 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
           </colgroup>
           <thead className="sticky top-0 z-10 bg-gray-50">
             <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-              {onToggleCheck && <th className="px-4 py-2 text-left sticky left-0 z-20 bg-gray-50"></th>}
+              {onToggleCheck && (
+                <th className="px-4 py-2 text-left sticky left-0 z-20 bg-gray-50">
+                  <input type="checkbox" checked={visibleSessions.length > 0 && visibleSessions.every(s => checkedIds?.has(s.id))} onChange={handleSelectAll} />
+                </th>
+              )}
               {orderedColumns.map((col, colIdx) => {
                 const idx = sortKeys.findIndex(s => s.key === col.key)
                 const active = idx !== -1

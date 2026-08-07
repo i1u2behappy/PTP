@@ -46,10 +46,12 @@
 ### 재수집 — 실패 URL만 다시
 
 - 일반모드: 기존 재시도 워커 루프가 실패 URL 목록만 대상으로 다시 돌게 함(같은 세션 재사용).
-- 개발자모드: `background.js`에 컨텍스트 메뉴 항목 "PTP 실패 상품 재수집"(`ptp-retry-failed`)을 추가,
-  클릭 시 `retryFailed(tab)`이 `failed-urls` 엔드포인트로 목록을 받아와 새 세션(`sessionId=null`)으로
-  하나씩 방문·추출·보고한다. `ScraperPanel.tsx`의 개발자모드 안내 박스는 실패 항목이 있을 때 이 메뉴를
-  안내하는 문구를 보여준다.
+- 개발자모드: ~~`background.js`에 컨텍스트 메뉴 항목 "PTP 실패 상품 재수집"(`ptp-retry-failed`)을 추가,
+  클릭 시 `retryFailed(tab)`이 `failed-urls` 엔드포인트로 목록을 받아와~~ **폐기됨(2026-08-07)** —
+  팝업이 "🔍 스크랩 미리보기 실행"/"🔄 스크랩 시작" 2개 실행 버튼만 남은 순수 트리거로 정리되며
+  `retryFailed`/`app/api/scrape/failed-urls`도 함께 제거됐다(`!specifications/manual-login-required-malls.md`
+  참고). 개발자모드에서 실패 재수집이 필요하면 지금은 "스크래핑 시작"을 다시 눌러 이어서 스크랩하는
+  방식만 남아있다.
 
 ### 중지 확정 타이밍 — 좀비 세션 방지와 "실제 상태와 다른 화면" 문제를 동시에 해결
 
@@ -99,7 +101,7 @@
 - `lib/scraper.ts`: `isStopRequested`(export화), `clearStopRequest`(신규), 워커 루프 실패 시
   `scrape_item_log` 기록, bot-detection 오탐 방지(`cost_price`도 null 체크에 포함)
 - `lib/scrape/run.ts`: 시작 시 `closeLoginWindow` 강제 호출 제거
-- `app/api/scrape/stop-requested/route.ts`(신규), `app/api/scrape/failed-urls/route.ts`(신규)
+- `app/api/scrape/stop-requested/route.ts`(신규) — `app/api/scrape/failed-urls/route.ts`는 이후 폐기(위 참고)
 - `app/api/scrape/status/route.ts`: 좀비 세션(사용자 중지 없이 조용히 죽은 경우) 자동 감지·확정
 - `app/api/scrape/extension-ingest/route.ts`: 실패 로그 기록 분기 추가
 - `extension-poc/background.js`: `checkStopRequested`, `reportFailure`, `retryFailed`,

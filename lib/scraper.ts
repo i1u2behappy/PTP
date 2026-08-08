@@ -2277,7 +2277,11 @@ async function readMaxPageNumber(page: Page, nextPageSelector: string | undefine
  *  destroyed" 오류로 죽는 경우가 실사용 중 확인됐다(submitLoginForm에서 먼저 발견된 것과 같은 문제, 위
  *  568행 참고) — 짧게 networkidle까지 한 번 더 기다려 그 지연 리다이렉트가 끝날 시간을 준다. */
 async function settleAfterNav(page: Page) {
-  await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {})
+  // ponytail: 5초로 뒀더니 광고/채팅위젯/분석 스크립트가 계속 떠 있어 networkidle에 끝내 도달하지
+  // 못하는 몰에서는 페이지 방문마다 5초를 통째로 날렸다(실사용 확인: 카테고리 개수 집계가 페이지를
+  // 수십 번 방문하는 지수+이분 탐색과 겹쳐 이게 전체 지연의 대부분을 차지했다). 지연 리다이렉트를
+  // 피하는 데는 훨씬 짧은 유예로도 충분해, 최악의 경우에도 페이지당 낭비가 크지 않게 줄였다.
+  await page.waitForLoadState('networkidle', { timeout: 500 }).catch(() => {})
 }
 
 /** 위젯이 "보이는 페이지 묶음"만 노출해 maxPage를 과소평가했을 때, 진짜 마지막 페이지를 한 페이지씩
@@ -2299,7 +2303,7 @@ async function findRealLastPage(
     if (stop()) return { page: lo, count: loCount }
     const probe = lo + step
     if (probe > bound) return null
-    await workerPage.goto(withPageParam(firstPageUrl, probe), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+    await workerPage.goto(withPageParam(firstPageUrl, probe), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
     await settleAfterNav(workerPage)
     const count = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
     if (count === 0) hi = probe
@@ -2308,7 +2312,7 @@ async function findRealLastPage(
   while (hi - lo > 1) {
     if (stop()) return { page: lo, count: loCount }
     const mid = Math.floor((lo + hi) / 2)
-    await workerPage.goto(withPageParam(firstPageUrl, mid), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+    await workerPage.goto(withPageParam(firstPageUrl, mid), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
     await settleAfterNav(workerPage)
     const count = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
     if (count === 0) hi = mid
@@ -2322,8 +2326,11 @@ async function countCategoryProductsOnce(
   userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined,
   nextPageSelector: string | undefined, baseUrl: string, stop: () => boolean,
 ): Promise<CategoryCount> {
+  // 개수만 세려고 <a> 태그만 보면 되니 'load'(이미지·광고·채팅위젯까지 다 받을 때까지 대기)가 아니라
+  // 'domcontentloaded'로 충분하다 — 상품 이미지가 많은 목록 페이지에서 이 차이가 페이지 방문 하나당
+  // 꽤 크다(지수+이분 탐색이 페이지를 수십 번 열 수 있어 누적되면 전체 속도에 영향이 크다).
   const firstPageUrl = resetToFirstPage(categoryUrl)
-  await workerPage.goto(firstPageUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+  await workerPage.goto(firstPageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {})
   await settleAfterNav(workerPage)
   const { category } = await detectCategoryLabel(workerPage)
   const label = category || categoryUrl
@@ -2337,7 +2344,7 @@ async function countCategoryProductsOnce(
     return { url: categoryUrl, label, count: perPage }
   }
 
-  await workerPage.goto(withPageParam(firstPageUrl, maxPage), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+  await workerPage.goto(withPageParam(firstPageUrl, maxPage), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
   await settleAfterNav(workerPage)
   const lastPageCount = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
   // maxPage가 "실제 마지막 페이지"가 아니라 페이지네이션 위젯이 한 번에 보여주는 번호 묶음의 끝일 수 있다
@@ -2345,7 +2352,7 @@ async function countCategoryProductsOnce(
   // 전부 같은 maxPage=5·lastPageCount=48(꽉 참)로 읽혀 진짜 총 개수보다 훨씬 적은 값에서 멈춘 사례 발견).
   // 그래서 "마지막"이라고 읽은 페이지 바로 다음 페이지도 비어있는지 한 번 더 확인해야 안심할 수 있다.
   if (lastPageCount > 0 && !stop()) {
-    await workerPage.goto(withPageParam(firstPageUrl, maxPage + 1), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+    await workerPage.goto(withPageParam(firstPageUrl, maxPage + 1), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
     await settleAfterNav(workerPage)
     const afterLastCount = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
     if (afterLastCount === 0) {
@@ -2368,9 +2375,24 @@ async function countCategoryProductsOnce(
 
   if (stop()) return { url: categoryUrl, label, count: perPage * maxPage }
 
-  // 마지막 페이지 번호를 잘못 읽었을 가능성(그 페이지가 실제로는 비어있음) — 페이지 번호 계산을 못 믿고
-  // 안전하게 직접 한 페이지씩 개수만 세며 끝까지 간다(정확한 개수 보장이 최우선).
-  await workerPage.goto(firstPageUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+  // 마지막 페이지 번호를 잘못 읽었을 가능성(그 페이지가 실제로는 비어있음) — maxPage 자체는 못 믿지만
+  // 1페이지 개수(perPage)는 이미 확인했으니, 거기서부터 위와 같은 지수+이분 탐색으로 실제 마지막
+  // 페이지를 빠르게 찾는다. 예전엔 여기서 1페이지씩 순서대로 순회했는데, "maxPage 페이지 자체가
+  // 비어있게 읽힌" 카테고리가 실제로는 수백~수천 개짜리인 경우도 있어(실사용 확인: 1020bag.com의
+  // 한 카테고리가 5622개) 순차 탐색이 카테고리 하나에 수십 분씩 걸렸다.
+  const fallbackFound = await findRealLastPage(
+    workerPage, firstPageUrl, AUTO_PAGINATION_CAP * 100, 1, perPage,
+    userSel, platformSel, detailPatternSrc, baseUrl, stop,
+  )
+  if (fallbackFound) {
+    const count = perPage * (fallbackFound.page - 1) + fallbackFound.count
+    console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage}(불신) → 실제 마지막 페이지=${fallbackFound.page} → count=${count} url=${firstPageUrl}`)
+    return { url: categoryUrl, label, count }
+  }
+
+  // 그래도 못 찾으면(탐색 상한을 넘김) 최후 수단으로 안전하게 한 페이지씩 순회한다(정확한 개수
+  // 보장이 최우선).
+  await workerPage.goto(firstPageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {})
   await settleAfterNav(workerPage)
   let total = 0
   for (let p = 0; p < AUTO_PAGINATION_CAP; p++) {
@@ -2378,10 +2400,10 @@ async function countCategoryProductsOnce(
     const count = p === 0 ? perPage : await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
     if (count === 0) break
     total += count
-    await workerPage.goto(withPageParam(firstPageUrl, p + 2), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+    await workerPage.goto(withPageParam(firstPageUrl, p + 2), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
     await settleAfterNav(workerPage)
   }
-  console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage}(불신) → 직접 순회 count=${total} url=${firstPageUrl}`)
+  console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage}(불신, 탐색도 실패) → 직접 순회 count=${total} url=${firstPageUrl}`)
   return { url: categoryUrl, label, count: total }
 }
 

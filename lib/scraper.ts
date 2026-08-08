@@ -41,6 +41,11 @@ function activeProfileDirName(userDataDir: string): string {
 }
 
 const MANUAL_LOGIN_PROFILE_COPY_ROOT = path.join(process.cwd(), '.playwright-profiles', '_manual-login-real-copy')
+// 이 사본은 siteId별이 아니라 이 경로 하나뿐이다(사용자의 개인 크롬 프로필 하나를 그대로 미러링하는
+// 것이라 몰마다 다를 이유가 없다) — 그래서 서로 다른 manual_login_required 몰 두 곳을 동시에 다뤄도
+// 이 물리 폴더 하나를 두고 경쟁한다. siteId별 락(withSiteLock)과 별개로, 이 전역 자원 전용 락 키로
+// 한 번에 하나의 manual-login 작업만 돌게 한다(withContext 참고).
+const MANUAL_LOGIN_LOCK_KEY = 'manual-login-profile-copy'
 // 로그인/보안 상태와 무관한 순수 성능 캐시만 제외한다. 설치된 확장프로그램(Extensions)은 용량이 커도 제외
 //하지 않는다 — 국내 몰의 PC인증/본인인증이 보안 프로그램 확장의 설치 여부를 확인하는 경우가 흔해서다.
 const PROFILE_COPY_CACHE_EXCLUDES = ['Cache', 'Code Cache', 'GPUCache', 'DawnWebGPUCache', 'DawnGraphiteCache']
@@ -144,6 +149,16 @@ const RETRY_COUNT = 2
 declare global {
   var __scrapeOpenSessions: Map<number, BrowserContext> | undefined
   var __scrapeStopRequests: Set<number> | undefined
+  var __previewRuns: Map<number, PreviewRunState> | undefined
+  var __scrapeSiteLocks: Map<number | string, Promise<void>> | undefined
+}
+
+interface PreviewRunState {
+  /** 이 몰(siteId)에 대해 더 최근 미리보기 요청이 새로 들어왔다는 뜻 — 다음 stop() 체크에서 스스로
+   *  멈춘다(아래 beginPreviewRun 참고). */
+  superseded: boolean
+  done: number
+  total: number
 }
 
 // 로컬 단일 사용자 도구 기준의 인메모리 상태. 여러 사용자가 동시에 쓰면 충돌한다(ponytail: 감수함).
@@ -164,6 +179,81 @@ export function requestStop(sessionId: number) {
  *  못 들여다본다 — 확장이 상품마다 이 함수를 거쳐 공개 API로 물어보게 한다(app/api/scrape/stop-requested). */
 export function isStopRequested(sessionId?: number) {
   return sessionId !== undefined && stopRequests.has(sessionId)
+}
+
+const siteLocks = globalThis.__scrapeSiteLocks ?? (globalThis.__scrapeSiteLocks = new Map<number | string, Promise<void>>())
+
+/**
+ * 이 파일의 여러 함수가 openSessions(로그인 창의 공유 탭)를 잠금 없이 그대로 꺼내 page.goto()를 걸거나,
+ * profileDir(siteId) 같은 몰 전용 디스크 자원(브라우저 프로필 폴더)에 launchPersistentContext를 건다 —
+ * 로그인 창 열기/로그인 확인/몰 구조 파악/스크랩 대상 직접지정/미리보기/스크래핑 시작 등 거의 모든 스크랩
+ * 관련 기능이 여기 해당한다. 같은 몰(key=siteId)에 대해 이런 함수가 동시에 두 번 불리면(같은 화면을 두
+ * 탭에서 열거나, 버튼을 빠르게 두 번 누르거나, 예약 스크랩과 수동 클릭이 겹치는 등) 두 실행이 같은 탭에서
+ * 서로의 네비게이션을 밟고 지나가 결과가 뒤섞이거나(에러 없이 조용히 틀린 데이터가 나옴 — 가장 위험한
+ * 형태), 한쪽이 다른 쪽의 살아있는 크롬 프로세스를 강제 종료시킬 수 있다(killOrphanedProfileProcess가
+ * "그 프로필 폴더를 쓰는 크롬"을 전부 대상으로 하기 때문).
+ *
+ * ## 언제 이걸 써야 하는가
+ * 이 파일에 함수를 새로 추가하거나 기존 함수를 고칠 때, 그 함수가 (a) openSessions.get(siteId)로 얻은
+ * 페이지에 goto/evaluate를 걸거나, (b) profileDir(siteId)/MANUAL_LOGIN_PROFILE_COPY_ROOT에
+ * launchPersistentContext를 건다면 — 같은 key로 동시에 두 번 불릴 수 있는지 먼저 따져보고, 가능하면
+ * 그 작업 전체(또는 최소한 실제로 공유 자원을 건드리는 부분)를 `withSiteLock(key, fn)`으로 감싼다.
+ * `withContext()`를 거치는 함수는 이미 자동으로 보호된다 — 이 파일에 새 스크랩 기능을 추가한다면 대부분
+ * `withContext`를 재사용하는 것만으로 충분하고, 그럴 수 없는 특수한 경우(로그인 창 관련 함수들처럼
+ * openSessions를 직접 만지는 경우)에만 이 함수를 직접 쓰면 된다.
+ *
+ * ## 왜 취소(supersede)가 아니라 줄서기(큐)인가
+ * 브라우저 탭 네비게이션은 이미 시작한 뒤엔 안전하게 취소할 방법이 없다 — 그래서 뒤에 온 실행을
+ * 취소시키는 대신, 앞의 실행이 완전히 끝날 때까지 기다리게 한다. 반대로 "화면에 최신 결과만 보여주면
+ * 충분하고, 오래된 요청은 그냥 버려도 되는" 경우(예: 미리보기 — previewRuns/beginPreviewRun 참고)는
+ * 이것과 다른 문제라 다른 해법(밀어내기)을 쓴다 — 그건 "사용자가 보는 결과"를 최신 것으로 덮어쓰는
+ * 문제고, 이건 "브라우저 자원 자체를 안전하게 나눠 쓰는" 문제다. 같은 몰에 대한 서로 다른 기능(예:
+ * 스크래핑 시작 도중의 몰 구조 파악)도 이 큐를 공유해 순서대로만 실행된다 — 오래 걸리는 작업(전체
+ * 스크래핑) 중에는 그 몰의 다른 작업이 끝날 때까지 기다리게 되는데, 애초에 같은 로그인 세션으로 두
+ * 자동화를 동시에 돌리면 안 되므로 이건 감수하는 트레이드오프다.
+ */
+export async function withSiteLock<T>(key: number | string | undefined, fn: () => Promise<T>): Promise<T> {
+  if (key === undefined) return fn()
+  const prevTail = siteLocks.get(key) ?? Promise.resolve()
+  let releaseTail!: () => void
+  const myTail = new Promise<void>(resolve => { releaseTail = resolve })
+  siteLocks.set(key, myTail)
+  try {
+    await prevTail
+    return await fn()
+  } finally {
+    releaseTail()
+    if (siteLocks.get(key) === myTail) siteLocks.delete(key)
+  }
+}
+
+const previewRuns = globalThis.__previewRuns ?? (globalThis.__previewRuns = new Map<number, PreviewRunState>())
+
+/** previewCatalog 진행률 표시 + 같은 몰에 대한 중복 실행 방지용. 실사용 중 확인된 문제: 미리보기가
+ *  오래 걸리는 동안 사용자가 중지 없이 다시 누르거나 브라우저를 새로고침하면, 서버에서는 예전 실행이
+ *  끝나지 않은 채 새 실행이 또 시작돼 같은 몰에 Playwright 탭 여러 벌이 동시에 돌며 서로 CPU를
+ *  나눠 먹어 둘 다 끝없이 느려졌다. 새 요청이 오면 그 몰의 이전 실행에 superseded 표시를 해 다음
+ *  stop() 체크 때 스스로 멈추게 하고, 이번 실행용 진행 상황 칸을 새로 만든다. */
+function beginPreviewRun(siteId: number | undefined): PreviewRunState | null {
+  if (siteId === undefined) return null
+  const prev = previewRuns.get(siteId)
+  if (prev) prev.superseded = true
+  const entry: PreviewRunState = { superseded: false, done: 0, total: 0 }
+  previewRuns.set(siteId, entry)
+  return entry
+}
+
+/** 이 실행이 그 사이 새 요청에 밀려났으면 자기 자신의 진행 상황 칸을 지우지 않는다(새 실행 것을
+ *  실수로 지우면 안 됨) — siteId의 현재 칸이 여전히 자기 자신일 때만 정리한다. */
+function endPreviewRun(siteId: number | undefined, entry: PreviewRunState | null) {
+  if (siteId === undefined || !entry) return
+  if (previewRuns.get(siteId) === entry) previewRuns.delete(siteId)
+}
+
+/** app/api/scrape/preview-progress가 폴링해서 화면에 "카테고리 N/M 확인 중"을 보여주는 데 쓴다. */
+export function getPreviewProgress(siteId: number): { done: number; total: number } | null {
+  const entry = previewRuns.get(siteId)
+  return entry ? { done: entry.done, total: entry.total } : null
 }
 
 /** 중지 반영이 끝난 뒤 Set에서 지운다 — 안 지우면 세션 id가 계속 쌓여 다음에 같은 id가(이론상) 재사용될 때
@@ -218,11 +308,16 @@ async function launchVisibleWindow(siteId: number): Promise<BrowserContext> {
 
 /** 사용자가 직접 로그인을 확인할 수 있도록 화면에 보이는 브라우저 창을 연다 */
 export async function openLoginWindow(siteId: number, opts: { url: string; loginId?: string; loginPw?: string }) {
-  const context = await launchVisibleWindow(siteId)
-  const page = context.pages()[0] || await context.newPage()
-  await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => {})
-  // 아이디/비번만 채워두고 제출은 하지 않는다 — 사용자가 직접 로그인 버튼을 눌러야 이후 "로그인 확인" 흐름과 맞는다.
-  await loginIfNeeded(page, { url: opts.url, loginId: opts.loginId, loginPw: opts.loginPw }, { autoSubmit: false })
+  // withContext와 같은 락 키(siteId)를 공유한다 — 이 함수도 launchVisibleWindow로 openSessions를
+  // 새로 채우고 그 탭에 곧바로 goto를 거는, withSiteLock 주석이 설명하는 바로 그 패턴이다. 같은 몰에
+  // 다른 작업(스크래핑 시작 등)이 이미 진행 중이면 그게 끝난 뒤 순서대로 실행된다.
+  return withSiteLock(siteId, async () => {
+    const context = await launchVisibleWindow(siteId)
+    const page = context.pages()[0] || await context.newPage()
+    await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => {})
+    // 아이디/비번만 채워두고 제출은 하지 않는다 — 사용자가 직접 로그인 버튼을 눌러야 이후 "로그인 확인" 흐름과 맞는다.
+    await loginIfNeeded(page, { url: opts.url, loginId: opts.loginId, loginPw: opts.loginPw }, { autoSubmit: false })
+  })
 }
 
 const CHROME_EXE = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
@@ -237,11 +332,15 @@ const CHROME_EXE = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
  * (개인 브라우저이므로 여기서 기존 크롬 프로세스를 강제 종료하지 않는다.)
  */
 export async function openManualLoginWindow(siteId: number, url: string): Promise<void> {
-  await closeLoginWindow(siteId)
-  // --no-first-run/--no-default-browser-check가 없으면 실제 크롬이 "Chrome에 로그인" 등 첫 실행 온보딩
-  // 화면을 활성 탭으로 띄워버려, 요청한 몰 로그인 URL로 바로 이동하지 않는다.
-  const child = spawn(CHROME_EXE, ['--no-first-run', '--no-default-browser-check', url], { detached: true, stdio: 'ignore' })
-  child.unref()
+  // closeLoginWindow가 openSessions를 만지므로 같은 락 키를 공유한다(withSiteLock 주석 참고) — 실제
+  // 브라우저 자체는 추적 밖의 개인 크롬이라 락이 끝난 뒤에는 이 함수가 더 할 일이 없다.
+  return withSiteLock(siteId, async () => {
+    await closeLoginWindow(siteId)
+    // --no-first-run/--no-default-browser-check가 없으면 실제 크롬이 "Chrome에 로그인" 등 첫 실행 온보딩
+    // 화면을 활성 탭으로 띄워버려, 요청한 몰 로그인 URL로 바로 이동하지 않는다.
+    const child = spawn(CHROME_EXE, ['--no-first-run', '--no-default-browser-check', url], { detached: true, stdio: 'ignore' })
+    child.unref()
+  })
 }
 
 /** 현재 로그인 창에서 사용자가 보고 있는 페이지 URL (없으면 null) */
@@ -258,15 +357,19 @@ export function getOpenPageUrl(siteId: number): string | null {
  * 새 탭을 열지 않고 기존 탭을 재사용한다(startElementPicker와 동일한 이유 — 탭이 계속 쌓이는 문제 방지).
  */
 export async function navigateOpenPageTo(siteId: number, url: string): Promise<string | null> {
-  const context = openSessions.get(siteId)
-  if (!context) return null
-  const pages = context.pages()
-  const page = pages.length ? pages[pages.length - 1] : await context.newPage()
-  if (page.url() !== url) {
-    await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
-  }
-  await page.bringToFront().catch(() => {})
-  return page.url()
+  // withContext와 같은 락 키(siteId) — 공유 탭에 직접 goto를 거는 함수라 withSiteLock 주석이 설명하는
+  // 패턴 그대로다.
+  return withSiteLock(siteId, async () => {
+    const context = openSessions.get(siteId)
+    if (!context) return null
+    const pages = context.pages()
+    const page = pages.length ? pages[pages.length - 1] : await context.newPage()
+    if (page.url() !== url) {
+      await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+    }
+    await page.bringToFront().catch(() => {})
+    return page.url()
+  })
 }
 
 /**
@@ -276,6 +379,9 @@ export async function navigateOpenPageTo(siteId: number, url: string): Promise<s
  * (그 쿠키가 만료됐으면 그 사이트 자체가 로그인 페이지로 돌려보낼 뿐 — 이 함수가 할 수 있는 건 여기까지).
  */
 export async function openUrlInLoginWindow(siteId: number, url: string): Promise<void> {
+  // 이미 열린 세션에 새 탭을 여는 것은 공유 탭을 건드리지 않아 그 자체로 안전하다 — 락 없이 바로
+  // 처리한다(다른 무거운 작업이 같은 몰에서 진행 중이어도 미리보기 "열기"가 그것 때문에 기다릴
+  // 필요는 없다).
   const existing = openSessions.get(siteId)
   if (existing) {
     const page = await existing.newPage()
@@ -283,9 +389,21 @@ export async function openUrlInLoginWindow(siteId: number, url: string): Promise
     await page.bringToFront().catch(() => {})
     return
   }
-  const context = await launchVisibleWindow(siteId)
-  const page = context.pages()[0] || await context.newPage()
-  await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+  // 세션이 없으면 새로 띄워야 하는데, launchVisibleWindow는 같은 몰의 다른 작업(withContext 등)과
+  // 충돌할 수 있는 close+kill+launch 절차라 withSiteLock으로 감싼다(withContext와 같은 락 키).
+  return withSiteLock(siteId, async () => {
+    // 락을 기다리는 사이 다른 실행이 이미 로그인 창을 열어뒀을 수 있다 — 다시 확인한다.
+    const nowExisting = openSessions.get(siteId)
+    if (nowExisting) {
+      const page = await nowExisting.newPage()
+      await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+      await page.bringToFront().catch(() => {})
+      return
+    }
+    const context = await launchVisibleWindow(siteId)
+    const page = context.pages()[0] || await context.newPage()
+    await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+  })
 }
 
 /** 새 로그인 창을 열기 전 기존 창을 정리할 때만 내부적으로 쓴다(openLoginWindow/openManualLoginWindow 참고) —
@@ -302,47 +420,60 @@ async function closeLoginWindow(siteId: number) {
 // 감지해 차단/도전과제를 거는 경우(예: manual-login-required 몰의 봇 탐지) 실제 크롬 쪽이 더 정상적으로 통과한다.
 export async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, context: BrowserContext) => Promise<T>): Promise<T> {
   if (opts.siteId) {
-    const openContext = openSessions.get(opts.siteId)
-    if (openContext) {
-      // 로그인 창이 열려있으면 그대로 재사용 (닫지 않음)
-      const pages = openContext.pages()
-      const page = pages.length ? pages[pages.length - 1] : await openContext.newPage()
-      return await fn(page, openContext)
-    }
-    if (await isManualLoginSite(opts.siteId)) {
-      // 직접로그인 필수 몰은 사용자의 실제 개인 크롬 프로필(활성 프로필 전체)을 사본으로 복제해 그 사본을
-      // 헤드리스로 띄운다 — syncManualLoginProfileCopy() 주석 참고. 개인 브라우저 자체를 건드리지 않으므로
-      // 여기서 기존 크롬 프로세스를 강제 종료하지 않는다.
-      let context: BrowserContext
-      try {
-        const { userDataDir, profileDirName } = await syncManualLoginProfileCopy()
-        context = await chromium.launchPersistentContext(userDataDir, {
-          headless: true, channel: 'chrome', chromiumSandbox: true,
-          args: profileDirName !== 'Default' ? [`--profile-directory=${profileDirName}`] : [],
-        })
-      } catch (e) {
-        throw new Error(`개인 크롬 프로필 복사본 실행에 실패했습니다: ${e instanceof Error ? e.message : String(e)}`)
+    const siteId = opts.siteId
+    // 이 몰(siteId)에 대한 다른 withContext 호출(또는 openSessions를 직접 만지는 로그인 창 관련
+    // 함수들 — withSiteLock 주석 참고)이 끝날 때까지 기다렸다가 실행한다. 같은 몰에 두 작업이 동시에
+    // 뜨면(두 탭에서 같은 화면을 열거나, 예약 스크랩과 수동 클릭이 겹치는 등) 아래 두 경로 다 실제로
+    // 사고로 이어지는 게 확인됐다: 로그인 창 재사용 경로는 같은 탭에 서로 다른 goto를 걸어 결과가
+    // 뒤섞이고, 헤드리스 실행 경로는 killOrphanedProfileProcess가 상대방의 살아있는 크롬을 죽인다.
+    return withSiteLock(siteId, async () => {
+      const openContext = openSessions.get(siteId)
+      if (openContext) {
+        // 로그인 창이 열려있으면 그대로 재사용 (닫지 않음)
+        const pages = openContext.pages()
+        const page = pages.length ? pages[pages.length - 1] : await openContext.newPage()
+        return await fn(page, openContext)
       }
+      if (await isManualLoginSite(siteId)) {
+        // 직접로그인 필수 몰은 사용자의 실제 개인 크롬 프로필(활성 프로필 전체)을 사본으로 복제해 그 사본을
+        // 헤드리스로 띄운다 — syncManualLoginProfileCopy() 주석 참고. 개인 브라우저 자체를 건드리지 않으므로
+        // 여기서 기존 크롬 프로세스를 강제 종료하지 않는다. 이 사본 폴더는 siteId 전용이 아니라 전역
+        // 하나뿐이라(MANUAL_LOGIN_LOCK_KEY 주석 참고) 위 siteId 락과 별개로 그 전역 자원 락도 같이 건다
+        // — robocopy부터 이 컨텍스트를 다 쓰고 닫을 때까지 통째로, 그래야 다른 manual-login 몰이 그 사이
+        // 같은 폴더에 launchPersistentContext를 걸어 충돌하지 않는다.
+        return withSiteLock(MANUAL_LOGIN_LOCK_KEY, async () => {
+          let context: BrowserContext
+          try {
+            const { userDataDir, profileDirName } = await syncManualLoginProfileCopy()
+            context = await chromium.launchPersistentContext(userDataDir, {
+              headless: true, channel: 'chrome', chromiumSandbox: true,
+              args: profileDirName !== 'Default' ? [`--profile-directory=${profileDirName}`] : [],
+            })
+          } catch (e) {
+            throw new Error(`개인 크롬 프로필 복사본 실행에 실패했습니다: ${e instanceof Error ? e.message : String(e)}`)
+          }
+          try {
+            const page = context.pages()[0] || await context.newPage()
+            return await fn(page, context)
+          } finally {
+            await context.close()
+          }
+        })
+      }
+
+      // 직접로그인 필수 몰은 사용자가 별도로 띄운(추적 안 되는) 크롬 창을 안 닫고 스크랩을 시작할 수 있어,
+      // 같은 프로필 폴더를 쓰는 헤드리스 실행이 lock 충돌로 실패하지 않도록 먼저 정리한다.
+      await killOrphanedProfileProcess(siteId)
+      const context = await chromium.launchPersistentContext(profileDir(siteId), {
+        headless: true, channel: 'chrome', chromiumSandbox: true,
+      })
       try {
         const page = context.pages()[0] || await context.newPage()
         return await fn(page, context)
       } finally {
         await context.close()
       }
-    }
-
-    // 직접로그인 필수 몰은 사용자가 별도로 띄운(추적 안 되는) 크롬 창을 안 닫고 스크랩을 시작할 수 있어,
-    // 같은 프로필 폴더를 쓰는 헤드리스 실행이 lock 충돌로 실패하지 않도록 먼저 정리한다.
-    await killOrphanedProfileProcess(opts.siteId)
-    const context = await chromium.launchPersistentContext(profileDir(opts.siteId), {
-      headless: true, channel: 'chrome', chromiumSandbox: true,
     })
-    try {
-      const page = context.pages()[0] || await context.newPage()
-      return await fn(page, context)
-    } finally {
-      await context.close()
-    }
   }
 
   const browser = await chromium.launch({ headless: true, channel: 'chrome', chromiumSandbox: true })
@@ -816,17 +947,22 @@ const MALL_PROFILE_SAMPLE_SIZE = 6
  * 직접 "이 둘은 서로 다른 용도"라고 확정함: 로그인 확인=구조 변화 감지 전용, 몰 구조 파악=거래정보 분석 전용.
  */
 export async function profileMallStructure(siteId: number, deep = false): Promise<MallProfileSignals | null> {
-  const context = openSessions.get(siteId)
-  if (!context) return null
-  const pages = context.pages()
-  const page = pages.length ? pages[pages.length - 1] : await context.newPage()
-  const site = await siteInfo(siteId)
-  if (site.url) {
-    await page.goto(site.url, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
-  }
-  const startUrl = page.url()
-  if (!startUrl || startUrl === 'about:blank') return null
-  return sampleMallProfile(page, startUrl, site.name, deep)
+  // withContext와 같은 락 키(siteId) — 공유 탭에 직접 goto를 걸고 그 페이지를 분석하는, withSiteLock
+  // 주석이 설명하는 패턴 그대로다. 예를 들어 "스크래핑 시작"이 이 몰의 그 탭을 한창 쓰고 있는 도중에
+  // "몰 구조 파악"을 눌러도 서로 페이지를 밟고 지나가지 않고 순서대로 실행된다.
+  return withSiteLock(siteId, async () => {
+    const context = openSessions.get(siteId)
+    if (!context) return null
+    const pages = context.pages()
+    const page = pages.length ? pages[pages.length - 1] : await context.newPage()
+    const site = await siteInfo(siteId)
+    if (site.url) {
+      await page.goto(site.url, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+    }
+    const startUrl = page.url()
+    if (!startUrl || startUrl === 'about:blank') return null
+    return sampleMallProfile(page, startUrl, site.name, deep)
+  })
 }
 
 async function siteInfo(siteId: number): Promise<{ name: string; url: string }> {
@@ -850,58 +986,62 @@ const pickerExposedPages = new WeakSet<Page>()
 export async function startElementPicker(
   siteId: number, previewProduct?: Record<string, unknown> | null, targetUrl?: string,
 ): Promise<boolean> {
-  const context = openSessions.get(siteId)
-  if (!context) return false
-  const pages = context.pages()
-  const page = pages.length ? pages[pages.length - 1] : await context.newPage()
+  // withContext와 같은 락 키(siteId) — 공유 탭에 직접 goto/evaluate를 거는, withSiteLock 주석이 설명하는
+  // 패턴 그대로다.
+  return withSiteLock(siteId, async () => {
+    const context = openSessions.get(siteId)
+    if (!context) return false
+    const pages = context.pages()
+    const page = pages.length ? pages[pages.length - 1] : await context.newPage()
 
-  // 미리보기 상품 페이지로 "이동"할 뿐, 새 탭을 열지 않는다 — 예전엔 호출부가 별도로 새 탭을 먼저 열고
-  // (openUrlInLoginWindow) 그 다음 여기서 다시 "마지막 탭"을 골랐는데, "스크랩 대상 직접지정"을 다시
-  // 누를 때마다(예: PTP 화면을 벗어났다 돌아와 다시 누른 경우) 매번 탭이 하나씩 더 쌓였다. 예전 탭에
-  // 남아있던 피커가 안 닫힌 채로 방치되면, 그 탭은 계속 예전 시점의 코드로 저장을 시도해 최신 탭의
-  // 저장과 서로 경쟁하며 값이 사라지는 것처럼 보일 수 있었다(신우 몰 재발 보고). 같은 컨텍스트의 다른
-  // 탭에 아직 살아있는 피커가 있으면 먼저 정리하고, 이 탭 하나만 활성 상태로 유지한다.
-  for (const other of pages) {
-    if (other === page) continue
-    await other.evaluate(() => (window as unknown as { __ptpPickerTeardown?: () => void }).__ptpPickerTeardown?.()).catch(() => {})
-  }
-  if (targetUrl && page.url() !== targetUrl) {
-    await page.goto(targetUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
-  }
-  await page.bringToFront().catch(() => {})
+    // 미리보기 상품 페이지로 "이동"할 뿐, 새 탭을 열지 않는다 — 예전엔 호출부가 별도로 새 탭을 먼저 열고
+    // (openUrlInLoginWindow) 그 다음 여기서 다시 "마지막 탭"을 골랐는데, "스크랩 대상 직접지정"을 다시
+    // 누를 때마다(예: PTP 화면을 벗어났다 돌아와 다시 누른 경우) 매번 탭이 하나씩 더 쌓였다. 예전 탭에
+    // 남아있던 피커가 안 닫힌 채로 방치되면, 그 탭은 계속 예전 시점의 코드로 저장을 시도해 최신 탭의
+    // 저장과 서로 경쟁하며 값이 사라지는 것처럼 보일 수 있었다(신우 몰 재발 보고). 같은 컨텍스트의 다른
+    // 탭에 아직 살아있는 피커가 있으면 먼저 정리하고, 이 탭 하나만 활성 상태로 유지한다.
+    for (const other of pages) {
+      if (other === page) continue
+      await other.evaluate(() => (window as unknown as { __ptpPickerTeardown?: () => void }).__ptpPickerTeardown?.()).catch(() => {})
+    }
+    if (targetUrl && page.url() !== targetUrl) {
+      await page.goto(targetUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+    }
+    await page.bringToFront().catch(() => {})
 
-  if (!pickerExposedPages.has(page)) {
-    // SELECT로 읽어 JS에서 합친 뒤 UPDATE하면, 여러 필드를 빠르게 연달아 지정할 때 SELECT~UPDATE 사이에
-    // 다른 저장이 끼어들어 먼저 저장한 필드가 통째로 사라지는 lost-update가 생긴다(신우 몰에서 실제
-    // 보고됨: 상품명 등 여러 개를 연속 지정하니 지정한 것들이 사라짐). Postgres의 jsonb `||`(병합)/
-    // `-`(키 제거) 연산자로 한 SQL 문 안에서 원자적으로 처리해 이 경쟁을 없앤다.
-    await page.exposeFunction('ptpSavePick', async (payload: { field: string; type: 'label' | 'selector' | 'fixed' | 'multi'; value: string }) => {
-      if (!payload.field?.trim()) return
-      await pool.query(
-        `UPDATE sites SET extraction_rules = COALESCE(extraction_rules, '{}'::jsonb) || jsonb_build_object($1::text, $2::jsonb) WHERE id=$3`,
-        [payload.field, JSON.stringify({ type: payload.type, value: payload.value }), siteId],
-      )
-    })
-    pickerExposedPages.add(page)
-  }
+    if (!pickerExposedPages.has(page)) {
+      // SELECT로 읽어 JS에서 합친 뒤 UPDATE하면, 여러 필드를 빠르게 연달아 지정할 때 SELECT~UPDATE 사이에
+      // 다른 저장이 끼어들어 먼저 저장한 필드가 통째로 사라지는 lost-update가 생긴다(신우 몰에서 실제
+      // 보고됨: 상품명 등 여러 개를 연속 지정하니 지정한 것들이 사라짐). Postgres의 jsonb `||`(병합)/
+      // `-`(키 제거) 연산자로 한 SQL 문 안에서 원자적으로 처리해 이 경쟁을 없앤다.
+      await page.exposeFunction('ptpSavePick', async (payload: { field: string; type: 'label' | 'selector' | 'fixed' | 'multi'; value: string }) => {
+        if (!payload.field?.trim()) return
+        await pool.query(
+          `UPDATE sites SET extraction_rules = COALESCE(extraction_rules, '{}'::jsonb) || jsonb_build_object($1::text, $2::jsonb) WHERE id=$3`,
+          [payload.field, JSON.stringify({ type: payload.type, value: payload.value }), siteId],
+        )
+      })
+      pickerExposedPages.add(page)
+    }
 
-  // "스크랩 대상 직접지정"을 누른 이 순간에만 주입한다 — 그 뒤로 이 탭이 다른 페이지로 이동해도 패널이
-  // 저절로 다시 뜨지 않는다(예전엔 페이지 로드마다 자동 재주입했는데, 사용자가 다 쓰고 다른 페이지를
-  // 둘러볼 때도 패널이 계속 따라 나타나 번거롭다는 지적으로 제거함, 2026-08). 다시 지정하려면 이 버튼을
-  // 다시 누르면 된다.
-  const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(
-    'SELECT extraction_rules FROM sites WHERE id=$1', [siteId],
-  )
-  // 기준 마스터테이블관리에서 사용자가 직접 바꾼 라벨(예: cost_price를 "원가" 대신 "공급가")과 배치한
-  // 순서를 이 패널의 필드 목록에도 그대로 반영한다 — 그래야 "직접지정" 화면과 기준 테이블을 나란히
-  // 보며 비교/수정할 수 있다.
-  const labelsRes = await pool.query<{ field_key: string; field_label: string }>(
-    'SELECT field_key, field_label FROM master_schema_fields ORDER BY sort_order, id',
-  )
-  const masterLabels = Object.fromEntries(labelsRes.rows.map(r => [r.field_key, r.field_label]))
-  const masterOrder = labelsRes.rows.map(r => r.field_key)
-  await page.evaluate(injectElementPicker, { previewProduct: previewProduct || null, extractionRules: res.rows[0]?.extraction_rules || {}, masterLabels, masterOrder })
-  return true
+    // "스크랩 대상 직접지정"을 누른 이 순간에만 주입한다 — 그 뒤로 이 탭이 다른 페이지로 이동해도 패널이
+    // 저절로 다시 뜨지 않는다(예전엔 페이지 로드마다 자동 재주입했는데, 사용자가 다 쓰고 다른 페이지를
+    // 둘러볼 때도 패널이 계속 따라 나타나 번거롭다는 지적으로 제거함, 2026-08). 다시 지정하려면 이 버튼을
+    // 다시 누르면 된다.
+    const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(
+      'SELECT extraction_rules FROM sites WHERE id=$1', [siteId],
+    )
+    // 기준 마스터테이블관리에서 사용자가 직접 바꾼 라벨(예: cost_price를 "원가" 대신 "공급가")과 배치한
+    // 순서를 이 패널의 필드 목록에도 그대로 반영한다 — 그래야 "직접지정" 화면과 기준 테이블을 나란히
+    // 보며 비교/수정할 수 있다.
+    const labelsRes = await pool.query<{ field_key: string; field_label: string }>(
+      'SELECT field_key, field_label FROM master_schema_fields ORDER BY sort_order, id',
+    )
+    const masterLabels = Object.fromEntries(labelsRes.rows.map(r => [r.field_key, r.field_label]))
+    const masterOrder = labelsRes.rows.map(r => r.field_key)
+    await page.evaluate(injectElementPicker, { previewProduct: previewProduct || null, extractionRules: res.rows[0]?.extraction_rules || {}, masterLabels, masterOrder })
+    return true
+  })
 }
 
 /** 실제 몰 페이지 안에서 실행되는 함수 — page.evaluate로 그대로 주입된다(문자열이 아니라 함수 자체를
@@ -2202,6 +2342,12 @@ export interface CatalogPreviewResult {
   /** true면 로그인 세션이 끊긴 채로(또는 아예 로그인 안 된 채로) 이 결과를 얻었을 수 있다 —
    *  화면에서 로그인 창을 다시 띄우도록 안내하는 데 쓴다. */
   needsLogin: boolean
+  /** true면 같은 몰에 대해 더 새로운 미리보기 요청이 들어와 이 실행이 중간에 밀려났다는 뜻 — 이
+   *  응답의 카운트/미리보기는 불완전할 수 있으므로 화면은 이 값이 true면 결과를 반영하지 말고
+   *  조용히 무시해야 한다(그 새 요청 쪽 응답이 진짜 결과다). 클라이언트 자신이 "중지" 버튼으로
+   *  스스로 취소한 경우는 fetch 자체가 AbortError로 거부돼 이 필드까지 오지 않는다 — 이건 오직
+   *  "다른 탭/요청이 나를 밀어냈다"는 경우만 구분하기 위한 것. */
+  superseded?: boolean
 }
 
 /** 상품 링크 매칭 로직만 — scanForProducts(collectProductUrls 내부)와 같은 판정 기준이지만 이름/썸네일은
@@ -2440,92 +2586,121 @@ async function countCategoryProducts(
 export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPreviewResult> {
   // 미리보기는 DB 세션이 없는 단발 요청이라 실제 스크랩의 sessionId+isStopRequested를 못 쓴다 — 대신
   // 클라이언트가 fetch를 abort하면 그 요청의 AbortSignal이 여기로 그대로 전달돼(app/api/scrape/
-  // preview-catalog/route.ts) 아래 루프들이 다음 네트워크 왕복 전에 스스로 멈춘다.
-  const stop = () => !!opts.stopSignal?.aborted
-  return withContext(opts, async (page, context) => {
-    const listingUrls = (opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])).map(resetToFirstPage)
+  // preview-catalog/route.ts) 아래 루프들이 다음 네트워크 왕복 전에 스스로 멈춘다. 같은 몰에 대해
+  // 새 미리보기 요청이 들어오면(중지 없이 다시 누름, 새로고침 등) beginPreviewRun이 이전 실행을
+  // superseded 처리해 같은 이유로 스스로 멈추게 한다 — 안 그러면 여러 실행이 겹쳐 돌며 서로 CPU를
+  // 나눠 먹어 실사용 중 확인된 "끝없이 느려짐" 문제로 이어졌다.
+  const runEntry = beginPreviewRun(opts.siteId)
+  const stop = () => !!opts.stopSignal?.aborted || !!runEntry?.superseded
+  const supersededResult = (): CatalogPreviewResult =>
+    ({ total: 0, platform: 'unknown', preview: null, items: [], categoryCounts: [], needsLogin: false, superseded: true })
+  try {
+    return await withContext(opts, async (page, context) => {
+      const listingUrls = (opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])).map(resetToFirstPage)
+      if (runEntry) runEntry.total = listingUrls.length
+      if (stop()) return supersededResult()
 
-    // 상세 미리보기용 상품 1건 + 이 몰의 플랫폼(셀렉터 판단용)을 먼저 확보한다. 아래 개수 집계가 카테고리
-    // 0의 1페이지를 다시 열게 되어 약간 중복되지만, 코드를 단순하게 유지하는 쪽을 택했다(카테고리가
-    // 많아도 중복은 1페이지 분량 뿐이라 전체 시간에 미치는 영향은 미미하다).
-    const bootstrap = await collectProductUrls(page, { ...opts, url: listingUrls[0], categoryUrls: undefined, maxPages: 1 })
-    const platform = bootstrap.platform
-    let firstUrl = bootstrap.urls[0]
-    let categoryByUrl = bootstrap.categoryByUrl
-    let needsLogin = bootstrap.needsLogin
-
-    const profile = PLATFORM_PROFILES[platform]
-    const userSel = opts.productLinkSelector || null
-    const platformSel = profile.productLinkSelector
-    const detailPatternSrc = profile.detailUrlPattern?.source
-    const nextPageSelector = opts.nextPageSelector || profile.nextPageSelector || undefined
-    const baseUrl = new URL(listingUrls[0]).origin
-
-    // 카테고리별 개수만 여러 탭으로 동시에 집계한다. 로그인 창을 재사용하는 siteId라도 그 공유 탭은
-    // 절대 쓰지 않고 항상 새 탭만 연다(discoverCategoryLinks에서 같은 이유로 겪은 "다른 네비게이션에
-    // 의해 중단됨" 충돌 방지).
-    const COUNT_CONCURRENCY = 4
-    const categoryCounts = new Array<CategoryCount | undefined>(listingUrls.length)
-    let cursor = 0
-    async function worker() {
-      const workerPage = await context.newPage()
+      // 부트스트랩(상세 미리보기용 상품 1건 확보)과 맨 아래 최종 상품 상세 추출은 항상 새 탭에서
+      // 한다 — 로그인 창이 열려있는 siteId는 withContext가 그 창의 공유 탭(page)을 그대로 재사용해
+      // 넘겨주는데, 같은 몰에 대해 미리보기 요청이 두 개 겹치면(바로 위 superseded 처리가 노리는 그
+      // 상황) 둘 다 이 공유 탭에서 goto를 걸어 한쪽 요청이 다른 쪽이 막 이동한 페이지를 읽어버리는
+      // 사고로 이어질 수 있다(리뷰로 확인된 문제 — superseded 체크만으론 못 막는다, 이 부트스트랩
+      // 자체엔 체크 지점이 없어서). 카테고리 개수 집계 워커가 이미 항상 context.newPage()로 새 탭을
+      // 쓰는 것과 같은 이유·같은 해법이라, 여기도 그 패턴을 그대로 따른다.
+      const scratchPage = await context.newPage()
       try {
-        while (true) {
-          if (stop()) return
-          const i = cursor++
-          if (i >= listingUrls.length) return
-          categoryCounts[i] = await countCategoryProducts(
-            workerPage, listingUrls[i], userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl, stop,
-          )
+        // 상세 미리보기용 상품 1건 + 이 몰의 플랫폼(셀렉터 판단용)을 먼저 확보한다. 아래 개수 집계가
+        // 카테고리 0의 1페이지를 다시 열게 되어 약간 중복되지만, 코드를 단순하게 유지하는 쪽을
+        // 택했다(카테고리가 많아도 중복은 1페이지 분량 뿐이라 전체 시간에 미치는 영향은 미미하다).
+        const bootstrap = await collectProductUrls(scratchPage, { ...opts, url: listingUrls[0], categoryUrls: undefined, maxPages: 1 })
+        const platform = bootstrap.platform
+        let firstUrl = bootstrap.urls[0]
+        let categoryByUrl = bootstrap.categoryByUrl
+        let needsLogin = bootstrap.needsLogin
+        if (stop()) return supersededResult()
+
+        const profile = PLATFORM_PROFILES[platform]
+        const userSel = opts.productLinkSelector || null
+        const platformSel = profile.productLinkSelector
+        const detailPatternSrc = profile.detailUrlPattern?.source
+        const nextPageSelector = opts.nextPageSelector || profile.nextPageSelector || undefined
+        const baseUrl = new URL(listingUrls[0]).origin
+
+        // 카테고리별 개수만 여러 탭으로 동시에 집계한다. 로그인 창을 재사용하는 siteId라도 그 공유 탭은
+        // 절대 쓰지 않고 항상 새 탭만 연다(discoverCategoryLinks에서 같은 이유로 겪은 "다른 네비게이션에
+        // 의해 중단됨" 충돌 방지).
+        const COUNT_CONCURRENCY = 4
+        const categoryCounts = new Array<CategoryCount | undefined>(listingUrls.length)
+        let cursor = 0
+        async function worker() {
+          const workerPage = await context.newPage()
+          try {
+            while (true) {
+              if (stop()) return
+              const i = cursor++
+              if (i >= listingUrls.length) return
+              categoryCounts[i] = await countCategoryProducts(
+                workerPage, listingUrls[i], userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl, stop,
+              )
+              if (runEntry) runEntry.done++
+            }
+          } finally {
+            await workerPage.close().catch(() => {})
+          }
         }
+        const workerCount = Math.min(COUNT_CONCURRENCY, listingUrls.length)
+        if (!stop()) await Promise.all(Array.from({ length: workerCount }, () => worker()))
+
+        // 중지되면 아직 처리 못 한 카테고리는 빈 칸으로 남는다 — 어차피 클라이언트가 이 응답을 안 받을
+        // 상황이라 정확도보다 여기서 안전하게(undefined.count로 죽지 않게) 걸러내는 것만 중요하다.
+        const doneCounts = categoryCounts.filter((c): c is CategoryCount => !!c)
+        const total = doneCounts.reduce((sum, c) => sum + c.count, 0)
+        if (stop()) return { ...supersededResult(), total, categoryCounts: doneCounts }
+
+        // 부트스트랩으로 고른 카테고리(0번)가 하필 비어있으면, 실제로 상품이 있는 다른 카테고리에서 1건을 구한다.
+        if (!firstUrl) {
+          const nonEmpty = doneCounts.find(c => c.count > 0)
+          if (nonEmpty) {
+            const retry = await collectProductUrls(scratchPage, { ...opts, url: nonEmpty.url, categoryUrls: undefined, maxPages: 1 })
+            firstUrl = retry.urls[0]
+            categoryByUrl = retry.categoryByUrl
+            needsLogin = needsLogin || retry.needsLogin
+          }
+        }
+
+        if (!firstUrl || stop()) return { total, platform, preview: null, items: [], categoryCounts: doneCounts, needsLogin }
+
+        await scratchPage.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 })
+        const productNeedsLogin = await loginIfNeeded(scratchPage, { url: firstUrl, ...opts })
+        needsLogin = needsLogin || productNeedsLogin
+        if (opts.loginId && scratchPage.url() !== firstUrl) {
+          await scratchPage.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+        }
+        await waitForExtractableContent(scratchPage)
+        const product = await extractProductRuleBased(scratchPage, firstUrl, selectorOverrides(opts), opts.extractionRules)
+        const domOptions = await extractOptionsFromDom(scratchPage)
+        if (domOptions.options.length) product.options = domOptions.options
+        if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
+        await applyStockByOption(scratchPage, product)
+        applyCategoryOverride(product, categoryByUrl.get(firstUrl), opts.extractionRules)
+
+        // AI모드는 외부 API 호출 + DB에 extraction_rules를 저장하는 비용 있는 단계라, 이미 밀려난
+        // 실행이면 굳이 돌리지 않는다(리뷰에서 지적된 가장 비싼 낭비 지점).
+        if (opts.aiMode && opts.siteId && !stop()) {
+          const ai = await applyAiModeRules(scratchPage, opts.siteId, firstUrl, opts, domOptions)
+          if (ai) {
+            applyCategoryOverride(ai.product, categoryByUrl.get(firstUrl), ai.rules)
+            return { total, platform, preview: { sourceUrl: firstUrl, product: ai.product }, items: [], categoryCounts: doneCounts, needsLogin }
+          }
+        }
+        return { total, platform, preview: { sourceUrl: firstUrl, product }, items: [], categoryCounts: doneCounts, needsLogin }
       } finally {
-        await workerPage.close().catch(() => {})
+        await scratchPage.close().catch(() => {})
       }
-    }
-    const workerCount = Math.min(COUNT_CONCURRENCY, listingUrls.length)
-    if (!stop()) await Promise.all(Array.from({ length: workerCount }, () => worker()))
-
-    // 중지되면 아직 처리 못 한 카테고리는 빈 칸으로 남는다 — 어차피 클라이언트가 이 응답을 안 받을
-    // 상황이라 정확도보다 여기서 안전하게(undefined.count로 죽지 않게) 걸러내는 것만 중요하다.
-    const doneCounts = categoryCounts.filter((c): c is CategoryCount => !!c)
-    const total = doneCounts.reduce((sum, c) => sum + c.count, 0)
-
-    // 부트스트랩으로 고른 카테고리(0번)가 하필 비어있으면, 실제로 상품이 있는 다른 카테고리에서 1건을 구한다.
-    if (!firstUrl && !stop()) {
-      const nonEmpty = doneCounts.find(c => c.count > 0)
-      if (nonEmpty) {
-        const retry = await collectProductUrls(page, { ...opts, url: nonEmpty.url, categoryUrls: undefined, maxPages: 1 })
-        firstUrl = retry.urls[0]
-        categoryByUrl = retry.categoryByUrl
-        needsLogin = needsLogin || retry.needsLogin
-      }
-    }
-
-    if (!firstUrl || stop()) return { total, platform, preview: null, items: [], categoryCounts: doneCounts, needsLogin }
-
-    await page.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 })
-    const productNeedsLogin = await loginIfNeeded(page, { url: firstUrl, ...opts })
-    needsLogin = needsLogin || productNeedsLogin
-    if (opts.loginId && page.url() !== firstUrl) {
-      await page.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
-    }
-    await waitForExtractableContent(page)
-    const product = await extractProductRuleBased(page, firstUrl, selectorOverrides(opts), opts.extractionRules)
-    const domOptions = await extractOptionsFromDom(page)
-    if (domOptions.options.length) product.options = domOptions.options
-    if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
-    await applyStockByOption(page, product)
-    applyCategoryOverride(product, categoryByUrl.get(firstUrl), opts.extractionRules)
-
-    if (opts.aiMode && opts.siteId) {
-      const ai = await applyAiModeRules(page, opts.siteId, firstUrl, opts, domOptions)
-      if (ai) {
-        applyCategoryOverride(ai.product, categoryByUrl.get(firstUrl), ai.rules)
-        return { total, platform, preview: { sourceUrl: firstUrl, product: ai.product }, items: [], categoryCounts: doneCounts, needsLogin }
-      }
-    }
-    return { total, platform, preview: { sourceUrl: firstUrl, product }, items: [], categoryCounts: doneCounts, needsLogin }
-  })
+    })
+  } finally {
+    endPreviewRun(opts.siteId, runEntry)
+  }
 }
 
 export interface CatalogItemEvent {

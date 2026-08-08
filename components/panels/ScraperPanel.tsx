@@ -343,6 +343,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 카테고리 개수 집계를 스스로 멈춘다(lib/scraper.ts 참고). 일반모드 전용(개발자모드는 서버가 아니라
   // 사용자 브라우저의 확장이 도는 것이라 이 fetch로 막을 수 있는 작업이 없다).
   const previewAbortRef = useRef<AbortController | null>(null)
+  // 카테고리가 많거나 큰 몰은 미리보기가 몇 분씩 걸릴 수 있어, 진행 중임을 알 수 있게 서버가 세는
+  // "카테고리 N/M" 진행 상황을 짧은 주기로 폴링해 보여준다(끝없이 도는 것처럼 보인다는 피드백).
+  const [previewProgress, setPreviewProgress] = useState<{ done: number; total: number } | null>(null)
+  const previewProgressPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // 개발자모드 "상품 페이지 미리보기"/"스크랩 대상 직접지정" — 일반모드와 같은 카드/상태(previewResult 등)를
   // 그대로 쓰지만, PTP가 그 몰 탭에 직접 접근할 방법이 없어(chrome.debugger 확장 전용 구조) 실제 캡처는
@@ -937,8 +941,18 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPreviewResult(null)
     setPreviewTotal(null)
     setPreviewItems([]); setCategoryCounts([])
+    setPreviewProgress(null)
     const controller = new AbortController()
     previewAbortRef.current = controller
+    // 카테고리가 많은/큰 몰은 몇 분씩 걸릴 수 있어 진행 중임을 보여준다 — 서버(previewCatalog)가
+    // 세는 "카테고리 N/M"을 짧은 주기로 폴링한다.
+    const siteId = selectedSite.id
+    previewProgressPollRef.current = setInterval(async () => {
+      const res = await fetch(`/api/scrape/preview-progress?siteId=${siteId}`).catch(() => null)
+      if (!res?.ok) return
+      const d = await res.json() as { done: number; total: number }
+      if (d.total > 0) setPreviewProgress(d)
+    }, 1000)
     try {
       const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
       const res = await fetch('/api/scrape/preview-catalog', {
@@ -953,7 +967,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         }),
       })
       if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`확인 실패: ${e.error || res.status}`); return }
-      const d = await res.json() as { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; categoryCounts?: CategoryCountItem[]; needsLogin?: boolean }
+      const d = await res.json() as { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; categoryCounts?: CategoryCountItem[]; needsLogin?: boolean; superseded?: boolean }
+      // 같은 몰에 대해 다른 탭/요청이 더 뒤에 미리보기를 시작해 이 실행이 서버에서 중간에 밀려난
+      // 경우(lib/scraper.ts의 beginPreviewRun 참고) — 이 응답은 불완전하니 화면에 반영하지 않는다.
+      // 밀어낸 쪽(진짜 최신 요청)의 응답이 곧 따로 온다.
+      if (d.superseded) return
       applyCatalogPreview(d)
     } catch (err) {
       // 사용자가 "중지"를 눌러 스스로 취소한 요청은 에러로 취급하지 않는다(handleStopPreview 참고).
@@ -961,6 +979,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     } finally {
       setPreviewLoading(false)
       previewAbortRef.current = null
+      if (previewProgressPollRef.current) { clearInterval(previewProgressPollRef.current); previewProgressPollRef.current = null }
+      setPreviewProgress(null)
     }
   }
 
@@ -1004,6 +1024,20 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         mode: 'catalog', siteId: selectedSite.id,
       }),
     })
+    // 이 몰에 이미 진행 중인 세션이 있으면(app/api/scrape/route.ts) 새로 시작하는 대신 그 세션에
+    // 그대로 연결한다 — 아무 설명 없이 "실행 중"만 뜬 채 멈춰있는 것처럼 보이지 않게 한다.
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({})) as { error?: string; sessionId?: number }
+      if (e.sessionId) {
+        alert(e.error || '이미 진행 중인 스크래핑에 연결합니다.')
+        setSessionId(e.sessionId)
+        localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ site: selectedSite, sessionId: e.sessionId }))
+      } else {
+        alert(e.error || '스크래핑 시작에 실패했습니다')
+        setStatus('idle')
+      }
+      return
+    }
     const data = await res.json() as { sessionId: number }
     setSessionId(data.sessionId)
     localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ site: selectedSite, sessionId: data.sessionId }))
@@ -1599,10 +1633,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   previewResult
                     ? 'bg-white border-2 border-teal-500 text-teal-600 hover:bg-teal-50'
                     : 'bg-teal-500 hover:bg-teal-600 text-white'}`}>
-                {previewLoading ? (mallMode === 'devmode' ? '대기 중...' : aiMode ? 'AI 분석 중...' : '확인 중...') : previewResult ? '✓ 스크랩 미리보기' : '🔍 스크랩 미리보기'}
+                {previewLoading
+                  ? (mallMode === 'devmode' ? '대기 중...' : previewProgress ? `카테고리 확인 중... (${previewProgress.done}/${previewProgress.total})` : aiMode ? 'AI 분석 중...' : '확인 중...')
+                  : previewResult ? '✓ 스크랩 미리보기' : '🔍 스크랩 미리보기'}
               </button>
               {/* 개발자모드는 서버가 아니라 사용자 브라우저의 확장이 도는 것이라 이 fetch로 중지시킬
-                  작업이 없다(위 devPreviewTimeoutRef의 2분 자동 해제만 있음) — 일반모드 전용. */}
+                  작업이 없다(위 devPreviewTimeoutRef의 2분 자동 해제만 있음) — 일반모드 전용. 진행
+                  중이라는 걸 알 수 있게 서버가 세는 카테고리 개수 기준 진행률도 폴링해서 같이 보여준다
+                  (끝없이 도는 것처럼 보인다는 피드백 — lib/scraper.ts의 getPreviewProgress 참고). */}
               {mallMode === 'normal' && previewLoading && (
                 <button type="button" onClick={handleStopPreview}
                   className="px-4 py-2 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-sm font-semibold rounded-full transition-colors">

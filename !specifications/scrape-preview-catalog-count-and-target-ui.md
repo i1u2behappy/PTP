@@ -147,6 +147,40 @@
   뜬다. 개발자모드는 서버가 아니라 사용자 브라우저의 확장이 도는 구조라 이 fetch로 멈출 서버 작업이
   없어 제외(기존 2분 타임아웃만 그대로 있음).
 
+## 중복 실행 방지 + 진행률 표시
+
+미리보기 중지 기능을 넣은 뒤에도 "끝없이 오래 걸린다"는 재보고가 있었다. 로그를 보니 **같은 몰에
+대해 미리보기 실행이 여러 개 겹쳐 돌고 있었다** — 워커 풀 구조상 한 실행 안에서는 카테고리가 절대
+중복 처리될 수 없는데, 완전히 같은 결과 메시지가 짧은 시간 안에 두 번씩 로그에 찍혔고, 그 와중에
+`/api/health/db` 같은 가벼운 요청도 14~71초씩 걸렸다(Playwright 탭 여러 벌이 CPU를 나눠 먹은
+정황). 원인: "중지" 기능이 생기기 전에는 미리보기를 도중에 멈출 방법이 아예 없었고, 코드를 여러 번
+고치는 동안 이미 실행 중이던 예전 시도들은 그 순간의 (더 느린) 코드로 계속 돌면서 쌓였다.
+
+- **`previewRuns`(신규, `lib/scraper.ts`)**: `Map<siteId, PreviewRunState>`(`{superseded, done, total}`,
+  `globalThis` 저장). `beginPreviewRun(siteId)`가 그 몰의 이전 실행을 `superseded=true`로 표시하고
+  이번 실행용 새 항목을 만든다. `previewCatalog`의 `stop()`이 클라이언트 abort뿐 아니라
+  `runEntry.superseded`도 함께 확인해, 밀려난 실행이 다음 체크포인트에서 스스로 멈춘다.
+- **진행률 폴링**: 워커가 카테고리 하나를 끝낼 때마다 `runEntry.done++`. `getPreviewProgress(siteId)`를
+  새 엔드포인트 `GET /api/scrape/preview-progress`가 노출하고, `ScraperPanel.tsx`가 1초마다 폴링해
+  버튼에 "카테고리 확인 중... (12/34)"로 보여준다 — 멈춘 건지 도는 건지 알 수 있게.
+- **공유 탭 경쟁(재점검 중 발견, 수정됨)**: `superseded` 체크만으론 부트스트랩(카테고리 0번 1건 확보)과
+  맨 끝 "상품 1건 상세 추출" 단계를 못 막았다 — 이 두 단계가 `withContext`가 넘겨주는 **공유 로그인
+  탭**에 직접 `goto`를 걸고 있어서, 같은 몰에 미리보기가 두 개 겹치면 한쪽이 다른 쪽이 막 이동한
+  페이지 내용을 읽어 **에러 없이 조용히 틀린 결과**가 나올 수 있었다. 카운팅 워커가 이미 항상
+  `context.newPage()`로 새 탭을 쓰는 것과 같은 이유로, 이 두 단계도 전용 `scratchPage`(새 탭)를 열어
+  쓰도록 바꿨다 — 같은 컨텍스트 안이라 로그인 세션은 그대로 공유되면서 경쟁은 사라진다.
+- **밀려난 실행의 응답을 화면이 "완료"로 잘못 표시하던 문제(수정됨)**: `previewRuns`가 siteId당 항목
+  하나뿐이라 두 탭이 같은 몰을 보면 진행률이 서로 덮어써질 뿐 아니라, 밀려난 실행도 **정상 200
+  응답**을 그대로 돌려줘 클라이언트가 그걸 "완료된 미리보기"인 줄 알고 화면에 반영해버렸다. 응답에
+  `superseded?: boolean` 필드를 추가하고, `handlePreview`는 이 값이 true면 결과를 조용히 무시한다
+  (진짜 최신 요청의 응답이 따로 옴).
+- **AI모드 낭비 방지**: 밀려난 실행이 마지막에 외부 AI API 호출 + DB 저장까지 무조건 돌리던 것을,
+  그 호출 직전에도 `stop()`을 한 번 더 확인하도록 해 건너뛰게 했다.
+- **더 넓은 범위의 후속 조치**: 이 문제의 진짜 근본 원인(`withContext`가 로그인 창의 공유 탭을 잠금
+  없이 여러 호출에 나눠줌)은 `previewCatalog` 하나만의 문제가 아니라 스크랩 관련 9개 기능 전체에
+  걸쳐 있었다 — 전용 리뷰 워크플로로 전수조사해 `withSiteLock`이라는 범용 락으로 한 번에 고쳤다.
+  자세한 내용은 `!specifications/concurrent-execution-guard.md` 참고.
+
 ## 스크랩 대상 카드 UI 재설계 (`components/panels/ScraperPanel.tsx`)
 
 ### 진행 상태를 버튼 색으로 구분 (파일럿: 스크래핑 메뉴)
@@ -226,14 +260,19 @@
 - `lib/scraper.ts`: `countProductsOnPage`, `readMaxPageNumber`, `findRealLastPage`(신규, 지수+이분
   탐색), `countCategoryProducts`(+`Once`), `settleAfterNav`, `previewCatalog` 재작성.
   `readListedTotalCount`(전체 텍스트 스캔 방식) 완전 제거. `ScrapeOptions.stopSignal?: AbortSignal`
-  신규 필드 + 카운팅 루프 전반에 `stop()` 체크 추가.
+  신규 필드 + 카운팅 루프 전반에 `stop()` 체크 추가. `previewRuns`/`beginPreviewRun`/`endPreviewRun`/
+  `getPreviewProgress`(신규, 중복 실행 방지 + 진행률). `previewCatalog`의 부트스트랩/최종 상품 추출이
+  공유 `page` 대신 전용 `scratchPage`(`context.newPage()`) 사용. `CatalogPreviewResult.superseded?:
+  boolean`(신규 필드).
 - `app/api/scrape/preview-catalog/route.ts`: `previewCatalog`에 `stopSignal: req.signal` 전달.
+- `app/api/scrape/preview-progress/route.ts`(신규): `GET ?siteId=` → `{done, total}` 진행률 폴링용.
 - `app/api/scrape/categories/route.ts`: `sites.scrape_profile.categoryLinks` 캐시를 먼저 확인 후
   없으면 `discoverCategoryLinks`로 직접 훑고 캐시에 반영(`force=true`면 강제 새로고침) — "몰 구조
   파악"이 이미 찾아둔 목록을 "카테고리 불러오기"가 재사용.
 - `components/panels/ScraperPanel.tsx`: `ScrapeStepBox` 신규 컴포넌트(`colorDone` prop 포함), 버튼
   전/후 색상, 스크랩 대상 2단 레이아웃, 카테고리 체크리스트 마스터 체크박스, 접기/펼치기 라벨 통일,
-  `previewAbortRef`/`handleStopPreview`(미리보기 중지).
+  `previewAbortRef`/`handleStopPreview`(미리보기 중지), `previewProgress`/`previewProgressPollRef`
+  (진행률 폴링), `d.superseded` 체크(밀려난 응답 무시).
 - `components/shell/GlobalErrorNet.tsx`(신규): 지수 백오프 자동 재시도, `AbortError` 예외 처리.
 - `app/layout.tsx`: `<GlobalErrorNet />` 마운트.
 

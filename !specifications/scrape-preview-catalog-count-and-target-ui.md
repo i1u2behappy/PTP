@@ -64,6 +64,24 @@
 **수정**: "마지막"이라고 읽은 페이지(`maxPage`) 바로 다음 페이지(`maxPage+1`)도 비어있는지 한 번 더
 확인한다. 비어있어야만 계산식을 신뢰하고, 상품이 더 있으면 안전한 직접 순회 폴백으로 전환한다.
 
+### 버그 3 — 위젯 캡 폴백(직접 순회)이 순차 탐색이라 대형 카테고리에서 다시 느려짐 (수정됨)
+
+버그 2의 수정으로 정확도는 맞았지만, "직접 순회로 전환"이 **1페이지씩 순서대로** 빈 페이지가 나올
+때까지 여는 방식이라 카테고리가 실제로 수십~수백 페이지짜리면 그만큼 느렸다. 다른 몰
+(`1020bag.com`, 고도몰류)의 실사용 로그로 재확인:
+
+```
+"국내생산제품" maxPage=9 → page 10에도 33개 더 있음 → 직접 순회로 전환   (수십 페이지 순차 방문)
+"지갑 > 반지갑" maxPage=2 → page 3에도 33개 더 있음 → 직접 순회로 전환
+"지갑 > 중지갑" / "지갑 > 카드지갑" / "방한용품" 도 동일 패턴
+```
+
+**수정**: 순차 탐색 대신 `findRealLastPage()` — 지수 확장(1, 2, 4, 8...페이지씩 건너뛰며 빈 페이지가
+나올 때까지) + 그 사이를 이분 탐색해 실제 마지막 페이지를 찾는다. 카테고리가 300페이지짜리여도
+로그(n)번(~20번 안팎)만 페이지를 열면 되므로 대형 카테고리에서도 빠르다. 탐색 상한
+(`AUTO_PAGINATION_CAP*100`페이지)을 넘도록 못 찾으면 기존의 안전한 순차 폴백으로 다시 떨어진다
+(정확도는 그대로 보장).
+
 ### 안정성 — 탐색 중 발생하는 "Execution context was destroyed" 자동 복구
 
 `goto` 직후 바로 `page.evaluate`를 부르면, 몰 페이지의 지연 리다이렉트와 겹쳐 실행 컨텍스트가
@@ -75,6 +93,31 @@
 - `countCategoryProducts()`는 내부적으로 `countCategoryProductsOnce()`를 감싸 실패 시 그 카테고리만
   조용히 한 번 더 재시도하고, 그래도 실패하면 해당 카테고리만 0개로 처리한다 — 카테고리 1건의 실패가
   `Promise.all`을 타고 전체 미리보기를 깨뜨리지 않는다(사용자 개입 없이 자동 복구).
+
+## 미리보기 중지
+
+미리보기가 오래 걸릴 수 있으니(위 성능 수정 이후에도 몰에 따라 카테고리가 아주 많으면 시간이 걸림)
+언제든 중지하고, 위 "스크랩 대상"을 다시 조정해 바로 새 미리보기를 시작할 수 있어야 한다는 요청.
+
+- **왜 실제 스크랩의 중지(`requestStop`/`isStopRequested`, `!specifications/scraping-control-and-retry.md`
+  참고)를 못 쓰는가**: 그 메커니즘은 `sessionId`(DB `scrape_session` row) 기준인데, 미리보기는 DB
+  세션을 만들지 않는 단발 요청이라 키로 쓸 세션이 없다.
+- **대신 요청 자체의 `AbortSignal`을 재사용**: 클라이언트(`ScraperPanel.tsx`)가 `AbortController`를
+  만들어 `fetch`에 물리고, "⏹ 중지" 버튼은 `controller.abort()`만 부른다. 서버
+  (`app/api/scrape/preview-catalog/route.ts`)는 그 요청의 `req.signal`을 `previewCatalog`에
+  `stopSignal`로 그대로 전달한다(`ScrapeOptions.stopSignal?: AbortSignal`, 신규 필드).
+- `previewCatalog` 내부에 `const stop = () => !!opts.stopSignal?.aborted`를 만들어 워커 풀 루프,
+  `countCategoryProducts`/`countCategoryProductsOnce`, `findRealLastPage`의 이분/지수 탐색 루프,
+  순차 폴백 루프, 마지막 상품 1건 추출 단계까지 다음 네트워크 왕복 전에 매번 확인한다 — 중지 후
+  서버가 계속 도는 것을 막아 곧바로 새 미리보기를 시작해도 이전 시도와 충돌하지 않는다.
+  `categoryCounts` 배열은 중지 시 처리 못 한 칸이 비므로(`(CategoryCount | undefined)[]`) 반환 직전
+  `filter(Boolean)`으로 걸러낸다.
+- `GlobalErrorNet`의 `window.fetch` 패치가 이 의도된 abort(`DOMException name==='AbortError'`)까지
+  "서버 오류"로 잡아 자동 재시도를 걸면, 중지해도 몇 초 뒤 같은 요청이 저절로 다시 나가는 문제가
+  생긴다 — AbortError는 `addFailure` 호출에서 제외하도록 예외 처리했다.
+- UI: "🔍 스크랩 미리보기" 옆에 로딩 중(`previewLoading`, 일반모드 한정)일 때만 "⏹ 중지" 버튼이
+  뜬다. 개발자모드는 서버가 아니라 사용자 브라우저의 확장이 도는 구조라 이 fetch로 멈출 서버 작업이
+  없어 제외(기존 2분 타임아웃만 그대로 있음).
 
 ## 스크랩 대상 카드 UI 재설계 (`components/panels/ScraperPanel.tsx`)
 
@@ -100,6 +143,15 @@
 패턴과 "설명 + 보조버튼 + 주버튼" 레이아웃을 강제로 공유하게 해, 두 곳(현재 페이지 가져오기 /
 카테고리 불러오기)이 따로 스타일이 어긋나지 않게 했다.
 
+**색상 신호 진화**: 처음엔 각 버튼이 자기 로컬 성공 여부(`currentUrlFetched`/`categories.length>0`)로
+색을 바꿨는데, 이 둘은 독립적이라 하나만 성공하면 색이 서로 달라져("둘이 다른 버튼처럼 보임", 사용자
+피드백) 잠깐 `staticColor`(색은 항상 고정, 라벨만 변경)로 눌렀다가, 최종적으로는 `colorDone` prop을
+따로 둬서 **"다음 단계(🔍 스크랩 미리보기 성공, `previewResult` 존재)로 넘어갔는지"라는 두 버튼
+공통 신호**로 색(+✓ 아이콘)을 함께 바꾸도록 정리했다. 라벨 텍스트(`doneLabel`)는 그와 별개로 각자
+실제 로컬 성공 여부로만 바뀐다 — 안 누른 버튼에 "불러옴" 같은 거짓 라벨이 붙지 않는다.
+(`ScrapeStepBox`의 `primary.done`=라벨용 로컬 신호, `primary.colorDone`=색상용 공유 신호, 미지정 시
+`done`으로 폴백.)
+
 ### 선택형 레이아웃 — "위/아래 단계"가 아니라 "둘 중 하나"
 
 "시작 URL을 그대로 스크랩" vs "카테고리를 자동으로 찾아 여러 개 지정"은 대체 관계(하나를 채우면
@@ -114,8 +166,20 @@
   입력칸을 보여주고 그 아래 버튼을 두면 반대로 읽힘).
 - 카테고리 검색 결과(캐시 안내/감지된 플랫폼/체크리스트)는 폭이 넓게 필요해 2단 배치 밖에 전체
   너비로 별도 박스로 둔다.
-- 로그인 미확인 상태(왼쪽 "현재 페이지 가져오기" 버튼이 안 뜰 때)는 오른쪽 카테고리 열만 전체
-  폭을 차지한다.
+- (수정) 처음엔 로그인 미확인 상태에서 왼쪽 "현재 페이지 가져오기" 박스 자체를 숨겼는데, 그러면
+  오른쪽(카테고리)만 있고 왼쪽이 비어 "같은 레벨" 느낌이 깨진다는 피드백으로, 이제 항상 두 열 다
+  보여주고 왼쪽은 `loginStep==='none'`일 때 버튼만 disabled 처리한다(열려있는 브라우저 세션이
+  없어 눌러도 조용히 무반응이라는 실질적 이유가 있음 — "카테고리 불러오기"가 `targetUrl` 없을 때
+  disabled인 것과 같은 근거).
+
+### 카테고리 체크리스트 — 전체선택을 우측 텍스트 링크에서 좌측 마스터 체크박스로
+
+"전체 선택 (몰 전체상품)"/"전체 해제"가 표 우측 끝 텍스트 링크였는데(눈에 잘 안 띔, 사용자 발견),
+각 행 체크박스와 같은 왼쪽 칸(`w-6`)으로 옮겼다. 폭을 픽셀 단위까지 정확히 맞추려고 헤더 행을
+별도 `<div>`가 아니라 같은 `<table>`의 `<thead>`로 합쳤다(`tbody`와 열 폭이 항상 자동으로 맞음).
+체크박스는 전체 선택 시 checked, 일부만 선택 시 `indeterminate`(ref 콜백으로 DOM 프로퍼티 직접 설정
+— React가 `indeterminate` HTML 속성을 지원하지 않음), 헤더 행은 `sticky top-0`으로 스크롤해도
+보이게 했다.
 
 ### 접기/펼치기 라벨 통일
 
@@ -131,17 +195,25 @@
 
 ## 관련 파일
 
-- `lib/scraper.ts`: `countProductsOnPage`, `readMaxPageNumber`, `countCategoryProducts`(+`Once`),
-  `settleAfterNav`, `previewCatalog` 재작성. `readListedTotalCount`(전체 텍스트 스캔 방식) 완전 제거.
+- `lib/scraper.ts`: `countProductsOnPage`, `readMaxPageNumber`, `findRealLastPage`(신규, 지수+이분
+  탐색), `countCategoryProducts`(+`Once`), `settleAfterNav`, `previewCatalog` 재작성.
+  `readListedTotalCount`(전체 텍스트 스캔 방식) 완전 제거. `ScrapeOptions.stopSignal?: AbortSignal`
+  신규 필드 + 카운팅 루프 전반에 `stop()` 체크 추가.
+- `app/api/scrape/preview-catalog/route.ts`: `previewCatalog`에 `stopSignal: req.signal` 전달.
 - `app/api/scrape/categories/route.ts`: `sites.scrape_profile.categoryLinks` 캐시를 먼저 확인 후
   없으면 `discoverCategoryLinks`로 직접 훑고 캐시에 반영(`force=true`면 강제 새로고침) — "몰 구조
   파악"이 이미 찾아둔 목록을 "카테고리 불러오기"가 재사용.
-- `components/panels/ScraperPanel.tsx`: `ScrapeStepBox` 신규 컴포넌트, 버튼 전/후 색상, 스크랩 대상
-  2단 레이아웃, 접기/펼치기 라벨 통일.
-- `components/shell/GlobalErrorNet.tsx`(신규): 지수 백오프 자동 재시도.
+- `components/panels/ScraperPanel.tsx`: `ScrapeStepBox` 신규 컴포넌트(`colorDone` prop 포함), 버튼
+  전/후 색상, 스크랩 대상 2단 레이아웃, 카테고리 체크리스트 마스터 체크박스, 접기/펼치기 라벨 통일,
+  `previewAbortRef`/`handleStopPreview`(미리보기 중지).
+- `components/shell/GlobalErrorNet.tsx`(신규): 지수 백오프 자동 재시도, `AbortError` 예외 처리.
 - `app/layout.tsx`: `<GlobalErrorNet />` 마운트.
 
 ## 상태
 
-**구현 완료.** tsc/eslint 클린. 카테고리 개수 버그는 실제 몰(seasonbag.co.kr) 로그로 원인을 확인하고
-수정했으며, 재현 확인은 사용자가 다음 미리보기 실행에서 검증 예정.
+**구현 완료.** tsc/eslint 클린. 카테고리 개수 버그는 실제 몰(seasonbag.co.kr, 1020bag.com) 로그로
+원인을 확인하고 수정했다. "현재 페이지 가져오기"가 느리다는 문의는 실제 코드(application-code
+7~74ms)가 아니라 `next dev` 개발 모드의 온디맨드 컴파일 오버헤드임을 프로덕션 빌드 비교
+(격리된 git worktree에서 `next build --webpack` 후 포트 비교 — 프로덕션 20~40ms vs 개발 서버
+730ms~3.5s)로 확인했다(코드 수정 없음, 환경 특성). 재현 확인은 사용자가 다음 미리보기 실행에서
+검증 예정.

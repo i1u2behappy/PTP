@@ -227,15 +227,19 @@ interface DevModeSession {
   created_at: string
 }
 
-/** "스크랩 대상" 카드의 "URL 불러오기"/"카테고리 불러오기" — 둘 다 같은 레벨의 보조 액션이라 같은
+/** "스크랩 대상" 카드의 "URL 불러오기"/"카테고리 불러오기" — 둘 다 같은 레벨의 대체 선택지라 같은
  *  틀(설명 + 버튼)을 강제로 공유하게 한다(따로 두면 스타일이 조금씩 어긋나기 쉽다는 게 실제로 확인된
- *  문제). 시도 전엔 진한 teal 버튼, 한 번 성공하면 흰 배경 + teal 테두리 + ✓로 바뀌는 것도 동일하다. */
+ *  문제). 색(진한 teal → 흰 테두리형+✓)은 "스크랩 대상이 정해졌는지"라는 두 버튼 공통의 신호
+ *  (`colorDone`)로 함께 바뀌게 하고, 라벨 텍스트만 각자 실제로 그 버튼을 눌러 성공했는지(`done`)로
+ *  따로 바뀐다 — 하나만 성공했다고 색까지 서로 달라지던 문제(둘이 다른 버튼처럼 보임)를 막으면서도,
+ *  누르지도 않은 버튼에 "불러옴"이라고 거짓 라벨을 붙이지 않는다. */
 function ScrapeStepBox({ description, primary, secondary, children }: {
   description: string
-  primary: { label: string; doneLabel: string; icon: string; loading?: boolean; loadingLabel?: string; done: boolean; onClick: () => void; disabled?: boolean }
+  primary: { label: string; doneLabel: string; icon: string; loading?: boolean; loadingLabel?: string; done: boolean; colorDone?: boolean; onClick: () => void; disabled?: boolean }
   secondary?: { label: string; title?: string; onClick: () => void; disabled?: boolean }
   children?: React.ReactNode
 }) {
+  const showDoneColor = primary.colorDone ?? primary.done
   return (
     <div className="bg-teal-50 border border-teal-100 rounded-xl px-4 py-2.5 mb-2">
       <div className="flex items-center justify-between gap-3">
@@ -249,10 +253,10 @@ function ScrapeStepBox({ description, primary, secondary, children }: {
           )}
           <button type="button" onClick={primary.onClick} disabled={primary.disabled}
             className={`px-4 py-1.5 text-xs font-semibold rounded-full transition-colors shrink-0 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed ${
-              primary.done
+              showDoneColor
                 ? 'bg-white border-2 border-teal-500 text-teal-600 hover:bg-teal-50'
                 : 'bg-teal-500 hover:bg-teal-600 text-white'}`}>
-            <span aria-hidden="true">{primary.done ? '✓' : primary.icon}</span>
+            <span aria-hidden="true">{showDoneColor ? '✓' : primary.icon}</span>
             {primary.loading ? (primary.loadingLabel || '처리 중...') : primary.done ? primary.doneLabel : primary.label}
           </button>
         </div>
@@ -335,6 +339,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 채우지 않으므로(확장이 previewItems 쪽만 보냄) 항상 빈 배열로 남아 기존 표시와 자연히 구분된다.
   const [categoryCounts, setCategoryCounts] = useState<CategoryCountItem[]>([])
   const [previewLoading, setPreviewLoading] = useState(false)
+  // "미리보기 중지" — fetch를 abort하면 서버(previewCatalog)도 opts.stopSignal로 같은 신호를 받아
+  // 카테고리 개수 집계를 스스로 멈춘다(lib/scraper.ts 참고). 일반모드 전용(개발자모드는 서버가 아니라
+  // 사용자 브라우저의 확장이 도는 것이라 이 fetch로 막을 수 있는 작업이 없다).
+  const previewAbortRef = useRef<AbortController | null>(null)
 
   // 개발자모드 "상품 페이지 미리보기"/"스크랩 대상 직접지정" — 일반모드와 같은 카드/상태(previewResult 등)를
   // 그대로 쓰지만, PTP가 그 몰 탭에 직접 접근할 방법이 없어(chrome.debugger 확장 전용 구조) 실제 캡처는
@@ -929,11 +937,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPreviewResult(null)
     setPreviewTotal(null)
     setPreviewItems([]); setCategoryCounts([])
+    const controller = new AbortController()
+    previewAbortRef.current = controller
     try {
       const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
       const res = await fetch('/api/scrape/preview-catalog', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           url: categoryUrls.length ? undefined : (targetUrl || undefined),
           categoryUrls: categoryUrls.length ? categoryUrls : undefined,
@@ -944,9 +955,20 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`확인 실패: ${e.error || res.status}`); return }
       const d = await res.json() as { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; categoryCounts?: CategoryCountItem[]; needsLogin?: boolean }
       applyCatalogPreview(d)
+    } catch (err) {
+      // 사용자가 "중지"를 눌러 스스로 취소한 요청은 에러로 취급하지 않는다(handleStopPreview 참고).
+      if (!(err instanceof DOMException && err.name === 'AbortError')) throw err
     } finally {
       setPreviewLoading(false)
+      previewAbortRef.current = null
     }
+  }
+
+  /** "🔍 스크랩 미리보기"가 도는 동안(일반모드) 누르면 그 fetch를 abort한다 — 서버(previewCatalog)도
+   *  같은 신호를 받아 진행 중이던 카테고리 개수 집계를 멈추므로, 중지 후 위 스크랩 대상을 다시 조정해
+   *  바로 새 미리보기를 시작할 수 있다(같은 로그인 세션/탭을 그대로 재사용, 별도 정리 불필요). */
+  function handleStopPreview() {
+    previewAbortRef.current?.abort()
   }
 
   const needsLogin = !!loginId
@@ -1357,15 +1379,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           <p className="text-xs text-gray-400 mb-2">아래 둘 중 하나를 고르세요 — 이 URL 하나만 그대로 쓰거나, 카테고리를 자동으로 찾아 여러 개를 한 번에 지정할 수 있습니다.</p>
           <div className="flex flex-col sm:flex-row items-stretch gap-2 mb-2">
             <div className="flex-1 flex flex-col gap-1">
-              {loginStep === 'confirmed' && (
-                <ScrapeStepBox
-                  description="💡 로그인 창에서 원하는 페이지로 이동했다면, 그 페이지를 현재 페이지 URL로 바로 가져와 그대로 스크랩할 수 있습니다."
-                  primary={{
-                    label: '현재 페이지 가져오기', doneLabel: '현재 페이지 가져옴', icon: '↻',
-                    loading: currentUrlLoading, loadingLabel: '가져오는 중...',
-                    done: currentUrlFetched, onClick: handleRefreshCurrentUrl,
-                  }} />
-              )}
+              <ScrapeStepBox
+                description="💡 로그인 창에서 원하는 페이지로 이동했다면, 그 페이지를 현재 페이지 URL로 바로 가져와 그대로 스크랩할 수 있습니다."
+                primary={{
+                  label: '현재 페이지 가져오기', doneLabel: '현재 페이지 가져옴', icon: '↻',
+                  loading: currentUrlLoading, loadingLabel: '가져오는 중...',
+                  done: currentUrlFetched, colorDone: !!previewResult, disabled: loginStep === 'none',
+                  onClick: handleRefreshCurrentUrl,
+                }} />
+              {/* '모든 카테고리 불러오기'와 같은 레벨로 항상 같은 틀(ScrapeStepBox)을 보여준다 — 로그인
+                  확인 전에는 아직 열린 창이 없어 disabled로만 막아둔다("카테고리 불러오기"가
+                  targetUrl 없을 때 disabled인 것과 같은 패턴). */}
               {/* 버튼으로 가져온(또는 직접 입력한) 실제 URL 값은 결과로서 버튼 아래에 보여준다. */}
               <label className="block">
                 <span className="block text-xs text-gray-500 mb-1">현재 페이지 URL</span>
@@ -1384,9 +1408,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               <ScrapeStepBox
                 description="💡 몰에 있는 카테고리들을 자동으로 찾아옵니다 — 시작 URL을 하나하나 알아낼 필요 없이 원하는 카테고리를 바로 불러올 수 있습니다."
                 primary={{
-                  label: '모든 카테고리 불러오기', doneLabel: '카테고리 불러옴', icon: '🔍',
+                  label: '모든 카테고리 불러오기', doneLabel: '카테고리 불러옴', icon: '↻',
                   loading: categoriesLoading, loadingLabel: '불러오는 중...',
-                  done: categories.length > 0, disabled: categoriesLoading || !targetUrl,
+                  done: categories.length > 0, colorDone: !!previewResult, disabled: categoriesLoading || !targetUrl,
                   onClick: () => handleLoadCategories(false),
                 }}
                 secondary={categories.length > 0 ? {
@@ -1425,14 +1449,23 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 <>
                   <p className="text-xs text-teal-700 mt-1">💡 아래에서 여러 카테고리를 체크하면, 체크한 카테고리들을 한 번에 스크랩 대상으로 지정할 수 있습니다.</p>
                   <div className="mt-1.5 border border-teal-200 bg-white rounded-xl overflow-hidden">
-                    <div className="flex items-center justify-between px-3 py-1.5 bg-teal-50 border-b border-teal-100">
-                      <span className="text-xs text-gray-500">발견된 카테고리 {categories.length}개 — 스크랩할 항목을 선택하세요</span>
-                      <button type="button" onClick={toggleAllCategories} className="text-xs text-teal-500 hover:underline shrink-0">
-                        {categories.every(c => isCategorySelected(c.href)) ? '전체 해제' : '전체 선택 (몰 전체상품)'}
-                      </button>
-                    </div>
                     <div className="max-h-40 overflow-y-auto">
                       <table className="w-full text-xs border-collapse">
+                        <thead>
+                          {/* 전체선택 체크박스를 우측 텍스트 링크 대신 아래 행 체크박스와 같은 왼쪽 칸에
+                              둔다 — 실제 <thead>/<tbody>로 같은 표에 넣어야 폭이 항상 정확히 맞는다. */}
+                          <tr className="sticky top-0 z-[2] bg-teal-50 border-b border-teal-100">
+                            <th className="px-3 py-1.5 w-6 sticky left-0 z-[1] bg-teal-50 font-normal text-left">
+                              <input type="checkbox" title="전체 선택/해제 (몰 전체상품)"
+                                checked={categories.every(c => isCategorySelected(c.href))}
+                                ref={el => { if (el) el.indeterminate = categories.some(c => isCategorySelected(c.href)) && !categories.every(c => isCategorySelected(c.href)) }}
+                                onChange={toggleAllCategories} />
+                            </th>
+                            <th colSpan={2} className="px-3 py-1.5 text-gray-500 font-normal text-left">
+                              발견된 카테고리 {categories.length}개 — 스크랩할 항목을 선택하세요
+                            </th>
+                          </tr>
+                        </thead>
                         <tbody>
                           {categories.map(c => (
                             <tr key={c.href} onClick={() => toggleCategory(c.href)}
@@ -1568,6 +1601,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                     : 'bg-teal-500 hover:bg-teal-600 text-white'}`}>
                 {previewLoading ? (mallMode === 'devmode' ? '대기 중...' : aiMode ? 'AI 분석 중...' : '확인 중...') : previewResult ? '✓ 스크랩 미리보기' : '🔍 스크랩 미리보기'}
               </button>
+              {/* 개발자모드는 서버가 아니라 사용자 브라우저의 확장이 도는 것이라 이 fetch로 중지시킬
+                  작업이 없다(위 devPreviewTimeoutRef의 2분 자동 해제만 있음) — 일반모드 전용. */}
+              {mallMode === 'normal' && previewLoading && (
+                <button type="button" onClick={handleStopPreview}
+                  className="px-4 py-2 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-sm font-semibold rounded-full transition-colors">
+                  ⏹ 중지
+                </button>
+              )}
               {(mallMode === 'devmode' || loginStep === 'confirmed') && (
                 mallMode === 'devmode' ? (
                   pickerActive ? (

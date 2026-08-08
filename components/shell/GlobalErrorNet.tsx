@@ -98,7 +98,10 @@ function patchFetch() {
       }
       return res
     } catch (err) {
-      if (!excluded) addFailure(url, '서버에 연결할 수 없습니다 — 네트워크 또는 서버 자체가 응답하지 않습니다', args)
+      // 화면이 AbortController로 스스로 취소한 요청(예: 미리보기 "중지" 버튼)까지 "서버 오류"로 띄우고
+      // 자동 재시도까지 걸면 안 된다 — 사용자가 멈추라고 한 요청이 몇 초 뒤 저절로 다시 나가버린다.
+      const isAbort = err instanceof DOMException && err.name === 'AbortError'
+      if (!excluded && !isAbort) addFailure(url, '서버에 연결할 수 없습니다 — 네트워크 또는 서버 자체가 응답하지 않습니다', args)
       throw err
     }
   }

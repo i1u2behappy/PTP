@@ -22,7 +22,9 @@ export async function POST(req: NextRequest) {
       )
       extractionRules = res.rows[0]?.extraction_rules || undefined
     }
-    const result = await previewCatalog({ ...body, extractionRules })
+    // 사용자가 미리보기 도중 "중지"를 누르면 클라이언트가 이 요청 자체를 abort한다 — 그 신호를 그대로
+    // previewCatalog에 넘겨 카테고리 개수 집계 루프가 다음 페이지를 열기 전에 스스로 멈추게 한다.
+    const result = await previewCatalog({ ...body, extractionRules, stopSignal: req.signal })
     return NextResponse.json(result)
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 })

@@ -118,6 +118,10 @@ export interface ScrapeOptions {
   /** "AI모드 스크래핑" — 켜져 있으면(미리보기 시점) 이 페이지를 AI로 분석해 이 몰의 추출 규칙을 새로
    *  만들어 저장하고, 그 규칙으로 다시 추출한 값을 돌려준다. siteId 없이는 저장할 곳이 없어 무시된다. */
   aiMode?: boolean
+  /** previewCatalog 전용 중지 신호 — 실제 스크랩(sessionId+isStopRequested)과 달리 미리보기는 DB
+   *  세션이 없는 단발 요청이라, 클라이언트가 fetch를 abort하면 그 요청의 AbortSignal을 그대로 여기
+   *  꽂아 카테고리별 개수 집계 루프가 다음 네트워크 왕복 전에 스스로 멈추게 한다. */
+  stopSignal?: AbortSignal
 }
 
 export function profileDir(siteId: number) {
@@ -2276,10 +2280,47 @@ async function settleAfterNav(page: Page) {
   await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {})
 }
 
+/** 위젯이 "보이는 페이지 묶음"만 노출해 maxPage를 과소평가했을 때, 진짜 마지막 페이지를 한 페이지씩
+ *  순차로 찾지 않고 지수 확장(1,2,4,8...페이지씩 건너뛰며 빈 페이지가 나올 때까지) + 그 사이를 이분
+ *  탐색해서 찾는다 — 카테고리가 수백 페이지짜리면 순차 탐색은 실사용 중 카테고리 1개에 수 분씩 걸리는
+ *  게 확인됐다(로그(n)번만 페이지를 열면 되므로 대형 카테고리에서도 빠르다).
+ *  bound 페이지까지도 빈 페이지를 못 찾으면 null(호출부가 안전한 순차 탐색으로 폴백). */
+async function findRealLastPage(
+  workerPage: Page, firstPageUrl: string, bound: number,
+  knownNonEmptyPage: number, knownNonEmptyCount: number,
+  userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
+  stop: () => boolean,
+): Promise<{ page: number; count: number } | null> {
+  let lo = knownNonEmptyPage
+  let loCount = knownNonEmptyCount
+  let hi: number | null = null
+  let step = 1
+  while (hi === null) {
+    if (stop()) return { page: lo, count: loCount }
+    const probe = lo + step
+    if (probe > bound) return null
+    await workerPage.goto(withPageParam(firstPageUrl, probe), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+    await settleAfterNav(workerPage)
+    const count = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    if (count === 0) hi = probe
+    else { lo = probe; loCount = count; step *= 2 }
+  }
+  while (hi - lo > 1) {
+    if (stop()) return { page: lo, count: loCount }
+    const mid = Math.floor((lo + hi) / 2)
+    await workerPage.goto(withPageParam(firstPageUrl, mid), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+    await settleAfterNav(workerPage)
+    const count = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    if (count === 0) hi = mid
+    else { lo = mid; loCount = count }
+  }
+  return { page: lo, count: loCount }
+}
+
 async function countCategoryProductsOnce(
   workerPage: Page, categoryUrl: string,
   userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined,
-  nextPageSelector: string | undefined, baseUrl: string,
+  nextPageSelector: string | undefined, baseUrl: string, stop: () => boolean,
 ): Promise<CategoryCount> {
   const firstPageUrl = resetToFirstPage(categoryUrl)
   await workerPage.goto(firstPageUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
@@ -2288,7 +2329,7 @@ async function countCategoryProductsOnce(
   const label = category || categoryUrl
 
   const perPage = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
-  if (perPage === 0) return { url: categoryUrl, label, count: 0 }
+  if (perPage === 0 || stop()) return { url: categoryUrl, label, count: perPage }
 
   const maxPage = await readMaxPageNumber(workerPage, nextPageSelector)
   if (maxPage === null || maxPage <= 1) {
@@ -2303,7 +2344,7 @@ async function countCategoryProductsOnce(
   // (예: 카페24 기본 스킨은 1~5만 링크로 노출하고 다음 묶음은 화살표로만 이동 — 실사용 확인: 여러 카테고리가
   // 전부 같은 maxPage=5·lastPageCount=48(꽉 참)로 읽혀 진짜 총 개수보다 훨씬 적은 값에서 멈춘 사례 발견).
   // 그래서 "마지막"이라고 읽은 페이지 바로 다음 페이지도 비어있는지 한 번 더 확인해야 안심할 수 있다.
-  if (lastPageCount > 0) {
+  if (lastPageCount > 0 && !stop()) {
     await workerPage.goto(withPageParam(firstPageUrl, maxPage + 1), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
     await settleAfterNav(workerPage)
     const afterLastCount = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
@@ -2312,8 +2353,20 @@ async function countCategoryProductsOnce(
       console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage} lastPageCount=${lastPageCount} → count=${count} url=${firstPageUrl} lastPageUrl=${withPageParam(firstPageUrl, maxPage)}`)
       return { url: categoryUrl, label, count }
     }
-    console.log(`[previewCatalog] "${label}" maxPage=${maxPage}이 위젯 페이지 묶음의 끝일 뿐(page ${maxPage + 1}에도 ${afterLastCount}개 더 있음) → 직접 순회로 전환`)
+    console.log(`[previewCatalog] "${label}" maxPage=${maxPage}이 위젯 페이지 묶음의 끝일 뿐(page ${maxPage + 1}에도 ${afterLastCount}개 더 있음) → 실제 마지막 페이지 빠르게 탐색`)
+    const found = await findRealLastPage(
+      workerPage, firstPageUrl, AUTO_PAGINATION_CAP * 100, maxPage + 1, afterLastCount,
+      userSel, platformSel, detailPatternSrc, baseUrl, stop,
+    )
+    if (found) {
+      const count = perPage * (found.page - 1) + found.count
+      console.log(`[previewCatalog] "${label}" perPage=${perPage} 실제 마지막 페이지=${found.page} lastPageCount=${found.count} → count=${count}`)
+      return { url: categoryUrl, label, count }
+    }
+    console.log(`[previewCatalog] "${label}" 실제 마지막 페이지를 못 찾음(${AUTO_PAGINATION_CAP * 100}페이지 이내) → 안전한 순차 탐색으로 폴백`)
   }
+
+  if (stop()) return { url: categoryUrl, label, count: perPage * maxPage }
 
   // 마지막 페이지 번호를 잘못 읽었을 가능성(그 페이지가 실제로는 비어있음) — 페이지 번호 계산을 못 믿고
   // 안전하게 직접 한 페이지씩 개수만 세며 끝까지 간다(정확한 개수 보장이 최우선).
@@ -2321,6 +2374,7 @@ async function countCategoryProductsOnce(
   await settleAfterNav(workerPage)
   let total = 0
   for (let p = 0; p < AUTO_PAGINATION_CAP; p++) {
+    if (stop()) break
     const count = p === 0 ? perPage : await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
     if (count === 0) break
     total += count
@@ -2338,14 +2392,16 @@ async function countCategoryProductsOnce(
 async function countCategoryProducts(
   workerPage: Page, categoryUrl: string,
   userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined,
-  nextPageSelector: string | undefined, baseUrl: string,
+  nextPageSelector: string | undefined, baseUrl: string, stop: () => boolean,
 ): Promise<CategoryCount> {
+  if (stop()) return { url: categoryUrl, label: categoryUrl, count: 0 }
   try {
-    return await countCategoryProductsOnce(workerPage, categoryUrl, userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl)
+    return await countCategoryProductsOnce(workerPage, categoryUrl, userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl, stop)
   } catch (err) {
+    if (stop()) return { url: categoryUrl, label: categoryUrl, count: 0 }
     console.log(`[previewCatalog] "${categoryUrl}" 개수 계산 중 오류(재시도) — ${err instanceof Error ? err.message : err}`)
     try {
-      return await countCategoryProductsOnce(workerPage, categoryUrl, userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl)
+      return await countCategoryProductsOnce(workerPage, categoryUrl, userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl, stop)
     } catch (err2) {
       console.log(`[previewCatalog] "${categoryUrl}" 개수 계산 재시도도 실패 — ${err2 instanceof Error ? err2.message : err2}`)
       return { url: categoryUrl, label: categoryUrl, count: 0 }
@@ -2360,6 +2416,10 @@ async function countCategoryProducts(
  * ponytail: 미리보기 전용이라 재시도/AI폴백 없이 1회만 시도한다 — 실패하면 버튼을 다시 누르면 됨.
  */
 export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPreviewResult> {
+  // 미리보기는 DB 세션이 없는 단발 요청이라 실제 스크랩의 sessionId+isStopRequested를 못 쓴다 — 대신
+  // 클라이언트가 fetch를 abort하면 그 요청의 AbortSignal이 여기로 그대로 전달돼(app/api/scrape/
+  // preview-catalog/route.ts) 아래 루프들이 다음 네트워크 왕복 전에 스스로 멈춘다.
+  const stop = () => !!opts.stopSignal?.aborted
   return withContext(opts, async (page, context) => {
     const listingUrls = (opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])).map(resetToFirstPage)
 
@@ -2383,16 +2443,17 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
     // 절대 쓰지 않고 항상 새 탭만 연다(discoverCategoryLinks에서 같은 이유로 겪은 "다른 네비게이션에
     // 의해 중단됨" 충돌 방지).
     const COUNT_CONCURRENCY = 4
-    const categoryCounts = new Array<CategoryCount>(listingUrls.length)
+    const categoryCounts = new Array<CategoryCount | undefined>(listingUrls.length)
     let cursor = 0
     async function worker() {
       const workerPage = await context.newPage()
       try {
         while (true) {
+          if (stop()) return
           const i = cursor++
           if (i >= listingUrls.length) return
           categoryCounts[i] = await countCategoryProducts(
-            workerPage, listingUrls[i], userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl,
+            workerPage, listingUrls[i], userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl, stop,
           )
         }
       } finally {
@@ -2400,13 +2461,16 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
       }
     }
     const workerCount = Math.min(COUNT_CONCURRENCY, listingUrls.length)
-    await Promise.all(Array.from({ length: workerCount }, () => worker()))
+    if (!stop()) await Promise.all(Array.from({ length: workerCount }, () => worker()))
 
-    const total = categoryCounts.reduce((sum, c) => sum + c.count, 0)
+    // 중지되면 아직 처리 못 한 카테고리는 빈 칸으로 남는다 — 어차피 클라이언트가 이 응답을 안 받을
+    // 상황이라 정확도보다 여기서 안전하게(undefined.count로 죽지 않게) 걸러내는 것만 중요하다.
+    const doneCounts = categoryCounts.filter((c): c is CategoryCount => !!c)
+    const total = doneCounts.reduce((sum, c) => sum + c.count, 0)
 
     // 부트스트랩으로 고른 카테고리(0번)가 하필 비어있으면, 실제로 상품이 있는 다른 카테고리에서 1건을 구한다.
-    if (!firstUrl) {
-      const nonEmpty = categoryCounts.find(c => c.count > 0)
+    if (!firstUrl && !stop()) {
+      const nonEmpty = doneCounts.find(c => c.count > 0)
       if (nonEmpty) {
         const retry = await collectProductUrls(page, { ...opts, url: nonEmpty.url, categoryUrls: undefined, maxPages: 1 })
         firstUrl = retry.urls[0]
@@ -2415,7 +2479,7 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
       }
     }
 
-    if (!firstUrl) return { total: 0, platform, preview: null, items: [], categoryCounts, needsLogin }
+    if (!firstUrl || stop()) return { total, platform, preview: null, items: [], categoryCounts: doneCounts, needsLogin }
 
     await page.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 })
     const productNeedsLogin = await loginIfNeeded(page, { url: firstUrl, ...opts })
@@ -2435,10 +2499,10 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
       const ai = await applyAiModeRules(page, opts.siteId, firstUrl, opts, domOptions)
       if (ai) {
         applyCategoryOverride(ai.product, categoryByUrl.get(firstUrl), ai.rules)
-        return { total, platform, preview: { sourceUrl: firstUrl, product: ai.product }, items: [], categoryCounts, needsLogin }
+        return { total, platform, preview: { sourceUrl: firstUrl, product: ai.product }, items: [], categoryCounts: doneCounts, needsLogin }
       }
     }
-    return { total, platform, preview: { sourceUrl: firstUrl, product }, items: [], categoryCounts, needsLogin }
+    return { total, platform, preview: { sourceUrl: firstUrl, product }, items: [], categoryCounts: doneCounts, needsLogin }
   })
 }
 

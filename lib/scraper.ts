@@ -99,7 +99,14 @@ export interface ScrapeOptions {
   excludeUrls?: string[]
   /** 상품 페이지 방문 사이 최소 지연(ms). 실제 지연은 이 값~2배 사이 랜덤 (차단 방지) */
   delayMs?: number
-  /** 카탈로그 모드에서 동시에 처리할 상품 페이지 수 (기본 1 = 순차 처리, 최대 8) */
+  /** 'manual'이면 아래 concurrency 값을 카테고리/상품 동시 처리 개수로 고정해서 쓴다(1~8). 생략 또는
+   *  'auto'면 기존 동작 그대로 — scrapeCatalogPage는 몰 반응을 보며 1에서 최대 8까지 스스로 올리고(적응형
+   *  동시성), previewCatalog/collectProductUrls의 카테고리 집계는 4로 고정된다. 동시에 여는 탭 수가
+   *  메모리 사용량에 직결돼(각 탭이 이미지까지 로드) 메모리 이슈를 진단/완화하려면 수동으로 낮춰본다. */
+  concurrencyMode?: 'auto' | 'manual'
+  /** concurrencyMode가 'manual'일 때만 쓰이는 동시 처리 개수(1~8, 범위 밖 값은 안전하게 clamp됨).
+   *  recheckMallProducts(연속관리 재체크)는 concurrencyMode와 무관하게 항상 이 값을 그대로 쓴다(기존 동작,
+   *  적응형 동시성이 없는 기능이라 auto/manual 구분이 의미 없음). */
   concurrency?: number
   loginId?: string
   loginPw?: string
@@ -143,6 +150,15 @@ async function throttle(delayMs?: number) {
   await sleep(delayMs + Math.random() * delayMs)
 }
 
+/** concurrencyMode==='manual'이면 opts.concurrency를 1~8로 clamp해서 쓰고, 아니면(생략/'auto') autoDefault를
+ *  쓴다 — collectProductUrls/previewCatalog의 카테고리 동시 집계 개수에 쓴다(둘 다 자체 ramp 로직이 없어
+ *  "auto"가 사실상 고정값 하나뿐이라 이 헬퍼로 충분하다). scrapeCatalogPage는 적응형 동시성(ramp-up)이
+ *  있어 이 헬퍼 대신 MAX_CONCURRENCY/activeLimit 시작값을 직접 조정한다. */
+function resolveConcurrency(opts: ScrapeOptions, autoDefault: number): number {
+  if (opts.concurrencyMode !== 'manual') return autoDefault
+  return Math.max(1, Math.min(opts.concurrency || 1, 8))
+}
+
 // 개별 상품 추출 실패 시 재시도 횟수 (일시적 네트워크/타임아웃 오류 대비). ponytail: 고정값, 설정 불가.
 const RETRY_COUNT = 2
 
@@ -151,6 +167,7 @@ declare global {
   var __scrapeStopRequests: Set<number> | undefined
   var __previewRuns: Map<number, PreviewRunState> | undefined
   var __scrapeSiteLocks: Map<number | string, Promise<void>> | undefined
+  var __scrapeSiteLockStatus: Map<number | string, { label: string; since: number }> | undefined
 }
 
 interface PreviewRunState {
@@ -159,6 +176,11 @@ interface PreviewRunState {
   superseded: boolean
   done: number
   total: number
+  /** 정상적으로 끝까지 완료된 결과 — 화면이 dev 서버 불안정 등으로 강제 새로고침돼 원래 fetch를
+   *  받을 JS 컨텍스트 자체가 사라져도, 다시 뜬 화면이 이 값을 폴링으로 가져가 그대로 보여줄 수 있게
+   *  잠시 남겨둔다(endPreviewRun 참고). 중지/밀려남/에러로 끝난 경우는 채우지 않는다 — 보여줄 만한
+   *  완성된 결과가 아니므로. */
+  result?: CatalogPreviewResult
 }
 
 // 로컬 단일 사용자 도구 기준의 인메모리 상태. 여러 사용자가 동시에 쓰면 충돌한다(ponytail: 감수함).
@@ -197,10 +219,12 @@ const siteLocks = globalThis.__scrapeSiteLocks ?? (globalThis.__scrapeSiteLocks 
  * 이 파일에 함수를 새로 추가하거나 기존 함수를 고칠 때, 그 함수가 (a) openSessions.get(siteId)로 얻은
  * 페이지에 goto/evaluate를 걸거나, (b) profileDir(siteId)/MANUAL_LOGIN_PROFILE_COPY_ROOT에
  * launchPersistentContext를 건다면 — 같은 key로 동시에 두 번 불릴 수 있는지 먼저 따져보고, 가능하면
- * 그 작업 전체(또는 최소한 실제로 공유 자원을 건드리는 부분)를 `withSiteLock(key, fn)`으로 감싼다.
- * `withContext()`를 거치는 함수는 이미 자동으로 보호된다 — 이 파일에 새 스크랩 기능을 추가한다면 대부분
- * `withContext`를 재사용하는 것만으로 충분하고, 그럴 수 없는 특수한 경우(로그인 창 관련 함수들처럼
- * openSessions를 직접 만지는 경우)에만 이 함수를 직접 쓰면 된다.
+ * 그 작업 전체(또는 최소한 실제로 공유 자원을 건드리는 부분)를 `withSiteLock(key, label, fn)`으로
+ * 감싼다. `label`은 사람이 읽을 짧은 한국어 이름("몰 구조 파악" 등) — 대기 중인 다른 요청이
+ * `getSiteLockStatus`로 "지금 무엇 때문에 기다리는지"를 화면에 보여줄 때 쓴다. `withContext()`를
+ * 거치는 함수는 이미 자동으로 보호된다 — 이 파일에 새 스크랩 기능을 추가한다면 대부분 `withContext`를
+ * 재사용하는 것만으로 충분하고, 그럴 수 없는 특수한 경우(로그인 창 관련 함수들처럼 openSessions를
+ * 직접 만지는 경우)에만 이 함수를 직접 쓰면 된다.
  *
  * ## 왜 취소(supersede)가 아니라 줄서기(큐)인가
  * 브라우저 탭 네비게이션은 이미 시작한 뒤엔 안전하게 취소할 방법이 없다 — 그래서 뒤에 온 실행을
@@ -212,7 +236,12 @@ const siteLocks = globalThis.__scrapeSiteLocks ?? (globalThis.__scrapeSiteLocks 
  * 스크래핑) 중에는 그 몰의 다른 작업이 끝날 때까지 기다리게 되는데, 애초에 같은 로그인 세션으로 두
  * 자동화를 동시에 돌리면 안 되므로 이건 감수하는 트레이드오프다.
  */
-export async function withSiteLock<T>(key: number | string | undefined, fn: () => Promise<T>): Promise<T> {
+/** 지금 그 락을 실제로 쥐고 있는 작업이 뭔지(사람이 읽을 라벨)와 언제부터인지 — 화면에 "다른 작업이
+ *  끝나길 기다리는 중"을 보여주는 용도로만 쓴다(getSiteLockStatus 참고). 대기열 자체(순서 보장)는
+ *  siteLocks가 담당하고, 이건 그 위에 얹은 순수 표시용 정보라 없어도 잠금 로직 자체는 정확하다. */
+const siteLockStatus = globalThis.__scrapeSiteLockStatus ?? (globalThis.__scrapeSiteLockStatus = new Map<number | string, { label: string; since: number }>())
+
+export async function withSiteLock<T>(key: number | string | undefined, label: string, fn: () => Promise<T>): Promise<T> {
   if (key === undefined) return fn()
   const prevTail = siteLocks.get(key) ?? Promise.resolve()
   let releaseTail!: () => void
@@ -220,11 +249,22 @@ export async function withSiteLock<T>(key: number | string | undefined, fn: () =
   siteLocks.set(key, myTail)
   try {
     await prevTail
+    siteLockStatus.set(key, { label, since: Date.now() })
     return await fn()
   } finally {
+    siteLockStatus.delete(key)
     releaseTail()
     if (siteLocks.get(key) === myTail) siteLocks.delete(key)
   }
+}
+
+/** 화면(ScraperPanel)이 폴링해서 "⏳ 다른 작업(${label}) 완료를 기다리는 중"을 보여주는 데 쓴다 —
+ *  사용자가 버튼을 눌렀는데 응답이 안 오면 그게 이 함수 자체가 느린 건지, 같은 몰의 다른 작업이
+ *  끝나길 줄서서 기다리는 중인지 구분할 방법이 없었다(실사용 중 "왜 이렇게 오래 걸리냐"는 질문으로
+ *  발견). `sinceMs`가 아주 크면(예: 수 분) 대기가 아니라 그 작업 자체가 오래 걸리고 있다는 뜻이다. */
+export function getSiteLockStatus(siteId: number): { label: string; sinceMs: number } | null {
+  const entry = siteLockStatus.get(siteId)
+  return entry ? { label: entry.label, sinceMs: Date.now() - entry.since } : null
 }
 
 const previewRuns = globalThis.__previewRuns ?? (globalThis.__previewRuns = new Map<number, PreviewRunState>())
@@ -244,22 +284,38 @@ function beginPreviewRun(siteId: number | undefined): PreviewRunState | null {
 }
 
 /** 이 실행이 그 사이 새 요청에 밀려났으면 자기 자신의 진행 상황 칸을 지우지 않는다(새 실행 것을
- *  실수로 지우면 안 됨) — siteId의 현재 칸이 여전히 자기 자신일 때만 정리한다. */
-function endPreviewRun(siteId: number | undefined, entry: PreviewRunState | null) {
+ *  실수로 지우면 안 됨) — siteId의 현재 칸이 여전히 자기 자신일 때만 처리한다. `result`가 있으면
+ *  (정상 완료) 칸을 바로 지우지 않고 그 결과를 담아 남겨둔다 — 화면이 강제 새로고침돼도 다시 뜬 뒤
+ *  폴링으로 이 결과를 그대로 가져갈 수 있게 하기 위함(재관찰 탭이 없으면 다음 미리보기가 시작될 때
+ *  beginPreviewRun이 이 칸을 덮어쓰면서 자연히 정리된다 — 별도 TTL/정리 타이머 없이도 충분하다).
+ *  중지/밀려남/에러로 끝나 남길 결과가 없으면(result 없음) 그대로 지운다. */
+function endPreviewRun(siteId: number | undefined, entry: PreviewRunState | null, result: CatalogPreviewResult | null) {
   if (siteId === undefined || !entry) return
-  if (previewRuns.get(siteId) === entry) previewRuns.delete(siteId)
+  if (previewRuns.get(siteId) !== entry) return
+  if (result) { entry.result = result; return }
+  previewRuns.delete(siteId)
 }
 
-/** app/api/scrape/preview-progress가 폴링해서 화면에 "카테고리 N/M 확인 중"을 보여주는 데 쓴다. */
-export function getPreviewProgress(siteId: number): { done: number; total: number } | null {
+/** app/api/scrape/preview-progress가 폴링해서 화면에 "카테고리 N/M 확인 중"을 보여주거나(진행 중),
+ *  화면이 강제 새로고침된 뒤 재관찰 중 정상 완료된 `result`를 그대로 받아가는 데(완료 후) 쓴다. */
+export function getPreviewProgress(siteId: number): { done: number; total: number; result?: CatalogPreviewResult } | null {
   const entry = previewRuns.get(siteId)
-  return entry ? { done: entry.done, total: entry.total } : null
+  return entry ? { done: entry.done, total: entry.total, result: entry.result } : null
 }
 
 /** 중지 반영이 끝난 뒤 Set에서 지운다 — 안 지우면 세션 id가 계속 쌓여 다음에 같은 id가(이론상) 재사용될 때
  *  엉뚱하게 즉시 중지된 것처럼 보일 수 있다. */
 export function clearStopRequest(sessionId: number) {
   stopRequests.delete(sessionId)
+}
+
+/** Chrome 프로세스 중 커맨드라인에 pathFilter가 포함된 것만 골라 강제 종료하는 PowerShell 조각.
+ *  `--type=*`(렌더러/GPU 등 자식 프로세스)는 매칭에서 빼 메인 브라우저 프로세스만 잡는다 — 그래야 `/T`가
+ *  그 프로세스의 자식(자기 자신의 렌더러 등)까지 트리째 한 번에 정리해준다. */
+function killChromeByPathScript(pathFilter: string): string {
+  return `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
+    `Where-Object { $_.CommandLine -like '*${pathFilter}*' -and $_.CommandLine -notlike '*--type=*' } | ` +
+    `ForEach-Object { taskkill /PID $_.ProcessId /F /T }`
 }
 
 /**
@@ -271,11 +327,18 @@ export function clearStopRequest(sessionId: number) {
  */
 async function killOrphanedProfileProcess(siteId: number): Promise<void> {
   if (process.platform !== 'win32') return
-  const dir = profileDir(siteId)
-  const script = `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
-    `Where-Object { $_.CommandLine -like '*${dir}*' -and $_.CommandLine -notlike '*--type=*' } | ` +
-    `ForEach-Object { taskkill /PID $_.ProcessId /F /T }`
-  await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script]).catch(() => {})
+  await execFileAsync('powershell.exe', ['-NoProfile', '-Command', killChromeByPathScript(profileDir(siteId))]).catch(() => {})
+}
+
+/** `app/api/system/restart-server`가 재시작 스크립트에 이어붙여 쓰는 PowerShell 조각(문자열만 돌려주고
+ *  실행은 안 함) — killOrphanedProfileProcess는 siteId 하나만 정리해서, 그 몰을 재시작 후 다시 쓰기
+ *  전까지는 이전에 죽지 않고 남은 orphan chrome.exe가 그대로 메모리를 붙들고 있다(서버를 재시작해도
+ *  메모리가 안 줄어드는 것처럼 보이는 원인 중 하나 — 헤드리스 컨텍스트는 정상 종료 시 `context.close()`로
+ *  정리되지만, 서버 프로세스가 강제 종료되면 그 `finally`가 실행될 기회 자체가 없다). 재시작 시점엔 특정
+ *  siteId를 몰라도 되니 이 프로젝트가 띄운 프로필(`.playwright-profiles` 아래 전부, manual-login
+ *  사본 포함) 전체를 한 번에 정리한다. */
+export function orphanedChromeCleanupScript(): string {
+  return killChromeByPathScript(path.join(process.cwd(), '.playwright-profiles'))
 }
 
 /** 화면에 보이는(headed) 브라우저 창을 새로 띄우고 openSessions에 등록한다. 프로필 디렉터리가 그대로라
@@ -311,7 +374,7 @@ export async function openLoginWindow(siteId: number, opts: { url: string; login
   // withContext와 같은 락 키(siteId)를 공유한다 — 이 함수도 launchVisibleWindow로 openSessions를
   // 새로 채우고 그 탭에 곧바로 goto를 거는, withSiteLock 주석이 설명하는 바로 그 패턴이다. 같은 몰에
   // 다른 작업(스크래핑 시작 등)이 이미 진행 중이면 그게 끝난 뒤 순서대로 실행된다.
-  return withSiteLock(siteId, async () => {
+  return withSiteLock(siteId, '로그인 창 열기', async () => {
     const context = await launchVisibleWindow(siteId)
     const page = context.pages()[0] || await context.newPage()
     await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => {})
@@ -334,7 +397,7 @@ const CHROME_EXE = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
 export async function openManualLoginWindow(siteId: number, url: string): Promise<void> {
   // closeLoginWindow가 openSessions를 만지므로 같은 락 키를 공유한다(withSiteLock 주석 참고) — 실제
   // 브라우저 자체는 추적 밖의 개인 크롬이라 락이 끝난 뒤에는 이 함수가 더 할 일이 없다.
-  return withSiteLock(siteId, async () => {
+  return withSiteLock(siteId, '로그인 창 열기(직접로그인)', async () => {
     await closeLoginWindow(siteId)
     // --no-first-run/--no-default-browser-check가 없으면 실제 크롬이 "Chrome에 로그인" 등 첫 실행 온보딩
     // 화면을 활성 탭으로 띄워버려, 요청한 몰 로그인 URL로 바로 이동하지 않는다.
@@ -359,7 +422,7 @@ export function getOpenPageUrl(siteId: number): string | null {
 export async function navigateOpenPageTo(siteId: number, url: string): Promise<string | null> {
   // withContext와 같은 락 키(siteId) — 공유 탭에 직접 goto를 거는 함수라 withSiteLock 주석이 설명하는
   // 패턴 그대로다.
-  return withSiteLock(siteId, async () => {
+  return withSiteLock(siteId, '로그인 확인', async () => {
     const context = openSessions.get(siteId)
     if (!context) return null
     const pages = context.pages()
@@ -391,7 +454,7 @@ export async function openUrlInLoginWindow(siteId: number, url: string): Promise
   }
   // 세션이 없으면 새로 띄워야 하는데, launchVisibleWindow는 같은 몰의 다른 작업(withContext 등)과
   // 충돌할 수 있는 close+kill+launch 절차라 withSiteLock으로 감싼다(withContext와 같은 락 키).
-  return withSiteLock(siteId, async () => {
+  return withSiteLock(siteId, '로그인 창 열기', async () => {
     // 락을 기다리는 사이 다른 실행이 이미 로그인 창을 열어뒀을 수 있다 — 다시 확인한다.
     const nowExisting = openSessions.get(siteId)
     if (nowExisting) {
@@ -418,7 +481,9 @@ async function closeLoginWindow(siteId: number) {
 
 // 어디서든 Playwright 번들 Chromium이 아니라 실제 설치된 크롬을 띄운다 — 몰이 자동화 브라우저를
 // 감지해 차단/도전과제를 거는 경우(예: manual-login-required 몰의 봇 탐지) 실제 크롬 쪽이 더 정상적으로 통과한다.
-export async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, context: BrowserContext) => Promise<T>): Promise<T> {
+export async function withContext<T>(
+  opts: ScrapeOptions, fn: (page: Page, context: BrowserContext) => Promise<T>, label = '스크랩 작업',
+): Promise<T> {
   if (opts.siteId) {
     const siteId = opts.siteId
     // 이 몰(siteId)에 대한 다른 withContext 호출(또는 openSessions를 직접 만지는 로그인 창 관련
@@ -426,7 +491,7 @@ export async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, conte
     // 뜨면(두 탭에서 같은 화면을 열거나, 예약 스크랩과 수동 클릭이 겹치는 등) 아래 두 경로 다 실제로
     // 사고로 이어지는 게 확인됐다: 로그인 창 재사용 경로는 같은 탭에 서로 다른 goto를 걸어 결과가
     // 뒤섞이고, 헤드리스 실행 경로는 killOrphanedProfileProcess가 상대방의 살아있는 크롬을 죽인다.
-    return withSiteLock(siteId, async () => {
+    return withSiteLock(siteId, label, async () => {
       const openContext = openSessions.get(siteId)
       if (openContext) {
         // 로그인 창이 열려있으면 그대로 재사용 (닫지 않음)
@@ -441,7 +506,7 @@ export async function withContext<T>(opts: ScrapeOptions, fn: (page: Page, conte
         // 하나뿐이라(MANUAL_LOGIN_LOCK_KEY 주석 참고) 위 siteId 락과 별개로 그 전역 자원 락도 같이 건다
         // — robocopy부터 이 컨텍스트를 다 쓰고 닫을 때까지 통째로, 그래야 다른 manual-login 몰이 그 사이
         // 같은 폴더에 launchPersistentContext를 걸어 충돌하지 않는다.
-        return withSiteLock(MANUAL_LOGIN_LOCK_KEY, async () => {
+        return withSiteLock(MANUAL_LOGIN_LOCK_KEY, label, async () => {
           let context: BrowserContext
           try {
             const { userDataDir, profileDirName } = await syncManualLoginProfileCopy()
@@ -950,7 +1015,7 @@ export async function profileMallStructure(siteId: number, deep = false): Promis
   // withContext와 같은 락 키(siteId) — 공유 탭에 직접 goto를 걸고 그 페이지를 분석하는, withSiteLock
   // 주석이 설명하는 패턴 그대로다. 예를 들어 "스크래핑 시작"이 이 몰의 그 탭을 한창 쓰고 있는 도중에
   // "몰 구조 파악"을 눌러도 서로 페이지를 밟고 지나가지 않고 순서대로 실행된다.
-  return withSiteLock(siteId, async () => {
+  return withSiteLock(siteId, deep ? '몰 구조 파악' : '구조 변화 감지', async () => {
     const context = openSessions.get(siteId)
     if (!context) return null
     const pages = context.pages()
@@ -988,7 +1053,7 @@ export async function startElementPicker(
 ): Promise<boolean> {
   // withContext와 같은 락 키(siteId) — 공유 탭에 직접 goto/evaluate를 거는, withSiteLock 주석이 설명하는
   // 패턴 그대로다.
-  return withSiteLock(siteId, async () => {
+  return withSiteLock(siteId, '스크랩 대상 직접지정', async () => {
     const context = openSessions.get(siteId)
     if (!context) return false
     const pages = context.pages()
@@ -1562,7 +1627,7 @@ export async function profileMallStructureForScrape(opts: ScrapeOptions): Promis
   if (!startUrlHint) return null
   const site = await siteInfo(opts.siteId)
   // 스크랩 시작 시점의 자동 체크도 로그인 확인과 같은 용도(구조 변화 감지)라 항상 가벼운(deep=false) 쪽만 쓴다.
-  return withContext(opts, page => sampleMallProfile(page, startUrlHint, site.name, false))
+  return withContext(opts, page => sampleMallProfile(page, startUrlHint, site.name, false), '구조 변화 감지')
 }
 
 async function sampleMallProfile(page: Page, startUrl: string, mallName: string, deep: boolean): Promise<MallProfileSignals | null> {
@@ -1816,7 +1881,7 @@ export async function scrapeSingleProduct(opts: ScrapeOptions): Promise<ScrapeRe
       if (aiProduct) return { sourceUrl: lastUrl, product: aiProduct }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError))
-  })
+  }, '재스크랩')
 }
 
 /** "스크랩 조정" 기능(일반모드)이 AI에게 실제 페이지를 보여주기 위해 원문을 그대로 가져온다. */
@@ -1825,7 +1890,7 @@ export async function fetchPageText(opts: ScrapeOptions & { url: string }): Prom
     await page.goto(opts.url, { waitUntil: 'load', timeout: 30_000 })
     await loginIfNeeded(page, opts)
     return page.content()
-  })
+  }, '스크랩 조정')
 }
 
 /**
@@ -2273,7 +2338,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
   }
 
   if (context && listingUrls.length > 1) {
-    const LISTING_CONCURRENCY = Math.min(4, listingUrls.length)
+    const LISTING_CONCURRENCY = Math.min(resolveConcurrency(opts, 4), listingUrls.length)
     let cursor = 0
     async function worker(workerPage: Page) {
       while (true) {
@@ -2311,7 +2376,7 @@ export async function detectIsListingPage(opts: ScrapeOptions): Promise<boolean>
     const { urls } = await collectProductUrls(page, opts)
     const currentUrl = opts.url || page.url()
     return urls.filter(u => u !== currentUrl).length > 1
-  })
+  }, '스크래핑 시작')
 }
 
 export interface CatalogPreviewItem {
@@ -2594,8 +2659,11 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
   const stop = () => !!opts.stopSignal?.aborted || !!runEntry?.superseded
   const supersededResult = (): CatalogPreviewResult =>
     ({ total: 0, platform: 'unknown', preview: null, items: [], categoryCounts: [], needsLogin: false, superseded: true })
+  // 정상적으로(중지/밀려남 없이) 끝까지 완료된 결과만 endPreviewRun에 넘겨 잠시 캐시해둔다 — 화면이
+  // 강제 새로고침돼도 다시 뜬 뒤 이 결과를 그대로 가져갈 수 있게 하기 위함(아래 finally 참고).
+  let finalResult: CatalogPreviewResult | null = null
   try {
-    return await withContext(opts, async (page, context) => {
+    const result = await withContext(opts, async (page, context) => {
       const listingUrls = (opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])).map(resetToFirstPage)
       if (runEntry) runEntry.total = listingUrls.length
       if (stop()) return supersededResult()
@@ -2629,7 +2697,7 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
         // 카테고리별 개수만 여러 탭으로 동시에 집계한다. 로그인 창을 재사용하는 siteId라도 그 공유 탭은
         // 절대 쓰지 않고 항상 새 탭만 연다(discoverCategoryLinks에서 같은 이유로 겪은 "다른 네비게이션에
         // 의해 중단됨" 충돌 방지).
-        const COUNT_CONCURRENCY = 4
+        const COUNT_CONCURRENCY = resolveConcurrency(opts, 4)
         const categoryCounts = new Array<CategoryCount | undefined>(listingUrls.length)
         let cursor = 0
         async function worker() {
@@ -2668,7 +2736,8 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
           }
         }
 
-        if (!firstUrl || stop()) return { total, platform, preview: null, items: [], categoryCounts: doneCounts, needsLogin }
+        if (stop()) return { ...supersededResult(), total, platform, categoryCounts: doneCounts, needsLogin }
+        if (!firstUrl) return { total, platform, preview: null, items: [], categoryCounts: doneCounts, needsLogin }
 
         await scratchPage.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 })
         const productNeedsLogin = await loginIfNeeded(scratchPage, { url: firstUrl, ...opts })
@@ -2697,9 +2766,11 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
       } finally {
         await scratchPage.close().catch(() => {})
       }
-    })
+    }, '스크랩 미리보기')
+    if (!result.superseded) finalResult = result
+    return result
   } finally {
-    endPreviewRun(opts.siteId, runEntry)
+    endPreviewRun(opts.siteId, runEntry, finalResult)
   }
 }
 
@@ -2774,9 +2845,14 @@ export async function scrapeCatalogPage(
     // 숫자를 고르게 하던 것을 대체한다. 1(가장 안전)부터 시작해 연속 성공이 쌓이면 서서히 올리고, 차단으로
     // 추정되는 응답(아래 scrapeOne의 "차단 또는 일시 오류로 추정" 판정)이 나오면 즉시 1로 낮추고 잠시 쉰다.
     // ponytail: RAMP_UP_STREAK/MAX_CONCURRENCY/쿨다운 값은 임의로 정한 안전 마진 — 실제로 몰별 반응을 보며 조정.
-    const MAX_CONCURRENCY = 8
+    // concurrencyMode==='manual'이면 그 값으로 상한을 고정하고 시작값도 거기서 바로 시작한다(activeLimit이
+    // 이미 MAX_CONCURRENCY와 같아 위 "연속 성공 시 상향" 조건이 못 만족돼 그대로 고정된 채 유지된다) —
+    // 차단 감지 시 1로 낮췄다가 회복하는 안전장치는 auto/manual 구분 없이 그대로 적용되고, manual이면
+    // 8이 아니라 이 고정값까지만 다시 올라온다.
+    const manualLimit = opts.concurrencyMode === 'manual' ? Math.max(1, Math.min(opts.concurrency || 1, 8)) : null
+    const MAX_CONCURRENCY = manualLimit ?? 8
     const RAMP_UP_STREAK = 5
-    let activeLimit = 1
+    let activeLimit = manualLimit ?? 1
     let okStreak = 0
     const concurrencyLog: ConcurrencyLogEntry[] = []
 
@@ -2877,7 +2953,7 @@ export async function scrapeCatalogPage(
     }
 
     return { total: productUrls.length, saved, stopped, concurrencyLog }
-  })
+  }, '스크래핑 시작')
 }
 
 export interface RecheckTarget {
@@ -2952,7 +3028,7 @@ export async function recheckMallProducts(opts: ScrapeOptions, targets: RecheckT
     await Promise.all(workerPages.slice(1).map(p => p.close().catch(() => {})))
 
     return results
-  })
+  }, '연속관리 재체크')
 }
 
 export interface CategoryLink {
@@ -3005,5 +3081,5 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
     } finally {
       await scanPage.close().catch(() => {})
     }
-  })
+  }, '카테고리 불러오기')
 }

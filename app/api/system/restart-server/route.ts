@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { spawn } from 'child_process'
+import { orphanedChromeCleanupScript } from '@/lib/scraper'
 
 /** PTP 서버(Next dev) 자체를 강제 재시작한다. 강제종료 후에는 .next 캐시가 깨질 수 있어(과거 실제 경험)
  *  반드시 dev:clean(.next 삭제 후 기동)으로 재기동한다. 이 요청을 처리 중인 프로세스 자신(process.pid)을
@@ -32,7 +33,11 @@ export async function POST() {
   restartInFlight = true
   const pid = process.pid
   const cwd = process.cwd()
-  const script = `Start-Sleep -Seconds 1; Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; Set-Location -LiteralPath '${cwd}'; npm run dev:clean`
+  // Stop-Process는 이 dev 서버 프로세스만 죽인다 — Playwright가 띄운 chrome.exe들은 그 자식이 아니라
+  // 프로필 폴더별로 launchPersistentContext된 별개 프로세스라 그대로 orphan으로 남아 메모리를 계속
+  // 붙들고 있었다(재시작해도 메모리가 안 줄어드는 원인 중 하나 — killOrphanedProfileProcess는 그
+  // siteId를 다시 쓸 때만 정리해서, 재시작 시점엔 전부를 쓸어줄 별도 단계가 필요하다).
+  const script = `Start-Sleep -Seconds 1; Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue; ${orphanedChromeCleanupScript()}; Start-Sleep -Seconds 1; Set-Location -LiteralPath '${cwd}'; npm run dev:clean`
   const child = spawn('powershell.exe', ['-NoProfile', '-Command', script], { detached: true, stdio: 'ignore', windowsHide: true, cwd })
   child.unref()
   return NextResponse.json({ ok: true })

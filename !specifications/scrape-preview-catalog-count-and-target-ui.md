@@ -181,6 +181,42 @@
   걸쳐 있었다 — 전용 리뷰 워크플로로 전수조사해 `withSiteLock`이라는 범용 락으로 한 번에 고쳤다.
   자세한 내용은 `!specifications/concurrent-execution-guard.md` 참고.
 
+## dev 서버 강제 새로고침에도 화면 상태가 덜 사라지게
+
+미리보기 도중 dev 서버가 CPU 과부하로 불안정해지면(자동화 작업과 API가 한 프로세스를 공유하는 구조,
+근본 해결은 아직 안 함) Next.js 자신의 빌드 매니페스트까지 손상되게 읽혀(`SyntaxError: Unexpected
+end of JSON input`, `Error: Manifest file is empty`) Fast Refresh가 브라우저 탭을 통째로 강제
+새로고침시키는 게 실사용 중 확인됐다("⚠ Fast Refresh had to perform a full reload"). 이 새로고침은
+React 상태를 전부 초기화하는데, `localStorage`에 저장해두던 항목이 시작 URL/카테고리 URL 목록/
+미리보기 결과뿐이라 로그인 확인 상태·발견된 카테고리 체크리스트·몰 구조 파악 결과가 사라진 것처럼
+보였고, 그 사이 서버에서는 원래 요청이 계속 돌다가 몇 분 뒤 완료됐지만(`previewCatalog`는 정상
+동작) 이미 새로고침된 화면은 그 결과를 받을 방법이 없었다.
+
+- **저장 항목 확대**: `FORM_STATE_KEY`에 `loginStep`/`categories`/`categoriesCached`/`profileResult`를
+  추가했다. 아이디/비밀번호는 `selectSite`가 매번 DB(`sites.login_id`/`login_pw_encrypted`)에서 다시
+  채워주므로 제외했다(평문 비밀번호를 `localStorage`에 남기지 않기 위함이기도 함). `selectSite`는
+  몰을 새로 고를 때 이 값들을 항상 초기화하므로(정상 동작), 복원 시 `selectSite` 완료 **이후**에
+  다시 덮어써야 한다 — `openSessions`(로그인 창)는 브라우저만 새로고침됐을 뿐인 같은 서버 프로세스에
+  그대로 남아있어 `loginStep` 복원이 실제 상태와 어긋나지 않는다.
+- **진행 중인 미리보기 재관찰 + 결과 자동 회수**: 마운트 시 복원 대상 몰에 대해
+  `GET /api/scrape/preview-progress`를 한 번 확인해, 아직 도는 실행이 있으면(`total>0`) 로딩 상태 +
+  진행률을 이어서 보여준다(`resumePreviewProgressPolling`). 처음엔 새로고침으로 끊긴 요청의 최종
+  결과를 이 탭이 받을 방법이 없어(원래 fetch를 기다리던 JS 컨텍스트가 없어짐) "다시 눌러달라"는
+  안내만 띄웠는데, 서버가 완료된 결과를 잠시 들고 있다가 폴링하는 쪽에 그대로 내려주도록
+  확장했다: `PreviewRunState.result?: CatalogPreviewResult`(신규 필드) — `previewCatalog`가 **정상
+  완료**(중지/밀려남이 아닌)일 때만 `endPreviewRun`에 그 결과를 넘기고, `endPreviewRun`은 그 경우
+  칸을 바로 지우지 않고 `result`를 채운 채 남겨둔다(다음 미리보기가 시작될 때 `beginPreviewRun`이
+  덮어쓰며 자연히 정리되므로 별도 TTL/정리 타이머 불필요 — "로컬 단일 사용자 도구" 기준으로 감수).
+  `getPreviewProgress`가 이 `result`도 함께 내려주고, 클라이언트는 폴링(또는 마운트 시 최초
+  확인)에서 `result`를 받으면 `applyCatalogPreview`로 그대로 화면에 반영한다 — 새로고침 전 요청이
+  실제로 완료됐다면 이제 자동으로 그 결과가 나타난다. `previewResumeNotice`(다시 눌러달라는 안내)는
+  중지/밀려남/에러 등으로 **남길 결과가 없는** 경우에만 최후 수단으로 뜬다.
+- 이 작업 중 기존 코드의 사각지대도 하나 발견해 같이 고쳤다: `!firstUrl || stop()`을 한 줄로 처리하던
+  분기가 `stop()`으로 중단된 경우에도 `superseded` 플래그를 안 붙이고 있었다(진짜 "상품을 못 찾음"과
+  같은 모양으로 나감) — 두 경우를 분리해 `stop()`이면 항상 `superseded:true`가 붙게 했다.
+- `handleStopPreview`는 이제 `previewAbortRef`가 없을 때(=관찰만 하던 경우)도 폴링을 멈추고 화면을
+  초기화하도록 분기 추가.
+
 ## 스크랩 대상 카드 UI 재설계 (`components/panels/ScraperPanel.tsx`)
 
 ### 진행 상태를 버튼 색으로 구분 (파일럿: 스크래핑 메뉴)
@@ -272,7 +308,9 @@
 - `components/panels/ScraperPanel.tsx`: `ScrapeStepBox` 신규 컴포넌트(`colorDone` prop 포함), 버튼
   전/후 색상, 스크랩 대상 2단 레이아웃, 카테고리 체크리스트 마스터 체크박스, 접기/펼치기 라벨 통일,
   `previewAbortRef`/`handleStopPreview`(미리보기 중지), `previewProgress`/`previewProgressPollRef`
-  (진행률 폴링), `d.superseded` 체크(밀려난 응답 무시).
+  (진행률 폴링), `d.superseded` 체크(밀려난 응답 무시), `FORM_STATE_KEY` 저장 항목 확대
+  (`loginStep`/`categories`/`categoriesCached`/`profileResult`), `resumePreviewProgressPolling`/
+  `previewResumeNotice`(새로고침 후 진행 중 미리보기 재관찰).
 - `components/shell/GlobalErrorNet.tsx`(신규): 지수 백오프 자동 재시도, `AbortError` 예외 처리.
 - `app/layout.tsx`: `<GlobalErrorNet />` 마운트.
 

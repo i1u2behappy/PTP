@@ -8,6 +8,7 @@ export async function POST(req: NextRequest) {
   const body = await req.json() as {
     url?: string; categoryUrls?: string[]; nextPageSelector?: string; maxPages?: number
     productLinkSelector?: string; loginId?: string; loginPw?: string; siteId?: number; aiMode?: boolean
+    concurrencyMode?: 'auto' | 'manual'; concurrency?: number
   }
 
   const resolvedUrl = body.url || body.categoryUrls?.[0] || (body.siteId ? getOpenPageUrl(body.siteId) : null)

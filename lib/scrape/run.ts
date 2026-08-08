@@ -17,6 +17,8 @@ export interface RunScrapingOpts {
   mode: 'single' | 'catalog'
   scrapeMode?: 'full' | 'incremental'
   siteId: number
+  concurrencyMode?: 'auto' | 'manual'
+  concurrency?: number
 }
 
 async function saveProduct(siteId: number, sessionId: number, r: ScrapeResult) {
@@ -54,6 +56,7 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
     url: opts.url, categoryUrls: opts.categoryUrls, productUrls: opts.productUrls,
     nextPageSelector: opts.nextPageSelector, maxPages: opts.maxPages, delayMs: opts.delayMs,
     loginId: opts.loginId, loginPw: opts.loginPw, productLinkSelector: opts.productLinkSelector, siteId,
+    concurrencyMode: opts.concurrencyMode, concurrency: opts.concurrency,
     excludeUrls: scrapeMode === 'incremental' ? [] : excluded.rows.map(r => r.source_url), sessionId,
     nameSelector: site?.custom_name_selector || undefined,
     priceSelector: site?.custom_price_selector || undefined,

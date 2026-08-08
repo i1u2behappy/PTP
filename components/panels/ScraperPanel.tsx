@@ -96,6 +96,18 @@ const LAST_SESSION_KEY = 'scrape.scraper.lastSession'
 // 시작된 뒤"에만 채워지므로 그 전 단계는 별도로 남겨둔다. 미리보기 결과도 다른 메뉴 갔다 돌아오면
 // 사라져 있다는 지적으로(재조회하려면 다시 몰 페이지에 접속해야 해 느리다) 폼 값과 함께 그대로 남겨둔다.
 const FORM_STATE_KEY = 'scrape.scraper.formState'
+// 몰(site)과 무관하게 항상 같은 값을 쓰는 전역 선호값이라 FORM_STATE_KEY(몰별 작업 상태)와 분리한다 —
+// 메모리 이슈 진단 중 "수동/1개"로 낮춰두면 몰을 바꿔도 그 설정이 그대로 유지되길 원할 것이라는 판단.
+const CONCURRENCY_PREF_KEY = 'scrape.scraper.concurrencyPref'
+function readConcurrencyPref(): { mode: 'auto' | 'manual'; value: number } {
+  if (typeof window === 'undefined') return { mode: 'auto', value: 4 }
+  try {
+    const saved = JSON.parse(localStorage.getItem(CONCURRENCY_PREF_KEY) || '{}') as { mode?: 'auto' | 'manual'; value?: number }
+    return { mode: saved.mode === 'manual' ? 'manual' : 'auto', value: saved.value ? Math.max(1, Math.min(8, saved.value)) : 4 }
+  } catch {
+    return { mode: 'auto', value: 4 }
+  }
+}
 
 interface ItemLogRow {
   id: number
@@ -347,6 +359,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // "카테고리 N/M" 진행 상황을 짧은 주기로 폴링해 보여준다(끝없이 도는 것처럼 보인다는 피드백).
   const [previewProgress, setPreviewProgress] = useState<{ done: number; total: number } | null>(null)
   const previewProgressPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // dev 서버가 불안정해 화면이 강제로 새로고침되면(Fast Refresh, 실사용 중 확인된 문제) 미리보기가
+  // "그냥 멈춘 것"처럼 보이지만 서버는 계속 돌고 있을 수 있다 — 화면이 다시 뜰 때 이 몰에 아직 도는
+  // 미리보기가 있으면 로딩 상태를 이어서 보여주고, 그 사이 끝나면 이 안내를 띄운다(원래 요청의 결과는
+  // 새로고침으로 끊긴 그 브라우저 탭 안에서만 받을 수 있어 그대로 복구할 방법은 없다 — 다시 눌러야 함).
+  const [previewResumeNotice, setPreviewResumeNotice] = useState<string | null>(null)
+
+  // 이 몰의 로그인 창 탭/프로필을 다른 스크랩 작업(스크래핑 시작/몰 구조 파악/미리보기 등)이 지금 쓰고
+  // 있으면, 여기서 누르는 버튼도 그게 끝날 때까지 순서를 기다린다(lib/scraper.ts의 withSiteLock 참고) —
+  // 예전엔 이걸 알 방법이 없어 "왜 이렇게 오래 걸리냐"는 질문으로 매번 서버 로그를 뒤져야 했다. 몰을
+  // 선택해두는 동안 짧은 주기로 폴링해, 대기 중이면 화면에 바로 보여준다.
+  const [siteLockStatus, setSiteLockStatus] = useState<{ busy: boolean; label?: string; sinceMs?: number } | null>(null)
 
   // 개발자모드 "상품 페이지 미리보기"/"스크랩 대상 직접지정" — 일반모드와 같은 카드/상태(previewResult 등)를
   // 그대로 쓰지만, PTP가 그 몰 탭에 직접 접근할 방법이 없어(chrome.debugger 확장 전용 구조) 실제 캡처는
@@ -360,6 +383,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const progressSectionRef = useRef<HTMLDivElement>(null)
 
   const [aiMode, setAiMode]       = useState(true)
+  // 카테고리/상품 목록을 동시에 몇 개까지 열지 — 'auto'는 기존 동작(스크래핑은 1~8 적응형, 미리보기/카테고리
+  // 목록 수집은 4 고정), 'manual'이면 concurrency 값으로 항상 고정한다. 열린 탭이 많을수록(이미지까지
+  // 로드) 메모리를 더 쓰므로, 메모리 이슈를 진단/완화할 때 1로 낮춰볼 수 있게 한다.
+  const [concurrencyMode, setConcurrencyMode] = useState<'auto' | 'manual'>(() => readConcurrencyPref().mode)
+  const [concurrency, setConcurrency] = useState<number>(() => readConcurrencyPref().value)
   const [status, setStatus]       = useState<Status>('idle')
   const [sessionId, setSessionId] = useState<number | null>(null)
   const [progress, setProgress]   = useState<{ saved: number; total: number; error?: string; successCount: number; failedCount: number }>({ saved: 0, total: 0, successCount: 0, failedCount: 0 })
@@ -377,6 +405,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     fetch('/api/sites').then(r => r.json()).then((d: Site[]) => { if (Array.isArray(d)) setSites(d) }).catch(() => {})
     fetch('/api/clients').then(r => r.json()).then((d: Client[]) => { if (Array.isArray(d)) setClients(d) }).catch(() => {})
   }, [])
+
+  // 동시 처리 자동/수동 선호값 — 몰별 상태(FORM_STATE_KEY)와 무관하게 하나만 저장해 몰을 바꿔도 유지한다.
+  useEffect(() => {
+    localStorage.setItem(CONCURRENCY_PREF_KEY, JSON.stringify({ mode: concurrencyMode, value: concurrency }))
+  }, [concurrencyMode, concurrency])
 
   useEffect(() => {
     // Mall 목록/거래처 목록에서 특정 몰(또는 거래처)을 지정해 들어온 경우, 그 선택이 우선이므로 이전 세션 복원은 건너뛴다.
@@ -415,6 +448,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         previewItems?: PreviewItem[]
         categoryCounts?: CategoryCountItem[]
         detectedPlatform?: string | null
+        loginStep?: LoginStep
+        categories?: { href: string; text: string }[]
+        categoriesCached?: { cached: boolean; updatedAt: string | null } | null
+        profileResult?: ProfileCheckResult | null
       }
       selectSite(saved.siteId).then(() => {
         setTargetUrl(saved.targetUrl)
@@ -424,6 +461,31 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         if (saved.previewItems?.length) setPreviewItems(saved.previewItems)
         if (saved.categoryCounts?.length) setCategoryCounts(saved.categoryCounts)
         if (saved.detectedPlatform) setDetectedPlatform(saved.detectedPlatform)
+        // 아이디/비번은 selectSite가 이미 DB(sites.login_id/login_pw_encrypted)에서 다시 채워주므로
+        // 여기서 따로 복원할 필요가 없다(비밀번호를 localStorage에 평문으로 남기지 않기 위함이기도 함).
+        // 로그인 확인 상태/발견된 카테고리/몰 구조 파악 결과는 selectSite가 항상 초기화해버리므로
+        // (몰을 새로 고를 때의 정상 동작) 그 다음에 다시 덮어써야 한다 — dev 서버가 Fast Refresh로
+        // 화면을 강제 새로고침시켜도(실사용 중 확인된 문제) 이 정보들이 사라진 것처럼 보이지 않게 한다.
+        // openSessions(로그인 창)는 브라우저만 새로고침됐을 뿐인 같은 서버 프로세스에 그대로 남아있어
+        // loginStep 복원이 실제 상태와 어긋나지 않는다.
+        if (saved.loginStep) setLoginStep(saved.loginStep)
+        if (saved.categories?.length) setCategories(saved.categories)
+        if (saved.categoriesCached) setCategoriesCached(saved.categoriesCached)
+        if (saved.profileResult) setProfileResult(saved.profileResult)
+        // dev 서버 불안정으로 화면이 강제 새로고침되면(Fast Refresh) 미리보기가 서버에서는 계속 돌고
+        // 있는데 화면만 "아무 일도 없었던 것"처럼 보인다 — 마운트 시점에 이 몰에 아직 도는 미리보기가
+        // 있는지 한 번 확인해, 있으면 로딩 상태를 이어서 보여준다(resumePreviewProgressPolling 참고).
+        fetch(`/api/scrape/preview-progress?siteId=${saved.siteId}`).then(r => r.json()).then((d: {
+          done: number; total: number
+          result?: { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; categoryCounts?: CategoryCountItem[]; needsLogin?: boolean }
+        }) => {
+          // 마운트되는 바로 그 순간 이미 완료돼 있었으면(폴링 시작 전) 1초 기다리지 않고 바로 반영한다.
+          if (d.result) { applyCatalogPreview(d.result); return }
+          if (!d.total) return
+          setPreviewLoading(true)
+          setPreviewProgress(d)
+          resumePreviewProgressPolling(saved.siteId)
+        }).catch(() => {})
       })
     } catch { /* 손상된 저장값은 무시 */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 마운트 시 1회만: initialSiteId는 탭 생성 시 고정되는 값
@@ -435,8 +497,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     localStorage.setItem(FORM_STATE_KEY, JSON.stringify({
       siteId: selectedSite.id, targetUrl, categoryUrlsText,
       previewResult, previewTotal, previewItems, categoryCounts, detectedPlatform,
+      loginStep, categories, categoriesCached, profileResult,
     }))
-  }, [selectedSite, targetUrl, categoryUrlsText, previewResult, previewTotal, previewItems, categoryCounts, detectedPlatform])
+  }, [selectedSite, targetUrl, categoryUrlsText, previewResult, previewTotal, previewItems, categoryCounts, detectedPlatform,
+    loginStep, categories, categoriesCached, profileResult])
 
   const filteredSites = useMemo(() => {
     const q = siteQuery.trim().toLowerCase()
@@ -558,6 +622,24 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     }
     checkForRunningSession()
     const timer = setInterval(checkForRunningSession, 5000)
+    return () => clearInterval(timer)
+  }, [selectedSite])
+
+  // 이 몰의 로그인 창/프로필을 지금 다른 스크랩 작업이 쓰고 있어 순서를 기다리는 중인지(withSiteLock)
+  // 화면에 보여준다 — 몰이 선택돼 있는 동안 항상 가볍게 폴링한다(버튼을 누르기 전에도 "이 몰은 지금
+  // 바쁩니다"를 미리 알 수 있게).
+  useEffect(() => {
+    // selectedSite가 없으면 그냥 폴링을 안 시작한다 — 아래 배너는 selectedSite도 같이 확인하니
+    // stale한 이전 값이 남아있어도 안 보인다(여기서 굳이 setSiteLockStatus(null)로 지울 필요 없음).
+    if (!selectedSite) return
+    const siteId = selectedSite.id
+    function poll() {
+      fetch(`/api/scrape/site-lock-status?siteId=${siteId}`).then(r => r.json())
+        .then((d: { busy: boolean; label?: string; sinceMs?: number }) => setSiteLockStatus(d))
+        .catch(() => {})
+    }
+    poll()
+    const timer = setInterval(poll, 1500)
     return () => clearInterval(timer)
   }, [selectedSite])
 
@@ -929,6 +1011,35 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     }
   }, [])
 
+  /** 화면이 새로고침돼 이 몰에 이미 진행 중인 미리보기가 있는 걸 뒤늦게 발견했을 때만 쓴다(아래 마운트
+   *  복원 로직 참고) — 그 요청을 이 탭이 다시 받을 방법은 없으니, 끝날 때까지 진행률만 이어서 보여주다가
+   *  끝나면 다시 눌러달라고 안내한다. */
+  function resumePreviewProgressPolling(siteId: number) {
+    if (previewProgressPollRef.current) clearInterval(previewProgressPollRef.current)
+    previewProgressPollRef.current = setInterval(async () => {
+      const res = await fetch(`/api/scrape/preview-progress?siteId=${siteId}`).catch(() => null)
+      const d = await res?.json().catch(() => null) as {
+        done: number; total: number
+        result?: { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; categoryCounts?: CategoryCountItem[]; needsLogin?: boolean }
+      } | null
+      // 서버(lib/scraper.ts의 endPreviewRun)가 정상 완료된 결과를 잠시 남겨두므로, 있으면 그대로
+      // 받아 적용한다 — 새로고침으로 끊긴 원래 요청의 결과를 이 탭이 자동으로 이어받는 경로.
+      if (d?.result) {
+        if (previewProgressPollRef.current) { clearInterval(previewProgressPollRef.current); previewProgressPollRef.current = null }
+        applyCatalogPreview(d.result)
+        setPreviewLoading(false)
+        setPreviewProgress(null)
+        return
+      }
+      if (d?.total) { setPreviewProgress(d); return }
+      // total도 result도 없다는 건 중지/밀려남/에러 등으로 남길 결과 없이 끝났다는 뜻 — 자동으로
+      // 이어받을 게 없으니 다시 눌러달라고 안내한다.
+      if (previewProgressPollRef.current) { clearInterval(previewProgressPollRef.current); previewProgressPollRef.current = null }
+      setPreviewLoading(false)
+      setPreviewProgress(null)
+      setPreviewResumeNotice('새로고침 전 진행 중이던 미리보기가 결과 없이 끝난 것 같습니다 — "🔍 스크랩 미리보기"를 다시 눌러 확인해주세요.')
+    }, 1000)
+  }
 
   /** 목록에서 상품 개수를 세는 것과 첫 상품 미리보기를 한 번의 요청(한 브라우저 세션)으로 같이 처리한다
    * — 예전에는 "테스트 실행"과 "미리보기"가 별도 버튼/요청이라 세션을 두 번 열어야 해서 느렸다. 개수는
@@ -937,6 +1048,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
    * 상품 1건으로 처리해 그대로 동작한다. */
   async function handlePreview() {
     if (!selectedSite || !canPreview) return
+    setPreviewResumeNotice(null)
     setPreviewLoading(true)
     setPreviewResult(null)
     setPreviewTotal(null)
@@ -945,7 +1057,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const controller = new AbortController()
     previewAbortRef.current = controller
     // 카테고리가 많은/큰 몰은 몇 분씩 걸릴 수 있어 진행 중임을 보여준다 — 서버(previewCatalog)가
-    // 세는 "카테고리 N/M"을 짧은 주기로 폴링한다.
+    // 세는 "카테고리 N/M"을 짧은 주기로 폴링한다. 새로고침 복구 중 관찰용 폴링(resumePreviewProgressPolling)이
+    // 이미 돌고 있었을 수 있어(사용자가 그 안내를 기다리지 않고 바로 다시 누른 경우) 먼저 정리한다 —
+    // 안 그러면 그 인터벌이 ref에서 밀려나 멈출 방법 없이 계속 도는(누수) 채로 남는다.
+    if (previewProgressPollRef.current) clearInterval(previewProgressPollRef.current)
     const siteId = selectedSite.id
     previewProgressPollRef.current = setInterval(async () => {
       const res = await fetch(`/api/scrape/preview-progress?siteId=${siteId}`).catch(() => null)
@@ -963,7 +1078,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           url: categoryUrls.length ? undefined : (targetUrl || undefined),
           categoryUrls: categoryUrls.length ? categoryUrls : undefined,
           loginId: loginId || undefined, loginPw: loginPw || undefined,
-          siteId: selectedSite.id, aiMode,
+          siteId: selectedSite.id, aiMode, concurrencyMode, concurrency,
         }),
       })
       if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`확인 실패: ${e.error || res.status}`); return }
@@ -988,7 +1103,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
    *  같은 신호를 받아 진행 중이던 카테고리 개수 집계를 멈추므로, 중지 후 위 스크랩 대상을 다시 조정해
    *  바로 새 미리보기를 시작할 수 있다(같은 로그인 세션/탭을 그대로 재사용, 별도 정리 불필요). */
   function handleStopPreview() {
-    previewAbortRef.current?.abort()
+    if (previewAbortRef.current) { previewAbortRef.current.abort(); return }
+    // 새로고침 뒤 서버에 아직 도는 미리보기를 관찰만 하던 중이면(resumePreviewProgressPolling) 이
+    // 탭엔 취소할 실제 요청이 없다 — 폴링만 멈추고 화면을 초기 상태로 되돌린다(서버 쪽 작업 자체는
+    // 계속 돈다 — 그 요청을 시작한 예전 탭이 없어졌을 뿐).
+    if (previewProgressPollRef.current) { clearInterval(previewProgressPollRef.current); previewProgressPollRef.current = null }
+    setPreviewLoading(false)
+    setPreviewProgress(null)
   }
 
   const needsLogin = !!loginId
@@ -1018,10 +1139,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         categoryUrls: categoryUrls.length ? categoryUrls : undefined,
         // 페이지당 지연은 몰 차단 방지를 위한 안전값을 그대로 유지한다(사용자가 조절할 필요가 없어 UI에서
         // 제거) — 다음페이지 셀렉터/최대 페이지 수는 플랫폼별 자동 감지(cafe24 등)로 대체된다. 동시 처리
-        // 개수는 더 이상 고정값을 받지 않는다 — scrapeCatalogPage가 몰의 반응을 보며 스스로 조절한다(적응형 동시성).
+        // 개수는 기본적으로 scrapeCatalogPage가 몰의 반응을 보며 스스로 조절한다(적응형 동시성) — 아래
+        // concurrencyMode가 'manual'이면 그 대신 concurrency 값으로 고정한다(메모리 이슈 진단/완화용).
         delayMs: 1000,
         loginId: loginId || undefined, loginPw: loginPw || undefined,
-        mode: 'catalog', siteId: selectedSite.id,
+        mode: 'catalog', siteId: selectedSite.id, concurrencyMode, concurrency,
       }),
     })
     // 이 몰에 이미 진행 중인 세션이 있으면(app/api/scrape/route.ts) 새로 시작하는 대신 그 세션에
@@ -1208,6 +1330,19 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         <div className="mb-4 bg-teal-50 rounded-xl px-3 py-2">
           <div className="text-sm font-medium text-gray-800">{selectedSite.name || selectedSite.url}</div>
           <div className="text-xs text-gray-500">{selectedSite.url}</div>
+        </div>
+      )}
+
+      {/* 이 몰의 로그인 창/프로필을 다른 스크랩 작업이 쓰고 있어 순서를 기다리는 중이면 알려준다
+          (withSiteLock 참고) — 안 그러면 지금 누른 버튼이 왜 응답이 없는지 알 방법이 없다. */}
+      {selectedSite && siteLockStatus?.busy && (
+        <div className="mb-4 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-xs text-amber-700 flex items-center gap-2">
+          <span>⏳</span>
+          <span>
+            이 몰은 지금 다른 작업(<b>{siteLockStatus.label}</b>)이 진행 중입니다
+            {siteLockStatus.sinceMs != null && ` — ${Math.round(siteLockStatus.sinceMs / 1000)}초째`} —
+            끝나면 방금 누른 작업이 이어서 진행됩니다.
+          </span>
         </div>
       )}
 
@@ -1611,6 +1746,22 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
             <label className="block text-sm font-semibold text-gray-700">상품 페이지 미리보기</label>
             <div className="flex items-center gap-2 shrink-0">
+              {/* 미리보기(카테고리별 개수 집계)와 아래 "스크래핑 시작" 둘 다 이 값을 그대로 쓴다(handlePreview/
+                  handleStart) — 여기 한 곳에서만 조절하면 된다. 열린 탭 수가 메모리 사용량에 직결되므로
+                  (각 탭이 이미지까지 로드) 메모리가 부족하면 수동으로 낮춰본다. */}
+              <div className="flex items-center gap-1 shrink-0"
+                title="카테고리/상품 페이지를 동시에 몇 개까지 열지 정합니다. 자동은 몰 반응을 보며 스스로 조절하고(스크래핑 시작 시 1~8, 미리보기는 4), 수동은 지정한 개수로 항상 고정합니다 — 메모리가 부족하면 수동으로 1~2개까지 낮춰보세요.">
+                <button type="button" onClick={() => setConcurrencyMode(m => m === 'manual' ? 'auto' : 'manual')}
+                  aria-pressed={concurrencyMode === 'manual'}
+                  className={`px-3 py-2 rounded-full text-sm font-medium border transition-colors ${concurrencyMode === 'manual' ? 'bg-amber-600 text-white border-amber-600' : 'bg-white text-gray-500 border-gray-300 hover:border-amber-400'}`}>
+                  {concurrencyMode === 'manual' ? '☑ 동시 처리 수동' : '☐ 동시 처리 자동'}
+                </button>
+                {concurrencyMode === 'manual' && (
+                  <input type="number" min={1} max={8} value={concurrency}
+                    onChange={e => setConcurrency(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
+                    className="w-14 px-2 py-2 border border-gray-300 rounded-lg text-sm text-center" />
+                )}
+              </div>
               <button type="button"
                 onClick={() => {
                   const next = !aiMode
@@ -1678,6 +1829,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               </button>
             </div>
           </div>
+
+          {previewResumeNotice && (
+            <p className="text-xs text-amber-600 bg-amber-50 rounded-lg px-3 py-2 mb-3">⚠ {previewResumeNotice}</p>
+          )}
 
           {!previewCardCollapsed && <>
           {mallMode === 'devmode' && (

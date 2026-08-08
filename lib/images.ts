@@ -89,7 +89,7 @@ async function fetchViaLoginSession(siteId: number, urls: string[]): Promise<Map
         if (res.ok()) result.set(url, await res.body())
       } catch { /* 이 URL은 포기 */ }
     }
-  })
+  }, '이미지 다운로드')
   return result
 }
 

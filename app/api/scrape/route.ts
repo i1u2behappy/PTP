@@ -19,6 +19,8 @@ interface ScrapeRequestBody {
   scopeType?: ScopeType
   productLinkSelector?: string
   siteId?: number
+  concurrencyMode?: 'auto' | 'manual'
+  concurrency?: number
 }
 
 export async function POST(req: NextRequest) {
@@ -66,6 +68,7 @@ export async function POST(req: NextRequest) {
         mode: body.mode, url: body.url, categoryUrls: body.categoryUrls,
         productLinkSelector: body.productLinkSelector, nextPageSelector: body.nextPageSelector,
         maxPages: body.maxPages, delayMs: body.delayMs,
+        concurrencyMode: body.concurrencyMode, concurrency: body.concurrency,
       }),
       body.siteId,
     ])

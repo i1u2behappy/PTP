@@ -22,14 +22,14 @@
 직접지정·미리보기 항목 열기)에 걸쳐 있었다. 각각을 따로 패치하는 대신, 근본 원인(공유 브라우저
 자원에 잠금이 없음)을 한 곳에서 고치는 쪽을 택했다.
 
-## 설계 — `withSiteLock(key, fn)`
+## 설계 — `withSiteLock(key, label, fn)`
 
 `lib/scraper.ts`의 `withSiteLock`은 같은 key(보통 `siteId`)에 대한 실행을 **취소가 아니라 줄세우기
 (큐)**로 처리하는 async 뮤텍스다. Promise 체이닝으로 구현(`siteLocks: Map<number|string, Promise<void>>`,
 `globalThis` 저장 — 다른 인메모리 상태와 같은 이유로 dev 핫리로드에도 살아남게 함).
 
 ```ts
-export async function withSiteLock<T>(key: number | string | undefined, fn: () => Promise<T>): Promise<T> {
+export async function withSiteLock<T>(key: number | string | undefined, label: string, fn: () => Promise<T>): Promise<T> {
   if (key === undefined) return fn()
   const prevTail = siteLocks.get(key) ?? Promise.resolve()
   let releaseTail!: () => void
@@ -37,13 +37,18 @@ export async function withSiteLock<T>(key: number | string | undefined, fn: () =
   siteLocks.set(key, myTail)
   try {
     await prevTail
+    siteLockStatus.set(key, { label, since: Date.now() })
     return await fn()
   } finally {
+    siteLockStatus.delete(key)
     releaseTail()
     if (siteLocks.get(key) === myTail) siteLocks.delete(key)
   }
 }
 ```
+
+`label`(사람이 읽을 짧은 이름, 예: "스크래핑 시작"/"몰 구조 파악")은 잠금 로직 자체엔 필요 없고,
+바로 아래 "대기 상태 표시" 기능을 위한 것이다.
 
 **왜 취소(supersede)가 아니라 줄서기인가**: 브라우저 탭 네비게이션은 이미 시작한 뒤 안전하게 취소할
 방법이 없다 — 그래서 뒤에 온 실행을 취소시키는 대신 앞의 실행이 완전히 끝날 때까지 기다리게 한다.
@@ -103,6 +108,25 @@ if (running.rows[0]) return NextResponse.json({ error: '...', sessionId: running
 방어선은 `withSiteLock`이라 그 경우에도 데이터가 섞이지는 않는다 — 이 체크는 사용자에게 미리
 설명해주기 위한 UX 장치일 뿐, 유일한 방어선이 아니다.
 
+## 대기 상태를 화면에 보여주기 (`getSiteLockStatus`)
+
+`withSiteLock`을 넣은 뒤부터, 같은 몰의 다른 작업이 아직 안 끝났으면 버튼을 눌러도 그게 끝날 때까지
+조용히 대기열에서 기다리게 됐다 — 그런데 화면엔 아무 표시가 없어서, 사용자 입장에선 "이 버튼(예:
+로그인 확인)이 원래 이렇게 느린 건지 다른 작업 때문에 밀린 건지" 구분할 방법이 없었다(실사용 중
+"로그인 확인이 왜 이렇게 오래 걸리냐"는 질문으로 발견 — 실제로는 `login-confirm` 자체는 DB 조회
+1번 + 페이지 이동 1번뿐인 가벼운 요청이었다).
+
+- `siteLockStatus: Map<key, {label, since}>`(신규, `globalThis` 저장) — `withSiteLock`이 락을
+  실제로 잡는 순간(대기가 끝나고 `fn()`을 부르기 직전) 이 몰을 지금 누가 쓰고 있는지 기록하고,
+  `fn()`이 끝나면 지운다.
+- `getSiteLockStatus(siteId)`(신규, export) — `{label, sinceMs}` 또는 `null`을 돌려준다.
+  `sinceMs`가 아주 크면(예: 수 분) 그건 대기가 아니라 그 작업 자체가 오래 걸리고 있다는 뜻이다.
+- `GET /api/scrape/site-lock-status?siteId=`(신규 라우트) — 위를 그대로 노출.
+- `ScraperPanel.tsx`: 몰이 선택돼 있는 동안 1.5초마다 이 엔드포인트를 폴링해(`siteLockStatus` state),
+  바쁘면 몰 정보 박스 바로 아래 "⏳ 이 몰은 지금 다른 작업(${label})이 진행 중입니다 — N초째 —
+  끝나면 방금 누른 작업이 이어서 진행됩니다"를 보여준다. 특정 버튼에 종속시키지 않고 몰 단위로 항상
+  보이게 했다 — 락도 몰 단위(siteId)라 어떤 버튼을 눌렀는지와 무관하게 같은 큐를 공유하기 때문이다.
+
 ## 하지 않은 것 (의도적으로)
 
 - **`scrapeCatalogPage`/`recheckMallProducts`가 로그인 창의 공유 탭을 "워커 0"으로 그대로 재사용하는
@@ -122,25 +146,31 @@ if (running.rows[0]) return NextResponse.json({ error: '...', sessionId: running
 ## 향후 개발 시 참고 — 언제 `withSiteLock`을 써야 하는가
 
 `lib/scraper.ts`에 함수를 새로 추가하거나 기존 함수를 고칠 때, 그 함수가 아래 둘 중 하나라도
-한다면 — 같은 key로 동시에 두 번 불릴 수 있는지 먼저 따져보고, 가능하면 `withSiteLock(key, fn)`으로
-감싼다:
+한다면 — 같은 key로 동시에 두 번 불릴 수 있는지 먼저 따져보고, 가능하면
+`withSiteLock(key, label, fn)`으로 감싼다:
 
 1. `openSessions.get(siteId)`로 얻은 페이지에 `goto`/`evaluate`를 건다.
 2. `profileDir(siteId)` 또는 `MANUAL_LOGIN_PROFILE_COPY_ROOT` 같은 몰(또는 전역) 전용 디스크 자원에
    `launchPersistentContext`를 건다.
 
-`withContext()`를 거치는 함수는 이미 자동으로 보호되므로, 새 스크랩 기능은 대부분 `withContext`를
-재사용하는 것만으로 충분하다. 그럴 수 없는 특수한 경우(로그인 창 관련 함수들처럼 `openSessions`를
-직접 만지는 경우)에만 `withSiteLock`을 직접 쓴다. 자세한 설명과 이유는 `lib/scraper.ts`의
-`withSiteLock` 함수 바로 위 주석에도 그대로 있다(코드를 고치는 사람이 가장 먼저 보게 되는 곳).
+`label`은 사람이 읽을 짧은 한국어 이름("몰 구조 파악", "카테고리 불러오기" 등) — 화면이
+`getSiteLockStatus`로 "지금 무엇 때문에 기다리는지"를 보여줄 때 그대로 노출되니, 사용자가 봤을 때
+바로 이해되는 이름을 쓴다. `withContext()`를 거치는 함수는 `withContext(opts, fn, label)`의 세
+번째 인자로 라벨만 넘기면 자동으로 보호된다 — 새 스크랩 기능은 대부분 `withContext`를 재사용하는
+것만으로 충분하다. 그럴 수 없는 특수한 경우(로그인 창 관련 함수들처럼 `openSessions`를 직접 만지는
+경우)에만 `withSiteLock`을 직접 쓴다. 자세한 설명과 이유는 `lib/scraper.ts`의 `withSiteLock` 함수
+바로 위 주석에도 그대로 있다(코드를 고치는 사람이 가장 먼저 보게 되는 곳).
 
 ## 관련 파일
 
-- `lib/scraper.ts`: `withSiteLock`(신규), `MANUAL_LOGIN_LOCK_KEY`(신규), `withContext`(락 적용),
-  `launchVisibleWindow`/`openLoginWindow`/`openManualLoginWindow`/`navigateOpenPageTo`/
-  `openUrlInLoginWindow`/`profileMallStructure`/`startElementPicker`(락 적용).
+- `lib/scraper.ts`: `withSiteLock`(신규, `label` 인자 포함), `siteLockStatus`/`getSiteLockStatus`
+  (신규, 대기 상태 표시), `MANUAL_LOGIN_LOCK_KEY`(신규), `withContext`(락 적용 + `label` 인자 추가,
+  9개 호출부 모두 라벨 지정), `launchVisibleWindow`/`openLoginWindow`/`openManualLoginWindow`/
+  `navigateOpenPageTo`/`openUrlInLoginWindow`/`profileMallStructure`/`startElementPicker`(락 적용).
 - `app/api/scrape/route.ts`: 진행 중인 세션 존재 여부 체크(409 + 기존 sessionId 반환).
+- `app/api/scrape/site-lock-status/route.ts`(신규): `GET ?siteId=` → `{busy, label?, sinceMs?}`.
 - `components/panels/ScraperPanel.tsx`: `handleStart`가 409 응답을 받으면 기존 세션에 연결.
+  `siteLockStatus` state + 1.5초 폴링 + "⏳ 다른 작업 진행 중" 배너(몰 정보 박스 바로 아래).
 
 ## 상태
 

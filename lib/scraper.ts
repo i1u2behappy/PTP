@@ -777,6 +777,10 @@ export interface MallProfileSignals {
    *  열어보지 않고 메뉴에서 바로 얻은 대분류+중분류 카테고리명 전체. 지원 안 되는 플랫폼은 빈 배열 —
    *  categoryPaths(샘플 기준 근사치)로 대신 가늠해야 한다. */
   categoryMenuNames: string[]
+  /** categoryMenuNames와 같은 카테고리를 이름+실제 이동 링크(href) 쌍으로 — "카테고리 불러오기"가 이
+   *  몰 구조분석 결과를 그대로 재사용해 후보를 다시 훑지 않고 즉시 목록을 보여줄 때 쓴다. 지원 안 되는
+   *  플랫폼/스캔 실패 시 빈 배열. */
+  categoryLinks: CategoryMenuLink[]
   /** URL 계층/카테고리/결제계좌/택배사/재고관리형태/업체연락처/상품페이지구조/스크래핑 유의사항을 실제로
    *  수집한 원문(홈 하단 회사정보 + 이용안내·공지 등 게시판 + 상품페이지) 기반으로 AI가 요약한 리포트.
    *  ANTHROPIC_API_KEY 미설정이거나 원문을 하나도 못 모았으면 null. */
@@ -1431,14 +1435,15 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
   // 아직 페이지 이동 전(현재 page가 startUrl) — 카테고리 메뉴/후보 링크 스캔은 반드시 여기서 먼저 한다.
   // 아래(랜딩 페이지 재시도)가 실제로 페이지를 이동시키므로, 이동 후로 미루면 이 몰의 헤더가 안 보일 수 있다.
   const categoryLinkCandidates = await findCategoryLinkCandidates(page)
-  let categoryMenuNames = await scanCategoryMenu(page)
+  let categoryLinks = await scanCategoryMenu(page)
   // 메뉴가 텍스트로 못 읽는 형태(이미지 스프라이트 등, 실사용 확인: 진짜양말)면, 후보 링크로 실제 들어가
   // 그 목록 페이지 자신의 카테고리 라벨을 대신 읽는다(discoverCategoriesByVisitingLinks 참고). 페이지를
   // 여러 번 더 열어야 해 무거운 작업이라 deep("몰 구조 파악" 버튼)에서만 한다.
-  if (deep && !categoryMenuNames.length && categoryLinkCandidates.length) {
-    categoryMenuNames = await discoverCategoriesByVisitingLinks(page, categoryLinkCandidates)
+  if (deep && !categoryLinks.length && categoryLinkCandidates.length) {
+    categoryLinks = await discoverCategoriesByVisitingLinks(page, categoryLinkCandidates)
     await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
   }
+  const categoryMenuNames = categoryLinks.map(c => c.name)
   // 같은 이유로, 상품 샘플로 이동하기 전에 지금 페이지(홈/목록)의 하단 회사정보와 이용안내·공지 등
   // 게시판 링크를 먼저 훑어 원문을 모아둔다 — 결제계좌/택배사/연락처는 상품페이지가 아니라 이런 정적
   // 페이지에 있다(실사용 몰 확인됨). deep(=="몰 구조 파악" 버튼)에서만 하는 무거운 작업이라 로그인
@@ -1479,7 +1484,7 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
     sampleCount: 0, platform, sampleProductUrl: sampleUrls[0], hasMainImages: false, hasDetailImages: false,
     optionUiTypes: [], hasCascadingOptions: false, hasStockQty: false, hasStockStatusText: false,
     hasStockByOption: false, hasDetailText: false, infoLabels: [], categoryPaths: [], categoryMaxDepth: 0,
-    categoryMenuNames, report: null,
+    categoryMenuNames, categoryLinks, report: null,
   }
   const optionTypes = new Set<'select' | 'swatch' | 'none'>()
   const infoLabelSet = new Set<string>()
@@ -1755,8 +1760,20 @@ async function detectMallPlatform(page: Page): Promise<MallPlatform> {
  *  실제 상품이 들어있는 카테고리는 대개 <ul><li> 중첩 메뉴로 표현되므로, 플랫폼을 가리지 않고 흔한 메뉴
  *  컨테이너 후보를 순서대로 시도해 <li>의 중첩 구조를 그대로 따라가며 "대분류 > 중분류" 경로 문자열을
  *  만든다 — 하위 메뉴가 없는 li는 그 자체가 리프(= 상품이 바로 들어있는 카테고리)로 본다. */
-async function scanCategoryMenu(page: Page): Promise<string[]> {
-  return page.evaluate(() => {
+export interface CategoryMenuLink {
+  name: string
+  href: string
+}
+
+/** 카테고리 메뉴처럼 보이는 영역에 로그인/장바구니 같은 무관한 메뉴나, 고객은 볼 일 없는 몰 내부 운영용
+ *  태그(제품촬영 지시, 입고 대기, 단가 조정 등)가 함께 섞여 나오는 몰이 있다(실사용 확인) — 이런 라벨은
+ *  카테고리로 인정하지 않는다. 라벨 자체가 이 패턴에 걸리면 그 하위 항목까지 전부 내부용일 가능성이
+ *  높아 하위까지 통째로 건너뛴다. */
+const NON_CATEGORY_TEXT_RE = /로그인|회원가입|로그아웃|장바구니|마이페이지|고객센터|검색어?|주문|배송조회|결제|사이트맵|관리자|촬영명령|입고대?기|입고대령|단가\s*(인상|조정)|재진행|색상?\s*(별)?\s*분류|cart|login|logout|mypage|search|sitemap/i
+
+async function scanCategoryMenu(page: Page): Promise<CategoryMenuLink[]> {
+  return page.evaluate(({ excludeSrc }) => {
+    const excludeRe = new RegExp(excludeSrc, 'i')
     // 몰마다(플랫폼/테마마다) 카테고리 메뉴 래퍼의 정확한 class/id가 제각각이라(고도몰 .ovmenu, 카페24
     // 커스텀테마 df-lnb-category, 도매의신 div_cat 등) 매번 실제 몰을 열어보고 하드코딩 셀렉터를 하나씩
     // 추가해왔다 — 근본적으로는 정확한 이름을 다 알 수 없으므로, 이름의 "일부"(부분 문자열)로 넓게
@@ -1778,16 +1795,26 @@ async function scanCategoryMenu(page: Page): Promise<string[]> {
       clone.querySelectorAll('ul, ol').forEach(n => n.remove())
       return (clone.textContent || '').trim()
     }
-    function buildPaths(li: Element, prefix: string[], depth: number, out: string[]) {
+    // 하위 <ul>(다음 레벨) 안의 <a>까지 섞이지 않도록, li 바로 안(중첩 목록 제외)의 첫 링크만 이 항목의
+    // 실제 이동 URL로 본다 — "카테고리 불러오기"가 이름뿐 아니라 클릭해서 스크랩할 수 있는 링크도 함께
+    // 쓸 수 있도록 하기 위함(예전엔 이름만 남기고 버렸다).
+    function ownHref(li: Element): string {
+      const clone = li.cloneNode(true) as Element
+      clone.querySelectorAll('ul, ol').forEach(n => n.remove())
+      return (clone.querySelector('a[href]') as HTMLAnchorElement | null)?.href || ''
+    }
+    function buildPaths(li: Element, prefix: string[], depth: number, out: { name: string; href: string }[]) {
       if (depth > 3 || out.length > 200) return
       const name = ownText(li)
       if (!isMeaningful(name)) return
+      if (excludeRe.test(name)) return // 이 라벨 자체가 카테고리가 아니면 하위 항목까지 통째로 건너뜀
       const path = [...prefix, name]
       const childLis = Array.from(li.querySelectorAll(':scope > ul > li, :scope > div > ul > li'))
       if (childLis.length) {
         childLis.forEach(sub => buildPaths(sub, path, depth + 1, out))
       } else {
-        out.push(path.join(' > '))
+        const href = ownHref(li)
+        if (href) out.push({ name: path.join(' > '), href })
       }
     }
     for (const tierSelector of SELECTOR_TIERS) {
@@ -1796,19 +1823,20 @@ async function scanCategoryMenu(page: Page): Promise<string[]> {
       // 한 티어 안에서도 후보가 여러 개(예: 헤더 카테고리 + 전체메뉴 플라이아웃 사본) 나올 수 있어,
       // 후보 하나가 우연히 매칭됐을 뿐(카테고리 메뉴가 아닌 다른 위젯)일 위험을 줄이려고 요구하는 "최소
       // 2개 이상" 조건을 만족하는 후보 중 가장 많은 경로를 뽑아낸 것을 채택한다.
-      let best: string[] = []
+      let best: { name: string; href: string }[] = []
       for (const root of candidates) {
         const topLis = Array.from(root.querySelectorAll(':scope > ul > li, :scope > li, :scope > div > ul > li'))
         if (!topLis.length) continue
-        const out: string[] = []
+        const out: { name: string; href: string }[] = []
         topLis.forEach(li => buildPaths(li, [], 0, out))
-        const uniq = [...new Set(out)]
+        const seenNames = new Set<string>()
+        const uniq = out.filter(o => (seenNames.has(o.name) ? false : (seenNames.add(o.name), true)))
         if (uniq.length >= 2 && uniq.length > best.length) best = uniq
       }
       if (best.length) return best
     }
     return []
-  }).catch(() => [])
+  }, { excludeSrc: NON_CATEGORY_TEXT_RE.source }).catch(() => [])
 }
 
 /** 시작 페이지에 상품 링크가 0개일 때(배너 전용 랜딩 페이지) 따라 들어가볼 카테고리 후보 링크를 모은다.
@@ -1849,16 +1877,20 @@ async function findCategoryLinkCandidates(page: Page): Promise<string[]> {
  *  메뉴 자체는 못 읽어도 "링크"(href)는 findCategoryLinkCandidates로 얻을 수 있으니, 그 링크로 실제
  *  들어가 목적지 목록 페이지 자신이 보여주는 카테고리 라벨(브레드크럼/타이틀 — 사용자가 봐야 하는 화면이라
  *  메뉴와 달리 거의 항상 실제 텍스트로 존재한다)을 detectCategoryLabel로 읽어 대신 채운다. */
-async function discoverCategoriesByVisitingLinks(page: Page, links: string[]): Promise<string[]> {
-  const names = new Set<string>()
+async function discoverCategoriesByVisitingLinks(page: Page, links: string[]): Promise<CategoryMenuLink[]> {
+  const seenNames = new Set<string>()
+  const result: CategoryMenuLink[] = []
   for (const link of links) {
     try {
       await page.goto(link, { waitUntil: 'load', timeout: 15_000 })
       const { category } = await detectCategoryLabel(page)
-      if (category) names.add(category)
+      if (category && !NON_CATEGORY_TEXT_RE.test(category) && !seenNames.has(category)) {
+        seenNames.add(category)
+        result.push({ name: category, href: link })
+      }
     } catch { /* 이 링크가 안되면 다음 링크로 */ }
   }
-  return [...names]
+  return result
 }
 
 interface CategoryLabel {
@@ -1980,8 +2012,13 @@ function withPageParam(url: string, pageNum: number): string {
   } catch { return url }
 }
 
-/** 목록 페이지(들)을 순회하며 제품 URL 후보를 모은다. 실제 상품 추출은 하지 않는다(테스트/실행 공용 로직). */
-async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<CollectedLinks> {
+/** 목록 페이지(들)을 순회하며 제품 URL 후보를 모은다. 실제 상품 추출은 하지 않는다(테스트/실행 공용 로직).
+ *  context를 넘기고 카테고리(listingUrls)가 여러 개면 탭을 나눠 동시에 훑는다 — 예전엔 카테고리 하나씩
+ *  순서대로 방문해서, 카테고리 수만큼 페이지 로딩 시간이 그대로 누적됐다(실사용 확인: 카테고리 9개짜리
+ *  미리보기가 5~7분씩 걸림 — 상품 상세페이지는 건드리지 않는데도 목록 페이지 자체를 순서대로 도는
+ *  것만으로 이렇게 오래 걸렸다). context가 없거나 목록이 1개뿐이면(병렬로 나눌 이득이 없음) 예전과 같이
+ *  순차로 돈다. */
+async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: BrowserContext): Promise<CollectedLinks> {
   if (opts.productUrls?.length) {
     return { urls: opts.productUrls, platform: 'unknown', categoryByUrl: new Map(), linkInfo: new Map(), needsLogin: false }
   }
@@ -2012,8 +2049,8 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
   const categoryByUrl = new Map<string, CategoryLabel>()
   const linkInfo = new Map<string, { name: string; thumbnail: string }>()
 
-  async function scanCurrentPage(): Promise<{ href: string; name: string; thumbnail: string }[]> {
-    const items: { href: string; name: string; thumbnail: string }[] = await page.evaluate(({ userSel, platformSel, detailPatternSrc }) => {
+  async function scanForProducts(targetPage: Page): Promise<{ href: string; name: string; thumbnail: string }[]> {
+    const items: { href: string; name: string; thumbnail: string }[] = await targetPage.evaluate(({ userSel, platformSel, detailPatternSrc }) => {
       // 대소문자 무시 — 같은 고도몰이라도 몰마다 실제 URL의 쿼리파라미터 표기가 "goodsno"/"goodsNo"처럼
       // 다를 수 있다(실제 발견된 사례: 가방쟁이는 goodsNo). 대소문자를 그대로 두면 이 필터에 상품 링크가
       // 전부 걸러져 카테고리에서 상품을 하나도 못 찾는 문제가 있었다.
@@ -2051,27 +2088,27 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
     return items.filter(item => item.href.startsWith(baseUrl))
   }
 
-  for (const listingUrl of listingUrls) {
-    if (page.url() !== listingUrl) {
-      await page.goto(listingUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+  async function collectFromListing(workerPage: Page, listingUrl: string) {
+    if (workerPage.url() !== listingUrl) {
+      await workerPage.goto(listingUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     }
 
-    const categoryLabel = await detectCategoryLabel(page)
+    const categoryLabel = await detectCategoryLabel(workerPage)
     let prevHrefs: Set<string> | null = null
 
     for (let p = 0; p < maxPages; p++) {
-      let matched = await scanCurrentPage()
+      let matched = await scanForProducts(workerPage)
       let hrefsThisPage = new Set(matched.map(m => m.href))
       const isDeadEnd = (hrefs: Set<string>) => hrefs.size === 0 || (prevHrefs !== null && [...hrefs].every(h => prevHrefs!.has(h)))
 
       // page 파라미터로 다음 페이지 이동을 시도했는데도 상품 목록이 그대로거나 비었으면(그 파라미터를 안 쓰는
       // 몰이거나 스킨 구조가 다른 경우), "다음" 버튼 클릭 방식으로 한 번 더 시도해본다.
       if (isDeadEnd(hrefsThisPage) && p > 0 && nextPageSelector) {
-        const nextBtn = page.locator(nextPageSelector).first()
+        const nextBtn = workerPage.locator(nextPageSelector).first()
         if (await nextBtn.isVisible({ timeout: 2_000 }).catch(() => false)) {
           await nextBtn.click()
-          await page.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
-          matched = await scanCurrentPage()
+          await workerPage.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
+          matched = await scanForProducts(workerPage)
           hrefsThisPage = new Set(matched.map(m => m.href))
         }
       }
@@ -2087,7 +2124,28 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions): Promise<Coll
       if (p >= maxPages - 1) break
       // 스킨마다 다른 "다음" 버튼 클래스에 기대는 대신, page 쿼리파라미터를 다음 번호로 바꿔 직접 이동한다 —
       // cafe24 등 대부분의 몰이 페이지 번호 링크 없이도(숫자가 안 보여도) 이 파라미터로 페이지를 넘겨준다.
-      await page.goto(withPageParam(page.url(), p + 2), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+      await workerPage.goto(withPageParam(workerPage.url(), p + 2), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+    }
+  }
+
+  if (context && listingUrls.length > 1) {
+    const LISTING_CONCURRENCY = Math.min(4, listingUrls.length)
+    let cursor = 0
+    async function worker(workerPage: Page) {
+      while (true) {
+        const i = cursor++
+        if (i >= listingUrls.length) return
+        await collectFromListing(workerPage, listingUrls[i]).catch(() => {})
+      }
+    }
+    const workerPages = await Promise.all(
+      Array.from({ length: LISTING_CONCURRENCY }, (_, idx) => (idx === 0 ? page : context.newPage())),
+    )
+    await Promise.all(workerPages.map(worker))
+    await Promise.all(workerPages.slice(1).map(p => p.close().catch(() => {})))
+  } else {
+    for (const listingUrl of listingUrls) {
+      await collectFromListing(page, listingUrl)
     }
   }
 
@@ -2118,38 +2176,250 @@ export interface CatalogPreviewItem {
   thumbnail: string
 }
 
+export interface CategoryCount {
+  url: string
+  label: string
+  count: number
+}
+
 export interface CatalogPreviewResult {
-  /** 지금 설정(셀렉터/카테고리)으로 목록에서 찾은 전체 상품 수 (페이징 끝까지 확인) */
+  /** 카테고리별 개수(categoryCounts)를 합산한 전체 상품 수 */
   total: number
   platform: MallPlatform
-  /** 그중 첫 번째 상품을 실제로 열어 추출한 결과 (찾은 상품이 없으면 null) */
+  /** 그중 상품 1건만 실제로 열어 컬럼별 데이터를 상세 추출한 결과 (찾은 상품이 없으면 null) — 나머지는
+   *  "스크래핑 시작"을 누르면 어차피 다시 전체를 훑으므로, 미리보기는 이 1건만 자세히 확인한다. */
   preview: ScrapeResult | null
-  /** 나머지 상품들의 목록 페이지 기준 정보(상품명/썸네일) — 실제로 열어보지 않아 빠르다 */
+  /** 개발자모드(크롬 확장) 미리보기 전용 — 확장이 직접 모은 목록 페이지 기준 정보. 일반모드
+   *  카탈로그 미리보기(이 함수)는 상품명/썸네일/링크를 더 이상 모으지 않아 항상 빈 배열이다
+   *  (카테고리별 개수만 categoryCounts로 확인하면 충분하다는 판단 — 실제 목록은 스크랩 시작 때 얻음). */
   items: CatalogPreviewItem[]
+  /** 카테고리(또는 단일 시작 URL)별 상품 개수만 — 이름/썸네일/링크는 모으지 않는다. */
+  categoryCounts: CategoryCount[]
   /** true면 로그인 세션이 끊긴 채로(또는 아예 로그인 안 된 채로) 이 결과를 얻었을 수 있다 —
    *  화면에서 로그인 창을 다시 띄우도록 안내하는 데 쓴다. */
   needsLogin: boolean
 }
 
+/** 상품 링크 매칭 로직만 — scanForProducts(collectProductUrls 내부)와 같은 판정 기준이지만 이름/썸네일은
+ *  전혀 만들지 않고 개수만 반환한다(미리보기는 개수 확인만 하면 되고, 나머지는 실제 스크랩 시작 때
+ *  어차피 다시 모으므로 여기서 모을 필요가 없다는 사용자 판단). */
+async function countProductsOnPage(
+  page: Page, userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
+): Promise<number> {
+  return page.evaluate(({ userSel, platformSel, detailPatternSrc, baseUrl }) => {
+    const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc, 'i') : null
+    const count = (sel: string, requireImg: boolean, applyDetailFilter: boolean) => Array.from(document.querySelectorAll(sel))
+      .filter(a => !requireImg || a.querySelector('img'))
+      .map(a => (a as HTMLAnchorElement).href)
+      .filter(href => href && href.startsWith(baseUrl))
+      .filter(href => !applyDetailFilter || !detailRe || detailRe.test(href))
+      .length
+    if (userSel) return count(userSel, false, false)
+    if (platformSel) {
+      const viaProfile = count(platformSel, false, true)
+      if (viaProfile > 0) return viaProfile
+    }
+    const normalize = (u: string) => u.replace(/\/+$/, '')
+    const currentNorm = normalize(location.href)
+    const originNorm = normalize(location.origin)
+    return Array.from(document.querySelectorAll('a'))
+      .filter(a => a.querySelector('img'))
+      .map(a => (a as HTMLAnchorElement).href)
+      .filter(href => href && href.startsWith(baseUrl))
+      .filter(href => { const n = normalize(href); return n !== currentNorm && n !== originNorm })
+      .length
+  }, { userSel, platformSel, detailPatternSrc, baseUrl })
+}
+
+/** 페이지네이션 위젯에 보이는 페이지 번호 중 가장 큰 값을 "총 페이지 수"로 읽는다 — 사용자가 요청한
+ *  "페이지당 노출 개수 × 총 페이지수 - 마지막 페이지에서 빠진 개수" 계산에 쓴다. 스킨에 따라 페이지
+ *  번호를 일부만 보여줄 수 있어(예: "1 2 3 ... 10") 100% 보장은 아니지만, 흔한 스킨은 전체를 보여준다. */
+async function readMaxPageNumber(page: Page, nextPageSelector: string | undefined): Promise<number | null> {
+  return page.evaluate(({ nextPageSelector }) => {
+    const roots: Element[] = []
+    if (nextPageSelector) {
+      const near = document.querySelector(nextPageSelector)?.closest('div, ul, nav, p')
+      if (near) roots.push(near)
+    }
+    if (!roots.length) roots.push(...Array.from(document.querySelectorAll('[class*="paging" i], [class*="pagination" i]')))
+    let max = 0
+    for (const el of roots) {
+      // <span>/<strong> 등 링크가 아닌 요소까지 다 보면, 같은 영역에 우연히 들어있는 "총 240개" 같은
+      // 무관한 숫자(상품 총계 배지 등)를 페이지 번호로 잘못 집을 수 있다(실사용 확인된 문제 — 여러
+      // 카테고리가 전부 그 배지 숫자로 동일하게 나옴). 실제 페이지 번호는 거의 항상 클릭 가능한 링크
+      // (href 있는 <a>)이므로 그것만 본다.
+      Array.from(el.querySelectorAll('a[href]')).forEach(node => {
+        const n = Number((node.textContent || '').trim())
+        if (Number.isInteger(n) && n > 0 && n < 100_000 && n > max) max = n
+      })
+    }
+    return max > 0 ? max : null
+  }, { nextPageSelector }).catch(() => null)
+}
+
+/** 미리보기 전용 — 카테고리(또는 단일 시작 URL) 하나의 상품 "개수"만 빠르게 구한다. 이름/썸네일/링크는
+ *  전혀 모으지 않는다.
+ *  1) 1페이지 상품 수 × 페이지네이션에서 읽은 총 페이지 수로 계산하고, 마지막 페이지를 한 번 더 열어
+ *     그 페이지의 실제 개수로 보정한다(사용자가 요청한 "페이지당 노출 개수 × 총 페이지수 - 마지막
+ *     페이지에서 빠진 개수" 계산과 동일).
+ *  2) 그것도 안 되면(페이지네이션 구조를 못 읽음) 페이지가 빈 화면이 나올 때까지 실제로 개수만 세며
+ *     넘어간다(이름/썸네일 없이 개수만이라 그래도 가볍다) — 정확한 개수 보장은 이 경로에서도 유지된다.
+ *  (이전엔 "총 128개" 같은 페이지 문구를 먼저 읽어 지름길로 썼는데, 그 문구를 document.body 전체에서
+ *  찾다 보니 상품 목록과 무관한 다른 위치의 숫자(사이트 전체 상품수 배지 등)를 잘못 집어 여러 카테고리가
+ *  전부 같은 엉뚱한 개수로 나오는 문제가 실제로 발견되어 제거했다 — 이제 항상 실제 상품 링크 개수를
+ *  세는 구조적인 방식만 쓴다.) */
+/** page.goto 직후 곧바로 page.evaluate를 하면, 그 사이 몰 페이지의 지연 리다이렉트(로그인 후 자동이동 등
+ *  클라이언트 스크립트가 건 setTimeout 이동)가 실행 중이던 실행 컨텍스트를 없애 "Execution context was
+ *  destroyed" 오류로 죽는 경우가 실사용 중 확인됐다(submitLoginForm에서 먼저 발견된 것과 같은 문제, 위
+ *  568행 참고) — 짧게 networkidle까지 한 번 더 기다려 그 지연 리다이렉트가 끝날 시간을 준다. */
+async function settleAfterNav(page: Page) {
+  await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {})
+}
+
+async function countCategoryProductsOnce(
+  workerPage: Page, categoryUrl: string,
+  userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined,
+  nextPageSelector: string | undefined, baseUrl: string,
+): Promise<CategoryCount> {
+  const firstPageUrl = resetToFirstPage(categoryUrl)
+  await workerPage.goto(firstPageUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+  await settleAfterNav(workerPage)
+  const { category } = await detectCategoryLabel(workerPage)
+  const label = category || categoryUrl
+
+  const perPage = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+  if (perPage === 0) return { url: categoryUrl, label, count: 0 }
+
+  const maxPage = await readMaxPageNumber(workerPage, nextPageSelector)
+  if (maxPage === null || maxPage <= 1) {
+    console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage} → count=${perPage} url=${firstPageUrl}`)
+    return { url: categoryUrl, label, count: perPage }
+  }
+
+  await workerPage.goto(withPageParam(firstPageUrl, maxPage), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+  await settleAfterNav(workerPage)
+  const lastPageCount = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+  // maxPage가 "실제 마지막 페이지"가 아니라 페이지네이션 위젯이 한 번에 보여주는 번호 묶음의 끝일 수 있다
+  // (예: 카페24 기본 스킨은 1~5만 링크로 노출하고 다음 묶음은 화살표로만 이동 — 실사용 확인: 여러 카테고리가
+  // 전부 같은 maxPage=5·lastPageCount=48(꽉 참)로 읽혀 진짜 총 개수보다 훨씬 적은 값에서 멈춘 사례 발견).
+  // 그래서 "마지막"이라고 읽은 페이지 바로 다음 페이지도 비어있는지 한 번 더 확인해야 안심할 수 있다.
+  if (lastPageCount > 0) {
+    await workerPage.goto(withPageParam(firstPageUrl, maxPage + 1), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+    await settleAfterNav(workerPage)
+    const afterLastCount = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    if (afterLastCount === 0) {
+      const count = perPage * (maxPage - 1) + lastPageCount
+      console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage} lastPageCount=${lastPageCount} → count=${count} url=${firstPageUrl} lastPageUrl=${withPageParam(firstPageUrl, maxPage)}`)
+      return { url: categoryUrl, label, count }
+    }
+    console.log(`[previewCatalog] "${label}" maxPage=${maxPage}이 위젯 페이지 묶음의 끝일 뿐(page ${maxPage + 1}에도 ${afterLastCount}개 더 있음) → 직접 순회로 전환`)
+  }
+
+  // 마지막 페이지 번호를 잘못 읽었을 가능성(그 페이지가 실제로는 비어있음) — 페이지 번호 계산을 못 믿고
+  // 안전하게 직접 한 페이지씩 개수만 세며 끝까지 간다(정확한 개수 보장이 최우선).
+  await workerPage.goto(firstPageUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+  await settleAfterNav(workerPage)
+  let total = 0
+  for (let p = 0; p < AUTO_PAGINATION_CAP; p++) {
+    const count = p === 0 ? perPage : await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    if (count === 0) break
+    total += count
+    await workerPage.goto(withPageParam(firstPageUrl, p + 2), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+    await settleAfterNav(workerPage)
+  }
+  console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage}(불신) → 직접 순회 count=${total} url=${firstPageUrl}`)
+  return { url: categoryUrl, label, count: total }
+}
+
+/** 위 settleAfterNav로 대부분 막히지만, 그래도 남는 드문 레이스는 카테고리 하나의 개수 계산 전체를
+ *  실패시킨다 — 예전엔 그 실패(Execution context was destroyed 등)가 Promise.all을 타고 미리보기 전체를
+ *  깨뜨려 사용자가 "확인 실패" 알림을 수동으로 닫고 처음부터 다시 눌러야 했다. 한 카테고리 실패가 나머지
+ *  카테고리까지 막지 않도록, 이 카테고리만 한 번 더 조용히 재시도한다(사용자 개입 없이 자동 처리). */
+async function countCategoryProducts(
+  workerPage: Page, categoryUrl: string,
+  userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined,
+  nextPageSelector: string | undefined, baseUrl: string,
+): Promise<CategoryCount> {
+  try {
+    return await countCategoryProductsOnce(workerPage, categoryUrl, userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl)
+  } catch (err) {
+    console.log(`[previewCatalog] "${categoryUrl}" 개수 계산 중 오류(재시도) — ${err instanceof Error ? err.message : err}`)
+    try {
+      return await countCategoryProductsOnce(workerPage, categoryUrl, userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl)
+    } catch (err2) {
+      console.log(`[previewCatalog] "${categoryUrl}" 개수 계산 재시도도 실패 — ${err2 instanceof Error ? err2.message : err2}`)
+      return { url: categoryUrl, label: categoryUrl, count: 0 }
+    }
+  }
+}
+
 /**
- * 카탈로그(목록) 모드 전용 — 목록에서 상품 링크를 모아 개수를 확인하고, 첫 번째 상품을 곧바로 열어
- * 미리보기까지 한 번의 브라우저 세션으로 처리한다. 목록 수집과 미리보기를 별도 요청으로 나누면
- * 매번 새 세션을 여느라 느려지므로, 하나로 합쳐 빠르게 확인할 수 있게 한다.
- * 미리보기는 정확한 총 개수를 보여줘야 하므로 maxPages를 지정해도 무시하고 항상 끝까지 페이징을 따라간다.
+ * 카탈로그(목록) 모드 전용 — 카테고리별 상품 개수를 빠르게 확인하고, 상품 1건만 실제로 열어 컬럼별
+ * 데이터를 상세 확인한다. 나머지 상품은 어차피 "스크래핑 시작"이 다시 전체를 훑으므로, 미리보기 시점엔
+ * 이름/썸네일/링크를 모을 필요가 없다는 사용자 판단에 따라 개수만 구한다(사용자 확인·설계 완료).
  * ponytail: 미리보기 전용이라 재시도/AI폴백 없이 1회만 시도한다 — 실패하면 버튼을 다시 누르면 됨.
  */
 export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPreviewResult> {
-  return withContext(opts, async page => {
-    const { urls, platform, linkInfo, categoryByUrl, needsLogin: listingNeedsLogin } = await collectProductUrls(page, { ...opts, maxPages: undefined })
-    const items: CatalogPreviewItem[] = urls.map(url => ({
-      url, name: linkInfo.get(url)?.name || '', thumbnail: linkInfo.get(url)?.thumbnail || '',
-    }))
-    if (!urls.length) return { total: 0, platform, preview: null, items: [], needsLogin: listingNeedsLogin }
+  return withContext(opts, async (page, context) => {
+    const listingUrls = (opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])).map(resetToFirstPage)
 
-    const firstUrl = urls[0]
+    // 상세 미리보기용 상품 1건 + 이 몰의 플랫폼(셀렉터 판단용)을 먼저 확보한다. 아래 개수 집계가 카테고리
+    // 0의 1페이지를 다시 열게 되어 약간 중복되지만, 코드를 단순하게 유지하는 쪽을 택했다(카테고리가
+    // 많아도 중복은 1페이지 분량 뿐이라 전체 시간에 미치는 영향은 미미하다).
+    const bootstrap = await collectProductUrls(page, { ...opts, url: listingUrls[0], categoryUrls: undefined, maxPages: 1 })
+    const platform = bootstrap.platform
+    let firstUrl = bootstrap.urls[0]
+    let categoryByUrl = bootstrap.categoryByUrl
+    let needsLogin = bootstrap.needsLogin
+
+    const profile = PLATFORM_PROFILES[platform]
+    const userSel = opts.productLinkSelector || null
+    const platformSel = profile.productLinkSelector
+    const detailPatternSrc = profile.detailUrlPattern?.source
+    const nextPageSelector = opts.nextPageSelector || profile.nextPageSelector || undefined
+    const baseUrl = new URL(listingUrls[0]).origin
+
+    // 카테고리별 개수만 여러 탭으로 동시에 집계한다. 로그인 창을 재사용하는 siteId라도 그 공유 탭은
+    // 절대 쓰지 않고 항상 새 탭만 연다(discoverCategoryLinks에서 같은 이유로 겪은 "다른 네비게이션에
+    // 의해 중단됨" 충돌 방지).
+    const COUNT_CONCURRENCY = 4
+    const categoryCounts = new Array<CategoryCount>(listingUrls.length)
+    let cursor = 0
+    async function worker() {
+      const workerPage = await context.newPage()
+      try {
+        while (true) {
+          const i = cursor++
+          if (i >= listingUrls.length) return
+          categoryCounts[i] = await countCategoryProducts(
+            workerPage, listingUrls[i], userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl,
+          )
+        }
+      } finally {
+        await workerPage.close().catch(() => {})
+      }
+    }
+    const workerCount = Math.min(COUNT_CONCURRENCY, listingUrls.length)
+    await Promise.all(Array.from({ length: workerCount }, () => worker()))
+
+    const total = categoryCounts.reduce((sum, c) => sum + c.count, 0)
+
+    // 부트스트랩으로 고른 카테고리(0번)가 하필 비어있으면, 실제로 상품이 있는 다른 카테고리에서 1건을 구한다.
+    if (!firstUrl) {
+      const nonEmpty = categoryCounts.find(c => c.count > 0)
+      if (nonEmpty) {
+        const retry = await collectProductUrls(page, { ...opts, url: nonEmpty.url, categoryUrls: undefined, maxPages: 1 })
+        firstUrl = retry.urls[0]
+        categoryByUrl = retry.categoryByUrl
+        needsLogin = needsLogin || retry.needsLogin
+      }
+    }
+
+    if (!firstUrl) return { total: 0, platform, preview: null, items: [], categoryCounts, needsLogin }
+
     await page.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 })
     const productNeedsLogin = await loginIfNeeded(page, { url: firstUrl, ...opts })
-    const needsLogin = listingNeedsLogin || productNeedsLogin
+    needsLogin = needsLogin || productNeedsLogin
     if (opts.loginId && page.url() !== firstUrl) {
       await page.goto(firstUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     }
@@ -2165,10 +2435,10 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
       const ai = await applyAiModeRules(page, opts.siteId, firstUrl, opts, domOptions)
       if (ai) {
         applyCategoryOverride(ai.product, categoryByUrl.get(firstUrl), ai.rules)
-        return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product: ai.product }, items, needsLogin }
+        return { total, platform, preview: { sourceUrl: firstUrl, product: ai.product }, items: [], categoryCounts, needsLogin }
       }
     }
-    return { total: urls.length, platform, preview: { sourceUrl: firstUrl, product }, items, needsLogin }
+    return { total, platform, preview: { sourceUrl: firstUrl, product }, items: [], categoryCounts, needsLogin }
   })
 }
 
@@ -2199,7 +2469,7 @@ export async function scrapeCatalogPage(
   onItem: (event: CatalogItemEvent) => Promise<void> | void,
 ): Promise<CatalogScrapeSummary> {
   return withContext(opts, async (page, context) => {
-    const { urls: productUrls, categoryByUrl, needsLogin: listingNeedsLogin } = await collectProductUrls(page, opts)
+    const { urls: productUrls, categoryByUrl, needsLogin: listingNeedsLogin } = await collectProductUrls(page, opts, context)
 
     // 예약된 자동 재스크랩처럼 아무도 화면을 안 보고 있는 상황에서 로그인이 끊긴 채로 스크랩되면, 그
     // 사실을 사용자가 나중에라도 알 수 있어야 한다 — 사이트 메모에 한 번만 남긴다(상품마다 남기면 도배됨).
@@ -2429,46 +2699,50 @@ export interface CategoryLink {
   text: string
 }
 
-const CATEGORY_EXCLUDE_TEXT_RE = /로그인|회원가입|로그아웃|장바구니|마이페이지|고객센터|검색|주문|배송조회|결제|cart|login|logout|mypage|search|sitemap/i
-
 export interface CategoryDiscoveryResult {
   platform: MallPlatform
   links: CategoryLink[]
 }
 
-/** 시작 URL 페이지에서 카테고리/메뉴로 추정되는 링크 후보를 찾아 사용자가 고를 수 있도록 목록으로 반환한다. */
+/** 시작 URL 페이지에서 카테고리 메뉴로 보이는 링크를 찾아 사용자가 고를 수 있도록 목록으로 반환한다.
+ *  "몰 구조 파악"(profileMallStructure/sampleMallProfile)이 이미 검증해 쓰고 있는 것과 같은 방식을
+ *  그대로 재사용한다 — 이전 버전(페이지 전체 <a> 스캔 + 후보마다 실제 방문해 상품 유무 확인)은 후보가
+ *  많은 몰에서 수십 번씩 페이지를 열어야 해 느렸고(실사용 불가 수준으로 느리다는 피드백), 그마저도
+ *  텍스트 필터만으로는 "[사업자정보확인]"/"이용안내" 같은 진짜 카테고리가 아닌 링크를 걸러내지 못했다.
+ *  1) scanCategoryMenu — 내비게이션 메뉴 영역(.cat/.lnb/.snb/.gnb/nav)의 메뉴 트리를 그 자리에서 바로
+ *     읽는다(추가 페이지 이동 없음, 사실상 즉시). 약관/개인정보처리방침 등은 이 메뉴 영역 밖에 있는
+ *     경우가 대부분이라 애초에 후보에 섞이지 않는다.
+ *  2) 메뉴를 텍스트로 못 읽는 몰(이미지 스프라이트 등)만, 후보 링크를 실제로 방문해 그 페이지의
+ *     브레드크럼이 있는지로 검증한다(discoverCategoriesByVisitingLinks) — 진짜 상품 목록 페이지만
+ *     브레드크럼이 있어 약관류 페이지가 자연히 걸러진다. 이 경로만 후보 수만큼 페이지를 여는 비용이
+ *     들지만, 몰 구조분석과 동일한 결과이므로 그쪽에서 이미 분석해둔 몰이면 API 라우트가 캐시를 먼저
+ *     확인해 이 느린 경로 자체를 건너뛴다(app/api/scrape/categories/route.ts 참고).
+ *  로그인 창을 재사용하는 siteId는 그 page가 사용자가 실제로 보고 있거나 다른 기능이 언제든 다시 움직일
+ *  수 있는 공유 탭이라, 탐색은 항상 새 탭에서 한다(공유 탭 재사용 시 실제로 "다른 네비게이션에 의해
+ *  중단됨" 충돌을 겪었다). */
 export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<CategoryDiscoveryResult> {
-  return withContext(opts, async page => {
+  return withContext(opts, async (page, context) => {
     const url = opts.url || page.url()
-    if (opts.url) {
-      await page.goto(opts.url, { waitUntil: 'load', timeout: 30_000 })
-      await loginIfNeeded(page, { url: opts.url, ...opts })
+    const scanPage = await context.newPage()
+    try {
+      await scanPage.goto(url, { waitUntil: 'load', timeout: 30_000 })
+      await loginIfNeeded(scanPage, { url, ...opts })
       // 로그인 필수 페이지는 로그인 폼으로 리다이렉트되므로, 로그인 시도 후 원래 목표 페이지로 다시 이동한다.
-      if (opts.loginId && page.url() !== opts.url) {
-        await page.goto(opts.url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+      if (opts.loginId && scanPage.url() !== url) {
+        await scanPage.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
       }
+
+      const platform = await detectMallPlatform(scanPage)
+      let categoryLinks = await scanCategoryMenu(scanPage)
+      if (!categoryLinks.length) {
+        const candidates = await findCategoryLinkCandidates(scanPage)
+        if (candidates.length) categoryLinks = await discoverCategoriesByVisitingLinks(scanPage, candidates)
+      }
+
+      const links: CategoryLink[] = categoryLinks.map(c => ({ href: c.href, text: c.name }))
+      return { platform, links }
+    } finally {
+      await scanPage.close().catch(() => {})
     }
-
-    const platform = await detectMallPlatform(page)
-    const baseUrl = new URL(url).origin
-    const links: CategoryLink[] = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll('a'))
-        // 썸네일 이미지를 감싼 링크는 상품 카드일 가능성이 높으므로 카테고리 후보에서 제외
-        .filter(a => !a.querySelector('img'))
-        .map(a => ({ href: (a as HTMLAnchorElement).href, text: (a.textContent || '').trim() }))
-        .filter(l => l.text && l.href.startsWith('http'))
-    })
-
-    const seen = new Set<string>()
-    const filtered = links.filter(l => {
-      if (!l.href.startsWith(baseUrl)) return false
-      if (l.text.length > 20) return false // 메뉴/카테고리 라벨은 보통 짧다
-      if (CATEGORY_EXCLUDE_TEXT_RE.test(l.text)) return false
-      if (seen.has(l.href)) return false
-      seen.add(l.href)
-      return true
-    })
-
-    return { platform, links: filtered }
   })
 }

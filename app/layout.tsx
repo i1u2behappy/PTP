@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import { Geist } from 'next/font/google'
 import { ChromeWarning } from '../components/shell/ChromeWarning'
 import { DbHealthBanner } from '../components/shell/DbHealthBanner'
+import { GlobalErrorNet } from '../components/shell/GlobalErrorNet'
 import './globals.css'
 
 const geist = Geist({ variable: '--font-geist', subsets: ['latin'] })
@@ -21,6 +22,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-full">
         <DbHealthBanner />
         <ChromeWarning />
+        <GlobalErrorNet />
         {children}
       </body>
     </html>

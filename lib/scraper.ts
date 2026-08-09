@@ -10,6 +10,7 @@ import path from 'path'
 import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import { chromium, type BrowserContext, type Page } from 'playwright'
+import { load as loadHtml } from 'cheerio'
 import type { ExtractedProduct } from './ai'
 import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, type MallStructureReport, type OptionCandidate } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
@@ -2460,8 +2461,18 @@ async function countProductsOnPage(
     const normalize = (u: string) => u.replace(/\/+$/, '')
     const currentNorm = normalize(location.href)
     const originNorm = normalize(location.origin)
-    const fallback = Array.from(document.querySelectorAll('a'))
+    // 로고/장바구니/마이샵/상단메뉴/"TODAY VIEW"(최근 본 상품) 위젯 등 사이트 공통 헤더의 <a><img>가 실제
+    // 상품처럼 잡히는 문제가 있었다(2026-08-09 seasonbag.co.kr 재현 — 실제로는 상품이 하나도 없는
+    // "대량구매/제작문의" 카테고리에서 이런 공통 요소들 때문에 perPage가 0이 아닌 값으로 잘못 확정되고,
+    // 이후 지수+이분 탐색이 이 카테고리에 진짜 있지도 않은 "페이지 수"를 찾아 헤맸다). 카페24 플랫폼
+    // 코어 마크업(`#contents`, 스킨을 바꿔도 대개 남아있음)이 있으면 그 안쪽(실제 본문 영역)만 보고, 이
+    // id를 못 찾는 스킨이면(신뢰 못 함) 문서 전체를 그대로 본다 — 즉 이 스코프 좁히기가 안 맞는 몰에서도
+    // 지금보다 나빠지지 않는다. `xans-layout-productrecent`(TODAY VIEW)는 #contents 스코프로도 대부분
+    // 걸러지지만, 일부 스킨은 이 위젯을 본문 안쪽에 붙이는 경우도 있어 별도로 한 번 더 제외한다.
+    const scopeRoot = document.querySelector('#contents') || document
+    const fallback = Array.from(scopeRoot.querySelectorAll('a'))
       .filter(a => a.querySelector('img'))
+      .filter(a => !a.closest('[class*="productrecent" i]'))
       .map(a => (a as HTMLAnchorElement).href)
       .filter(href => href && href.startsWith(baseUrl))
       .filter(href => { const n = normalize(href); return n !== currentNorm && n !== originNorm })
@@ -2561,6 +2572,98 @@ async function readCurrentPageNumber(page: Page, nextPageSelector: string | unde
   }, { nextPageSelector }).catch(() => null)
 }
 
+/** countProductsOnPage의 무(無)브라우저 버전 — 브라우저 탭으로 실제 페이지를 열지 않고, 이미 받아온 HTML
+ *  문자열만 cheerio로 파싱해 같은 판정 기준을 적용한다. 브라우저는 href를 항상 절대경로로 정규화해
+ *  주지만(`a.href`) cheerio는 원본 속성값(상대경로일 수 있음) 그대로 주므로, finalUrl(리다이렉트 반영된
+ *  실제 응답 URL)을 기준으로 직접 절대경로화한다. 판정 로직 자체는 countProductsOnPage와 반드시 같게
+ *  유지해야 한다(이 몰에서 실사용 확인된 판단 기준들이라 여기서 갈라지면 지수+이분 탐색이 다시 틀린
+ *  결과를 낼 수 있다). */
+function countProductsFromHtml(
+  html: string, finalUrl: string, userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
+): { count: number; isLoginPage: boolean; fingerprint: string } {
+  const $ = loadHtml(html)
+  const isLoginPage = $('input[type="password"]').length > 0
+  const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc, 'i') : null
+  const resolve = (href: string | undefined): string | null => {
+    if (!href) return null
+    try { return new URL(href, finalUrl).href } catch { return null }
+  }
+  const hrefs = (sel: string, requireImg: boolean, applyDetailFilter: boolean) => $(sel).toArray()
+    .filter(el => !requireImg || $(el).find('img').length > 0)
+    .map(el => resolve($(el).attr('href')))
+    .filter((href): href is string => !!href && href.startsWith(baseUrl))
+    .filter(href => !applyDetailFilter || !detailRe || detailRe.test(href))
+  const toResult = (list: string[]) => ({ count: list.length, isLoginPage, fingerprint: list.slice().sort().join('|') })
+  if (userSel) return toResult(hrefs(userSel, false, false))
+  if (platformSel) {
+    const viaProfile = hrefs(platformSel, false, true)
+    if (viaProfile.length > 0) return toResult(viaProfile)
+  }
+  const normalize = (u: string) => u.replace(/\/+$/, '')
+  const currentNorm = normalize(finalUrl)
+  const originNorm = normalize(new URL(finalUrl).origin)
+  // countProductsOnPage의 #contents 스코프 좁히기 + TODAY VIEW 제외와 반드시 같게 유지한다(위 함수 주석
+  // 참고). cheerio-select의 속성선택자 `i` 플래그 지원 여부에 의존하지 않도록, 조상 class는 직접 정규식으로
+  // 검사한다.
+  const contents = $('#contents')
+  const scopeRoot = contents.length ? contents : $('body')
+  const fallback = scopeRoot.find('a').toArray()
+    .filter(el => $(el).find('img').length > 0)
+    .filter(el => !$(el).parents().toArray().some(p => /productrecent/i.test($(p).attr('class') || '')))
+    .map(el => resolve($(el).attr('href')))
+    .filter((href): href is string => !!href && href.startsWith(baseUrl))
+    .filter(href => { const n = normalize(href); return n !== currentNorm && n !== originNorm })
+  return toResult(fallback)
+}
+
+/** readCurrentPageNumber의 무브라우저 버전 — 같은 "다수 클래스와 다른 하나" 판정을 cheerio로 재현한다. */
+function readCurrentPageNumberFromHtml(html: string, nextPageSelector: string | undefined): number | null {
+  const $ = loadHtml(html)
+  const isPagingClass = (cls: string) => /paging|pagination/i.test(cls)
+  const roots: ReturnType<typeof $> [] = []
+  if (nextPageSelector) {
+    const near = $(nextPageSelector).first().closest('div, ul, nav, p')
+    if (near.length) roots.push(near)
+  }
+  if (!roots.length) {
+    $('[class]').each((_, el) => { if (isPagingClass($(el).attr('class') || '')) roots.push($(el)) })
+  }
+  for (const root of roots) {
+    const entries = root.find('a[href]').toArray()
+      .map(el => ({ n: Number(($(el).text() || '').trim()), cls: $(el).attr('class') || '' }))
+      .filter(e => Number.isInteger(e.n) && e.n > 0 && e.n < 100_000)
+    if (entries.length < 2) continue
+    const counts = new Map<string, number>()
+    for (const e of entries) counts.set(e.cls, (counts.get(e.cls) || 0) + 1)
+    const [commonCls] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
+    const odd = entries.filter(e => e.cls !== commonCls)
+    if (odd.length === 1) return odd[0].n
+  }
+  return null
+}
+
+/** 실제 브라우저 탭을 띄우지 않고, 로그인된 브라우저 컨텍스트의 쿠키를 그대로 실어 순수 HTTP GET만
+ *  보낸다(context.request는 같은 BrowserContext에 묶여 있어 쿠키를 따로 옮길 필요가 없다) — 렌더링·
+ *  JS 실행·CDP 왕복이 전혀 없어 지수+이분 탐색이 수십 번 반복돼도 이벤트루프/메모리 부담이 거의 없다.
+ *  실패(네트워크 오류, non-200 등)하면 null을 돌려주고, 호출부가 그 한 번만 브라우저 방식으로 대체한다. */
+async function probeLightweight(
+  context: BrowserContext, url: string,
+  userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
+  nextPageSelector: string | undefined,
+): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; currentPage: number | null } | null> {
+  try {
+    const res = await context.request.get(url, { timeout: 15_000 })
+    if (!res.ok()) return null
+    const html = await res.text()
+    const finalUrl = res.url()
+    const { count, isLoginPage, fingerprint } = countProductsFromHtml(html, finalUrl, userSel, platformSel, detailPatternSrc, baseUrl)
+    const currentPage = count > 0 ? readCurrentPageNumberFromHtml(html, nextPageSelector) : null
+    return { count, isLoginPage, fingerprint, currentPage }
+  } catch {
+    return null
+  }
+}
+
 /** 미리보기 전용 — 카테고리(또는 단일 시작 URL) 하나의 상품 "개수"만 빠르게 구한다. 이름/썸네일/링크는
  *  전혀 모으지 않는다.
  *  1) 1페이지 상품 수 × 페이지네이션에서 읽은 총 페이지 수로 계산하고, 마지막 페이지를 한 번 더 열어
@@ -2620,36 +2723,53 @@ async function findRealLastPage(
   let loFingerprint = knownNonEmptyFingerprint
   let hi: number | null = null
   let step = 1
+
+  // 이 탐색은 페이지를 수십 번 열 수 있어(카테고리가 수백 페이지면 로그(n)번이라도 누적된다) 매번
+  // 브라우저 탭으로 실제 렌더링하면 무겁다 — knownNonEmptyPage는 이미 브라우저로 확인된 값이므로, 같은
+  // 페이지를 브라우저 탭 없이(순수 HTTP + 쿠키 재사용) 한 번 더 읽어보고 개수가 일치하면 이 몰은 서버
+  // 렌더링(HTML에 상품 링크가 그대로 있음)이라고 보고 이후 모든 probe를 가벼운 방식으로 돌린다. 안
+  // 맞으면(클라이언트 JS로 그리는 몰 등) useHttp를 false로 두어 기존 브라우저 방식 그대로 간다 — 즉 이
+  // 최적화가 안 맞는 몰에서도 지금보다 나빠지지 않는다.
+  const context = workerPage.context()
+  const calibration = await probeLightweight(context, withPageParam(firstPageUrl, knownNonEmptyPage), userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
+  const useHttp = !!calibration && !calibration.isLoginPage && calibration.count === knownNonEmptyCount
+  console.log(`[previewCatalog] 지수+이분 탐색: ${useHttp ? '가벼운 HTTP 방식' : '브라우저 방식(캘리브레이션 불일치 또는 실패)'} 사용 (기준 페이지=${knownNonEmptyPage}, 기준 개수=${knownNonEmptyCount}, 확인된 개수=${calibration?.count ?? 'null'})`)
+
+  async function probeAt(pageNum: number): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; currentPage: number | null }> {
+    if (useHttp) {
+      const lightweight = await probeLightweight(context, withPageParam(firstPageUrl, pageNum), userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
+      if (lightweight) return lightweight
+      // 이번 한 번만 네트워크 오류 등으로 실패 — 브라우저로 대체하고, 다음 probe부터는 다시 가벼운 방식을 쓴다.
+    }
+    await workerPage.goto(withPageParam(firstPageUrl, pageNum), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
+    await settleAfterNav(workerPage)
+    const { count, isLoginPage, fingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    const currentPage = count > 0 ? await readCurrentPageNumber(workerPage, nextPageSelector) : null
+    return { count, isLoginPage, fingerprint, currentPage }
+  }
+
   while (hi === null) {
     if (stop()) return { page: lo, count: loCount }
     const probe = lo + step
     if (probe > bound) return null
-    await workerPage.goto(withPageParam(firstPageUrl, probe), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
-    await settleAfterNav(workerPage)
-    const { count, isLoginPage, fingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
-    if (isLoginPage) return { page: lo, count: loCount, needsLogin: true }
-    const currentPage = count > 0 ? await readCurrentPageNumber(workerPage, nextPageSelector) : null
-    const clamped = currentPage !== null && currentPage !== probe
-    if (count === 0 || clamped || fingerprint === loFingerprint) { hi = probe; continue }
+    const r = await probeAt(probe)
+    if (r.isLoginPage) return { page: lo, count: loCount, needsLogin: true }
+    const clamped = r.currentPage !== null && r.currentPage !== probe
+    if (r.count === 0 || clamped || r.fingerprint === loFingerprint) { hi = probe; continue }
     if (stop()) return { page: lo, count: loCount }
-    await workerPage.goto(withPageParam(firstPageUrl, probe + 1), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
-    await settleAfterNav(workerPage)
-    const next = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    const next = await probeAt(probe + 1)
     if (next.isLoginPage) return { page: lo, count: loCount, needsLogin: true }
-    if (next.count > 0 && next.fingerprint === fingerprint) { hi = probe; continue }
-    lo = probe; loCount = count; loFingerprint = fingerprint; step *= 2
+    if (next.count > 0 && next.fingerprint === r.fingerprint) { hi = probe; continue }
+    lo = probe; loCount = r.count; loFingerprint = r.fingerprint; step *= 2
   }
   while (hi - lo > 1) {
     if (stop()) return { page: lo, count: loCount }
     const mid = Math.floor((lo + hi) / 2)
-    await workerPage.goto(withPageParam(firstPageUrl, mid), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
-    await settleAfterNav(workerPage)
-    const { count, isLoginPage, fingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
-    if (isLoginPage) return { page: lo, count: loCount, needsLogin: true }
-    const currentPage = count > 0 ? await readCurrentPageNumber(workerPage, nextPageSelector) : null
-    const clamped = currentPage !== null && currentPage !== mid
-    if (count === 0 || clamped || fingerprint === loFingerprint) hi = mid
-    else { lo = mid; loCount = count; loFingerprint = fingerprint }
+    const r = await probeAt(mid)
+    if (r.isLoginPage) return { page: lo, count: loCount, needsLogin: true }
+    const clamped = r.currentPage !== null && r.currentPage !== mid
+    if (r.count === 0 || clamped || r.fingerprint === loFingerprint) hi = mid
+    else { lo = mid; loCount = r.count; loFingerprint = r.fingerprint }
   }
   return { page: lo, count: loCount }
 }

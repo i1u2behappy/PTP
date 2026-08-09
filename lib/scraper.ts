@@ -2487,6 +2487,39 @@ async function readMaxPageNumber(page: Page, nextPageSelector: string | undefine
   }, { nextPageSelector }).catch(() => null)
 }
 
+/** 지금 실제로 몇 페이지를 보고 있는지, 위젯이 스스로 표시하는 값을 읽는다. 범위를 벗어난 `page`를
+ *  요청해도 몰이 마지막 유효 페이지로 그대로 clamp해서 돌려주는 경우(2026-08-09 seasonbag.co.kr
+ *  스크린샷으로 직접 확인 — URL은 `page=21`인데 위젯은 여전히 "14"를 현재 페이지로 굵게 표시), 상품
+ *  목록 내용(fingerprint)에 의존하는 판정보다 이게 훨씬 안정적이다 — clamp된 목록 내용은(광고/추천
+ *  위젯 등 섞여) 매번 완전히 똑같지 않을 수 있어도, 위젯의 "지금 몇 페이지"는 항상 같은 값을 준다.
+ *  실제 마크업 확인(seasonbag.co.kr, 카페24 기본 스킨): 현재 페이지도 `href 없는 요소가 아니라 여전히
+ *  `<a href>`다 — 다만 클래스가 다르다(`<a class="other">11</a>` ... `<a class="this">14</a>`).
+ *  href 유무로는 구분이 안 되므로, "페이지 번호 링크들 중 클래스가 다수와 다른 하나"를 찾는다(스킨마다
+ *  클래스 이름은 다를 수 있지만 "현재 페이지만 클래스가 다르다"는 구조는 흔하다). 2개 이상이 다수와
+ *  다르면(구조를 못 믿겠으면) null로 포기한다. */
+async function readCurrentPageNumber(page: Page, nextPageSelector: string | undefined): Promise<number | null> {
+  return page.evaluate(({ nextPageSelector }) => {
+    const roots: Element[] = []
+    if (nextPageSelector) {
+      const near = document.querySelector(nextPageSelector)?.closest('div, ul, nav, p')
+      if (near) roots.push(near)
+    }
+    if (!roots.length) roots.push(...Array.from(document.querySelectorAll('[class*="paging" i], [class*="pagination" i]')))
+    for (const el of roots) {
+      const entries = Array.from(el.querySelectorAll('a[href]'))
+        .map(a => ({ n: Number((a.textContent || '').trim()), cls: a.className }))
+        .filter(e => Number.isInteger(e.n) && e.n > 0 && e.n < 100_000)
+      if (entries.length < 2) continue
+      const counts = new Map<string, number>()
+      for (const e of entries) counts.set(e.cls, (counts.get(e.cls) || 0) + 1)
+      const [commonCls] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]
+      const odd = entries.filter(e => e.cls !== commonCls)
+      if (odd.length === 1) return odd[0].n
+    }
+    return null
+  }, { nextPageSelector }).catch(() => null)
+}
+
 /** 미리보기 전용 — 카테고리(또는 단일 시작 URL) 하나의 상품 "개수"만 빠르게 구한다. 이름/썸네일/링크는
  *  전혀 모으지 않는다.
  *  1) 1페이지 상품 수 × 페이지네이션에서 읽은 총 페이지 수로 계산하고, 마지막 페이지를 한 번 더 열어
@@ -2527,12 +2560,19 @@ async function settleAfterNav(page: Page) {
  *  "새 내용"으로 오판할 수 있다(직접 재현: lo=8에서 probe=16으로 건너뛰었는데 16이 이미 14페이지 내용의
  *  반복이지만, 8페이지 내용과는 여전히 달라 새 페이지로 오인됨 → 결과가 실제(14)보다 큰 값(16)으로 확정).
  *  그래서 "새 내용처럼 보이는" probe는 바로 다음 페이지(probe+1)까지 한 번 더 확인해, 그것도 같은 내용이면
- *  (반복이 안정적으로 계속됨) probe 자체를 새 lo로 승격하지 않고 그 자리를 벽으로 확정한다. */
+ *  (반복이 안정적으로 계속됨) probe 자체를 새 lo로 승격하지 않고 그 자리를 벽으로 확정한다.
+ *  이 fingerprint 비교도 완벽하진 않다: clamp된 응답에 광고/추천 위젯 등이 섞여 매번 완전히 똑같지
+ *  않으면(직접 재현: 실사용 세션에서 URL이 21까지 계속 올라가는데도 페이지네이션 위젯은 계속 "14"를
+ *  현재 페이지로 보여줌 — 상품 목록 내용은 매번 조금씩 달라 fingerprint 비교로는 못 잡음) 이 비교만으론
+ *  안 걸린다. 그래서 `readCurrentPageNumber()`(위젯이 스스로 보고하는 "지금 몇 페이지")를 우선 신호로
+ *  쓴다 — 요청한 페이지 번호(probe/mid)와 위젯이 말하는 현재 페이지가 다르면, 상품 내용이 어떻든 그
+ *  즉시 clamp로 확정한다(위젯 구조를 못 읽는 스킨이면 null이 나와 기존 fingerprint 검증으로 자동
+ *  폴백된다). */
 async function findRealLastPage(
   workerPage: Page, firstPageUrl: string, bound: number,
   knownNonEmptyPage: number, knownNonEmptyCount: number, knownNonEmptyFingerprint: string,
   userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
-  stop: () => boolean,
+  nextPageSelector: string | undefined, stop: () => boolean,
 ): Promise<{ page: number; count: number; needsLogin?: boolean } | null> {
   let lo = knownNonEmptyPage
   let loCount = knownNonEmptyCount
@@ -2547,7 +2587,9 @@ async function findRealLastPage(
     await settleAfterNav(workerPage)
     const { count, isLoginPage, fingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
     if (isLoginPage) return { page: lo, count: loCount, needsLogin: true }
-    if (count === 0 || fingerprint === loFingerprint) { hi = probe; continue }
+    const currentPage = count > 0 ? await readCurrentPageNumber(workerPage, nextPageSelector) : null
+    const clamped = currentPage !== null && currentPage !== probe
+    if (count === 0 || clamped || fingerprint === loFingerprint) { hi = probe; continue }
     if (stop()) return { page: lo, count: loCount }
     await workerPage.goto(withPageParam(firstPageUrl, probe + 1), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
     await settleAfterNav(workerPage)
@@ -2563,7 +2605,9 @@ async function findRealLastPage(
     await settleAfterNav(workerPage)
     const { count, isLoginPage, fingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
     if (isLoginPage) return { page: lo, count: loCount, needsLogin: true }
-    if (count === 0 || fingerprint === loFingerprint) hi = mid
+    const currentPage = count > 0 ? await readCurrentPageNumber(workerPage, nextPageSelector) : null
+    const clamped = currentPage !== null && currentPage !== mid
+    if (count === 0 || clamped || fingerprint === loFingerprint) hi = mid
     else { lo = mid; loCount = count; loFingerprint = fingerprint }
   }
   return { page: lo, count: loCount }
@@ -2617,11 +2661,16 @@ async function countCategoryProductsOnce(
       await settleAfterNav(workerPage)
       const { count: afterLastCount, isLoginPage: afterLastIsLogin, fingerprint: afterLastFingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
       if (afterLastIsLogin) return { url: categoryUrl, label, count: perPage * (maxPage - 1) + lastPageCount, needsLogin: true }
-      // count>0이어도 maxPage와 완전히 같은 내용(fingerprint 일치)이면 "더 있다"가 아니라 범위를 벗어난
-      // page 요청을 몰이 마지막 유효 페이지로 그대로 되돌려준 것이다(2026-08-09 seasonbag.co.kr 재현) —
-      // 진짜 빈 페이지와 똑같이 취급해 여기서 확정한다. 안 그러면 아래 findRealLastPage가 "새 페이지"로
-      // 착각한 채 끝을 못 찾고 페이지 번호만 계속 올리며 헤맨다.
-      if (afterLastCount === 0 || afterLastFingerprint === lastPageFingerprint) {
+      // count>0이어도 위젯이 스스로 "지금 페이지"를 maxPage로 보고하면(요청은 maxPage+1인데) 범위를
+      // 벗어난 page 요청을 몰이 마지막 유효 페이지로 그대로 되돌려준 것이다(2026-08-09 seasonbag.co.kr
+      // 실사용 재현 — 상품 목록 내용은 매번 조금씩 달라 fingerprint만으론 못 잡았지만, 위젯은 항상 같은
+      // "지금 14페이지"를 보고했다). 위젯을 못 읽는 스킨이면(currentPage===null) fingerprint 일치
+      // 여부로 대신 판단한다(기존 방식). 어느 쪽이든 진짜 빈 페이지와 똑같이 취급해 여기서 확정한다 —
+      // 안 그러면 아래 findRealLastPage가 "새 페이지"로 착각한 채 끝을 못 찾고 페이지 번호만 계속
+      // 올리며 헤맨다.
+      const afterLastCurrentPage = afterLastCount > 0 ? await readCurrentPageNumber(workerPage, nextPageSelector) : null
+      const afterLastClamped = afterLastCurrentPage !== null && afterLastCurrentPage !== maxPage + 1
+      if (afterLastCount === 0 || afterLastClamped || afterLastFingerprint === lastPageFingerprint) {
         const count = perPage * (maxPage - 1) + lastPageCount
         console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage} lastPageCount=${lastPageCount} → count=${count} url=${firstPageUrl} lastPageUrl=${withPageParam(firstPageUrl, maxPage)}`)
         return { url: categoryUrl, label, count }
@@ -2629,7 +2678,7 @@ async function countCategoryProductsOnce(
       console.log(`[previewCatalog] "${label}" maxPage=${maxPage}이 위젯 페이지 묶음의 끝일 뿐(page ${maxPage + 1}에도 ${afterLastCount}개 더 있음) → 실제 마지막 페이지 빠르게 탐색`)
       const found = await findRealLastPage(
         workerPage, firstPageUrl, AUTO_PAGINATION_CAP * 100, maxPage + 1, afterLastCount, afterLastFingerprint,
-        userSel, platformSel, detailPatternSrc, baseUrl, stop,
+        userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector, stop,
       )
       if (found) {
         const count = perPage * (found.page - 1) + found.count
@@ -2652,7 +2701,7 @@ async function countCategoryProductsOnce(
   // 있어(실사용 확인: 1020bag.com의 한 카테고리가 5622개) 순차 탐색이 카테고리 하나에 수십 분씩 걸렸다.
   const fallbackFound = await findRealLastPage(
     workerPage, firstPageUrl, AUTO_PAGINATION_CAP * 100, 1, perPage, perPageFingerprint,
-    userSel, platformSel, detailPatternSrc, baseUrl, stop,
+    userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector, stop,
   )
   if (fallbackFound) {
     const count = perPage * (fallbackFound.page - 1) + fallbackFound.count

@@ -134,6 +134,39 @@
 빈 화면) → 정확히 300으로 수렴(방문 25회, 로그 스케일 유지), 1·3페이지짜리 극소 카테고리도 각각
 정확히 수렴.
 
+### 버그 7 — clamp된 응답의 상품 내용이 매번 조금씩 달라 fingerprint 비교로도 못 잡음 (수정됨)
+
+버그 6을 고친 뒤 실사용에서 또 재현(2026-08-09, 사용자가 실제 브라우저 스크린샷으로 직접 확인):
+같은 몰에서 URL이 `page=21`까지 올라갔는데도, 페이지네이션 위젯은 여전히 "14"를 현재 페이지로 굵게
+표시하고 있었다. 즉 버그 6의 클램핑 자체는 맞았지만, **클램핑된 응답의 상품 목록 내용이 매번 완전히
+똑같지는 않다**(광고/추천 위젯 등이 섞여 fingerprint가 매 요청마다 달라짐으로 추정) — 그래서
+"내용이 똑같으면 반복으로 본다"는 fingerprint 비교로는 이 케이스를 못 잡았다.
+
+DB에 저장된 이 몰의 실제 로그인 정보(`sites.login_pw_encrypted`, 앱과 동일한
+`CREDENTIALS_ENCRYPTION_KEY`로 복호화)로 헤드리스 브라우저를 직접 로그인시켜 재현/검증했다:
+- `page=15/16/21/32/50`을 반복 요청 → 상품 개수는 매번 0(내 테스트 세션에선 진짜로 빈 화면 — 사용자의
+  실사용 세션과 몰의 반응이 완전히 같지는 않았을 수 있음, 세션 이력/누적 요청량에 따라 몰의 반응이
+  달라질 수 있다는 뜻으로 추정).
+- 하지만 **페이지네이션 위젯 자체는 항상 안정적으로 "14"를 현재 페이지로 보고**했다. 실제 마크업
+  확인: 카페24 기본 스킨은 현재 페이지도 `href 없는 요소가 아니라 여전히 `<a href>`이고, 클래스만
+  다르다(`<a class="other">11</a>` ... `<a class="this">14</a>`) — 그래서 애초에 "href 없는 요소가
+  현재 페이지"라는 첫 시도 가정이 틀렸다는 것도 이 과정에서 확인했다.
+
+**수정**: `readCurrentPageNumber()`(신규) — 페이지네이션 위젯 안 페이지 번호 링크들 중 **"클래스가
+다수와 다른 하나"**를 현재 페이지로 찾는다(스킨마다 클래스 이름은 다를 수 있지만 "현재 페이지만
+클래스가 다르다"는 구조는 흔함). 상품 데이터가 아니라 위젯 구조 자체를 읽으므로 광고/추천 위젯 같은
+데이터 노이즈에 영향받지 않는다. `findRealLastPage`의 지수/이분 탐색과 `countCategoryProductsOnce`의
+`maxPage+1` 확인 지점 전부에서, **요청한 페이지 번호와 위젯이 보고하는 현재 페이지가 다르면 상품
+개수가 몇 개든 그 즉시 벽으로 확정**한다 — fingerprint 비교보다 우선 신호로 쓰고, 위젯을 못 읽는
+스킨(`readCurrentPageNumber`가 `null`)이면 기존 fingerprint 비교로 자동 폴백한다(버그 6 수정을 대체
+하지 않고 보완).
+
+순수 JS 시뮬레이션으로 검증: 클램핑된 응답의 내용이 매번 랜덤하게 달라지는 경우(이번에 확인된 실제
+상황) → 위젯 신호로 정확히 14로 수렴(10회 방문). 위젯 신호가 전혀 없는 몰(폴백 경로) → 기존
+fingerprint 방식 그대로 정확히 수렴. 평범한 300페이지짜리 몰 → 로그 스케일 방문 수 그대로 정상 동작.
+`node`로 이 몰에 실제 로그인해 `readCurrentPageNumber`와 동일한 로직을 그대로 실행해 page=14에서
+정확히 `{value:14, cls:"this"}`를 얻는 것도 확인했다.
+
 ### 성능 — 페이지 방문 1회당 고정비용이 지수+이분 탐색 횟수만큼 누적돼 여전히 느렸음 (수정됨)
 
 버그 3·4로 알고리즘(방문 횟수)은 O(log n)까지 줄였는데도 여전히 느리다는 재보고 — 원인은 **페이지
@@ -343,7 +376,11 @@ React 상태를 전부 초기화하는데, `localStorage`에 저장해두던 항
   공유 `page` 대신 전용 `scratchPage`(`context.newPage()`) 사용. `CatalogPreviewResult.superseded?:
   boolean`(신규 필드). (2026-08-09, 버그 5·6) `countProductsOnPage`의 반환값에 `isLoginPage`/
   `fingerprint` 추가, `findRealLastPage`가 `knownNonEmptyFingerprint` 인자 + 지수 확장 단계의
-  probe+1 검증 로직을 받음, `CategoryCount.needsLogin?: boolean`(신규 필드).
+  probe+1 검증 로직을 받음, `CategoryCount.needsLogin?: boolean`(신규 필드). (2026-08-09, 버그 7)
+  `readCurrentPageNumber`(신규) — 페이지네이션 위젯이 스스로 보고하는 현재 페이지 번호를 "클래스가
+  다수와 다른 링크"로 찾아 읽는다. `findRealLastPage`가 `nextPageSelector` 인자를 추가로 받아 이 함수를
+  fingerprint 비교보다 우선하는 clamp 판정 신호로 쓰고, `countCategoryProductsOnce`의 `maxPage+1`
+  확인 지점에도 같은 방식을 적용.
 - `app/api/scrape/preview-catalog/route.ts`: `previewCatalog`에 `stopSignal: req.signal` 전달.
 - `app/api/scrape/preview-progress/route.ts`(신규): `GET ?siteId=` → `{done, total}` 진행률 폴링용.
 - `app/api/scrape/categories/route.ts`: `sites.scrape_profile.categoryLinks` 캐시를 먼저 확인 후
@@ -360,12 +397,15 @@ React 상태를 전부 초기화하는데, `localStorage`에 저장해두던 항
 
 ## 상태
 
-**구현 완료.** tsc/eslint 클린. 카테고리 개수 버그(1~6)는 전부 실제 몰(seasonbag.co.kr, 1020bag.com)
-재현으로 원인을 확인하고 수정했다. 속도는 알고리즘(지수+이분 탐색)과 페이지 방문 1회당 고정비용
+**구현 완료.** tsc/eslint 클린. 카테고리 개수 버그(1~7)는 전부 실제 몰(seasonbag.co.kr, 1020bag.com)
+재현으로 원인을 확인하고 수정했다 — 버그 7은 DB에 저장된 실제 로그인 정보로 헤드리스 브라우저를 직접
+인증시켜 라이브로 재현/검증까지 마쳤다. 속도는 알고리즘(지수+이분 탐색)과 페이지 방문 1회당 고정비용
 (`settleAfterNav` 타임아웃, `waitUntil`) 양쪽을 다 손봐야 했다 — 하나만 고쳤을 땐 "여전히 느리다"는
 재보고가 반복됐다. "현재 페이지 가져오기"가 느리다는 문의는 실제 코드(application-code 7~74ms)가
 아니라 `next dev` 개발 모드의 온디맨드 컴파일 오버헤드임을 프로덕션 빌드 비교(격리된 git worktree에서
 `next build --webpack` 후 포트 비교 — 프로덕션 20~40ms vs 개발 서버 730ms~3.5s)로 확인했다(코드
 수정 없음, 환경 특성). 버그 5·6은 순수 JS 시뮬레이션(클램핑 몰/정상 몰/극소 카테고리 3가지 경우)으로
-알고리즘 자체는 검증했으나, 실제 seasonbag.co.kr 재실행으로의 최종 확인은 사용자가 다음 미리보기
-실행에서 검증 예정.
+알고리즘을 검증했지만, 실사용에서 버그 6 수정 이후로도 같은 몰에서 재현됐다(버그 7) — clamp된 응답의
+상품 내용이 안정적이지 않다는 걸 놓쳤기 때문. 버그 7은 fingerprint가 아니라 위젯 구조 자체를 읽는
+방식으로 더 근본적으로 고쳤고, DB의 실제 로그인 정보로 직접 인증해 라이브로 재현/검증까지 마쳤다.
+PTP 화면에서의 최종 확인(같은 몰 재실행)은 사용자가 다음 미리보기 실행에서 검증 예정.

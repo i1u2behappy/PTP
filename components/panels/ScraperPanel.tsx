@@ -97,15 +97,17 @@ const LAST_SESSION_KEY = 'scrape.scraper.lastSession'
 // 사라져 있다는 지적으로(재조회하려면 다시 몰 페이지에 접속해야 해 느리다) 폼 값과 함께 그대로 남겨둔다.
 const FORM_STATE_KEY = 'scrape.scraper.formState'
 // 몰(site)과 무관하게 항상 같은 값을 쓰는 전역 선호값이라 FORM_STATE_KEY(몰별 작업 상태)와 분리한다 —
-// 메모리 이슈 진단 중 "수동/1개"로 낮춰두면 몰을 바꿔도 그 설정이 그대로 유지되길 원할 것이라는 판단.
-const CONCURRENCY_PREF_KEY = 'scrape.scraper.concurrencyPref'
+// 메모리/CPU 이슈 진단 중 "수동/2개"로 낮춰두면 몰을 바꿔도 그 설정이 그대로 유지되길 원할 것이라는 판단.
+// 기본값을 자동/4 → 수동/2로 바꾸면서 키 이름도 바꿨다(.v2) — 안 바꾸면 예전에 이미 저장된 자동/4 값이
+// 그대로 읽혀 새 기본값이 적용되지 않는다(로컬 도구라 기존 저장값을 서버에서 강제로 덮어쓸 방법이 없음).
+const CONCURRENCY_PREF_KEY = 'scrape.scraper.concurrencyPref.v2'
 function readConcurrencyPref(): { mode: 'auto' | 'manual'; value: number } {
-  if (typeof window === 'undefined') return { mode: 'auto', value: 4 }
+  if (typeof window === 'undefined') return { mode: 'manual', value: 2 }
   try {
     const saved = JSON.parse(localStorage.getItem(CONCURRENCY_PREF_KEY) || '{}') as { mode?: 'auto' | 'manual'; value?: number }
-    return { mode: saved.mode === 'manual' ? 'manual' : 'auto', value: saved.value ? Math.max(1, Math.min(8, saved.value)) : 4 }
+    return { mode: saved.mode === 'auto' ? 'auto' : 'manual', value: saved.value ? Math.max(1, Math.min(8, saved.value)) : 2 }
   } catch {
-    return { mode: 'auto', value: 4 }
+    return { mode: 'manual', value: 2 }
   }
 }
 
@@ -784,9 +786,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setRetrying(false)
     localStorage.removeItem(LAST_SESSION_KEY)
     // 탭 전환 등으로 이 화면이 다시 마운트돼도, 로그인 창이 서버에 실제로 열려있으면 그 상태를 그대로 복원한다
-    // (loginStep은 이 컴포넌트의 로컬 상태라 마운트될 때마다 초기화되지만, 실제 브라우저 세션은 서버에 계속 살아있을 수 있다)
+    // (loginStep은 이 컴포넌트의 로컬 상태라 마운트될 때마다 초기화되지만, 실제 브라우저 세션은 서버에 계속 살아있을 수 있다).
+    // 반대로 서버에 열려있는 게 없으면 명시적으로 'none'으로 되돌린다 — 안 그러면 아래 FORM_STATE_KEY
+    // 복원(localStorage에 남아있던 예전 loginStep='confirmed')이 이 값을 덮어써도 아무도 고쳐주지 않아,
+    // PTP 서버를 재시작해 실제 로그인 창이 사라진 뒤에도 화면은 계속 "확인됨"으로 남는 문제가 있었다.
     fetch(`/api/scrape/current-url?siteId=${siteId}`).then(r => r.json()).then((d: { url: string | null }) => {
-      if (d.url) setLoginStep('confirmed')
+      setLoginStep(d.url ? 'confirmed' : 'none')
     }).catch(() => {})
   }
 
@@ -1254,8 +1259,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </div>
             <div className="border border-gray-100 rounded-xl overflow-hidden">
               <div className="flex items-center justify-end gap-2 px-3 py-1.5 border-b border-gray-100 bg-gray-50">
+                {/* 보조 기능 토글(켜짐/꺼짐)은 클릭 한 번짜리 액션 버튼(rounded-full 알약 모양)과 모양부터
+                    다르게 — 사각형에 가까운 rounded-md로 "체크박스형 스위치"라는 걸 한눈에 구분되게 한다. */}
                 <button onClick={() => setSiteShowFilters(v => !v)}
-                  className={`px-3 py-1 text-xs font-semibold rounded-full transition-colors ${siteShowFilters ? 'bg-teal-500 text-white hover:bg-teal-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                  className={`px-3 py-0.5 text-xs font-semibold rounded-md transition-colors ${siteShowFilters ? 'bg-teal-100 text-teal-700 hover:bg-teal-200' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
                   🔍 필터
                 </button>
                 {(siteHasColFilters || siteSortKeys.length > 0) && (
@@ -1751,15 +1758,18 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   (각 탭이 이미지까지 로드) 메모리가 부족하면 수동으로 낮춰본다. */}
               <div className="flex items-center gap-1 shrink-0"
                 title="카테고리/상품 페이지를 동시에 몇 개까지 열지 정합니다. 자동은 몰 반응을 보며 스스로 조절하고(스크래핑 시작 시 1~8, 미리보기는 4), 수동은 지정한 개수로 항상 고정합니다 — 메모리가 부족하면 수동으로 1~2개까지 낮춰보세요.">
+                {/* 보조 기능(켜짐/꺼짐) 토글은 옆의 주 액션 버튼(rounded-full 알약 모양)과 모양부터 다르게
+                    — rounded-md의 각진 "체크박스형 스위치"로 둬서 누르면 바로 실행되는 버튼이 아니라는 걸
+                    형태만으로도 구분되게 한다. */}
                 <button type="button" onClick={() => setConcurrencyMode(m => m === 'manual' ? 'auto' : 'manual')}
                   aria-pressed={concurrencyMode === 'manual'}
-                  className={`px-3 py-2 rounded-full text-sm font-medium border transition-colors ${concurrencyMode === 'manual' ? 'bg-amber-600 text-white border-amber-600' : 'bg-white text-gray-500 border-gray-300 hover:border-amber-400'}`}>
+                  className={`px-3 py-1 rounded-md text-sm font-medium border transition-colors ${concurrencyMode === 'manual' ? 'bg-amber-100 text-amber-700 border-amber-300' : 'bg-white text-gray-500 border-gray-300 hover:border-amber-300'}`}>
                   {concurrencyMode === 'manual' ? '☑ 동시 처리 수동' : '☐ 동시 처리 자동'}
                 </button>
                 {concurrencyMode === 'manual' && (
                   <input type="number" min={1} max={8} value={concurrency}
                     onChange={e => setConcurrency(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
-                    className="w-14 px-2 py-2 border border-gray-300 rounded-lg text-sm text-center" />
+                    className="w-14 px-2 py-1 border border-gray-300 rounded-lg text-sm text-center" />
                 )}
               </div>
               <button type="button"
@@ -1775,7 +1785,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 }}
                 aria-pressed={aiMode}
                 title="켜두면 미리보기 시점에 AI가 이 몰의 상품 페이지 구조를 분석해 컬럼별 추출 규칙을 자동으로 만들어 저장합니다. 미리보기로 결과를 확인하고, 부족한 부분은 '스크랩 대상 직접지정'으로 보완하세요."
-                className={`px-3 py-2 rounded-full text-sm font-medium border transition-colors ${aiMode ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-gray-500 border-gray-300 hover:border-violet-400'}`}>
+                className={`px-3 py-1 rounded-md text-sm font-medium border transition-colors ${aiMode ? 'bg-violet-100 text-violet-700 border-violet-300' : 'bg-white text-gray-500 border-gray-300 hover:border-violet-300'}`}>
                 {aiMode ? '☑ 🪄 AI모드 켜짐' : '☐ AI모드 꺼짐'}
               </button>
               <button type="button" onClick={mallMode === 'devmode' ? handleDevPreview : handlePreview}

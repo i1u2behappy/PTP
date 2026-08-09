@@ -211,8 +211,9 @@ export function ClientsListPanel() {
           ) : (
             <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-0 flex flex-col">
               <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-gray-100 bg-gray-50 shrink-0">
+                {/* 보조 기능 토글은 rounded-md의 각진 모양으로, 클릭 한 번짜리 액션 버튼(rounded-full)과 구분한다. */}
                 <button onClick={() => setShowFilters(v => !v)}
-                  className={`px-3 py-1 text-xs font-semibold rounded-full transition-colors ${showFilters ? 'bg-teal-500 text-white hover:bg-teal-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+                  className={`px-3 py-0.5 text-xs font-semibold rounded-md transition-colors ${showFilters ? 'bg-teal-100 text-teal-700 hover:bg-teal-200' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
                   🔍 필터
                 </button>
                 {(hasFilters || sortKeys.length > 0) && (

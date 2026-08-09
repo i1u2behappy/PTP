@@ -2389,6 +2389,9 @@ export interface CategoryCount {
   url: string
   label: string
   count: number
+  /** true면 이 카테고리를 세는 도중 로그인 화면으로 리다이렉트됐다 — count는 로그인 화면으로 튕기기
+   *  전까지 확인된 값(불완전할 수 있음)이다. previewCatalog가 이 값들을 모아 최상위 needsLogin에 반영한다. */
+  needsLogin?: boolean
 }
 
 export interface CatalogPreviewResult {
@@ -2417,32 +2420,44 @@ export interface CatalogPreviewResult {
 
 /** 상품 링크 매칭 로직만 — scanForProducts(collectProductUrls 내부)와 같은 판정 기준이지만 이름/썸네일은
  *  전혀 만들지 않고 개수만 반환한다(미리보기는 개수 확인만 하면 되고, 나머지는 실제 스크랩 시작 때
- *  어차피 다시 모으므로 여기서 모을 필요가 없다는 사용자 판단). */
+ *  어차피 다시 모으므로 여기서 모을 필요가 없다는 사용자 판단).
+ *  isLoginPage: 이 카운팅 경로는(다른 페이지 방문 함수들과 달리) loginIfNeeded를 거치지 않아 로그인
+ *  화면으로 튕겨나가도 감지할 방법이 없었다 — 로그인 폼이 있는 페이지는 상품이 0개인 빈 페이지가 아니라
+ *  "우연히 몇 개의 img 링크가 있는 페이지"로 보여, 지수+이분 탐색이 절대 끝(count===0)을 못 만나 카테고리
+ *  하나당 페이지를 수십 번 여는(최후 순차 폴백까지 전부 소진) 원인이 됐다(2026-08-09 seasonbag.co.kr에서
+ *  재현 확인 — 몰마다 새 탭이 세션 검증에 걸려 로그인 화면으로 리다이렉트될 수 있음). 이미 매 페이지마다
+ *  한 번 하는 evaluate 호출에 얹어서 검사하므로 추가 왕복이 없다.
+ *  fingerprint: 범위를 벗어난 page 파라미터를 요청하면 빈 화면이 아니라 마지막 유효 페이지 내용을 그대로
+ *  다시 돌려주는 몰이 있다(2026-08-09 seasonbag.co.kr에서 재현 확인 — URL은 page=32인데 실제로는 14페이지
+ *  내용). count만 보면 "0이 아니니 더 있다"고 오판해 지수 탐색이 진짜 끝을 못 찾고 페이지 번호만 계속
+ *  올리며 헤맨다 — 상품 링크 목록을 정렬해 이어붙인 문자열로 비교하면 "새 페이지인지 같은 내용의 반복인지"
+ *  구분할 수 있다. */
 async function countProductsOnPage(
   page: Page, userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
-): Promise<number> {
+): Promise<{ count: number; isLoginPage: boolean; fingerprint: string }> {
   return page.evaluate(({ userSel, platformSel, detailPatternSrc, baseUrl }) => {
+    const isLoginPage = !!document.querySelector('input[type="password"]')
     const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc, 'i') : null
-    const count = (sel: string, requireImg: boolean, applyDetailFilter: boolean) => Array.from(document.querySelectorAll(sel))
+    const hrefs = (sel: string, requireImg: boolean, applyDetailFilter: boolean) => Array.from(document.querySelectorAll(sel))
       .filter(a => !requireImg || a.querySelector('img'))
       .map(a => (a as HTMLAnchorElement).href)
       .filter(href => href && href.startsWith(baseUrl))
       .filter(href => !applyDetailFilter || !detailRe || detailRe.test(href))
-      .length
-    if (userSel) return count(userSel, false, false)
+    const toResult = (list: string[]) => ({ count: list.length, isLoginPage, fingerprint: list.slice().sort().join('|') })
+    if (userSel) return toResult(hrefs(userSel, false, false))
     if (platformSel) {
-      const viaProfile = count(platformSel, false, true)
-      if (viaProfile > 0) return viaProfile
+      const viaProfile = hrefs(platformSel, false, true)
+      if (viaProfile.length > 0) return toResult(viaProfile)
     }
     const normalize = (u: string) => u.replace(/\/+$/, '')
     const currentNorm = normalize(location.href)
     const originNorm = normalize(location.origin)
-    return Array.from(document.querySelectorAll('a'))
+    const fallback = Array.from(document.querySelectorAll('a'))
       .filter(a => a.querySelector('img'))
       .map(a => (a as HTMLAnchorElement).href)
       .filter(href => href && href.startsWith(baseUrl))
       .filter(href => { const n = normalize(href); return n !== currentNorm && n !== originNorm })
-      .length
+    return toResult(fallback)
   }, { userSel, platformSel, detailPatternSrc, baseUrl })
 }
 
@@ -2499,15 +2514,29 @@ async function settleAfterNav(page: Page) {
  *  순차로 찾지 않고 지수 확장(1,2,4,8...페이지씩 건너뛰며 빈 페이지가 나올 때까지) + 그 사이를 이분
  *  탐색해서 찾는다 — 카테고리가 수백 페이지짜리면 순차 탐색은 실사용 중 카테고리 1개에 수 분씩 걸리는
  *  게 확인됐다(로그(n)번만 페이지를 열면 되므로 대형 카테고리에서도 빠르다).
- *  bound 페이지까지도 빈 페이지를 못 찾으면 null(호출부가 안전한 순차 탐색으로 폴백). */
+ *  bound 페이지까지도 빈 페이지를 못 찾으면 null(호출부가 안전한 순차 탐색으로 폴백).
+ *  탐색 중 로그인 화면으로 튕기면(needsLogin) 그 즉시 지금까지 확인한 값으로 멈춘다 — 로그인 화면은
+ *  count===0이 아니라서 이 탐색이 끝을 못 찾고 bound까지 헤매다 최후 순차 폴백까지 소진하는 원인이었다.
+ *  knownNonEmptyFingerprint: 범위를 벗어난 page를 요청해도 빈 화면이 아니라 마지막 유효 페이지 내용을
+ *  그대로 다시 돌려주는 몰이 있다(2026-08-09 seasonbag.co.kr 재현 — page=32를 요청해도 실제로는 14페이지
+ *  내용이 반복됨). count>0이라고 "더 있다"고 오판하면 진짜 끝을 못 찾고 페이지 번호만 계속 올리며 헤맨다
+ *  — probe의 내용이 지금까지 확인한 마지막(lo) 페이지 내용과 완전히 같으면(fingerprint 일치) 새 내용이
+ *  아니라 반복이라는 뜻이므로, count===0과 똑같이 "여기가 끝"으로 처리한다.
+ *  다만 lo와의 단순 비교만으론 부족하다: 지수 확장은 한 번에 여러 페이지를 건너뛰므로(1,2,4,8...), 건너뛴
+ *  자리가 하필 그 "반복 지점"이면 (진짜 내용은 페이지마다 다르므로) 저 멀리 있는 lo와는 우연히 달라 보여
+ *  "새 내용"으로 오판할 수 있다(직접 재현: lo=8에서 probe=16으로 건너뛰었는데 16이 이미 14페이지 내용의
+ *  반복이지만, 8페이지 내용과는 여전히 달라 새 페이지로 오인됨 → 결과가 실제(14)보다 큰 값(16)으로 확정).
+ *  그래서 "새 내용처럼 보이는" probe는 바로 다음 페이지(probe+1)까지 한 번 더 확인해, 그것도 같은 내용이면
+ *  (반복이 안정적으로 계속됨) probe 자체를 새 lo로 승격하지 않고 그 자리를 벽으로 확정한다. */
 async function findRealLastPage(
   workerPage: Page, firstPageUrl: string, bound: number,
-  knownNonEmptyPage: number, knownNonEmptyCount: number,
+  knownNonEmptyPage: number, knownNonEmptyCount: number, knownNonEmptyFingerprint: string,
   userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
   stop: () => boolean,
-): Promise<{ page: number; count: number } | null> {
+): Promise<{ page: number; count: number; needsLogin?: boolean } | null> {
   let lo = knownNonEmptyPage
   let loCount = knownNonEmptyCount
+  let loFingerprint = knownNonEmptyFingerprint
   let hi: number | null = null
   let step = 1
   while (hi === null) {
@@ -2516,18 +2545,26 @@ async function findRealLastPage(
     if (probe > bound) return null
     await workerPage.goto(withPageParam(firstPageUrl, probe), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
     await settleAfterNav(workerPage)
-    const count = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
-    if (count === 0) hi = probe
-    else { lo = probe; loCount = count; step *= 2 }
+    const { count, isLoginPage, fingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    if (isLoginPage) return { page: lo, count: loCount, needsLogin: true }
+    if (count === 0 || fingerprint === loFingerprint) { hi = probe; continue }
+    if (stop()) return { page: lo, count: loCount }
+    await workerPage.goto(withPageParam(firstPageUrl, probe + 1), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
+    await settleAfterNav(workerPage)
+    const next = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    if (next.isLoginPage) return { page: lo, count: loCount, needsLogin: true }
+    if (next.count > 0 && next.fingerprint === fingerprint) { hi = probe; continue }
+    lo = probe; loCount = count; loFingerprint = fingerprint; step *= 2
   }
   while (hi - lo > 1) {
     if (stop()) return { page: lo, count: loCount }
     const mid = Math.floor((lo + hi) / 2)
     await workerPage.goto(withPageParam(firstPageUrl, mid), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
     await settleAfterNav(workerPage)
-    const count = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
-    if (count === 0) hi = mid
-    else { lo = mid; loCount = count }
+    const { count, isLoginPage, fingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    if (isLoginPage) return { page: lo, count: loCount, needsLogin: true }
+    if (count === 0 || fingerprint === loFingerprint) hi = mid
+    else { lo = mid; loCount = count; loFingerprint = fingerprint }
   }
   return { page: lo, count: loCount }
 }
@@ -2546,57 +2583,80 @@ async function countCategoryProductsOnce(
   const { category } = await detectCategoryLabel(workerPage)
   const label = category || categoryUrl
 
-  const perPage = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+  const { count: perPage, isLoginPage: perPageIsLogin, fingerprint: perPageFingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+  // 1페이지 자체가 로그인 화면이면(이 새 탭이 이 몰의 세션 검증에 걸려 튕겨나간 경우) 뒤 어떤 값도
+  // 못 믿는다 — 개수를 0으로 잘못 확정하는 대신 needsLogin만 알리고 즉시 끝낸다(호출부가 "로그인이
+  // 끊겼을 수 있다"는 배너를 보여줄 근거가 된다).
+  if (perPageIsLogin) return { url: categoryUrl, label, count: 0, needsLogin: true }
   if (perPage === 0 || stop()) return { url: categoryUrl, label, count: perPage }
 
   const maxPage = await readMaxPageNumber(workerPage, nextPageSelector)
-  if (maxPage === null || maxPage <= 1) {
+  // maxPage가 정말로(위젯을 읽어서) 1 이하로 확인된 경우만 곧바로 믿는다 — 위젯을 아예 못 찾은 경우
+  // (maxPage===null)는 "1페이지짜리 카테고리"인지 "위젯 클래스명이 특이해서 못 읽은 대형 카테고리"인지
+  // 구분이 안 되므로, 곧장 믿지 않고 아래 maxPage!==null 블록을 건너뛰어 이 함수 뒤쪽의 지수+이분 탐색
+  // (원래 "maxPage를 읽었지만 못 믿는 경우"를 위해 있던 것)을 그대로 재사용한다 — 예전엔 여기서 perPage를
+  // 그대로 총합으로 확정해버려, 위젯이 안 잡히는 스킨에서 실제보다 적게 세는 문제가 있었다.
+  if (maxPage !== null && maxPage <= 1) {
     console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage} → count=${perPage} url=${firstPageUrl}`)
     return { url: categoryUrl, label, count: perPage }
   }
 
-  await workerPage.goto(withPageParam(firstPageUrl, maxPage), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
-  await settleAfterNav(workerPage)
-  const lastPageCount = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
-  // maxPage가 "실제 마지막 페이지"가 아니라 페이지네이션 위젯이 한 번에 보여주는 번호 묶음의 끝일 수 있다
-  // (예: 카페24 기본 스킨은 1~5만 링크로 노출하고 다음 묶음은 화살표로만 이동 — 실사용 확인: 여러 카테고리가
-  // 전부 같은 maxPage=5·lastPageCount=48(꽉 참)로 읽혀 진짜 총 개수보다 훨씬 적은 값에서 멈춘 사례 발견).
-  // 그래서 "마지막"이라고 읽은 페이지 바로 다음 페이지도 비어있는지 한 번 더 확인해야 안심할 수 있다.
-  if (lastPageCount > 0 && !stop()) {
-    await workerPage.goto(withPageParam(firstPageUrl, maxPage + 1), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
+  if (maxPage !== null) {
+    await workerPage.goto(withPageParam(firstPageUrl, maxPage), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
     await settleAfterNav(workerPage)
-    const afterLastCount = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
-    if (afterLastCount === 0) {
-      const count = perPage * (maxPage - 1) + lastPageCount
-      console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage} lastPageCount=${lastPageCount} → count=${count} url=${firstPageUrl} lastPageUrl=${withPageParam(firstPageUrl, maxPage)}`)
-      return { url: categoryUrl, label, count }
+    const { count: lastPageCount, isLoginPage: lastPageIsLogin, fingerprint: lastPageFingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    // 여기서부터는 최소한 1페이지(perPage)는 로그인 상태에서 확인한 값이므로, 그걸 최선의 추정치로 두고
+    // needsLogin만 같이 알린다 — 0으로 깎아내리지 않는다.
+    if (lastPageIsLogin) return { url: categoryUrl, label, count: perPage, needsLogin: true }
+    // maxPage가 "실제 마지막 페이지"가 아니라 페이지네이션 위젯이 한 번에 보여주는 번호 묶음의 끝일 수 있다
+    // (예: 카페24 기본 스킨은 1~5만 링크로 노출하고 다음 묶음은 화살표로만 이동 — 실사용 확인: 여러 카테고리가
+    // 전부 같은 maxPage=5·lastPageCount=48(꽉 참)로 읽혀 진짜 총 개수보다 훨씬 적은 값에서 멈춘 사례 발견).
+    // 그래서 "마지막"이라고 읽은 페이지 바로 다음 페이지도 비어있는지 한 번 더 확인해야 안심할 수 있다.
+    if (lastPageCount > 0 && !stop()) {
+      await workerPage.goto(withPageParam(firstPageUrl, maxPage + 1), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
+      await settleAfterNav(workerPage)
+      const { count: afterLastCount, isLoginPage: afterLastIsLogin, fingerprint: afterLastFingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+      if (afterLastIsLogin) return { url: categoryUrl, label, count: perPage * (maxPage - 1) + lastPageCount, needsLogin: true }
+      // count>0이어도 maxPage와 완전히 같은 내용(fingerprint 일치)이면 "더 있다"가 아니라 범위를 벗어난
+      // page 요청을 몰이 마지막 유효 페이지로 그대로 되돌려준 것이다(2026-08-09 seasonbag.co.kr 재현) —
+      // 진짜 빈 페이지와 똑같이 취급해 여기서 확정한다. 안 그러면 아래 findRealLastPage가 "새 페이지"로
+      // 착각한 채 끝을 못 찾고 페이지 번호만 계속 올리며 헤맨다.
+      if (afterLastCount === 0 || afterLastFingerprint === lastPageFingerprint) {
+        const count = perPage * (maxPage - 1) + lastPageCount
+        console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage} lastPageCount=${lastPageCount} → count=${count} url=${firstPageUrl} lastPageUrl=${withPageParam(firstPageUrl, maxPage)}`)
+        return { url: categoryUrl, label, count }
+      }
+      console.log(`[previewCatalog] "${label}" maxPage=${maxPage}이 위젯 페이지 묶음의 끝일 뿐(page ${maxPage + 1}에도 ${afterLastCount}개 더 있음) → 실제 마지막 페이지 빠르게 탐색`)
+      const found = await findRealLastPage(
+        workerPage, firstPageUrl, AUTO_PAGINATION_CAP * 100, maxPage + 1, afterLastCount, afterLastFingerprint,
+        userSel, platformSel, detailPatternSrc, baseUrl, stop,
+      )
+      if (found) {
+        const count = perPage * (found.page - 1) + found.count
+        if (found.needsLogin) return { url: categoryUrl, label, count, needsLogin: true }
+        console.log(`[previewCatalog] "${label}" perPage=${perPage} 실제 마지막 페이지=${found.page} lastPageCount=${found.count} → count=${count}`)
+        return { url: categoryUrl, label, count }
+      }
+      console.log(`[previewCatalog] "${label}" 실제 마지막 페이지를 못 찾음(${AUTO_PAGINATION_CAP * 100}페이지 이내) → 안전한 순차 탐색으로 폴백`)
     }
-    console.log(`[previewCatalog] "${label}" maxPage=${maxPage}이 위젯 페이지 묶음의 끝일 뿐(page ${maxPage + 1}에도 ${afterLastCount}개 더 있음) → 실제 마지막 페이지 빠르게 탐색`)
-    const found = await findRealLastPage(
-      workerPage, firstPageUrl, AUTO_PAGINATION_CAP * 100, maxPage + 1, afterLastCount,
-      userSel, platformSel, detailPatternSrc, baseUrl, stop,
-    )
-    if (found) {
-      const count = perPage * (found.page - 1) + found.count
-      console.log(`[previewCatalog] "${label}" perPage=${perPage} 실제 마지막 페이지=${found.page} lastPageCount=${found.count} → count=${count}`)
-      return { url: categoryUrl, label, count }
-    }
-    console.log(`[previewCatalog] "${label}" 실제 마지막 페이지를 못 찾음(${AUTO_PAGINATION_CAP * 100}페이지 이내) → 안전한 순차 탐색으로 폴백`)
+  } else {
+    console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=null(페이지네이션 위젯 못 찾음) → 지수+이분 탐색으로 실제 마지막 페이지 확인`)
   }
 
-  if (stop()) return { url: categoryUrl, label, count: perPage * maxPage }
+  if (stop()) return { url: categoryUrl, label, count: maxPage ? perPage * maxPage : perPage }
 
-  // 마지막 페이지 번호를 잘못 읽었을 가능성(그 페이지가 실제로는 비어있음) — maxPage 자체는 못 믿지만
-  // 1페이지 개수(perPage)는 이미 확인했으니, 거기서부터 위와 같은 지수+이분 탐색으로 실제 마지막
-  // 페이지를 빠르게 찾는다. 예전엔 여기서 1페이지씩 순서대로 순회했는데, "maxPage 페이지 자체가
-  // 비어있게 읽힌" 카테고리가 실제로는 수백~수천 개짜리인 경우도 있어(실사용 확인: 1020bag.com의
-  // 한 카테고리가 5622개) 순차 탐색이 카테고리 하나에 수십 분씩 걸렸다.
+  // 여기 도달하는 두 경우 다 maxPage를 못 믿는다: 위젯을 읽었지만 그 페이지가 실제로는 비어있었던 경우,
+  // 또는 위젯 자체를 못 찾은 경우(maxPage===null). 어느 쪽이든 1페이지 개수(perPage)는 이미 확인했으니,
+  // 거기서부터 지수+이분 탐색으로 실제 마지막 페이지를 빠르게 찾는다. 예전엔 여기서 1페이지씩 순서대로
+  // 순회했는데, "maxPage 페이지 자체가 비어있게 읽힌" 카테고리가 실제로는 수백~수천 개짜리인 경우도
+  // 있어(실사용 확인: 1020bag.com의 한 카테고리가 5622개) 순차 탐색이 카테고리 하나에 수십 분씩 걸렸다.
   const fallbackFound = await findRealLastPage(
-    workerPage, firstPageUrl, AUTO_PAGINATION_CAP * 100, 1, perPage,
+    workerPage, firstPageUrl, AUTO_PAGINATION_CAP * 100, 1, perPage, perPageFingerprint,
     userSel, platformSel, detailPatternSrc, baseUrl, stop,
   )
   if (fallbackFound) {
     const count = perPage * (fallbackFound.page - 1) + fallbackFound.count
+    if (fallbackFound.needsLogin) return { url: categoryUrl, label, count, needsLogin: true }
     console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage}(불신) → 실제 마지막 페이지=${fallbackFound.page} → count=${count} url=${firstPageUrl}`)
     return { url: categoryUrl, label, count }
   }
@@ -2606,10 +2666,17 @@ async function countCategoryProductsOnce(
   await workerPage.goto(firstPageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {})
   await settleAfterNav(workerPage)
   let total = 0
+  let prevFingerprint: string | null = null
   for (let p = 0; p < AUTO_PAGINATION_CAP; p++) {
     if (stop()) break
-    const count = p === 0 ? perPage : await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
-    if (count === 0) break
+    const { count, isLoginPage, fingerprint } = p === 0
+      ? { count: perPage, isLoginPage: false, fingerprint: perPageFingerprint }
+      : await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    if (isLoginPage) return { url: categoryUrl, label, count: total, needsLogin: true }
+    // 여기도 위와 같은 이유로 fingerprint가 바로 앞 페이지와 같으면(범위 밖 page를 마지막 유효 페이지로
+    // 그대로 되돌려주는 몰) 새 페이지로 착각해 더하지 않고 여기서 끝낸다.
+    if (count === 0 || fingerprint === prevFingerprint) break
+    prevFingerprint = fingerprint
     total += count
     await workerPage.goto(withPageParam(firstPageUrl, p + 2), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
     await settleAfterNav(workerPage)
@@ -2723,6 +2790,10 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
         // 상황이라 정확도보다 여기서 안전하게(undefined.count로 죽지 않게) 걸러내는 것만 중요하다.
         const doneCounts = categoryCounts.filter((c): c is CategoryCount => !!c)
         const total = doneCounts.reduce((sum, c) => sum + c.count, 0)
+        // 카테고리 개수 집계 중 로그인 화면으로 튕긴 카테고리가 하나라도 있으면 그 결과(count)는
+        // 불완전할 수 있다는 뜻이라, 최상위 needsLogin에 반영해 화면이 "로그인을 다시 확인해주세요"를
+        // 보여줄 수 있게 한다.
+        needsLogin = needsLogin || doneCounts.some(c => c.needsLogin)
         if (stop()) return { ...supersededResult(), total, categoryCounts: doneCounts }
 
         // 부트스트랩으로 고른 카테고리(0번)가 하필 비어있으면, 실제로 상품이 있는 다른 카테고리에서 1건을 구한다.

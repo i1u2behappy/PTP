@@ -71,9 +71,28 @@
 - `app/api/scrape/preview-catalog/route.ts`: 요청 바디를 그대로 `previewCatalog`에 스프레드해서 넘기던
   기존 구조라 런타임 변경은 필요 없었고, 타입 캐스트에 필드만 추가했다.
 
+## 기본값 변경 — 자동/4 → 수동/2 (2026-08-09)
+
+실사용 확인(모니터링 로그): 자동 모드로 미리보기를 돌렸을 때 탭 7개(평상시) → 13개로 늘어난 구간이
+2번 있었고, 그 구간 내내 CPU가 거의 100%에 붙어있었다(2코어 CPU에서 동시 탭이 늘면 병렬로 빠르게
+끝나기보다 서로 CPU를 기다리며 전체 시간이 늘어남 — 메모리는 위험 수준까지 가지 않아 이번엔 CPU 경쟁이
+"느림"의 주된 원인이었다). 이에 따라 `ScraperPanel.tsx`의 기본값을 자동/4 → **수동/2**로 바꿨다.
+
+- `readConcurrencyPref()`의 세 fallback 지점(`typeof window==='undefined'`/파싱 성공 시 누락값/`catch`)
+  전부 `{mode:'manual', value:2}`로 변경.
+  `saved.mode` 판정도 뒤집었다(`saved.mode === 'auto' ? 'auto' : 'manual'` — 명시적으로 `'auto'`를
+  저장해둔 경우만 자동을 유지하고, 그 외(값 없음 포함)는 수동을 기본으로 삼는다).
+- **저장 키를 `scrape.scraper.concurrencyPref` → `scrape.scraper.concurrencyPref.v2`로 변경.** 이
+  기능을 만든 직후부터 `ScraperPanel`이 마운트될 때마다 그 시점의 기본값(자동/4)을 곧바로
+  localStorage에 써왔으므로, 브라우저에 이미 그 값이 저장돼 있다 — 키 이름을 그대로 두면 코드의
+  fallback 기본값을 바꿔도 이미 저장된 값이 계속 읽혀 새 기본값이 전혀 적용되지 않는다. 로컬 단일
+  사용자 도구라 서버에서 브라우저 저장값을 강제로 지우거나 마이그레이션할 방법이 없어, 키 자체를
+  새로 만들어 우회했다(예전 키는 그냥 안 쓰는 채로 남는다 — 정리용 코드 불필요).
+
 ## 상태
 
 **구현 완료.** tsc/eslint 클린(수정한 7개 파일 기준 — `npx eslint .` 전체 실행 시 나오는 나머지 경고/
 에러는 이번 작업과 무관한 기존 파일들). `resolveConcurrency`의 clamp 경계값(0, 음수, 99, `undefined`)은
-임시 node 스크립트로 직접 검증. 실사용 검증은 아직 안 됐다 — 수동 모드로 낮췄을 때 실제로 메모리 사용이
-줄어드는지, 재시작 후 `Get-Process chrome`으로 orphan이 실제로 사라지는지는 다음 사용 중 확인 필요.
+임시 node 스크립트로 직접 검증. 재시작 후 orphan chrome이 실제로 사라지는지는 확인됐다(`.playwright-
+profiles`를 쓰는 chrome.exe 0개). 기본값을 수동/2로 낮춘 뒤의 CPU/속도 개선 체감은 사용자가 다음 사용
+중 확인 예정.

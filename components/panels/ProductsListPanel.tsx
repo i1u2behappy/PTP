@@ -71,11 +71,30 @@ export function ProductsListPanel() {
     }
   }
 
+  /** "상태" 컬럼(ScrapeSessionGrid)이 "✓ 확정 - 데이터 검수 완"으로 보여주는 것과 같은 기준 —
+   *  아직 미확정 항목이 남은 세션은 병합 대상이 아니다. */
+  function isConfirmed(s: Session): boolean {
+    return s.staged_count > 0 && s.pending_count === 0
+  }
+
   function toggleCheckSession(id: number) {
+    const target = sessions.find(s => s.id === id)
+    if (!target) return
     setCheckedSessionIds(prev => {
-      const n = new Set(prev)
-      n.has(id) ? n.delete(id) : n.add(id)
-      return n
+      if (prev.has(id)) {
+        const n = new Set(prev); n.delete(id); return n
+      }
+      if (!isConfirmed(target)) {
+        alert('확정(데이터 검수 완료)되지 않은 세션은 병합할 수 없습니다.')
+        return prev
+      }
+      // 병합은 같은 몰의 세션끼리만 가능하다(서버도 검증하지만, 체크하는 즉시 바로 알려준다).
+      const firstChecked = prev.size > 0 ? sessions.find(s => s.id === [...prev][0]) : undefined
+      if (firstChecked && firstChecked.site_id !== target.site_id) {
+        alert('이미 체크한 세션들과 몰이 다릅니다. 같은 몰의 세션만 함께 선택할 수 있습니다.')
+        return prev
+      }
+      return new Set(prev).add(id)
     })
   }
 
@@ -94,6 +113,20 @@ export function ProductsListPanel() {
     } finally {
       setDeleting(false)
     }
+  }
+
+  /** 각각 스크랩된 세션 여러 개를 하나로 묶는다 — 다른 메뉴(데이터 마이그 목록 등)에서 이 중 아무
+   *  세션이나 조회해도 그룹 전체가 함께 조회된다(lib/scrape/mergeGroup.ts). 상품마스터는 만들지
+   *  않는다 — 그건 "확정" 버튼이 이미 끝낸 별개의 단계. */
+  async function handleMergeSessions() {
+    const sessionIds = [...checkedSessionIds]
+    const res = await fetch('/api/sessions/merge', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionIds }),
+    })
+    if (!res.ok) { alert('병합에 실패했습니다.'); return }
+    setCheckedSessionIds(new Set())
+    setSelectedSessionId(Math.min(...sessionIds))
+    loadSessions()
   }
 
   function openMigration() {
@@ -141,6 +174,12 @@ export function ProductsListPanel() {
             ) : (
               <>
                 <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
+                {checkedSessionIds.size >= 2 && (
+                  <button onClick={handleMergeSessions}
+                    className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors shrink-0">
+                    🔗 선택 병합 ({checkedSessionIds.size})
+                  </button>
+                )}
                 {isAdmin && checkedSessionIds.size > 0 && (
                   <button onClick={handleDeleteChecked} disabled={deleting}
                     className="px-3 py-1.5 bg-rose-50 text-rose-600 text-xs font-semibold rounded-full hover:bg-rose-100 disabled:opacity-50 transition-colors shrink-0">
@@ -162,7 +201,7 @@ export function ProductsListPanel() {
               <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4 shrink-0">
                 <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId}
                   onDelete={isAdmin ? handleDeleteSession : undefined} maxHeightClassName="max-h-48" showClientMall
-                  checkedIds={isAdmin ? checkedSessionIds : undefined} onToggleCheck={isAdmin ? toggleCheckSession : undefined} />
+                  checkedIds={checkedSessionIds} onToggleCheck={toggleCheckSession} isRowCheckable={isConfirmed} />
               </div>
             </>
           )}

@@ -43,7 +43,7 @@ function widthFor(key: string): number {
 /** 스크랩 세션 목록 그리드 — 데이터 마이그 목록 상단 조회와 마이그레이션 하위 메뉴들(ScrapeScopePicker)이
  *  공유한다. 컬럼 클릭 정렬(Shift+클릭 복합 정렬), 컬럼별 필터, 컬럼 폭 조절·드래그 순서 변경까지
  *  StagingItemsGrid와 동일한 조작 방식을 제공한다. */
-export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId, onSelect, onDelete, maxHeightClassName = 'max-h-52', showClientMall, checkedIds, onToggleCheck }: {
+export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId, onSelect, onDelete, maxHeightClassName = 'max-h-52', showClientMall, checkedIds, onToggleCheck, isRowCheckable }: {
   sessions: T[]
   selectedId: number | ''
   onSelect: (id: number) => void
@@ -54,6 +54,9 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
   /** 세션 여러 개를 동시에 체크할 수 있게 한다 — "선택 병합"처럼 세션 단위 다중 선택이 필요한 화면에서만 전달. */
   checkedIds?: Set<number>
   onToggleCheck?: (id: number) => void
+  /** 지정하면 이 함수가 false를 돌려준 행은 체크박스를 흐리게 비활성화한다(예: "확정" 안 된 세션은 병합
+   *  대상에서 제외) — 안 주면(기존 호출부 전부) 항상 체크 가능, 기존 동작 그대로. */
+  isRowCheckable?: (s: T) => boolean
 }) {
   const [sortKeys, setSortKeys] = useState<SortKey[]>([])
   const [filters, setFilters] = useState<Record<string, string>>({})
@@ -152,11 +155,14 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
       })
     : filteredSessions
 
+  const checkableVisible = visibleSessions.filter(s => isRowCheckable?.(s) ?? true)
+
   // 지금 필터/정렬로 보이는 세션들만 대상으로 전체 선택/해제한다 — 이미 체크된 게 전부면 끄고, 아니면 켠다.
+  // isRowCheckable이 false인 행은 건드리지 않는다(체크박스 자체가 비활성화돼 있어 애초에 못 켬).
   function handleSelectAll() {
     if (!onToggleCheck) return
-    const allChecked = visibleSessions.length > 0 && visibleSessions.every(s => checkedIds?.has(s.id))
-    visibleSessions.forEach(s => {
+    const allChecked = checkableVisible.length > 0 && checkableVisible.every(s => checkedIds?.has(s.id))
+    checkableVisible.forEach(s => {
       const checked = checkedIds?.has(s.id) ?? false
       if (allChecked ? checked : !checked) onToggleCheck(s.id)
     })
@@ -208,7 +214,7 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
             <tr className="border-b border-gray-200 text-gray-500 font-semibold">
               {onToggleCheck && (
                 <th className="px-4 py-2 text-left sticky left-0 z-20 bg-gray-50">
-                  <input type="checkbox" checked={visibleSessions.length > 0 && visibleSessions.every(s => checkedIds?.has(s.id))} onChange={handleSelectAll} />
+                  <input type="checkbox" checked={checkableVisible.length > 0 && checkableVisible.every(s => checkedIds?.has(s.id))} onChange={handleSelectAll} />
                 </th>
               )}
               {orderedColumns.map((col, colIdx) => {
@@ -256,7 +262,10 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
                   s.id === selectedId ? 'bg-teal-50' : 'hover:bg-gray-50'}`}>
                 {onToggleCheck && (
                   <td className={`px-4 py-2 sticky left-0 z-10 ${rowStickyBg}`} onClick={e => e.stopPropagation()}>
-                    <input type="checkbox" checked={checkedIds?.has(s.id) ?? false} onChange={() => onToggleCheck(s.id)} />
+                    <input type="checkbox" checked={checkedIds?.has(s.id) ?? false} onChange={() => onToggleCheck(s.id)}
+                      disabled={!(isRowCheckable?.(s) ?? true)}
+                      title={isRowCheckable?.(s) === false ? '확정되지 않은 세션이라 선택할 수 없습니다' : undefined}
+                      className={isRowCheckable?.(s) === false ? 'opacity-30 cursor-not-allowed' : ''} />
                   </td>
                 )}
                 {orderedColumns.map((col, colIdx) => (

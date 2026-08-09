@@ -428,7 +428,14 @@ export function StagingItemsGrid({ sessionId }: {
     })
   }
 
-  function handleOpenSourceUrl(url: string) {
+  async function handleOpenSourceUrl(url: string) {
+    try {
+      const res = await fetch('/api/system/open-in-browser', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      })
+      if (res.ok) return
+    } catch { /* 폴백으로 진행 */ }
     window.open(url, '_blank', 'noreferrer')
   }
 
@@ -526,6 +533,7 @@ export function StagingItemsGrid({ sessionId }: {
             📥 엑셀 다운로드
           </button>
           <button onClick={handleMerge} disabled={!selected.size || merging}
+            title="확정 시: 이미지 다운로드 + 원본 데이터(mall_products) 반영 + (거래처 연결된 몰이면) 상품마스터 자동 변환까지 처리됩니다."
             className="px-4 py-1.5 bg-teal-500 text-white text-xs font-semibold rounded-full hover:bg-teal-600 disabled:opacity-40 transition-colors">
             {merging ? '확정 중...' : `확정 (스크랩검수 후) (${selected.size})`}
           </button>

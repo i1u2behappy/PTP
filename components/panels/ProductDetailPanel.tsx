@@ -87,13 +87,21 @@ export function ProductDetailPanel({ params }: { params?: Record<string, unknown
   }
 
   /** 그냥 새 탭으로 열면 로그인 쿠키가 없어 로그아웃 상태로 보인다 — 이 몰 전용 로그인 창(예전 로그인
-   *  쿠키가 남은 프로필)에 열어 로그인된 상태로 확인할 수 있게 한다. */
+   *  쿠키가 남은 프로필)에 열어 로그인된 상태로 확인할 수 있게 한다. 그것도 안 되면 Chrome(없으면
+   *  Edge)으로 열고, 그마저 안 되면 일반 새 탭(=PTP를 띄운 브라우저)으로 최후 폴백한다. */
   async function handleOpenSourceUrl() {
     if (!data) return
     try {
       const res = await fetch('/api/scrape/open-url', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ siteId: data.site_id, url: data.source_url }),
+      })
+      if (res.ok) return
+    } catch { /* 폴백으로 진행 */ }
+    try {
+      const res = await fetch('/api/system/open-in-browser', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: data.source_url }),
       })
       if (res.ok) return
     } catch { /* 폴백으로 진행 */ }

@@ -1,5 +1,7 @@
 import pool, { decryptSecret } from './db'
 import { runScraping } from './scrape/run'
+import { isAnySiteBusy } from './scraper'
+import { restartPtpServer, isRestartInFlight } from './systemRestart'
 
 // ponytail: 단일 프로세스 in-memory 스케줄러. 여러 서버 인스턴스로 스케일하면 각자 따로 돌아 중복 실행될 수 있음.
 let started = false
@@ -9,6 +11,31 @@ export function startScheduler() {
   if (started) return
   started = true
   setInterval(() => { checkSchedules().catch(() => {}) }, 60_000)
+  setInterval(() => { checkMemoryAndAutoRestart().catch(() => {}) }, 5 * 60_000)
+}
+
+// ponytail: 2026-08-09 실사용 확인 — 평소엔 300~700MB인 이 서버 프로세스가, 스크랩/미리보기를 많이
+// 반복한 하루 뒤 3.65GB까지 불어난 채 안 줄어들어(V8이 한 번 늘린 힙을 스스로 OS에 안 돌려줌) 미리보기가
+// 멈추고 화면 진행상황이 사라지는 사고로 이어졌다(메모리 부족 → dev 서버 불안정 → Fast Refresh 강제
+// 새로고침으로 React 상태 초기화, [[scrape-preview-catalog-count-and-target-ui]] 스펙에 이미 기록된
+// 증상). 사용자가 눈치채고 수동으로 재시작 버튼을 누르기 전에, 조용히 스스로 정리한다.
+const MEMORY_RESTART_THRESHOLD_MB = 1536
+
+/** 이 서버 프로세스 자신의 메모리(RSS)가 임계치를 넘었고, 지금 어떤 몰이든 브라우저 세션을 쓰는 작업이
+ *  진행 중이 아니면(isAnySiteBusy) 조용히 재시작한다 — 작업 중간에 끼어들어 진행상황을 날리는 걸
+ *  막는 게 최우선이라, "지금 당장은 아니어도 다음 유휴 순간에" 정리되는 것으로 충분하다고 판단했다.
+ *  재시작 자체가 이 프로세스를 죽이므로, 재시작 뒤 새 프로세스는 낮은 메모리로 다시 시작해 당장 또
+ *  걸릴 일이 없다 — 그래서 "얼마 전에 이미 재시작했다"를 따로 기억해두는 코드가 필요 없다. */
+async function checkMemoryAndAutoRestart() {
+  if (isRestartInFlight()) return
+  const rssMB = process.memoryUsage().rss / 1024 / 1024
+  if (rssMB < MEMORY_RESTART_THRESHOLD_MB) return
+  if (isAnySiteBusy()) {
+    console.log(`[autoRestart] 메모리 ${Math.round(rssMB)}MB로 임계치(${MEMORY_RESTART_THRESHOLD_MB}MB) 초과했지만, 진행 중인 몰 작업이 있어 이번엔 건너뜀`)
+    return
+  }
+  console.log(`[autoRestart] 메모리 ${Math.round(rssMB)}MB로 임계치(${MEMORY_RESTART_THRESHOLD_MB}MB) 초과 + 유휴 상태 확인 — 자동 재시작`)
+  await restartPtpServer()
 }
 
 interface DueSite {

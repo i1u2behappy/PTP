@@ -267,6 +267,14 @@ export function getSiteLockStatus(siteId: number): { label: string; sinceMs: num
   return entry ? { label: entry.label, sinceMs: Date.now() - entry.since } : null
 }
 
+/** 지금 어떤 몰이든(siteId 무관) 브라우저 세션을 쓰는 작업이 하나라도 진행 중인지 — scrapeCatalogPage/
+ *  previewCatalog/몰 구조 파악 등 withContext를 거치는 작업은 전부 시작부터 끝까지 withSiteLock을 쥐고
+ *  있으므로, 이게 비어있으면 이 프로세스 안에서 지금 브라우저를 쓰는 작업이 전혀 없다는 뜻이다. 메모리
+ *  임계치 초과 시 자동 재시작(lib/scheduler.ts) 전에 "작업 중간에 끼어들지 않는지" 확인하는 용도. */
+export function isAnySiteBusy(): boolean {
+  return siteLockStatus.size > 0
+}
+
 const previewRuns = globalThis.__previewRuns ?? (globalThis.__previewRuns = new Map<number, PreviewRunState>())
 
 /** previewCatalog 진행률 표시 + 같은 몰에 대한 중복 실행 방지용. 실사용 중 확인된 문제: 미리보기가
@@ -2487,6 +2495,39 @@ async function readMaxPageNumber(page: Page, nextPageSelector: string | undefine
   }, { nextPageSelector }).catch(() => null)
 }
 
+/** 페이지네이션 위젯의 "마지막 페이지로" 이동 버튼 href에 인코딩된 페이지 번호를 직접 읽는다 —
+ *  `readMaxPageNumber`보다 훨씬 직접적이고 안정적인 1순위 신호다. 이 버튼은 보통 이미지 버튼이라
+ *  텍스트가 없어(`<a href="...page=14"><img alt="마지막 페이지"></a>`) `readMaxPageNumber`의 텍스트
+ *  기반 스캔(`node.textContent`)에는 전혀 안 잡혔다 — `<img>`는 textContent가 없기 때문. 그런데 이
+ *  버튼은 "마지막 페이지로 이동"이라는 자기 역할상, 몰이 지금 보여주는 페이지가 몇 번이든(범위 밖으로
+ *  clamp됐어도) href는 항상 진짜 마지막 페이지를 가리켜야 한다 — 실사용 확인(2026-08-09,
+ *  seasonbag.co.kr): `cate_no=41`을 1/3/6/7/261페이지 어느 걸로 요청해도 이 버튼의 href는 한 번도
+ *  안 바뀌고 항상 `page=6`(진짜 마지막)을 가리켰다. 텍스트로 보이는 페이지 번호를 세거나(버그 3~7이
+ *  전부 이 방식의 한계에서 나왔다) 지수+이분 탐색으로 찾을 필요 자체가 없어진다. 카페24 기본
+ *  페이지네이션 위젯(`ec-base-paginate`, 플랫폼 코어 마크업이라 스킨을 커스터마이징해도 대개 그대로
+ *  남아있음)은 이 버튼에 `class="last"`를 쓰지만, 클래스명이 다른 스킨도 있을 수 있어 클래스/alt
+ *  텍스트에 "last" 또는 "마지막"이 포함된 링크를 찾는다. */
+async function readLastPageFromNavButton(page: Page): Promise<number | null> {
+  return page.evaluate(() => {
+    const roots = Array.from(document.querySelectorAll('[class*="paging" i], [class*="pagination" i]'))
+    for (const el of roots) {
+      const candidates = Array.from(el.querySelectorAll('a[href]')).filter(a => {
+        const cls = a.className || ''
+        const alt = a.querySelector('img')?.getAttribute('alt') || ''
+        return /last|마지막/i.test(cls) || /last|마지막/i.test(alt)
+      })
+      for (const a of candidates) {
+        try {
+          const u = new URL((a as HTMLAnchorElement).href, location.href)
+          const n = Number(u.searchParams.get('page'))
+          if (Number.isInteger(n) && n > 0) return n
+        } catch { /* href가 page 쿼리파라미터 형태가 아님 — 다음 후보로 */ }
+      }
+    }
+    return null
+  }).catch(() => null)
+}
+
 /** 지금 실제로 몇 페이지를 보고 있는지, 위젯이 스스로 표시하는 값을 읽는다. 범위를 벗어난 `page`를
  *  요청해도 몰이 마지막 유효 페이지로 그대로 clamp해서 돌려주는 경우(2026-08-09 seasonbag.co.kr
  *  스크린샷으로 직접 확인 — URL은 `page=21`인데 위젯은 여전히 "14"를 현재 페이지로 굵게 표시), 상품
@@ -2634,7 +2675,12 @@ async function countCategoryProductsOnce(
   if (perPageIsLogin) return { url: categoryUrl, label, count: 0, needsLogin: true }
   if (perPage === 0 || stop()) return { url: categoryUrl, label, count: perPage }
 
-  const maxPage = await readMaxPageNumber(workerPage, nextPageSelector)
+  // 1순위: "마지막 페이지로" 버튼 href에서 직접 읽는다 — 텍스트를 세는 readMaxPageNumber보다 훨씬
+  // 신뢰도가 높다(범위 밖 page로 clamp돼도 이 버튼은 항상 진짜 마지막 페이지를 가리킴, 위 함수 설명
+  // 참고). 이게 있으면 아래 "maxPage+1 확인 → 그래도 못 믿으면 지수+이분 탐색" 안전장치가 거의 항상
+  // 즉시(afterLastCount===0으로) 끝나 실질적으로 탐색 자체가 필요 없어진다. 이 버튼이 없는 스킨이면
+  // null이 나와 기존 readMaxPageNumber로 자동 폴백한다.
+  const maxPage = (await readLastPageFromNavButton(workerPage)) ?? (await readMaxPageNumber(workerPage, nextPageSelector))
   // maxPage가 정말로(위젯을 읽어서) 1 이하로 확인된 경우만 곧바로 믿는다 — 위젯을 아예 못 찾은 경우
   // (maxPage===null)는 "1페이지짜리 카테고리"인지 "위젯 클래스명이 특이해서 못 읽은 대형 카테고리"인지
   // 구분이 안 되므로, 곧장 믿지 않고 아래 maxPage!==null 블록을 건너뛰어 이 함수 뒤쪽의 지수+이분 탐색

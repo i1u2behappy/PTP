@@ -63,12 +63,16 @@ export async function restartPtpServer(): Promise<void> {
   // Stop-Process는 이 dev 서버 프로세스만 죽인다 — Playwright가 띄운 chrome.exe들은 그 자식이 아니라
   // 프로필 폴더별로 launchPersistentContext된 별개 프로세스라 그대로 orphan으로 남아 메모리를 계속
   // 붙들고 있었다(재시작해도 메모리가 안 줄어드는 원인 중 하나) — orphanedChromeCleanupScript()로 같이 정리한다.
+  // 재시작된 새 서버의 출력을 어디로도 안 보내면(예전엔 그랬다), 그 뒤 이 프로세스가 왜 멈추거나
+  // 죽었는지 볼 로그가 전혀 없다(2026-08-09 실사용 확인 — 자동재시작 후 멀쩡히 떠 있던 서버가 나중에
+  // 조용히 죽었는데, 원인을 볼 로그가 하나도 없었다). cmd.exe 자체의 리다이렉션으로 .dev-server.log에
+  // 이어서(>>) 계속 쌓아 재시작 전후 기록이 끊기지 않게 한다.
   fs.writeFileSync(scriptPath, [
     `Start-Sleep -Seconds 1`,
     `Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`,
     orphanedChromeCleanupScript(),
     `Start-Sleep -Seconds 1`,
-    `Start-Process -FilePath 'cmd.exe' -ArgumentList '/c npm run dev:clean' -WorkingDirectory '${cwd}' -WindowStyle Hidden`,
+    `Start-Process -FilePath 'cmd.exe' -ArgumentList '/c npm run dev:clean >> ".dev-server.log" 2>&1' -WorkingDirectory '${cwd}' -WindowStyle Hidden`,
   ].join('\r\n'))
   const taskCmd = `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`
   try {

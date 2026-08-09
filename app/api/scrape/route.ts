@@ -53,10 +53,13 @@ export async function POST(req: NextRequest) {
   const scopeType = body.scopeType || (body.productUrls?.length ? 'products' : body.categoryUrls?.length ? 'category' : 'all')
   const scrapeMode = body.scrapeMode || 'full'
 
+  // scope_params에 실제 선택된 카테고리 URL 목록을 남겨둔다 — 나중에 "이 몰에서 어떤 카테고리를 이미
+  // 스크랩했는지"를 세션 기록에서 되짚어볼 수 있어야 한다(부분적으로 나눠 스크랩하는 경우, /api/scrape/
+  // categories가 이 값을 모아 카테고리 목록에 "완료" 표시를 붙이는 데 쓴다).
   const sessionRes = await pool.query<{ id: number }>(
-    `INSERT INTO scrape_sessions (url, site_id, login_id, status, scope_type, mode)
-     VALUES ($1,$2,$3,'running',$4,$5) RETURNING id`,
-    [resolvedUrl, body.siteId, body.loginId || null, scopeType, scrapeMode],
+    `INSERT INTO scrape_sessions (url, site_id, login_id, status, scope_type, mode, scope_params)
+     VALUES ($1,$2,$3,'running',$4,$5,$6) RETURNING id`,
+    [resolvedUrl, body.siteId, body.loginId || null, scopeType, scrapeMode, JSON.stringify({ categoryUrls: body.categoryUrls || [] })],
   )
   const sessionId = sessionRes.rows[0].id
 

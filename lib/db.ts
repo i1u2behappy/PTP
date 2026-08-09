@@ -187,6 +187,11 @@ export async function initDb() {
     -- 같이 받아가게 한다.
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS devmode_ai_preview BOOLEAN NOT NULL DEFAULT false;
 
+    -- 카테고리 목록의 "이미 스크랩함" 표시가 이 시각 이후의 완료 세션만 기준으로 삼는다(app/api/scrape/
+    -- categories) — 로그인을 다시 하면 이전 로그인 때 완료한 카테고리는 더 이상 참고 대상이 아니라는
+    -- 사용자 판단(2026-08-10)에 따른 것. app/api/scrape/login-confirm이 로그인 확인 시점마다 갱신한다.
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS last_login_confirmed_at TIMESTAMPTZ;
+
     CREATE TABLE IF NOT EXISTS supply_clients (
       id                   SERIAL PRIMARY KEY,
       name                 TEXT NOT NULL,

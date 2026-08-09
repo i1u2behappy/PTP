@@ -342,6 +342,15 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 지금 막 새로 훑었으면(false) 시간이 걸린다 — 사용자가 그 차이를 알 수 있도록 상태만 같이 보여준다.
   const [categoriesCached, setCategoriesCached] = useState<{ cached: boolean; updatedAt: string | null } | null>(null)
   const [detectedPlatform, setDetectedPlatform] = useState<string | null>(null)
+  // 카테고리를 나눠서(오늘 일부, 나중에 나머지) 스크랩하는 경우가 있어, 이 몰의 과거 완료 세션들을 훑어
+  // "이미 스크랩해본 카테고리"를 체크박스 목록에 표시한다(app/api/scrape/categories가 계산해 내려줌).
+  // allCategoriesScraped=true면 몰 전체 스크랩을 완료한 적이 있다는 뜻이라 개별 목록과 무관하게 전부 완료로 본다.
+  const [scrapedCategoryHrefs, setScrapedCategoryHrefs] = useState<string[]>([])
+  const [allCategoriesScraped, setAllCategoriesScraped] = useState(false)
+  // 메뉴 구조상 카테고리처럼 보이지만 실제 상품이 없는 항목(안내/문의 페이지 등)은 자동 판별만으로 완전히
+  // 걸러낼 수 없어(몰마다 메뉴 구조가 제각각), 사용자가 직접 "제외"로 표시해둘 수 있게 한다(사이트별로
+  // 서버에 저장돼 다음에 카테고리를 다시 불러와도 유지됨).
+  const [excludedCategoryHrefs, setExcludedCategoryHrefs] = useState<string[]>([])
 
   const [previewResult, setPreviewResult]   = useState<{ sourceUrl: string; product: PreviewProduct } | null>(null)
   // 미리보기 결과가 로그인 세션이 끊긴 상태로 얻어진 것 같을 때(창을 닫은 뒤 세션 만료 등) — 자동으로
@@ -413,10 +422,56 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     localStorage.setItem(CONCURRENCY_PREF_KEY, JSON.stringify({ mode: concurrencyMode, value: concurrency }))
   }, [concurrencyMode, concurrency])
 
+  // LAST_SESSION_KEY(스크랩 진행/완료 상태)와 FORM_STATE_KEY(몰 선택/카테고리 목록 등)는 서로 독립적으로
+  // 복원돼야 한다 — 아래 마운트 effect에서 둘 다 적용한다.
+  interface ScraperFormSavedState {
+    siteId: number; targetUrl: string; categoryUrlsText: string
+    previewResult?: { sourceUrl: string; product: PreviewProduct } | null
+    previewTotal?: number | null
+    previewItems?: PreviewItem[]
+    categoryCounts?: CategoryCountItem[]
+    detectedPlatform?: string | null
+    loginStep?: LoginStep
+    categories?: { href: string; text: string }[]
+    categoriesCached?: { cached: boolean; updatedAt: string | null } | null
+    profileResult?: ProfileCheckResult | null
+    scrapedCategoryHrefs?: string[]
+    allCategoriesScraped?: boolean
+    excludedCategoryHrefs?: string[]
+  }
+
+  function applyFormState(saved: ScraperFormSavedState) {
+    setTargetUrl(saved.targetUrl)
+    setCategoryUrlsText(saved.categoryUrlsText)
+    if (saved.previewResult) setPreviewResult(saved.previewResult)
+    if (saved.previewTotal != null) setPreviewTotal(saved.previewTotal)
+    if (saved.previewItems?.length) setPreviewItems(saved.previewItems)
+    if (saved.categoryCounts?.length) setCategoryCounts(saved.categoryCounts)
+    if (saved.detectedPlatform) setDetectedPlatform(saved.detectedPlatform)
+    // 로그인 확인 상태/발견된 카테고리/몰 구조 파악 결과는 dev 서버가 Fast Refresh로 화면을 강제
+    // 새로고침시켜도(실사용 중 확인된 문제) 사라진 것처럼 보이지 않게 여기서 되살린다. openSessions
+    // (로그인 창)는 브라우저만 새로고침됐을 뿐인 같은 서버 프로세스에 그대로 남아있어 loginStep 복원이
+    // 실제 상태와 어긋나지 않는다.
+    if (saved.loginStep) setLoginStep(saved.loginStep)
+    if (saved.categories?.length) setCategories(saved.categories)
+    if (saved.categoriesCached) setCategoriesCached(saved.categoriesCached)
+    if (saved.profileResult) setProfileResult(saved.profileResult)
+    if (saved.scrapedCategoryHrefs?.length) setScrapedCategoryHrefs(saved.scrapedCategoryHrefs)
+    if (saved.allCategoriesScraped) setAllCategoriesScraped(true)
+    if (saved.excludedCategoryHrefs?.length) setExcludedCategoryHrefs(saved.excludedCategoryHrefs)
+  }
+
   useEffect(() => {
     // Mall 목록/거래처 목록에서 특정 몰(또는 거래처)을 지정해 들어온 경우, 그 선택이 우선이므로 이전 세션 복원은 건너뛴다.
     if (initialSiteId) { selectSite(initialSiteId); return }
     if (initialClientId) return
+
+    const formRaw = localStorage.getItem(FORM_STATE_KEY)
+    let savedForm: ScraperFormSavedState | null = null
+    if (formRaw) {
+      try { savedForm = JSON.parse(formRaw) as ScraperFormSavedState } catch { /* 손상된 저장값은 무시 */ }
+    }
+
     const raw = localStorage.getItem(LAST_SESSION_KEY)
     if (raw) {
       try {
@@ -429,6 +484,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error,
             successCount: Number(d.success_count) || 0, failedCount: Number(d.failed_count) || 0,
           })
+          // 세션 복원과 별개로, 같은 몰의 카테고리 목록 등 폼 상태도 함께 복원한다 — 예전엔 여기서 그대로
+          // return해버려 "스크랩 완료" 상태는 보이는데 그 위 카테고리 선택 목록은 사라져 보이는 문제가
+          // 있었다(2026-08-10 실사용 확인). selectSite()는 카테고리/진행상황을 전부 초기화하는 함수라
+          // (사용자가 다른 몰을 새로 고를 때 쓰는 용도) 여기서 그대로 쓰면 방금 복원한 세션까지 같이
+          // 지워버리므로 쓰지 않고, 저장해둔 값을 직접 적용한다.
+          if (savedForm && savedForm.siteId === saved.site.id) applyFormState(savedForm)
         }).catch(() => {})
         // 진행 로그(URL별 성공/실패)는 탭 전환으로 언마운트됐다 돌아와도 그대로 보여야 하므로 같이 복원한다.
         fetch(`/api/scrape/log?sessionId=${saved.sessionId}`).then(r => r.json()).then((rows: ItemLogRow[]) => {
@@ -440,56 +501,25 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     // 아직 스크랩을 시작하지 않은 단계(위 세션 복원 대상이 없음)라도, 몰 선택/시작 URL/카테고리 목록만은
     // 그대로 이어서 볼 수 있도록 복원한다. selectSite가 site.url로 targetUrl을 기본값으로 초기화해버리므로,
     // 그 뒤에 저장해둔 실제 값으로 다시 덮어쓴다.
-    const formRaw = localStorage.getItem(FORM_STATE_KEY)
-    if (!formRaw) return
-    try {
-      const saved = JSON.parse(formRaw) as {
-        siteId: number; targetUrl: string; categoryUrlsText: string
-        previewResult?: { sourceUrl: string; product: PreviewProduct } | null
-        previewTotal?: number | null
-        previewItems?: PreviewItem[]
-        categoryCounts?: CategoryCountItem[]
-        detectedPlatform?: string | null
-        loginStep?: LoginStep
-        categories?: { href: string; text: string }[]
-        categoriesCached?: { cached: boolean; updatedAt: string | null } | null
-        profileResult?: ProfileCheckResult | null
-      }
-      selectSite(saved.siteId).then(() => {
-        setTargetUrl(saved.targetUrl)
-        setCategoryUrlsText(saved.categoryUrlsText)
-        if (saved.previewResult) setPreviewResult(saved.previewResult)
-        if (saved.previewTotal != null) setPreviewTotal(saved.previewTotal)
-        if (saved.previewItems?.length) setPreviewItems(saved.previewItems)
-        if (saved.categoryCounts?.length) setCategoryCounts(saved.categoryCounts)
-        if (saved.detectedPlatform) setDetectedPlatform(saved.detectedPlatform)
-        // 아이디/비번은 selectSite가 이미 DB(sites.login_id/login_pw_encrypted)에서 다시 채워주므로
-        // 여기서 따로 복원할 필요가 없다(비밀번호를 localStorage에 평문으로 남기지 않기 위함이기도 함).
-        // 로그인 확인 상태/발견된 카테고리/몰 구조 파악 결과는 selectSite가 항상 초기화해버리므로
-        // (몰을 새로 고를 때의 정상 동작) 그 다음에 다시 덮어써야 한다 — dev 서버가 Fast Refresh로
-        // 화면을 강제 새로고침시켜도(실사용 중 확인된 문제) 이 정보들이 사라진 것처럼 보이지 않게 한다.
-        // openSessions(로그인 창)는 브라우저만 새로고침됐을 뿐인 같은 서버 프로세스에 그대로 남아있어
-        // loginStep 복원이 실제 상태와 어긋나지 않는다.
-        if (saved.loginStep) setLoginStep(saved.loginStep)
-        if (saved.categories?.length) setCategories(saved.categories)
-        if (saved.categoriesCached) setCategoriesCached(saved.categoriesCached)
-        if (saved.profileResult) setProfileResult(saved.profileResult)
-        // dev 서버 불안정으로 화면이 강제 새로고침되면(Fast Refresh) 미리보기가 서버에서는 계속 돌고
-        // 있는데 화면만 "아무 일도 없었던 것"처럼 보인다 — 마운트 시점에 이 몰에 아직 도는 미리보기가
-        // 있는지 한 번 확인해, 있으면 로딩 상태를 이어서 보여준다(resumePreviewProgressPolling 참고).
-        fetch(`/api/scrape/preview-progress?siteId=${saved.siteId}`).then(r => r.json()).then((d: {
-          done: number; total: number
-          result?: { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; categoryCounts?: CategoryCountItem[]; needsLogin?: boolean }
-        }) => {
-          // 마운트되는 바로 그 순간 이미 완료돼 있었으면(폴링 시작 전) 1초 기다리지 않고 바로 반영한다.
-          if (d.result) { applyCatalogPreview(d.result); return }
-          if (!d.total) return
-          setPreviewLoading(true)
-          setPreviewProgress(d)
-          resumePreviewProgressPolling(saved.siteId)
-        }).catch(() => {})
-      })
-    } catch { /* 손상된 저장값은 무시 */ }
+    if (!savedForm) return
+    const siteId = savedForm.siteId
+    selectSite(siteId).then(() => {
+      applyFormState(savedForm!)
+      // dev 서버 불안정으로 화면이 강제 새로고침되면(Fast Refresh) 미리보기가 서버에서는 계속 돌고
+      // 있는데 화면만 "아무 일도 없었던 것"처럼 보인다 — 마운트 시점에 이 몰에 아직 도는 미리보기가
+      // 있는지 한 번 확인해, 있으면 로딩 상태를 이어서 보여준다(resumePreviewProgressPolling 참고).
+      fetch(`/api/scrape/preview-progress?siteId=${siteId}`).then(r => r.json()).then((d: {
+        done: number; total: number
+        result?: { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; categoryCounts?: CategoryCountItem[]; needsLogin?: boolean }
+      }) => {
+        // 마운트되는 바로 그 순간 이미 완료돼 있었으면(폴링 시작 전) 1초 기다리지 않고 바로 반영한다.
+        if (d.result) { applyCatalogPreview(d.result); return }
+        if (!d.total) return
+        setPreviewLoading(true)
+        setPreviewProgress(d)
+        resumePreviewProgressPolling(siteId)
+      }).catch(() => {})
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 마운트 시 1회만: initialSiteId는 탭 생성 시 고정되는 값
   }, [])
 
@@ -499,10 +529,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     localStorage.setItem(FORM_STATE_KEY, JSON.stringify({
       siteId: selectedSite.id, targetUrl, categoryUrlsText,
       previewResult, previewTotal, previewItems, categoryCounts, detectedPlatform,
-      loginStep, categories, categoriesCached, profileResult,
+      loginStep, categories, categoriesCached, profileResult, scrapedCategoryHrefs, allCategoriesScraped, excludedCategoryHrefs,
     }))
   }, [selectedSite, targetUrl, categoryUrlsText, previewResult, previewTotal, previewItems, categoryCounts, detectedPlatform,
-    loginStep, categories, categoriesCached, profileResult])
+    loginStep, categories, categoriesCached, profileResult, scrapedCategoryHrefs, allCategoriesScraped, excludedCategoryHrefs])
 
   const filteredSites = useMemo(() => {
     const q = siteQuery.trim().toLowerCase()
@@ -909,7 +939,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   }
 
   /** 로그인 창에 새 탭으로 열어 로그인된 상태로 보여준다. 로그인 창이 닫혀있으면 서버가 저장된 로그인
-   * 쿠키로 새 창을 띄운다 — 요청이 아예 실패했을 때만 일반 새 탭으로 폴백한다. */
+   * 쿠키로 새 창을 띄운다 — 그것도 안 되면 Chrome(없으면 Edge)으로 열고, 그마저 안 되면(설치된 브라우저를
+   * 못 찾음 등) 일반 새 탭(=PTP를 띄운 브라우저)으로 최후 폴백한다. */
   async function handleOpenItem(url: string) {
     if (selectedSite) {
       try {
@@ -920,6 +951,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         if (res.ok) return
       } catch { /* 폴백으로 진행 */ }
     }
+    try {
+      const res = await fetch('/api/system/open-in-browser', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      })
+      if (res.ok) return
+    } catch { /* 폴백으로 진행 */ }
     window.open(url, '_blank', 'noreferrer')
   }
 
@@ -932,10 +970,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ siteId: selectedSite.id, url: targetUrl, loginId, loginPw, force }),
       })
-      const d = await res.json() as { links: { href: string; text: string }[]; platform: string; cached: boolean; updatedAt: string | null }
+      const d = await res.json() as {
+        links: { href: string; text: string }[]; platform: string; cached: boolean; updatedAt: string | null
+        scrapedHrefs?: string[]; allScraped?: boolean; excludedCategoryHrefs?: string[]
+      }
       setCategories(d.links || [])
       setDetectedPlatform(d.platform || null)
       setCategoriesCached({ cached: d.cached, updatedAt: d.updatedAt ?? null })
+      setScrapedCategoryHrefs(d.scrapedHrefs || [])
+      setAllCategoriesScraped(!!d.allScraped)
+      setExcludedCategoryHrefs(d.excludedCategoryHrefs || [])
     } finally {
       setCategoriesLoading(false)
     }
@@ -943,6 +987,27 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   function isCategorySelected(href: string) {
     return categoryUrlsText.split('\n').map(s => s.trim()).includes(href)
+  }
+  function isCategoryScraped(href: string) {
+    return allCategoriesScraped || scrapedCategoryHrefs.includes(href)
+  }
+  function isCategoryExcluded(href: string) {
+    return excludedCategoryHrefs.includes(href)
+  }
+  /** 실제 상품이 없는 카테고리(안내/문의 페이지 등)를 사용자가 직접 열어보고 "이건 아니다"로 표시한다 —
+   *  화면엔 바로 반영하고(목록 맨 아래로 정리), 서버에도 남겨 다음에 카테고리를 다시 불러와도 유지되게
+   *  한다. 서버 저장이 실패해도 화면 표시는 그대로 두고 조용히 넘어간다 — 실패해도 이번 화면에서 목록을
+   *  정리하는 데는 지장이 없고, 다음에 다시 불러오면 서버 값 기준으로 다시 맞춰진다. */
+  async function toggleCategoryExcluded(href: string) {
+    if (!selectedSite) return
+    const nextExcluded = !isCategoryExcluded(href)
+    setExcludedCategoryHrefs(prev => (nextExcluded ? [...prev, href] : prev.filter(h => h !== href)))
+    try {
+      await fetch('/api/scrape/categories/exclude', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteId: selectedSite.id, href, excluded: nextExcluded }),
+      })
+    } catch { /* 화면 표시는 이미 반영했으니 조용히 넘어간다 */ }
   }
   function toggleCategory(href: string) {
     const lines = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
@@ -1059,6 +1124,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPreviewTotal(null)
     setPreviewItems([]); setCategoryCounts([])
     setPreviewProgress(null)
+    // 새 미리보기는 새 스크랩 대상을 정하는 것이므로, 아래 "진행 상황"에 이전 스크랩의 "완료" 기록이
+    // 그대로 남아있으면 새로 스크래핑을 시작하려는 건지 이전 결과를 보는 건지 헷갈린다 — handleBackToSettings와
+    // 같은 방식으로 초기화한다.
+    setStatus('idle')
+    setSessionId(null)
+    setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([])
+    localStorage.removeItem(LAST_SESSION_KEY)
     const controller = new AbortController()
     previewAbortRef.current = controller
     // 카테고리가 많은/큰 몰은 몇 분씩 걸릴 수 있어 진행 중임을 보여준다 — 서버(previewCatalog)가
@@ -1637,20 +1709,40 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                                 ref={el => { if (el) el.indeterminate = categories.some(c => isCategorySelected(c.href)) && !categories.every(c => isCategorySelected(c.href)) }}
                                 onChange={toggleAllCategories} />
                             </th>
-                            <th colSpan={2} className="px-3 py-1.5 text-gray-500 font-normal text-left">
-                              발견된 카테고리 {categories.length}개 — 스크랩할 항목을 선택하세요
+                            <th colSpan={3} className="px-3 py-1.5 text-gray-500 font-normal text-left">
+                              발견된 카테고리 {categories.length}개
+                              {categories.some(c => isCategoryScraped(c.href)) &&
+                                ` (완료 ${categories.filter(c => isCategoryScraped(c.href)).length}개)`} — 스크랩할 항목을 선택하세요
                             </th>
                           </tr>
                         </thead>
                         <tbody>
-                          {categories.map(c => (
+                          {/* 실제 상품이 없는 항목(안내/문의 페이지 등)을 "제외"로 표시해두면 눈에 잘 안 띄게
+                              맨 아래로 정리한다 — Array.sort는 안정 정렬이라 같은 그룹(제외/비제외) 안에서는
+                              원래 발견 순서가 그대로 유지된다. */}
+                          {[...categories].sort((a, b) => Number(isCategoryExcluded(a.href)) - Number(isCategoryExcluded(b.href))).map(c => (
                             <tr key={c.href} onClick={() => toggleCategory(c.href)}
-                              className="group border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer">
+                              className={`group border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer ${isCategoryExcluded(c.href) ? 'opacity-50' : ''}`}>
                               <td className="px-3 py-1.5 w-6 sticky left-0 z-[1] bg-white group-hover:bg-gray-50">
                                 <input type="checkbox" checked={isCategorySelected(c.href)} onChange={() => toggleCategory(c.href)} onClick={e => e.stopPropagation()} />
                               </td>
-                              <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">{c.text}</td>
+                              <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
+                                <span className={isCategoryExcluded(c.href) ? 'line-through' : ''}>{c.text}</span>
+                                {isCategoryScraped(c.href) && (
+                                  <span className="ml-1.5 text-[10px] font-semibold text-teal-600" title="이 카테고리는 이전에 스크래핑을 완료한 적이 있습니다">✓ 완료</span>
+                                )}
+                                {isCategoryExcluded(c.href) && (
+                                  <span className="ml-1.5 text-[10px] font-semibold text-gray-400" title="상품 카테고리가 아닌 것으로 표시해뒀습니다">제외됨</span>
+                                )}
+                              </td>
                               <td className="px-3 py-1.5 text-gray-400 max-w-[320px] truncate" title={c.href}>{c.href}</td>
+                              <td className="px-3 py-1.5 w-12 text-right sticky right-0 bg-white group-hover:bg-gray-50">
+                                <button type="button" onClick={e => { e.stopPropagation(); toggleCategoryExcluded(c.href) }}
+                                  title={isCategoryExcluded(c.href) ? '다시 카테고리로 복원합니다' : '상품이 없는 카테고리라 목록 아래로 정리합니다'}
+                                  className="text-[10px] text-gray-400 hover:text-rose-500 hover:underline whitespace-nowrap">
+                                  {isCategoryExcluded(c.href) ? '복원' : '제외'}
+                                </button>
+                              </td>
                             </tr>
                           ))}
                         </tbody>

@@ -14,5 +14,10 @@ export async function POST(req: NextRequest) {
   const mallUrl = site.rows[0]?.url
   const currentUrl = mallUrl ? await navigateOpenPageTo(siteId, mallUrl) : getOpenPageUrl(siteId)
 
+  // 카테고리 목록의 "이미 스크랩함" 표시(app/api/scrape/categories)가 이 시각 이후의 완료 세션만 보게
+  // 한다 — 다시 로그인했다는 건 새 작업 사이클로 본다는 뜻이라, 이전 로그인 때 완료한 카테고리까지
+  // "완료"로 보여줄 필요가 없다는 사용자 판단(2026-08-10).
+  await pool.query(`UPDATE sites SET last_login_confirmed_at = NOW() WHERE id=$1`, [siteId])
+
   return NextResponse.json({ ok: true, currentUrl })
 }

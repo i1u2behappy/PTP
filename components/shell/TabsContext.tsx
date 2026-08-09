@@ -126,17 +126,19 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
     setActiveTabId(tab.id)
   }, [])
 
-  // 브라우저 "뒤로가기"를 눌러도 PTP 밖으로 나가지 않고 대시보드가 열리게 한다 — 히스토리에 더미 엔트리를
-  // 계속 채워둬 뒤로가기가 실제로 이전 페이지로 넘어가기 전에 항상 이 트랩에 먼저 걸리게 한다.
+  // 브라우저 "뒤로가기"를 눌러도 PTP 밖으로 나가지 않게 한다 — 히스토리에 더미 엔트리를 계속 채워둬
+  // 뒤로가기가 실제로 이전 페이지로 넘어가기 전에 항상 이 트랩에 먼저 걸리게 한다. 대시보드로 강제
+  // 전환하지는 않는다 — popstate는 의도적인 뒤로가기 버튼뿐 아니라 트랙패드 스와이프/마우스 사이드버튼
+  // 등으로도 뜨는데, 스크래핑 진행 화면 등을 보다가 실수로 이게 뜨면 진행 중인 화면에서 대시보드로
+  // 튕겨나가는 부작용이 있었다(2026-08-09 실사용 확인) — 그냥 지금 화면에 머무는 것으로 충분하다.
   useEffect(() => {
     window.history.pushState(null, '', location.href)
     function handlePopState() {
       window.history.pushState(null, '', location.href)
-      openTab(DASHBOARD_TAB)
     }
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
-  }, [openTab])
+  }, [])
 
   const setActive = useCallback((id: string) => {
     if (id !== activeTabIdRef.current) recordHistory(activeTabIdRef.current)

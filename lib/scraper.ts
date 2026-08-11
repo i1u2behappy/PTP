@@ -2939,9 +2939,12 @@ async function countCategoryProductsOnce(
   if (perPage === 0 || stop()) return { url: categoryUrl, label, count: perPage }
 
   // 0순위: 몰이 직접 적어둔 "총 N개" 문구가 있으면 그게 정답이다 — 위젯 판독이나 페이지를 더 열어보는
-  // 어떤 방식보다 빠르고 정확하다(1페이지 개수보다 작을 리 없다는 사실로 오탐 여부를 한 번 더 검증).
+  // 어떤 방식보다 빠르고 정확하다. readStatedTotalCount 자체가 이미 카테고리 라벨 근접 검증으로
+  // 오탐을 걸러내므로, 여기서 "1페이지 개수(perPage)보다 작으면 안 믿는다"는 추가 조건은 걸지 않는다
+  // — perPage 자체가 상품 카드 중복 링크 등으로 부풀려진 경우(실사용 확인: 펫투비, 진짜 21개인데
+  // perPage가 31~32로 잡힘) 정답인 statedTotal이 오히려 perPage보다 작아 그 조건에 걸려 버려진다.
   const statedTotal = await readStatedTotalCount(workerPage, label)
-  if (statedTotal !== null && statedTotal >= perPage) {
+  if (statedTotal !== null) {
     console.log(`[previewCatalog] "${label}" 페이지에 적힌 "총 ${statedTotal}개" 문구를 그대로 사용 → count=${statedTotal}`)
     return { url: categoryUrl, label, count: statedTotal }
   }

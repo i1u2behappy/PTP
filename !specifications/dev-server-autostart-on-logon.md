@@ -89,3 +89,38 @@ message... deadline has elapsed`)나고 있었고, 단순 API 라우트 하나 �
   재시작" 버튼은, 서버가 완전히 멈춘 경우 그 재시작 요청조차 같은 죽은 프로세스가 처리해야 해서
   응답이 영영 안 올 수 있다는 점을 놓치고 있었다(타임아웃 없이 무한정 "재시작 중..." 표시) — 6초
   타임아웃을 추가해, 응답이 없으면 "브라우저로는 더 해볼 수 없다"는 것을 바로 알려주도록 수정.
+
+## 재부팅 시 Docker(Postgres)보다 dev 서버가 먼저 떠서 초기 DB 연결이 실패하던 문제 (2026-08-12)
+
+PC를 재부팅했더니 Docker는 정상 기동됐는데 `localhost:3000`이 한동안 연결이 안 되는 것처럼 보인다는
+사용자 보고. `.dev-server.log` 확인 결과 재부팅 직후 `Connection terminated unexpectedly`/
+`Connection terminated due to connection timeout` 에러가 여러 번 찍혀 있었다. 원인 확인:
+
+- Docker의 `scrape-postgres` 컨테이너 시작 시각과 `ScrapeDevServer`(`/SC ONLOGON`) 작업으로 뜬
+  `next dev` 프로세스 시작 시각이 겨우 36초 차이(로그온 시 두 자동시작이 거의 동시에 걸림). 컨테이너가
+  "Up" 상태가 돼도 Postgres 자체가 실제로 연결을 받기까지 몇 초가 더 걸리는데, `start-dev-server.cmd`는
+  이를 전혀 기다리지 않고 곧바로 `next dev`를 띄워 첫 DB 쿼리들이 실패했다.
+- 몇 분 뒤 재확인하니 이미 자연히 정상화돼 있었다(Postgres 연결 재시도 자체는 `pg` 드라이버가 알아서
+  하므로 완전히 멈추지는 않음) — 그래도 재부팅마다 운에 따라 재현될 수 있는 구조적 틈이라 근본 수정.
+
+**수정**: `scripts/start-dev-server.cmd`에 `npm run dev:clean` 실행 전 Postgres 준비 대기 루프 추가 —
+`docker exec scrape-postgres pg_isready`를 최대 45회(각 시도 사이 약 2초, 최대 ~90초) 재시도하고,
+준비되면(또는 상한을 넘기면) 곧바로 dev 서버를 띄운다. 이 스크립트는 `restart-dev-server.ps1`(매일
+새벽 4시 재기동)도 그대로 재사용하므로 두 경로 다 한 번에 적용된다. `restartPtpServer()`(수동 재시작
+버튼 + 메모리 임계치 자동재시작, `lib/systemRestart.ts`)는 이 스크립트를 안 거치고 별도로
+`npm run dev:clean`을 직접 호출하는데, 이 경로는 앱이 이미 떠서 도는 중에만 트리거되므로(즉 그 시점엔
+DB가 이미 정상 연결돼 있었다는 뜻) 같은 대기 로직이 필요 없어 손대지 않았다.
+
+**구현 시 겪은 배치 스크립트 함정(전부 실사용 테스트로 검증)**:
+- 재시도 루프에서 `goto`로 `( ... ) > 파일` 리다이렉션 블록(또는 그 안에 중첩된 `for /L do (...)`) 밖의
+  라벨로 빠져나가면, 그 이후 출력이 리다이렉션을 벗어나 콘솔로 새어나간다(cmd.exe의 잘 알려진 한계) —
+  `goto`/라벨을 전혀 안 쓰고, `set DBREADY=` + `for /L`의 매 반복마다 `if not defined DBREADY (...)`로
+  건너뛰는 플래그 방식으로 재작성해서 해결.
+- `timeout /t N /nobreak`는 콘솔 핸들이 없는 비대화형 컨텍스트(예약 작업이 띄운 창 숨김 cmd.exe)에서
+  실제로는 대기하지 않고 즉시 반환될 수 있다(실사용 테스트로 확인: 3회 재시도가 1초 안에 다 끝남) —
+  `ping -n 3 127.0.0.1 >nul`(약 2초)로 대체, 같은 조건에서 정확히 대기함을 확인.
+- 배치 파일에 한글 텍스트를 넣었더니 인코딩 문제로 파서 자체가 깨졌다(`echo` 문구가 글자 단위로
+  잘려 "명령이 아닙니다" 오류) — 이 스크립트의 echo 문구는 전부 영문으로 유지.
+
+## 관련 파일
+- `scripts/start-dev-server.cmd`: Postgres 준비 대기 루프 추가.

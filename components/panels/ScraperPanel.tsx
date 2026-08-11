@@ -221,6 +221,7 @@ interface MallProfileSignals {
   categoryPaths: string[]
   categoryMaxDepth: number
   categoryMenuNames: string[]
+  hasPaginationWidget: boolean
   report: MallStructureReport | null
 }
 interface ProfileCheckResult {
@@ -1610,6 +1611,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 {!profileResult.signals.report && profileResult.signals.categoryMenuNames.length > 0 && (
                   <span className="text-[11px] bg-white border border-gray-200 text-gray-500 rounded-full px-2 py-0.5">
                     카테고리 메뉴 {profileResult.signals.categoryMenuNames.length}개: {profileResult.signals.categoryMenuNames.join(', ')}
+                  </span>
+                )}
+                {/* 위젯이 있는 게 정상/기본이라 그 경우엔 굳이 안 보여준다 — 없을 때만 눈에 띄게, 미리보기가
+                    이 신호를 참조해 지수 탐색으로 곧장 넘어간다는 것도 같이 안내한다. */}
+                {!profileResult.signals.hasPaginationWidget && (
+                  <span className="text-[11px] bg-amber-50 border border-amber-200 text-amber-700 rounded-full px-2 py-0.5">
+                    페이지네이션 위젯 없음 — 미리보기 카테고리 개수 확인 시 지수 탐색으로 바로 진행
                   </span>
                 )}
               </div>

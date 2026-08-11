@@ -302,6 +302,59 @@ Playwright의 `context.request.get()`(같은 `BrowserContext`라 로그인 쿠�
 브라우저 탐색이 (라벨용) 1회로 줄고, 안 맞는 몰은 기존처럼 매번 브라우저로 처리돼 지금보다 나빠지지
 않는다.
 
+### "몰 구조 파악"이 페이지네이션 위젯 유무를 확인해 미리보기가 참조하게 함 (2026-08-11)
+
+버그 11 수정 이후에도 위젯 자체가 아예 없는 몰(펫투비 등)은 카테고리마다
+`readLastPageFromNavButton`/`readMaxPageNumber`를 매번 반복 시도해도 항상 실패할 뿐이었다 — 사용자
+요청: "몰구조파악할 때 위젯이 없다는 것도 체크하게 하고, 그 결과를 미리보기가 참조하게 하라."
+
+**수정**: `MallProfileSignals`에 `hasPaginationWidget: boolean`(신규) 추가. `sampleMallProfile`이
+카테고리 목록 페이지를 방문한 김에(추가 이동 없이) 이 확인을 한 번만 하고 `sites.scrape_profile`에
+저장한다(기존 저장 경로 그대로 재사용). `previewCatalog`가 `ScrapeOptions.knownNoPaginationWidget`
+(신규)으로 이 신호를 받아 `countCategoryProductsOnce`에 전달하면, 위젯 확인 자체를 건너뛰고 곧장
+지수+이분 탐색으로 넘어간다. `/api/scrape/preview-catalog`가 요청마다 `sites.scrape_profile`을 조회해
+자동으로 실어보내므로 사용자가 따로 할 일은 없다(단, 이 필드가 없던 예전 프로파일은 "몰 구조 파악"을
+한 번 다시 눌러야 채워진다). "몰 구조 파악" 결과 화면(`ScraperPanel.tsx`)에도 위젯이 없을 때만 눈에
+띄는 배지로 표시.
+
+### 버그 12 — 상품 카드 하나에 링크가 2개면 개수가 그대로 배로 부풀려짐 + `?page=N`이 아예 안 통하는 몰에서 최대 16만 배까지 폭주 (수정됨)
+
+2026-08-12 실사용 확인: 펫투비 "사료" 카테고리가 실제로는 21개인데 32개·571개·16,363개·65,483개 등
+매번 다른 틀린 값이 나왔다. 실제 계정으로 로그인해 라이브로 원인을 확인:
+
+1. **중복 링크 미제거**: 이 몰 스킨은 상품 카드마다 `<a>`가 2개다(썸네일 링크 + 마우스오버 "빠른보기"
+   오버레이 버튼 링크, 둘 다 같은 `goods_view.php?goodsno=`를 가리킴). `countProductsOnPage`/
+   `countProductsFromHtml`의 `toResult`가 매칭된 href 목록을 중복 제거 없이 그대로 `list.length`로
+   세고 있어서, 실제 21개가 42개로 잡혔다(직접 로그인해 확인: 두 링크 그룹 다 정확히 21개, href
+   문자열까지 완전히 동일 — dedup으로 정확히 21로 수렴함을 라이브로 검증). 이건 이 몰만의 문제가
+   아니라 카드에 링크가 여러 개인(썸네일+빠른보기 버튼 등 흔한 UI 패턴) 어떤 몰에서도 재현되는
+   구조적 버그였다.
+2. **`?page=N`이 이 몰에서는 실제로 아무 효과가 없음**: 3초 간격으로 천천히, 실제 로그인 세션으로
+   `&page=3/5/8/...`을 하나씩 직접 열어봐도 전부 상품이 0개로 나왔다(속도/차단 문제가 아니라 이
+   파라미터 자체가 이 몰의 실제 페이지 전환 방식이 아님 — 로그로 확인된 `.paging` 요소도 사실
+   "최근본"(최근 본 상품) 위젯이었을 뿐, 상품 목록과 무관). 그런데 매 요청마다 오버레이 버튼 등
+   렌더링이 미묘하게 달라 지수+이분 탐색의 반복(fingerprint) 판정이 계속 "새 페이지"로 오판해, 탐색이
+   끝을 못 찾고 512·1024페이지까지 헤매다 그 지점을 "진짜 마지막 페이지"로 잘못 확정했다.
+
+**수정**:
+1. `countProductsOnPage`/`countProductsFromHtml`의 `toResult`가 href 목록을 `new Set(...)`으로
+   중복 제거한 뒤 개수/fingerprint를 계산한다(두 함수 판정 기준 동일 유지 원칙 그대로).
+2. `readStatedTotalCount(page, categoryLabel)`(신규) — 몰이 목록 페이지에 직접 적어둔 "총 N개"/
+   "전체 N건" 문구를 읽어, 그 문구 주변 30자 안에 지금 카테고리 라벨의 마지막 구간(예: "강아지 >
+   사료"의 "사료")이 같이 나오는지로 검증한다(전체 페이지에서 무작정 찾으면 무관한 배지 숫자를 잘못
+   집는다 — 버그 1이 이미 겪은 실수를 반복하지 않기 위한 스코프 검증). `countCategoryProductsOnce`가
+   1페이지 개수 확인 직후 이걸 최우선으로 시도하고, 찾은 값이 1페이지 개수보다 작지 않으면(오탐 방지)
+   그 값을 바로 총 개수로 쓰고 위젯 판독·탐색을 전부 건너뛴다. 실사용 확인: 펫투비 "사료" 페이지에
+   실제로 "사료(옵션상품수 포함) 총 21개의 상품이 준비되어 있습니다"라는 문구가 있어 정확히 매칭됨.
+3. `findRealLastPage`의 탐색 상한을 `AUTO_PAGINATION_CAP*100`(5000페이지)에서
+   `MAX_PAGE_SEARCH_BOUND = AUTO_PAGINATION_CAP*4`(200페이지, 신규 상수)로 낮췄다. 실제 확인된
+   대형 카테고리(1020bag.com 5622개, ≈30페이지)도 이 값의 15% 안쪽이라 정상적인 대형 카테고리는
+   여전히 넉넉하게 찾지만, 위 두 안전장치가 안 통하는 몰이라도 이제는 512·1024페이지까지 헤매다 틀린
+   숫자로 확정하는 대신 훨씬 빨리 포기하고 안전한 순차 폴백으로 넘어간다.
+
+세 수정 다 특정 몰 이름으로 예외처리한 게 아니라 범용 로직이라, 같은 유형(카드 중복 링크 / 위젯
+없음 / `page=N` 무반응)의 다른 몰에도 그대로 적용된다.
+
 ## 미리보기 중지
 
 미리보기가 오래 걸릴 수 있으니(위 성능 수정 이후에도 몰에 따라 카테고리가 아주 많으면 시간이 걸림)
@@ -495,8 +548,18 @@ React 상태를 전부 초기화하는데, `localStorage`에 저장해두던 항
   `countProductsOnPage`/`countProductsFromHtml`의 폴백 스캔에 `#contents` 스코프 제한 +
   `xans-layout-productrecent`(TODAY VIEW) 조상 제외 추가. (2026-08-11, 버그 11) `probeCategoryPage`
   (신규, top-level로 분리) — `countCategoryProductsOnce`가 1페이지 개수로 자체 캘리브레이션 후
-  `maxPage`/`maxPage+1` 확인에도 가벼운 HTTP 경로를 재사용.
+  `maxPage`/`maxPage+1` 확인에도 가벼운 HTTP 경로를 재사용. (2026-08-11) `MallProfileSignals.
+  hasPaginationWidget`(신규) — "몰 구조 파악"이 목록 페이지 방문 김에 위젯 유무를 확인해 저장.
+  `ScrapeOptions.knownNoPaginationWidget`(신규) — `previewCatalog`가 이 신호를 받아
+  `countCategoryProductsOnce`의 위젯 확인 자체를 건너뛰게 함. (2026-08-12, 버그 12)
+  `countProductsOnPage`/`countProductsFromHtml`의 `toResult`가 href를 `Set`으로 중복 제거.
+  `readStatedTotalCount`(신규) — 몰이 직접 적어둔 "총 N개" 문구를 카테고리 라벨로 검증해 최우선
+  신호로 사용. `MAX_PAGE_SEARCH_BOUND`(신규 상수, `AUTO_PAGINATION_CAP*4`=200) — 기존
+  `AUTO_PAGINATION_CAP*100`(5000)이던 `findRealLastPage`의 탐색 상한을 낮춤.
+- `lib/scrape/mallProfile.ts`: (2026-08-11) `summarizeProfile`/`describeDiff`에 `hasPaginationWidget`
+  반영.
 - `app/api/scrape/preview-catalog/route.ts`: `previewCatalog`에 `stopSignal: req.signal` 전달.
+  (2026-08-11) `sites.scrape_profile.hasPaginationWidget`을 조회해 `knownNoPaginationWidget`으로 전달.
 - `app/api/scrape/preview-progress/route.ts`(신규): `GET ?siteId=` → `{done, total}` 진행률 폴링용.
 - `app/api/scrape/categories/route.ts`: `sites.scrape_profile.categoryLinks` 캐시를 먼저 확인 후
   없으면 `discoverCategoryLinks`로 직접 훑고 캐시에 반영(`force=true`면 강제 새로고침) — "몰 구조
@@ -509,6 +572,8 @@ React 상태를 전부 초기화하는데, `localStorage`에 저장해두던 항
   `previewResumeNotice`(새로고침 후 진행 중 미리보기 재관찰).
 - `components/shell/GlobalErrorNet.tsx`(신규): 지수 백오프 자동 재시도, `AbortError` 예외 처리.
 - `app/layout.tsx`: `<GlobalErrorNet />` 마운트.
+- (2026-08-11) `components/panels/ScraperPanel.tsx`: 로컬 `MallProfileSignals` 타입에
+  `hasPaginationWidget` 추가 + 위젯 없을 때만 보이는 안내 배지.
 
 ## 상태
 
@@ -543,3 +608,12 @@ fallback이 브라우저보다 2개 더 셈)는 원인 미조사 상태다. **�
 동일(순수 함수 추출)이라 회귀 위험이 없고, `countCategoryProductsOnce`의 신규 캘리브레이션은 실패해도
 기존 브라우저 방식으로 그대로 폴백하므로 안 맞는 몰에서도 지금보다 나빠지지 않는다. 실제 카테고리가
 많은 몰(펫투비 등)로 미리보기 소요 시간이 줄었는지는 다음 실사용에서 확인 예정.
+
+몰구조파악 위젯 체크(2026-08-11)와 버그 12(2026-08-12)는 tsc/eslint 클린. 버그 12는 실제 계정으로
+로그인해 펫투비에 라이브로 재현·검증했다: href 중복 제거는 실제 페이지에서 42→21로 정확히 수렴 확인,
+"총 N개" 문구 검증도 실제 페이지의 "사료(옵션상품수 포함) 총 21개의 상품이 준비되어 있습니다"와 정확히
+매칭됨을 확인. **버그 9 문서 하단에 남겨뒀던 미해결 이슈("같은 카테고리를 완전히 동일한 조건으로 두 번
+실행했는데 결과가 6394개 → 634개로 10배 달랐다")는 이번에 확인된 버그 12(중복 링크 미제거로 인한 개수
+불안정 + `page=N` 무반응 몰에서의 지수 탐색 폭주)와 정확히 같은 유형의 증상이다 — 다만 seasonbag.co.kr
+"크로스/슬링백"에서 재현해 직접 검증하지는 않았으므로, 그 몰도 완전히 해소됐다고 확정하기보다는 다음에
+그 몰을 다시 스크랩할 때 확인 예정으로 남겨둔다.

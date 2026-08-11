@@ -16,6 +16,7 @@ function summarizeProfile(p: MallProfileSignals): string {
     p.hasStockStatusText ? '재고상태 문구 표시' : '재고상태 문구 미표시',
     p.hasStockByOption ? '옵션별 재고 위젯 있음' : '옵션별 재고 위젯 없음',
     `상품정보 항목: ${p.infoLabels.join(', ') || '없음'}`,
+    p.hasPaginationWidget ? '페이지네이션 위젯 있음' : '페이지네이션 위젯 없음(미리보기 개수 확인 시 지수 탐색만 사용)',
   ].join(', ')
 }
 
@@ -31,6 +32,7 @@ function describeDiff(prev: MallProfileSignals, next: MallProfileSignals): strin
   if (prev.hasStockStatusText !== next.hasStockStatusText) diffs.push(`재고상태 문구: ${prev.hasStockStatusText ? '있었음' : '없었음'} → ${next.hasStockStatusText ? '있음' : '없음'}`)
   if (prev.hasStockByOption !== next.hasStockByOption) diffs.push(`옵션별 재고 위젯: ${prev.hasStockByOption ? '있었음' : '없었음'} → ${next.hasStockByOption ? '있음' : '없음'}`)
   if (prev.hasCascadingOptions !== next.hasCascadingOptions) diffs.push(`연쇄옵션(색상→사이즈 등): ${prev.hasCascadingOptions ? '있었음' : '없었음'} → ${next.hasCascadingOptions ? '있음' : '없음'}`)
+  if (prev.hasPaginationWidget !== next.hasPaginationWidget) diffs.push(`페이지네이션 위젯: ${prev.hasPaginationWidget ? '있었음' : '없었음'} → ${next.hasPaginationWidget ? '있음' : '없음'}`)
   const prevOpt = new Set(prev.optionUiTypes)
   const nextOpt = new Set(next.optionUiTypes)
   if (prevOpt.size !== nextOpt.size || [...prevOpt].some(t => !nextOpt.has(t))) {

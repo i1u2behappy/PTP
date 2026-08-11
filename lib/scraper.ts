@@ -135,6 +135,12 @@ export interface ScrapeOptions {
    *  세션이 없는 단발 요청이라, 클라이언트가 fetch를 abort하면 그 요청의 AbortSignal을 그대로 여기
    *  꽂아 카테고리별 개수 집계 루프가 다음 네트워크 왕복 전에 스스로 멈추게 한다. */
   stopSignal?: AbortSignal
+  /** "몰 구조 파악"이 이미 확인해둔 신호(sites.scrape_profile.hasPaginationWidget===false) — true(=
+   *  위젯 없음이 확인됨)면 previewCatalog의 카테고리별 개수 집계가 매 카테고리마다
+   *  readLastPageFromNavButton/readMaxPageNumber를 반복 시도하지 않고 곧장 지수+이분 탐색으로
+   *  넘어간다. 그 확인 자체가 몰 전체에 대해 항상 실패하는 스킨(펫투비 등)에서, 카테고리 수만큼 반복해도
+   *  얻는 게 없던 낭비를 없앤다. */
+  knownNoPaginationWidget?: boolean
 }
 
 export function profileDir(siteId: number) {
@@ -1002,6 +1008,13 @@ export interface MallProfileSignals {
    *  몰 구조분석 결과를 그대로 재사용해 후보를 다시 훑지 않고 즉시 목록을 보여줄 때 쓴다. 지원 안 되는
    *  플랫폼/스캔 실패 시 빈 배열. */
   categoryLinks: CategoryMenuLink[]
+  /** 목록 페이지에 이 코드가 읽을 수 있는 페이지네이션 위젯(마지막 페이지 버튼 또는 페이지 번호 링크)이
+   *  있는지 — false면 미리보기의 카테고리별 개수 집계(countCategoryProductsOnce)가 매 카테고리마다 같은
+   *  확인을 반복하지 않고 곧장 지수+이분 탐색으로 넘어간다(knownNoPaginationWidget 참고). 위젯이 전혀
+   *  없는 몰은 그 확인이 어차피 항상 실패로 끝나 카테고리 수만큼 반복해도 얻는 게 없다(펫투비 등 일부
+   *  고도몰 스킨에서 실사용 확인, 2026-08-11 — 이 몰은 카테고리 하나에 최후수단 순회까지 떨어져 미리보기가
+   *  30분 넘게 걸렸다). */
+  hasPaginationWidget: boolean
   /** URL 계층/카테고리/결제계좌/택배사/재고관리형태/업체연락처/상품페이지구조/스크래핑 유의사항을 실제로
    *  수집한 원문(홈 하단 회사정보 + 이용안내·공지 등 게시판 + 상품페이지) 기반으로 AI가 요약한 리포트.
    *  ANTHROPIC_API_KEY 미설정이거나 원문을 하나도 못 모았으면 null. */
@@ -1662,6 +1675,18 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
     categoryByUrl = collected.categoryByUrl
   } catch { /* 카탈로그로 인식되지 않으면 아래에서 현재 페이지를 상품 페이지 1건으로 취급 */ }
 
+  // 지금 page는 아직 목록 페이지(startUrl)에 그대로 있다(collectProductUrls를 maxPages:1로 불러 페이지
+  // 이동 없음) — 추가 네비게이션 없이 이 페이지의 페이지네이션 위젯을 바로 확인한다. countCategoryProductsOnce가
+  // 매 카테고리마다 거치는 것과 같은 순서(1순위: 마지막 페이지 버튼 href, 2순위: 페이지 번호 텍스트)로,
+  // 이 몰의 스킨이 그 형태를 아예 안 쓰면 미리보기가 카테고리 수만큼 같은 확인을 반복해도 항상 실패할
+  // 뿐이니 여기서 한 번만 확인해 결과를 남겨둔다.
+  const hasPaginationWidget = await (async () => {
+    try {
+      const maxPage = (await readLastPageFromNavButton(page)) ?? (await readMaxPageNumber(page, undefined))
+      return maxPage !== null
+    } catch { return false }
+  })()
+
   // 아직 페이지 이동 전(현재 page가 startUrl) — 카테고리 메뉴/후보 링크 스캔은 반드시 여기서 먼저 한다.
   // 아래(랜딩 페이지 재시도)가 실제로 페이지를 이동시키므로, 이동 후로 미루면 이 몰의 헤더가 안 보일 수 있다.
   const categoryLinkCandidates = await findCategoryLinkCandidates(page)
@@ -1714,7 +1739,7 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
     sampleCount: 0, platform, sampleProductUrl: sampleUrls[0], hasMainImages: false, hasDetailImages: false,
     optionUiTypes: [], hasCascadingOptions: false, hasStockQty: false, hasStockStatusText: false,
     hasStockByOption: false, hasDetailText: false, infoLabels: [], categoryPaths: [], categoryMaxDepth: 0,
-    categoryMenuNames, categoryLinks, report: null,
+    categoryMenuNames, categoryLinks, hasPaginationWidget, report: null,
   }
   const optionTypes = new Set<'select' | 'swatch' | 'none'>()
   const infoLabelSet = new Set<string>()
@@ -2251,6 +2276,15 @@ interface CollectedLinks {
 // 링크가 사라지는 순간(아래 반복문의 break) 그보다 훨씬 먼저 끝난다.
 const AUTO_PAGINATION_CAP = 50
 
+// findRealLastPage(지수+이분 탐색)의 절대 상한. 예전엔 AUTO_PAGINATION_CAP*100(5000페이지)까지 허용했는데,
+// "?page=N"이 실제로는 아무 효과가 없는 몰(펫투비 등, 실사용 확인·2026-08-11 — 매 요청마다 내용이 조금씩
+// 달라져 지수 탐색이 "새 페이지"로 계속 오판)에서 이 상한을 거의 다 쓸 때까지 안 멈춰, 실제 21개짜리
+// 카테고리를 512페이지·16,363개로 잘못 확정하는 사고로 이어졌다. 진짜 대형 카테고리(1020bag.com 5622개,
+// 189개/페이지 기준 약 30페이지)도 이 값의 15% 안쪽이라, 훨씬 낮춰도 정상적인 대형 카테고리는 여전히
+// 여유 있게 찾는다 — 대신 위 안전장치들(총 N개 문구, href 중복 제거)이 실패하는 몰에서는 훨씬 빨리
+// "못 찾음"으로 포기하고 안전한 폴백으로 넘어가게 한다.
+const MAX_PAGE_SEARCH_BOUND = AUTO_PAGINATION_CAP * 4
+
 /**
  * 카테고리 URL을 그 카테고리의 중간 페이지(예: "...?cate_no=67&page=5")로 입력해도, 페이지네이션은
  * 항상 1페이지부터 끝까지 훑어야 그 페이지 이전에 있던 상품들을 놓치지 않는다 — "다음 페이지" 링크를
@@ -2515,7 +2549,12 @@ async function countProductsOnPage(
       .map(a => (a as HTMLAnchorElement).href)
       .filter(href => href && href.startsWith(baseUrl))
       .filter(href => !applyDetailFilter || !detailRe || detailRe.test(href))
-    const toResult = (list: string[]) => ({ count: list.length, isLoginPage, fingerprint: list.slice().sort().join('|') })
+    // 상품 카드 하나에 링크가 여러 개인 스킨이 흔하다(썸네일 링크 + "빠른보기"/장바구니 오버레이 버튼
+    // 링크 등, 실사용 확인: 펫투비 고도몰 스킨은 카드마다 이 두 링크가 항상 같은 상품을 중복으로 가리켜
+    // 실제 21개인 카테고리가 42개로 잡혔다) — 중복 href를 그대로 세면 몰마다 카드 안 링크 개수가 달라
+    // count가 들뜨고 불안정해진다(지수+이분 탐색이 "새 페이지"로 오판하는 원인). URL 그대로 중복 제거해
+    // 실제 상품 개수만 센다.
+    const toResult = (list: string[]) => { const u = [...new Set(list)]; return { count: u.length, isLoginPage, fingerprint: u.slice().sort().join('|') } }
     if (userSel) return toResult(hrefs(userSel, false, false))
     if (platformSel) {
       const viaProfile = hrefs(platformSel, false, true)
@@ -2656,7 +2695,9 @@ function countProductsFromHtml(
     .map(el => resolve($(el).attr('href')))
     .filter((href): href is string => !!href && href.startsWith(baseUrl))
     .filter(href => !applyDetailFilter || !detailRe || detailRe.test(href))
-  const toResult = (list: string[]) => ({ count: list.length, isLoginPage, fingerprint: list.slice().sort().join('|') })
+  // countProductsOnPage와 반드시 같은 중복 제거 기준을 유지한다(위 함수 주석 참고 — 상품 카드 하나에
+  // 링크가 여러 개인 스킨에서 count가 들뜨는 문제).
+  const toResult = (list: string[]) => { const u = [...new Set(list)]; return { count: u.length, isLoginPage, fingerprint: u.slice().sort().join('|') } }
   if (userSel) return toResult(hrefs(userSel, false, false))
   if (platformSel) {
     const viaProfile = hrefs(platformSel, false, true)
@@ -2848,10 +2889,38 @@ async function findRealLastPage(
   return { page: lo, count: loCount }
 }
 
+/** 목록 페이지에 몰이 직접 적어둔 "총 N개"/"전체 N건" 같은 문구를 읽는다 — 있으면 페이지를 추측하거나
+ *  여러 장 열어볼 필요 없이 그 자체가 정답이라, 위젯 판독·지수+이분 탐색·직접 순회를 통째로 건너뛸 수
+ *  있다. 실사용 확인(펫투비, 2026-08-11): 실제로는 21개짜리 카테고리("사료(옵션상품수 포함) 총 21개의
+ *  상품이 준비되어 있습니다")를 지수+이분 탐색이 최대 16,363개까지 잘못 부풀렸던 사고 — 원인은
+ *  ?page=N이 이 몰에선 실제 페이지 전환을 전혀 안 시키는데(직접 로그인해 느린 속도로 재현·확인)도 매번
+ *  조금씩 다른 내용(상품카드 오버레이 등)을 돌려줘 탐색이 "새 페이지"로 계속 오판한 것이었다.
+ *  document.body 전체를 무작정 훑으면 이 카테고리와 무관한 배지 숫자를 잘못 집을 위험이 있다(과거
+ *  readListedTotalCount가 실제로 이 문제로 제거됐다 — scrape-preview-catalog-count-and-target-ui.md
+ *  버그 1 참고) — 찾은 문장 주변에 이 카테고리 라벨의 마지막 구간(예: "강아지 > 사료"의 "사료")이 같이
+ *  나오는지로 한 번 검증해, 무관한 사이트 전체 통계 배지를 걸러낸다. */
+async function readStatedTotalCount(page: Page, categoryLabel: string): Promise<number | null> {
+  const leafLabel = categoryLabel.split(' > ').pop()?.trim()
+  if (!leafLabel) return null
+  return page.evaluate(({ leafLabel }) => {
+    const text = document.body.innerText
+    const re = /(총|전체)\s*([\d,]+)\s*(개|건)/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(text))) {
+      const contextStart = Math.max(0, m.index - 30)
+      if (text.slice(contextStart, m.index + m[0].length).includes(leafLabel)) {
+        const n = Number(m[2].replace(/,/g, ''))
+        if (Number.isInteger(n) && n > 0 && n < 1_000_000) return n
+      }
+    }
+    return null
+  }, { leafLabel }).catch(() => null)
+}
+
 async function countCategoryProductsOnce(
   workerPage: Page, categoryUrl: string,
   userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined,
-  nextPageSelector: string | undefined, baseUrl: string, stop: () => boolean,
+  nextPageSelector: string | undefined, baseUrl: string, stop: () => boolean, knownNoPaginationWidget: boolean,
 ): Promise<CategoryCount> {
   // 개수만 세려고 <a> 태그만 보면 되니 'load'(이미지·광고·채팅위젯까지 다 받을 때까지 대기)가 아니라
   // 'domcontentloaded'로 충분하다 — 상품 이미지가 많은 목록 페이지에서 이 차이가 페이지 방문 하나당
@@ -2869,12 +2938,23 @@ async function countCategoryProductsOnce(
   if (perPageIsLogin) return { url: categoryUrl, label, count: 0, needsLogin: true }
   if (perPage === 0 || stop()) return { url: categoryUrl, label, count: perPage }
 
+  // 0순위: 몰이 직접 적어둔 "총 N개" 문구가 있으면 그게 정답이다 — 위젯 판독이나 페이지를 더 열어보는
+  // 어떤 방식보다 빠르고 정확하다(1페이지 개수보다 작을 리 없다는 사실로 오탐 여부를 한 번 더 검증).
+  const statedTotal = await readStatedTotalCount(workerPage, label)
+  if (statedTotal !== null && statedTotal >= perPage) {
+    console.log(`[previewCatalog] "${label}" 페이지에 적힌 "총 ${statedTotal}개" 문구를 그대로 사용 → count=${statedTotal}`)
+    return { url: categoryUrl, label, count: statedTotal }
+  }
+
   // 1순위: "마지막 페이지로" 버튼 href에서 직접 읽는다 — 텍스트를 세는 readMaxPageNumber보다 훨씬
   // 신뢰도가 높다(범위 밖 page로 clamp돼도 이 버튼은 항상 진짜 마지막 페이지를 가리킴, 위 함수 설명
   // 참고). 이게 있으면 아래 "maxPage+1 확인 → 그래도 못 믿으면 지수+이분 탐색" 안전장치가 거의 항상
   // 즉시(afterLastCount===0으로) 끝나 실질적으로 탐색 자체가 필요 없어진다. 이 버튼이 없는 스킨이면
-  // null이 나와 기존 readMaxPageNumber로 자동 폴백한다.
-  const maxPage = (await readLastPageFromNavButton(workerPage)) ?? (await readMaxPageNumber(workerPage, nextPageSelector))
+  // null이 나와 기존 readMaxPageNumber로 자동 폴백한다. "몰 구조 파악"이 이미 이 몰엔 위젯이 아예
+  // 없다고 확인해뒀으면(knownNoPaginationWidget), 카테고리마다 이 확인을 반복해도 항상 null만 나올 뿐이라
+  // 곧장 건너뛴다(펫투비 등에서 실사용 확인, 2026-08-11).
+  const maxPage = knownNoPaginationWidget ? null
+    : (await readLastPageFromNavButton(workerPage)) ?? (await readMaxPageNumber(workerPage, nextPageSelector))
   // maxPage가 정말로(위젯을 읽어서) 1 이하로 확인된 경우만 곧바로 믿는다 — 위젯을 아예 못 찾은 경우
   // (maxPage===null)는 "1페이지짜리 카테고리"인지 "위젯 클래스명이 특이해서 못 읽은 대형 카테고리"인지
   // 구분이 안 되므로, 곧장 믿지 않고 아래 maxPage!==null 블록을 건너뛰어 이 함수 뒤쪽의 지수+이분 탐색
@@ -2895,6 +2975,7 @@ async function countCategoryProductsOnce(
   const context = workerPage.context()
   const calibration = await probeLightweight(context, firstPageUrl, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
   const useHttp = !!calibration && !calibration.isLoginPage && calibration.count === perPage
+  console.log(`[previewCatalog] "${label}" 캘리브레이션: ${useHttp ? '가벼운 HTTP 방식 사용' : '브라우저 방식(불일치 또는 실패)'} (1페이지 브라우저=${perPage}, HTTP=${calibration?.count ?? 'null'})`)
 
   if (maxPage !== null) {
     const { count: lastPageCount, isLoginPage: lastPageIsLogin, fingerprint: lastPageFingerprint } =
@@ -2925,7 +3006,7 @@ async function countCategoryProductsOnce(
       }
       console.log(`[previewCatalog] "${label}" maxPage=${maxPage}이 위젯 페이지 묶음의 끝일 뿐(page ${maxPage + 1}에도 ${afterLastCount}개 더 있음) → 실제 마지막 페이지 빠르게 탐색`)
       const found = await findRealLastPage(
-        workerPage, firstPageUrl, AUTO_PAGINATION_CAP * 100, maxPage + 1, afterLastCount, afterLastFingerprint,
+        workerPage, firstPageUrl, MAX_PAGE_SEARCH_BOUND, maxPage + 1, afterLastCount, afterLastFingerprint,
         userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector, stop,
       )
       if (found) {
@@ -2934,7 +3015,7 @@ async function countCategoryProductsOnce(
         console.log(`[previewCatalog] "${label}" perPage=${perPage} 실제 마지막 페이지=${found.page} lastPageCount=${found.count} → count=${count}`)
         return { url: categoryUrl, label, count }
       }
-      console.log(`[previewCatalog] "${label}" 실제 마지막 페이지를 못 찾음(${AUTO_PAGINATION_CAP * 100}페이지 이내) → 안전한 순차 탐색으로 폴백`)
+      console.log(`[previewCatalog] "${label}" 실제 마지막 페이지를 못 찾음(${MAX_PAGE_SEARCH_BOUND}페이지 이내) → 안전한 순차 탐색으로 폴백`)
     }
   } else {
     console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=null(페이지네이션 위젯 못 찾음) → 지수+이분 탐색으로 실제 마지막 페이지 확인`)
@@ -2948,7 +3029,7 @@ async function countCategoryProductsOnce(
   // 순회했는데, "maxPage 페이지 자체가 비어있게 읽힌" 카테고리가 실제로는 수백~수천 개짜리인 경우도
   // 있어(실사용 확인: 1020bag.com의 한 카테고리가 5622개) 순차 탐색이 카테고리 하나에 수십 분씩 걸렸다.
   const fallbackFound = await findRealLastPage(
-    workerPage, firstPageUrl, AUTO_PAGINATION_CAP * 100, 1, perPage, perPageFingerprint,
+    workerPage, firstPageUrl, MAX_PAGE_SEARCH_BOUND, 1, perPage, perPageFingerprint,
     userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector, stop,
   )
   if (fallbackFound) {
@@ -2959,24 +3040,25 @@ async function countCategoryProductsOnce(
   }
 
   // 그래도 못 찾으면(탐색 상한을 넘김) 최후 수단으로 안전하게 한 페이지씩 순회한다(정확한 개수
-  // 보장이 최우선).
-  await workerPage.goto(firstPageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {})
-  await settleAfterNav(workerPage)
+  // 보장이 최우선). 위 캘리브레이션(useHttp)이 이 몰에 맞으면 여기도 브라우저 탭 없이 가벼운 HTTP로
+  // 순회한다 — 지수+이분 탐색 자체가 끝을 못 찾을 만큼 위젯 신호가 아예 없는 몰(예: 페이지네이션 위젯을
+  // 이 코드가 인식하는 어떤 형태로도 못 찾는 고도몰 스킨)일수록 이 최후 수단으로 떨어질 확률이 높은데,
+  // 예전엔 여기만 캘리브레이션과 무관하게 항상 브라우저로 돌아 카테고리 하나에 페이지 수십 개를 실제
+  // 탐색하며 몰 응답이 느리면 페이지당 최대 15초까지 허비했다(실사용 확인: pettob.co.kr 미리보기가
+  // 카테고리 몇 개만에 30분 넘게 걸림, 2026-08-11).
   let total = 0
   let prevFingerprint: string | null = null
   for (let p = 0; p < AUTO_PAGINATION_CAP; p++) {
     if (stop()) break
     const { count, isLoginPage, fingerprint } = p === 0
       ? { count: perPage, isLoginPage: false, fingerprint: perPageFingerprint }
-      : await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+      : await probeCategoryPage(workerPage, context, firstPageUrl, p + 1, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
     if (isLoginPage) return { url: categoryUrl, label, count: total, needsLogin: true }
     // 여기도 위와 같은 이유로 fingerprint가 바로 앞 페이지와 같으면(범위 밖 page를 마지막 유효 페이지로
     // 그대로 되돌려주는 몰) 새 페이지로 착각해 더하지 않고 여기서 끝낸다.
     if (count === 0 || fingerprint === prevFingerprint) break
     prevFingerprint = fingerprint
     total += count
-    await workerPage.goto(withPageParam(firstPageUrl, p + 2), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
-    await settleAfterNav(workerPage)
   }
   console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage}(불신, 탐색도 실패) → 직접 순회 count=${total} url=${firstPageUrl}`)
   return { url: categoryUrl, label, count: total }
@@ -2989,16 +3071,16 @@ async function countCategoryProductsOnce(
 async function countCategoryProducts(
   workerPage: Page, categoryUrl: string,
   userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined,
-  nextPageSelector: string | undefined, baseUrl: string, stop: () => boolean,
+  nextPageSelector: string | undefined, baseUrl: string, stop: () => boolean, knownNoPaginationWidget: boolean,
 ): Promise<CategoryCount> {
   if (stop()) return { url: categoryUrl, label: categoryUrl, count: 0 }
   try {
-    return await countCategoryProductsOnce(workerPage, categoryUrl, userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl, stop)
+    return await countCategoryProductsOnce(workerPage, categoryUrl, userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl, stop, knownNoPaginationWidget)
   } catch (err) {
     if (stop()) return { url: categoryUrl, label: categoryUrl, count: 0 }
     console.log(`[previewCatalog] "${categoryUrl}" 개수 계산 중 오류(재시도) — ${err instanceof Error ? err.message : err}`)
     try {
-      return await countCategoryProductsOnce(workerPage, categoryUrl, userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl, stop)
+      return await countCategoryProductsOnce(workerPage, categoryUrl, userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl, stop, knownNoPaginationWidget)
     } catch (err2) {
       console.log(`[previewCatalog] "${categoryUrl}" 개수 계산 재시도도 실패 — ${err2 instanceof Error ? err2.message : err2}`)
       return { url: categoryUrl, label: categoryUrl, count: 0 }
@@ -3073,6 +3155,7 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
               if (i >= listingUrls.length) return
               categoryCounts[i] = await countCategoryProducts(
                 workerPage, listingUrls[i], userSel, platformSel, detailPatternSrc, nextPageSelector, baseUrl, stop,
+                opts.knownNoPaginationWidget === true,
               )
               if (runEntry) runEntry.done++
             }

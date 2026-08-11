@@ -153,7 +153,8 @@ cache_corruption`/`dev_server_restart_corrupts_cache` 메모에 이미 기록된
 
 ### 자동 재시작 — 메모리 임계치 + 유휴 상태 확인 (`lib/scheduler.ts`)
 
-`checkMemoryAndAutoRestart()`(신규, 5분마다 실행) — 이 프로세스의 RSS가 `MEMORY_RESTART_THRESHOLD_MB`
+`checkMemoryAndAutoRestart()`(신규, 5분마다 → 2026-08-11 1분마다로 단축, 임계치 초과 상태를 더 빨리
+잡기 위함) — 이 프로세스의 RSS가 `MEMORY_RESTART_THRESHOLD_MB`
 (1536MB)를 넘고, **지금 어떤 몰이든 브라우저 세션을 쓰는 작업이 진행 중이 아니면**(`isAnySiteBusy()`,
 `lib/scraper.ts`에 신규 — `siteLockStatus` 맵이 비어있는지로 판정) 조용히 `restartPtpServer()`를
 호출한다. 작업 중간에 끼어들어 진행상황을 날리는 걸 막는 게 최우선이라, "지금 당장은 아니어도 다음

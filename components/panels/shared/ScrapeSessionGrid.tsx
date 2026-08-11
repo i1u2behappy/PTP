@@ -43,7 +43,7 @@ function widthFor(key: string): number {
 /** 스크랩 세션 목록 그리드 — 데이터 마이그 목록 상단 조회와 마이그레이션 하위 메뉴들(ScrapeScopePicker)이
  *  공유한다. 컬럼 클릭 정렬(Shift+클릭 복합 정렬), 컬럼별 필터, 컬럼 폭 조절·드래그 순서 변경까지
  *  StagingItemsGrid와 동일한 조작 방식을 제공한다. */
-export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId, onSelect, onDelete, maxHeightClassName = 'max-h-52', showClientMall, checkedIds, onToggleCheck, isRowCheckable }: {
+export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId, onSelect, onDelete, maxHeightClassName = 'max-h-52', showClientMall, checkedIds, onToggleCheck, isRowCheckable, extraActions }: {
   sessions: T[]
   selectedId: number | ''
   onSelect: (id: number) => void
@@ -57,6 +57,9 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
   /** 지정하면 이 함수가 false를 돌려준 행은 체크박스를 흐리게 비활성화한다(예: "확정" 안 된 세션은 병합
    *  대상에서 제외) — 안 주면(기존 호출부 전부) 항상 체크 가능, 기존 동작 그대로. */
   isRowCheckable?: (s: T) => boolean
+  /** 이 그리드 자체의 "🔍 필터" 버튼과 같은 줄에 같이 둬야 하는 화면별 버튼(예: 선택 병합/삭제) — 안
+   *  주면(기존 호출부 전부) 아무것도 안 붙는다. */
+  extraActions?: React.ReactNode
 }) {
   const [sortKeys, setSortKeys] = useState<SortKey[]>([])
   const [filters, setFilters] = useState<Record<string, string>>({})
@@ -191,6 +194,7 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
   return (
     <div>
       <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-gray-100 bg-gray-50">
+        {extraActions}
         {/* 보조 기능 토글은 rounded-md의 각진 모양으로, 클릭 한 번짜리 액션 버튼(rounded-full)과 구분한다. */}
         <button onClick={() => setShowFilters(v => !v)}
           className={`px-3 py-0.5 text-xs font-semibold rounded-md transition-colors ${showFilters ? 'bg-teal-100 text-teal-700 hover:bg-teal-200' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>

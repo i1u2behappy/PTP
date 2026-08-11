@@ -90,6 +90,74 @@
 제거(설명 주석만 남김). `withContext`가 이미 갖고 있던 "열린 창이 있으면 재사용" 로직이 이제 실제로
 동작한다 — CAPTCHA를 풀어둔 창이 그대로 유지된 채 스크래핑이 이어진다.
 
+## 2026-08-11 재설계 — 일반모드 "중지"가 백엔드에서 실제로는 안 멈추던 문제 + 수집 단계 진행률 사각지대
+
+### 배경 — "중지를 눌러도 백엔드는 계속 스크래핑 중이었다"
+
+일반모드(서버가 직접 Playwright를 돌리는 몰)에서 "동시처리수동 2"로 스크랩을 시작했는데 크롬 창이
+여러 개 뜨는 걸 사용자가 발견 → 조사 요청 → "중지를 눌렀는데도 백엔드에서 여전히 스크래핑이 계속되고
+있었다"는 게 재확인되면서, 사용자가 명확히 요구: 화면에서 중지/시작/옵션변경을 누르면 백엔드 전반이
+반드시 같은 상태로 움직여야 하고, 이게 어긋나는 지점을 전부 다시 점검해서 재설계하라는 것.
+
+기존 위 "중지 확정 타이밍"/"좀비 세션 자동 감지" 절은 **개발자모드(확장이 도는)를 기준으로 설계된
+20초/90초 타이머**였다 — "이 시간이 지났는데도 running이면 죽은 것으로 본다"는 논리인데, 일반모드는
+`withContext`가 시작부터 끝까지 `withSiteLock`을 쥐고 있어 "지금 이 몰 작업이 실제로 진행 중인가"를
+직접 아는 방법(`getSiteLockStatus`)이 이미 있었다. 그런데 두 타이머 다 이 신호를 전혀 참조하지 않고
+시간만으로 확정해버려, 상품 하나가 재시도 backoff나 차단 감지 대기로 잠깐 오래 걸리면(90초 초과)
+실제로는 멈추지 않았는데 DB만 `'stopped'`로 확정되는 불일치가 실사용에서 확인됐다 — 화면은 "중지됨"을
+보여주는데 뒤에서는 계속 상품을 쌓고 있었다.
+
+### 수정 1 — 20초/90초 타이머를 site-lock 상태로 게이팅
+
+- `app/api/scrape/stop/route.ts`: `requestStop` 직후 예약하는 20초 강제확정 타이머 실행 시점에
+  `getSiteLockStatus(siteId)`를 다시 확인 — 락이 아직 살아있으면(=아직 실제로 안 멈춤, 좀비가 아님)
+  확정을 건너뛴다. 락이 실제로 풀리는 순간(=`run.ts`가 최종 상태를 직접 씀)까지 기다리게 된다.
+- `app/api/scrape/status/route.ts`: 90초 좀비 감지 조건에 `!getSiteLockStatus(row.site_id)`를 추가 —
+  락이 살아있으면 로그 정체와 무관하게 죽은 게 아니라고 판단해 확정하지 않는다.
+- 두 라우트 다 개발자모드(사이트 락을 안 쥐는 구조)에는 영향 없음 — `getSiteLockStatus`가 항상
+  `null`이라 기존 시간 기반 판정 그대로 동작.
+
+### 수정 2 — URL 수집(카테고리 목록 순회) 단계엔 중지 체크가 아예 없었음
+
+다시 파이프라인을 처음부터(`runScraping` → `scrapeCatalogPage` → `collectProductUrls`) 재추적하다가
+발견한, 수정 1과는 별개의 사각지대: 상품 URL을 모으는 `collectProductUrls`(카테고리별 페이지네이션
+순회) 안에는 `isStopRequested` 체크가 **한 곳도 없었다**. 카테고리가 페이지 수십~수백 개짜리면 이
+수집 단계만도 오래 걸리는데, 중지를 눌러도 상품을 하나도 못 긁은 채로 이 수집이 끝날 때까지 그냥
+계속 돌았다.
+
+- `CollectedLinks`에 `stopped: boolean` 필드 추가.
+- `collectProductUrls`의 세 루프(카테고리 내 페이지 순회 `collectFromListing`, 카테고리 여러 개 동시
+  순회 `worker`, 카테고리 여러 개 순차 순회) 전부에 `isStopRequested(opts.sessionId)` 체크 추가.
+- `scrapeCatalogPage`가 `stopped: stoppedDuringCollection`을 받아 즉시 `{ total: 0, saved: 0, stopped:
+  true, concurrencyLog: [] }`로 짧게 끝낸다.
+
+### 수정 3 — 수집 단계 진행률이 화면에 아예 안 보이던 문제
+
+위 수정과 별개로, "수집 진행상황은 왜 안 보여주는 거야?"라는 지적을 다시 점검하며 발견: `ScraperPanel`의
+"진행 상황" 패널은 `product_count`/`saved_count`만 보는데, 이 값들은 상품을 하나씩 처리할 때
+(`run.ts`의 `onItem` 콜백)만 갱신된다 — `collectProductUrls`가 도는 동안은 둘 다 0으로 남아 "수집 완료:
+0개"만 계속 뜬다. 카테고리가 많은 몰(펫투비 19개)은 이 단계만 오래 걸릴 수 있는데, 멈춘 건지 도는 건지
+화면에서 구분이 안 됐다. 미리보기가 이미 같은 문제를 `previewRuns`/`getPreviewProgress`로 풀어놨는데
+(`scrape-preview-catalog-count-and-target-ui.md` "중복 실행 방지 + 진행률 표시" 참고), 실제 스크랩
+쪽엔 그 대응이 없었다.
+
+- `lib/scraper.ts`에 세션ID 기준 인메모리 `collectProgress`(신규, `Map<sessionId,{done,total}>`)를
+  추가 — `collectProductUrls`가 카테고리 목록 길이로 `total`을 잡고, 카테고리 하나를 끝낼 때마다
+  `done++`, 함수 종료 시 항목을 지운다(이후 상품별 진행률과 안 겹치게). `getCollectProgress(sessionId)`
+  export.
+- `app/api/scrape/status/route.ts`: 세션이 `running`일 때만 `collect_progress`로 같이 내려준다(좀비
+  판정으로 `status`가 바뀐 뒤라면 안 내려줌).
+- `ScraperPanel.tsx`: `progress.total===0`이면서 `collectProgress`가 있으면 "카테고리 목록 수집
+  중... N / M"을 보여주고, 그 외엔 기존 "수집 완료: N개 / M개" 그대로.
+
+### 부수 발견 — "다른 작업 진행 중" 배너가 자기 자신의 락을 다른 사람 것으로 오인
+
+같은 재점검 중 발견한 관련 버그: `siteLockStatus` 폴링 배너(`selectedSite && siteLockStatus?.busy`)가
+방금 자기 자신이 시작한 작업이 쥔 락도 "다른 작업이 진행 중"으로 그대로 보여줬다 — 자기 작업이 오래
+걸리면 영원히 "누가 막고 있다"처럼 보이는 오인이었다. `handleStart`/`handlePreview` 클릭 시각을
+`myLockClickAtRef`에 남기고, 배너 조건에 `sinceMs`(락을 쥔 지 얼마나 됐는지)가 그 클릭 시각보다
+이전(=내가 시작하기 전부터 있던 락)일 때만 보이도록 추가.
+
 ## 하지 않는 것 (알려진 한계)
 
 - 재시도 횟수 제한이나 자동 재시도(백오프 등)는 없다 — 사용자가 수동으로 재시도 버튼/메뉴를 누르는
@@ -102,17 +170,25 @@
   `scrape_item_log` 기록, bot-detection 오탐 방지(`cost_price`도 null 체크에 포함)
 - `lib/scrape/run.ts`: 시작 시 `closeLoginWindow` 강제 호출 제거
 - `app/api/scrape/stop-requested/route.ts`(신규) — `app/api/scrape/failed-urls/route.ts`는 이후 폐기(위 참고)
-- `app/api/scrape/status/route.ts`: 좀비 세션(사용자 중지 없이 조용히 죽은 경우) 자동 감지·확정
+- `app/api/scrape/status/route.ts`: 좀비 세션(사용자 중지 없이 조용히 죽은 경우) 자동 감지·확정,
+  (2026-08-11) `getSiteLockStatus`로 게이팅 + `collect_progress` 응답 필드 추가
 - `app/api/scrape/extension-ingest/route.ts`: 실패 로그 기록 분기 추가
 - `extension-poc/background.js`: `checkStopRequested`, `reportFailure`, `retryFailed`,
   컨텍스트 메뉴 `ptp-retry-failed`
 - `proxy.ts`: `stop-requested`/`failed-urls` 공개 경로 추가
-- `components/panels/ScraperPanel.tsx`: 개발자모드 중지 버튼, 성공/실패 분리 표시, 재시도 안내
+- `components/panels/ScraperPanel.tsx`: 개발자모드 중지 버튼, 성공/실패 분리 표시, 재시도 안내,
+  (2026-08-11) `myLockClickAtRef`(자기 락 오인 방지), `collectProgress` 표시
+- (2026-08-11) `app/api/scrape/stop/route.ts`: 20초 강제확정 타이머를 `getSiteLockStatus`로 게이팅
+- (2026-08-11) `lib/scraper.ts`: `CollectedLinks.stopped`, `collectProductUrls` 3개 루프에 중지 체크,
+  `scrapeCatalogPage`의 수집 단계 중지 시 즉시 반환, `collectProgress`/`getCollectProgress`(신규)
 
 ## 상태
 
 **구현 완료.** 커밋 `3500f61` → `f5f9ce4`(좀비 세션 즉시 확정 추가, 이후 "화면과 실제 상태 불일치"
-문제의 원인이 됨) → `8dc74cb`(즉시 확정 대신 20초 유예 폴백으로 수정) → 이번 커밋(중지 요청 없이
-조용히 죽는 세션까지 잡는 90초 상시 감시 추가). tsc/eslint 클린, 확장 런타임 문자열(`buildExtractExpr`
-등) 실제 처리된 값 기준으로 재검증 완료. 좀비 감지 로직은 실제로 멈춰있던 세션(신우 session 50)에
-대해 라이브로 자동 해소되는 것까지 확인함.
+문제의 원인이 됨) → `8dc74cb`(즉시 확정 대신 20초 유예 폴백으로 수정) → `90초 상시 감시` 커밋(중지
+요청 없이 조용히 죽는 세션까지 잡음) → 이번 커밋(일반모드 기준 재설계: 20초/90초 타이머를 시간만이
+아니라 `getSiteLockStatus`로도 검증, 수집 단계 중지 사각지대 해소, 수집 단계 진행률 표시, 자기 락
+오인 배너 수정). tsc/eslint 클린, 확장 런타임 문자열(`buildExtractExpr` 등) 실제 처리된 값 기준으로
+재검증 완료. 좀비 감지 로직은 실제로 멈춰있던 세션(신우 session 50)에 대해 라이브로 자동 해소되는
+것까지 확인함. 이번 재설계분은 실제 스크랩 세션으로의 라이브 재현(정지 클릭 후 site-lock이 실제로
+안 풀렸던 상황)까지는 다음 실사용에서 확인 예정 — tsc/eslint 클린 + 코드 경로 재추적으로 검증.

@@ -11,7 +11,7 @@ export function startScheduler() {
   if (started) return
   started = true
   setInterval(() => { checkSchedules().catch(() => {}) }, 60_000)
-  setInterval(() => { checkMemoryAndAutoRestart().catch(() => {}) }, 5 * 60_000)
+  setInterval(() => { checkMemoryAndAutoRestart().catch(() => {}) }, 60_000)
 }
 
 // ponytail: 2026-08-09 실사용 확인 — 평소엔 300~700MB인 이 서버 프로세스가, 스크랩/미리보기를 많이

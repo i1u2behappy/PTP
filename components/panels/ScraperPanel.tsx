@@ -381,6 +381,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 예전엔 이걸 알 방법이 없어 "왜 이렇게 오래 걸리냐"는 질문으로 매번 서버 로그를 뒤져야 했다. 몰을
   // 선택해두는 동안 짧은 주기로 폴링해, 대기 중이면 화면에 바로 보여준다.
   const [siteLockStatus, setSiteLockStatus] = useState<{ busy: boolean; label?: string; sinceMs?: number } | null>(null)
+  // "스크래핑 시작"/"미리보기"를 누른 시각 — 그 뒤 이 몰의 락이 그 시각 이후에 잡혔으면 그건 방금 내가
+  // 시작한 그 작업 자신이 쥔 락이다(아래 배너가 "다른 작업이 진행 중"이라고 스스로를 가리키며 혼란을
+  // 주지 않게 구분하는 용도, 2026-08-11 실사용 확인 — 내 작업이 실제로 잘 돌고 있는데도 계속 "다른
+  // 작업 대기 중" 배너가 떠 있어서 아무 진행도 안 되는 것처럼 보였다).
+  const myLockClickAtRef = useRef<number | null>(null)
 
   // 개발자모드 "상품 페이지 미리보기"/"스크랩 대상 직접지정" — 일반모드와 같은 카드/상태(previewResult 등)를
   // 그대로 쓰지만, PTP가 그 몰 탭에 직접 접근할 방법이 없어(chrome.debugger 확장 전용 구조) 실제 캡처는
@@ -402,6 +407,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [status, setStatus]       = useState<Status>('idle')
   const [sessionId, setSessionId] = useState<number | null>(null)
   const [progress, setProgress]   = useState<{ saved: number; total: number; error?: string; successCount: number; failedCount: number }>({ saved: 0, total: 0, successCount: 0, failedCount: 0 })
+  // 상품 URL 수집(카테고리 목록 순회) 단계는 progress.total이 아직 0이라 위 progress만으로는 "카테고리 몇 개
+  // 중 몇 번째"를 보여줄 수 없다 — 미리보기의 previewProgress와 같은 이유·같은 해법(2026-08-11).
+  const [collectProgress, setCollectProgress] = useState<{ done: number; total: number } | null>(null)
   const [stopping, setStopping]   = useState(false)
   const [itemLog, setItemLog]     = useState<ItemLogRow[]>([])
   // 적응형 동시성이 이번 회차에 언제 올리고(연속 성공) 언제 차단 감지로 다시 낮췄는지 — 스크래핑 후 간략히 확인용
@@ -615,11 +623,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (!sessionId || status !== 'running') return
     pollRef.current = setInterval(async () => {
       const r = await fetch(`/api/scrape/status?sessionId=${sessionId}`)
-      const d = await r.json() as { status: string; product_count: number; saved_count: number; success_count: number; failed_count: number; error?: string; concurrency_log?: { at: string; level: number; reason: 'ramp_up' | 'block_detected' }[] }
+      const d = await r.json() as { status: string; product_count: number; saved_count: number; success_count: number; failed_count: number; error?: string; concurrency_log?: { at: string; level: number; reason: 'ramp_up' | 'block_detected' }[]; collect_progress?: { done: number; total: number } | null }
       setProgress({
         saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error,
         successCount: Number(d.success_count) || 0, failedCount: Number(d.failed_count) || 0,
       })
+      setCollectProgress(d.collect_progress ?? null)
       if (Array.isArray(d.concurrency_log)) setConcurrencyLog(d.concurrency_log)
       fetch(`/api/scrape/log?sessionId=${sessionId}`).then(r => r.json()).then((rows: ItemLogRow[]) => {
         if (Array.isArray(rows)) setItemLog(rows)
@@ -810,7 +819,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     // 된다 — LAST_SESSION_KEY 복원(마운트 시 1회)과 별개로, 몰을 바꿀 때마다 항상 초기화한다.
     setStatus('idle')
     setSessionId(null)
-    setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([])
+    setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
     setItemLog([])
     setStopping(false)
     setRetrying(false)
@@ -1118,6 +1127,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
    * 상품 1건으로 처리해 그대로 동작한다. */
   async function handlePreview() {
     if (!selectedSite || !canPreview) return
+    myLockClickAtRef.current = Date.now()
     setPreviewResumeNotice(null)
     setPreviewLoading(true)
     setPreviewResult(null)
@@ -1129,7 +1139,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     // 같은 방식으로 초기화한다.
     setStatus('idle')
     setSessionId(null)
-    setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([])
+    setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
     localStorage.removeItem(LAST_SESSION_KEY)
     const controller = new AbortController()
     previewAbortRef.current = controller
@@ -1195,15 +1205,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   function handleBackToSettings() {
     setStatus('idle')
     setSessionId(null)
-    setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([])
+    setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
     localStorage.removeItem(LAST_SESSION_KEY)
   }
 
   async function handleStart() {
     if (!selectedSite || !canStart) return
+    myLockClickAtRef.current = Date.now()
     const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
     setStatus('running')
-    setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([])
+    setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
     setItemLog([])
     // 시작 버튼을 누르면 그 아래 "진행 상황" 섹션으로 자동 스크롤해, 화면을 따로 내리지 않아도 바로 보이게 한다.
     // 이 시점엔 아직 리렌더 전이라 섹션이 DOM에 없을 수 있어(status는 방금 막 바뀜) 다음 페인트 이후로 미룬다.
@@ -1246,7 +1257,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (!selectedSite || failedUrls.length === 0) return
     setRetrying(true)
     setStatus('running')
-    setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([])
+    setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
     setItemLog([])
     try {
       const res = await fetch('/api/scrape', {
@@ -1413,8 +1424,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       )}
 
       {/* 이 몰의 로그인 창/프로필을 다른 스크랩 작업이 쓰고 있어 순서를 기다리는 중이면 알려준다
-          (withSiteLock 참고) — 안 그러면 지금 누른 버튼이 왜 응답이 없는지 알 방법이 없다. */}
-      {selectedSite && siteLockStatus?.busy && (
+          (withSiteLock 참고) — 안 그러면 지금 누른 버튼이 왜 응답이 없는지 알 방법이 없다.
+          busy=true라고 항상 "다른" 작업이라 단정하면 안 된다 — 대기가 풀려 방금 누른 내 작업이 실제로
+          시작되면 그 순간부터는 내가 락을 쥔 것인데도 계속 "다른 작업 진행 중"으로 보여, 내 작업이 잘
+          도는 동안 아무 진행도 없는 것처럼 보이는 문제가 있었다(2026-08-11 실사용 확인). 락의 나이
+          (sinceMs)가 내가 버튼을 누른 뒤 지난 시간보다 길 때만(=이 락이 내 클릭보다 먼저 생겼을 때만)
+          "다른 작업"으로 본다. */}
+      {selectedSite && siteLockStatus?.busy &&
+        (myLockClickAtRef.current == null || (siteLockStatus.sinceMs ?? 0) > Date.now() - myLockClickAtRef.current) && (
         <div className="mb-4 bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-xs text-amber-700 flex items-center gap-2">
           <span>⏳</span>
           <span>
@@ -2236,10 +2253,18 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 style={{ width: progress.total > 0 ? `${Math.round(progress.saved / progress.total * 100)}%` : '10%' }} />
             </div>
           )}
-          <p className="text-sm text-gray-600">
-            수집 완료: <strong>{progress.saved}</strong>개 {progress.total > 0 && `/ ${progress.total}개`}
-            {progress.failedCount > 0 && <span className="text-rose-500"> · 실패 {progress.failedCount}개</span>}
-          </p>
+          {/* 상품 URL 수집(카테고리 목록 순회) 단계는 progress.total이 아직 0이라 아래 "수집 완료: 0개"만
+              보이면 멈춘 것처럼 보인다 — collectProgress가 있으면(그 단계가 진행 중이라는 뜻) 그걸 먼저 보여준다. */}
+          {status === 'running' && progress.total === 0 && collectProgress && collectProgress.total > 1 ? (
+            <p className="text-sm text-gray-600">
+              카테고리 목록 수집 중... <strong>{collectProgress.done}</strong> / {collectProgress.total}
+            </p>
+          ) : (
+            <p className="text-sm text-gray-600">
+              수집 완료: <strong>{progress.saved}</strong>개 {progress.total > 0 && `/ ${progress.total}개`}
+              {progress.failedCount > 0 && <span className="text-rose-500"> · 실패 {progress.failedCount}개</span>}
+            </p>
+          )}
 
           {/* 적응형 동시성이 실제로 조정된 적이 있을 때만 보여준다 — 계속 1로 순차 처리됐다면(가장 흔한 경우)
               보여줄 내용이 없어 아예 렌더링하지 않는다("간략히" 확인 목적이라 평소엔 화면을 차지하지 않음). */}

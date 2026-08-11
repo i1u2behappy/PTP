@@ -282,6 +282,26 @@ Playwright의 `context.request.get()`(같은 `BrowserContext`라 로그인 쿠�
 유지). 검증: 실제로 받아온 HTML에 이 필터를 그대로 적용해 최종 개수가 0으로 나옴을 확인 — 이후
 `perPage===0`이면 즉시 종료되므로 지수+이분 탐색 자체가 시작되지 않는다.
 
+### 버그 11 — 가벼운 HTTP 탐색(버그 9)이 흔한 경로(위젯이 maxPage를 정확히 보여주는 몰)엔 안 쓰이고 있었음 (수정됨)
+
+버그 9는 `findRealLastPage`(위젯을 못 믿어 지수+이분 탐색까지 가는 드문 경우)에만 가벼운 HTTP
+캘리브레이션을 붙였다. 그런데 `countCategoryProductsOnce`가 **모든 카테고리마다** 거치는 흔한
+검증 경로 — "마지막 페이지로" 읽은 `maxPage`가 진짜 끝인지 확인하려고 `maxPage` 페이지와
+`maxPage+1` 페이지를 여는 것 — 은 여전히 항상 실제 브라우저 탭으로 열고 있었다. 사용자 재점검 요청
+(2026-08-11, "카테고리가 많으면 미리보기가 느려지는데 어차피 개수만 세는 거니까 오래 걸리면 안
+된다")으로 다시 확인: 카테고리가 19개면 지수+이분 탐색까지 가지 않는 정상 케이스에서도 최소
+19×2회의 무거운 브라우저 탐색(`domcontentloaded` + `settleAfterNav`)이 쌓이고 있었다 — 카테고리 수가
+많을 때 느려지는 주된 원인.
+
+**수정**: `probeLightweight`를 `probeAt`(findRealLastPage 내부 클로저)에서 꺼내 top-level 함수
+`probeCategoryPage(workerPage, context, firstPageUrl, pageNum, useHttp, ...)`로 분리(순수 리팩터,
+`findRealLastPage`의 캘리브레이션/동작은 그대로). `countCategoryProductsOnce`는 1페이지 방문(라벨
+추출 때문에 여전히 브라우저 필요) 직후 그 개수를 기준으로 자체 캘리브레이션(`probeLightweight`
+1회)을 수행하고, `maxPage`/`maxPage+1` 확인 두 곳 모두 이 `useHttp` 판정으로
+`probeCategoryPage`를 호출한다 — 서버가 HTML에 상품 링크를 그대로 내려주는 몰이면 카테고리 하나당
+브라우저 탐색이 (라벨용) 1회로 줄고, 안 맞는 몰은 기존처럼 매번 브라우저로 처리돼 지금보다 나빠지지
+않는다.
+
 ## 미리보기 중지
 
 미리보기가 오래 걸릴 수 있으니(위 성능 수정 이후에도 몰에 따라 카테고리가 아주 많으면 시간이 걸림)
@@ -473,7 +493,9 @@ React 상태를 전부 초기화하는데, `localStorage`에 저장해두던 항
   순수 HTTP GET. `findRealLastPage`가 진입 시 캘리브레이션(브라우저 확인값과 대조)해 일치하면 이후
   모든 probe를 가벼운 방식으로, 불일치/실패 시 기존 브라우저 방식으로 처리. (2026-08-10, 버그 10)
   `countProductsOnPage`/`countProductsFromHtml`의 폴백 스캔에 `#contents` 스코프 제한 +
-  `xans-layout-productrecent`(TODAY VIEW) 조상 제외 추가.
+  `xans-layout-productrecent`(TODAY VIEW) 조상 제외 추가. (2026-08-11, 버그 11) `probeCategoryPage`
+  (신규, top-level로 분리) — `countCategoryProductsOnce`가 1페이지 개수로 자체 캘리브레이션 후
+  `maxPage`/`maxPage+1` 확인에도 가벼운 HTTP 경로를 재사용.
 - `app/api/scrape/preview-catalog/route.ts`: `previewCatalog`에 `stopSignal: req.signal` 전달.
 - `app/api/scrape/preview-progress/route.ts`(신규): `GET ?siteId=` → `{done, total}` 진행률 폴링용.
 - `app/api/scrape/categories/route.ts`: `sites.scrape_profile.categoryLinks` 캐시를 먼저 확인 후
@@ -516,3 +538,8 @@ fallback이 브라우저보다 2개 더 셈)는 원인 미조사 상태다. **�
 이건 이번 최적화와 무관한, 지수+이분 탐색 알고리즘 자체의 기존 정확성 문제(clamp 감지가 실행마다
 다른 지점에서 걸리는 것으로 추정)로 보이며 원인 조사·수정에 착수하지 못했다 — 다음 작업 시 최우선
 검토 대상.
+
+버그 11(2026-08-11)은 tsc/eslint 클린. `findRealLastPage`의 기존 캘리브레이션/동작은 리팩터 전후
+동일(순수 함수 추출)이라 회귀 위험이 없고, `countCategoryProductsOnce`의 신규 캘리브레이션은 실패해도
+기존 브라우저 방식으로 그대로 폴백하므로 안 맞는 몰에서도 지금보다 나빠지지 않는다. 실제 카테고리가
+많은 몰(펫투비 등)로 미리보기 소요 시간이 줄었는지는 다음 실사용에서 확인 예정.

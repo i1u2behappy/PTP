@@ -167,6 +167,7 @@ declare global {
   var __scrapeOpenSessions: Map<number, BrowserContext> | undefined
   var __scrapeStopRequests: Set<number> | undefined
   var __previewRuns: Map<number, PreviewRunState> | undefined
+  var __scrapeCollectProgress: Map<number, { done: number; total: number }> | undefined
   var __scrapeSiteLocks: Map<number | string, Promise<void>> | undefined
   var __scrapeSiteLockStatus: Map<number | string, { label: string; since: number }> | undefined
 }
@@ -202,6 +203,17 @@ export function requestStop(sessionId: number) {
  *  못 들여다본다 — 확장이 상품마다 이 함수를 거쳐 공개 API로 물어보게 한다(app/api/scrape/stop-requested). */
 export function isStopRequested(sessionId?: number) {
   return sessionId !== undefined && stopRequests.has(sessionId)
+}
+
+const collectProgress = globalThis.__scrapeCollectProgress ?? (globalThis.__scrapeCollectProgress = new Map<number, { done: number; total: number }>())
+
+/** app/api/scrape/status가 폴링해서, 상품 URL 수집(카테고리 목록 순회) 단계처럼 product_count/
+ *  saved_count가 아직 0이라 "진행 상황"에 보여줄 숫자가 없는 동안에도 "카테고리 N/M 수집 중"을 보여주는
+ *  데 쓴다 — 미리보기의 previewRuns/getPreviewProgress와 같은 문제(오래 걸리는 수집 단계가 화면엔 멈춘
+ *  것처럼 보임)를 실제 스크랩 세션에도 같은 방식으로 해결한다(2026-08-11). 수집이 끝나면(collectProductUrls
+ *  finally) 지워지므로, 이후 상품별 진행률과 겹쳐 보이지 않는다. */
+export function getCollectProgress(sessionId: number): { done: number; total: number } | null {
+  return collectProgress.get(sessionId) ?? null
 }
 
 const siteLocks = globalThis.__scrapeSiteLocks ?? (globalThis.__scrapeSiteLocks = new Map<number | string, Promise<void>>())
@@ -2035,13 +2047,31 @@ async function scanCategoryMenu(page: Page): Promise<CategoryMenuLink[]> {
         if (href) out.push({ name: path.join(' > '), href })
       }
     }
+    // 후보 root가 탭 위젯(예: el-tab류 — <li data-tabid="tab1"><a>강아지</a></li> + <div id="tab1">그 탭
+    // 내용</div>) 안에 있으면, 그 탭 버튼의 라벨을 찾아 돌려준다. 못 찾으면 null(이 몰이 탭 구조가
+    // 아니거나 못 알아본 스킨) — 그러면 호출부가 그냥 이름을 안 건드리고 그대로 쓴다.
+    function findTabLabel(root: Element): string | null {
+      let el: Element | null = root
+      while (el) {
+        if (el.id) {
+          const label = document.querySelector(`[data-tabid="${el.id}"]`)?.textContent?.trim()
+          if (label) return label
+        }
+        el = el.parentElement
+      }
+      return null
+    }
     for (const tierSelector of SELECTOR_TIERS) {
       let candidates: Element[]
       try { candidates = Array.from(document.querySelectorAll(tierSelector)) } catch { continue }
-      // 한 티어 안에서도 후보가 여러 개(예: 헤더 카테고리 + 전체메뉴 플라이아웃 사본) 나올 수 있어,
-      // 후보 하나가 우연히 매칭됐을 뿐(카테고리 메뉴가 아닌 다른 위젯)일 위험을 줄이려고 요구하는 "최소
-      // 2개 이상" 조건을 만족하는 후보 중 가장 많은 경로를 뽑아낸 것을 채택한다.
-      let best: { name: string; href: string }[] = []
+      // 한 티어 안에서도 후보가 여러 개 나올 수 있다 — 헤더 카테고리 + 전체메뉴 플라이아웃 사본처럼 같은
+      // 메뉴의 중복일 수도 있고(아래 href dedup으로 걸러짐), 펫투비처럼 "강아지"/"고양이" 탭마다 완전히
+      // 별개인 카테고리 목록이 DOM에 각자 따로 존재하는 경우도 있다(탭 전환은 보이는 것만 바뀔 뿐 둘 다
+      // 항상 DOM에 있음, 2026-08-10 실사용 확인 — 후보 하나만 골라 버리면 다른 탭 카테고리를 통째로
+      // 놓쳤다). "최소 2개 이상" 조건으로 노이즈(카테고리 메뉴가 아닌 다른 위젯)를 거른 뒤, 통과한
+      // 후보는 전부 합친다(href 기준 dedup — 이름이 같아도 href가 다르면 별개 카테고리로 본다).
+      const groups: { label: string | null; items: { name: string; href: string }[] }[] = []
+      const groupLabels = new Set<string>()
       for (const root of candidates) {
         const topLis = Array.from(root.querySelectorAll(':scope > ul > li, :scope > li, :scope > div > ul > li'))
         if (!topLis.length) continue
@@ -2049,9 +2079,24 @@ async function scanCategoryMenu(page: Page): Promise<CategoryMenuLink[]> {
         topLis.forEach(li => buildPaths(li, [], 0, out))
         const seenNames = new Set<string>()
         const uniq = out.filter(o => (seenNames.has(o.name) ? false : (seenNames.add(o.name), true)))
-        if (uniq.length >= 2 && uniq.length > best.length) best = uniq
+        if (uniq.length < 2) continue
+        const label = findTabLabel(root)
+        if (label) groupLabels.add(label)
+        groups.push({ label, items: uniq })
       }
-      if (best.length) return best
+      // 합쳐진 후보가 서로 다른 탭(라벨) 2개 이상에서 왔을 때만 이름 앞에 그 탭 라벨을 붙인다 — "사료"가
+      // 강아지/고양이 양쪽에 다 있으면 이름만 보고는 구분이 안 되므로(2026-08-11 실사용 확인). 탭 구조가
+      // 아닌 몰(대부분)은 groupLabels가 비어있어 이름을 그대로 둔다.
+      const merged: { name: string; href: string }[] = []
+      const seenHrefs = new Set<string>()
+      for (const { label, items } of groups) {
+        for (const o of items) {
+          if (seenHrefs.has(o.href)) continue
+          seenHrefs.add(o.href)
+          merged.push({ name: groupLabels.size > 1 && label ? `${label} > ${o.name}` : o.name, href: o.href })
+        }
+      }
+      if (merged.length) return merged
     }
     return []
   }, { excludeSrc: NON_CATEGORY_TEXT_RE.source }).catch(() => [])
@@ -2193,6 +2238,11 @@ interface CollectedLinks {
   /** 목록 페이지 자체가 로그인 세션 끊김으로 보임(로그인폼이 계속 보임) — true면 이 결과 자체가
    *  비로그인 상태로 얻어졌을 수 있다는 뜻 */
   needsLogin: boolean
+  /** "중지"가 눌려 상품 URL을 다 모으지 못한 채 중간에 멈췄다는 뜻 — 카테고리가 페이지 수십~수백
+   *  개짜리면 이 수집 단계만도 오래 걸릴 수 있는데, 예전엔 이 단계에 isStopRequested 체크가 전혀
+   *  없어서 "중지"를 눌러도 상품 하나도 못 긁고도 이 수집이 끝날 때까지 그대로 계속 돌았다
+   *  (2026-08-11 실사용 확인·수정). */
+  stopped: boolean
 }
 
 // 사용자가 최대 페이지 수를 지정하지 않으면 "다음 페이지" 링크가 더 이상 없을 때까지 끝까지 따라간다 —
@@ -2238,11 +2288,12 @@ function withPageParam(url: string, pageNum: number): string {
  *  순차로 돈다. */
 async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: BrowserContext): Promise<CollectedLinks> {
   if (opts.productUrls?.length) {
-    return { urls: opts.productUrls, platform: 'unknown', categoryByUrl: new Map(), linkInfo: new Map(), needsLogin: false }
+    return { urls: opts.productUrls, platform: 'unknown', categoryByUrl: new Map(), linkInfo: new Map(), needsLogin: false, stopped: false }
   }
 
   const listingUrls = (opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])).map(resetToFirstPage)
   const maxPages = Math.max(1, opts.maxPages || AUTO_PAGINATION_CAP)
+  if (opts.sessionId != null) collectProgress.set(opts.sessionId, { done: 0, total: listingUrls.length })
 
   let needsLogin = false
   if (opts.url || opts.categoryUrls?.length) {
@@ -2306,6 +2357,12 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
     return items.filter(item => item.href.startsWith(baseUrl))
   }
 
+  // "중지"가 이 URL 수집 단계 중에 눌리면 여기서 즉시 멈춘다 — 아래 세 곳(카테고리 내 페이지 순회,
+  // 카테고리 여러 개 동시 순회, 카테고리 여러 개 순차 순회) 전부에서 확인해야 한다. 카테고리가 페이지
+  // 수십~수백 개짜리면 이 수집 단계만도 오래 걸리는데, 예전엔 여기 어디에도 isStopRequested 체크가
+  // 없어서 "중지"를 눌러도 상품을 하나도 못 긁은 채로 이 수집이 끝날 때까지 그냥 계속 돌았다
+  // (2026-08-11 실사용 확인·수정).
+  let collectionStopped = false
   async function collectFromListing(workerPage: Page, listingUrl: string) {
     if (workerPage.url() !== listingUrl) {
       await workerPage.goto(listingUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
@@ -2315,6 +2372,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
     let prevHrefs: Set<string> | null = null
 
     for (let p = 0; p < maxPages; p++) {
+      if (isStopRequested(opts.sessionId)) { collectionStopped = true; break }
       let matched = await scanForProducts(workerPage)
       let hrefsThisPage = new Set(matched.map(m => m.href))
       const isDeadEnd = (hrefs: Set<string>) => hrefs.size === 0 || (prevHrefs !== null && [...hrefs].every(h => prevHrefs!.has(h)))
@@ -2351,9 +2409,11 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
     let cursor = 0
     async function worker(workerPage: Page) {
       while (true) {
+        if (isStopRequested(opts.sessionId)) { collectionStopped = true; return }
         const i = cursor++
         if (i >= listingUrls.length) return
         await collectFromListing(workerPage, listingUrls[i]).catch(() => {})
+        if (opts.sessionId != null) collectProgress.get(opts.sessionId)!.done++
       }
     }
     const workerPages = await Promise.all(
@@ -2363,7 +2423,9 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
     await Promise.all(workerPages.slice(1).map(p => p.close().catch(() => {})))
   } else {
     for (const listingUrl of listingUrls) {
+      if (isStopRequested(opts.sessionId)) { collectionStopped = true; break }
       await collectFromListing(page, listingUrl)
+      if (opts.sessionId != null) collectProgress.get(opts.sessionId)!.done++
     }
   }
 
@@ -2372,7 +2434,8 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
   const excludeSet  = new Set(opts.excludeUrls || [])
   const urls = [...productUrlSet].filter(h => !listingSet.has(h) && !excludeSet.has(h))
 
-  return { urls, platform, categoryByUrl, linkInfo, needsLogin }
+  if (opts.sessionId != null) collectProgress.delete(opts.sessionId)
+  return { urls, platform, categoryByUrl, linkInfo, needsLogin, stopped: collectionStopped }
 }
 
 /**
@@ -2664,6 +2727,26 @@ async function probeLightweight(
   }
 }
 
+/** useHttp가 참이면(호출부가 이미 페이지 1과 대조해 이 몰이 순수 HTTP로도 같은 개수가 나옴을 확인한
+ *  상태) 브라우저 탭 없이 probeLightweight로 먼저 시도하고, 실패하거나 useHttp가 아니면 기존처럼
+ *  브라우저 탭으로 이동해 읽는다 — findRealLastPage의 지수+이분 탐색과 countCategoryProductsOnce의
+ *  마지막 페이지/마지막+1 페이지 확인이 이 판정 로직을 공유한다. */
+async function probeCategoryPage(
+  workerPage: Page, context: BrowserContext, firstPageUrl: string, pageNum: number, useHttp: boolean,
+  userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
+  nextPageSelector: string | undefined,
+): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; currentPage: number | null }> {
+  if (useHttp) {
+    const lightweight = await probeLightweight(context, withPageParam(firstPageUrl, pageNum), userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
+    if (lightweight) return lightweight
+  }
+  await workerPage.goto(withPageParam(firstPageUrl, pageNum), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
+  await settleAfterNav(workerPage)
+  const { count, isLoginPage, fingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+  const currentPage = count > 0 ? await readCurrentPageNumber(workerPage, nextPageSelector) : null
+  return { count, isLoginPage, fingerprint, currentPage }
+}
+
 /** 미리보기 전용 — 카테고리(또는 단일 시작 URL) 하나의 상품 "개수"만 빠르게 구한다. 이름/썸네일/링크는
  *  전혀 모으지 않는다.
  *  1) 1페이지 상품 수 × 페이지네이션에서 읽은 총 페이지 수로 계산하고, 마지막 페이지를 한 번 더 열어
@@ -2735,18 +2818,9 @@ async function findRealLastPage(
   const useHttp = !!calibration && !calibration.isLoginPage && calibration.count === knownNonEmptyCount
   console.log(`[previewCatalog] 지수+이분 탐색: ${useHttp ? '가벼운 HTTP 방식' : '브라우저 방식(캘리브레이션 불일치 또는 실패)'} 사용 (기준 페이지=${knownNonEmptyPage}, 기준 개수=${knownNonEmptyCount}, 확인된 개수=${calibration?.count ?? 'null'})`)
 
-  async function probeAt(pageNum: number): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; currentPage: number | null }> {
-    if (useHttp) {
-      const lightweight = await probeLightweight(context, withPageParam(firstPageUrl, pageNum), userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
-      if (lightweight) return lightweight
-      // 이번 한 번만 네트워크 오류 등으로 실패 — 브라우저로 대체하고, 다음 probe부터는 다시 가벼운 방식을 쓴다.
-    }
-    await workerPage.goto(withPageParam(firstPageUrl, pageNum), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
-    await settleAfterNav(workerPage)
-    const { count, isLoginPage, fingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
-    const currentPage = count > 0 ? await readCurrentPageNumber(workerPage, nextPageSelector) : null
-    return { count, isLoginPage, fingerprint, currentPage }
-  }
+  const probeAt = (pageNum: number) => probeCategoryPage(
+    workerPage, context, firstPageUrl, pageNum, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector,
+  )
 
   while (hi === null) {
     if (stop()) return { page: lo, count: loCount }
@@ -2811,10 +2885,20 @@ async function countCategoryProductsOnce(
     return { url: categoryUrl, label, count: perPage }
   }
 
+  // 마지막 페이지·마지막+1 페이지 확인은 라벨이 필요 없어(위에서 1페이지 방문 때 이미 얻음) 굳이 실제
+  // 브라우저 탭으로 이동할 필요가 없다 — 1페이지를 브라우저 탭 없이(순수 HTTP + 쿠키 재사용) 한 번 더
+  // 읽어보고 개수가 일치하면(서버가 HTML에 상품 링크를 그대로 내려주는 몰) 이후 두 확인은 가벼운 방식으로
+  // 돌린다. 카테고리가 많은 몰에서 미리보기가 오래 걸리는 주된 원인이 카테고리마다 이 확인 2회씩 실제
+  // 브라우저 탐색을 도는 것이었다(실사용 확인, 2026-08-11) — findRealLastPage의 지수+이분 탐색엔 이미
+  // 같은 최적화가 있었는데, 그 탐색까지 가지 않는 흔한 경우(위젯이 maxPage를 정확히 보여주는 몰)엔 안
+  // 쓰이고 있었다.
+  const context = workerPage.context()
+  const calibration = await probeLightweight(context, firstPageUrl, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
+  const useHttp = !!calibration && !calibration.isLoginPage && calibration.count === perPage
+
   if (maxPage !== null) {
-    await workerPage.goto(withPageParam(firstPageUrl, maxPage), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
-    await settleAfterNav(workerPage)
-    const { count: lastPageCount, isLoginPage: lastPageIsLogin, fingerprint: lastPageFingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    const { count: lastPageCount, isLoginPage: lastPageIsLogin, fingerprint: lastPageFingerprint } =
+      await probeCategoryPage(workerPage, context, firstPageUrl, maxPage, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
     // 여기서부터는 최소한 1페이지(perPage)는 로그인 상태에서 확인한 값이므로, 그걸 최선의 추정치로 두고
     // needsLogin만 같이 알린다 — 0으로 깎아내리지 않는다.
     if (lastPageIsLogin) return { url: categoryUrl, label, count: perPage, needsLogin: true }
@@ -2823,9 +2907,8 @@ async function countCategoryProductsOnce(
     // 전부 같은 maxPage=5·lastPageCount=48(꽉 참)로 읽혀 진짜 총 개수보다 훨씬 적은 값에서 멈춘 사례 발견).
     // 그래서 "마지막"이라고 읽은 페이지 바로 다음 페이지도 비어있는지 한 번 더 확인해야 안심할 수 있다.
     if (lastPageCount > 0 && !stop()) {
-      await workerPage.goto(withPageParam(firstPageUrl, maxPage + 1), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
-      await settleAfterNav(workerPage)
-      const { count: afterLastCount, isLoginPage: afterLastIsLogin, fingerprint: afterLastFingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+      const { count: afterLastCount, isLoginPage: afterLastIsLogin, fingerprint: afterLastFingerprint, currentPage: afterLastCurrentPage } =
+        await probeCategoryPage(workerPage, context, firstPageUrl, maxPage + 1, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
       if (afterLastIsLogin) return { url: categoryUrl, label, count: perPage * (maxPage - 1) + lastPageCount, needsLogin: true }
       // count>0이어도 위젯이 스스로 "지금 페이지"를 maxPage로 보고하면(요청은 maxPage+1인데) 범위를
       // 벗어난 page 요청을 몰이 마지막 유효 페이지로 그대로 되돌려준 것이다(2026-08-09 seasonbag.co.kr
@@ -2834,7 +2917,6 @@ async function countCategoryProductsOnce(
       // 여부로 대신 판단한다(기존 방식). 어느 쪽이든 진짜 빈 페이지와 똑같이 취급해 여기서 확정한다 —
       // 안 그러면 아래 findRealLastPage가 "새 페이지"로 착각한 채 끝을 못 찾고 페이지 번호만 계속
       // 올리며 헤맨다.
-      const afterLastCurrentPage = afterLastCount > 0 ? await readCurrentPageNumber(workerPage, nextPageSelector) : null
       const afterLastClamped = afterLastCurrentPage !== null && afterLastCurrentPage !== maxPage + 1
       if (afterLastCount === 0 || afterLastClamped || afterLastFingerprint === lastPageFingerprint) {
         const count = perPage * (maxPage - 1) + lastPageCount
@@ -3087,7 +3169,11 @@ export async function scrapeCatalogPage(
   onItem: (event: CatalogItemEvent) => Promise<void> | void,
 ): Promise<CatalogScrapeSummary> {
   return withContext(opts, async (page, context) => {
-    const { urls: productUrls, categoryByUrl, needsLogin: listingNeedsLogin } = await collectProductUrls(page, opts, context)
+    const { urls: productUrls, categoryByUrl, needsLogin: listingNeedsLogin, stopped: stoppedDuringCollection } = await collectProductUrls(page, opts, context)
+    // 상품 URL을 모으는 단계(카테고리 페이지 여러 개를 훑는 단계)에서 이미 "중지"가 눌렸으면, 지금까지
+    // 모은 것으로 상품 스크랩 단계를 시작하지 않고 그대로 멈춘다 — 여기서 그냥 진행해버리면 "중지"를
+    // 눌렀는데도 (지금까지 모은 URL 몇 개는) 계속 스크랩되는 것처럼 보인다.
+    if (stoppedDuringCollection) return { total: 0, saved: 0, stopped: true, concurrencyLog: [] }
 
     // 예약된 자동 재스크랩처럼 아무도 화면을 안 보고 있는 상황에서 로그인이 끊긴 채로 스크랩되면, 그
     // 사실을 사용자가 나중에라도 알 수 있어야 한다 — 사이트 메모에 한 번만 남긴다(상품마다 남기면 도배됨).

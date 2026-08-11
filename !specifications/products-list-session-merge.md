@@ -28,11 +28,28 @@
 ## 관련 파일
 
 - `components/panels/shared/ScrapeSessionGrid.tsx`: `isRowCheckable` prop 추가(체크박스 비활성화 +
-  전체선택 계산에서 제외).
+  전체선택 계산에서 제외). (2026-08-11) `extraActions` prop 추가.
 - `components/panels/ProductsListPanel.tsx`: `isConfirmed`/`handleMergeSessions`(신규), 체크 검증 로직,
   "🔗 선택 병합" 버튼, 체크박스 컬럼 전체 사용자 개방.
+
+## 2026-08-11 후속 수정
+
+### `isConfirmed()`가 항상 false로 판정 — COUNT(*)가 문자열로 내려옴
+
+체크 기능이 안 먹힌다는 재보고로 확인: `staged_count`/`pending_count`는 서버의 `COUNT(*)`(Postgres
+bigint) 결과라 `pg` 드라이버가 문자열로 내려준다 — `s.pending_count === 0`은 `"0" === 0`이라 항상
+false가 되어 모든 세션이 미확정으로 오판됐다(체크박스가 전부 비활성화). `ScrapeSessionGrid`의 같은
+판정과 동일하게 `Number()`로 감싸도록 수정.
+
+### "선택 병합"/"선택 삭제" 버튼을 그리드 헤더로 이동
+
+이 버튼들이 `ScrapeSessionGrid` 바깥(패널 자체 헤더)에 있어 그리드의 "🔍 필터" 등 보조 버튼과 다른
+줄에 떠 있었다. `ScrapeSessionGrid`에 `extraActions?: React.ReactNode`(신규, 선택적) prop을 추가해
+그리드 자신의 액션 줄에 같이 그리도록 이동시키고, 색상도 주 액션(teal/rose 채움)에서 그리드의 다른
+보조 버튼과 같은 중립 회색 필(pill)로 통일했다.
 
 ## 상태
 
 **구현 완료.** tsc/eslint 클린. 실제 화면에서의 최종 확인(체크 → 병합 → 데이터 마이그 목록에서 그룹
-확인)은 사용자가 다음 사용 시 확인 예정.
+확인)은 사용자가 다음 사용 시 확인 예정. 2026-08-11 수정(COUNT 문자열 비교, 버튼 위치 이동)도
+tsc/eslint 클린.

@@ -72,9 +72,12 @@ export function ProductsListPanel() {
   }
 
   /** "상태" 컬럼(ScrapeSessionGrid)이 "✓ 확정 - 데이터 검수 완"으로 보여주는 것과 같은 기준 —
-   *  아직 미확정 항목이 남은 세션은 병합 대상이 아니다. */
+   *  아직 미확정 항목이 남은 세션은 병합 대상이 아니다. staged_count/pending_count는 서버의
+   *  COUNT(*)(bigint) 결과라 pg 드라이버가 문자열로 내려준다 — Number()로 감싸지 않으면
+   *  "0" === 0이 항상 false가 되어 모든 세션이 미확정으로 오판된다(ScrapeSessionGrid의 같은 판정과
+   *  동일하게 Number()로 변환). */
   function isConfirmed(s: Session): boolean {
-    return s.staged_count > 0 && s.pending_count === 0
+    return Number(s.staged_count) > 0 && Number(s.pending_count) === 0
   }
 
   function toggleCheckSession(id: number) {
@@ -172,21 +175,7 @@ export function ProductsListPanel() {
                   : '선택된 세션이 없습니다.'}
               </span>
             ) : (
-              <>
-                <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
-                {checkedSessionIds.size >= 2 && (
-                  <button onClick={handleMergeSessions}
-                    className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors shrink-0">
-                    🔗 선택 병합 ({checkedSessionIds.size})
-                  </button>
-                )}
-                {isAdmin && checkedSessionIds.size > 0 && (
-                  <button onClick={handleDeleteChecked} disabled={deleting}
-                    className="px-3 py-1.5 bg-rose-50 text-rose-600 text-xs font-semibold rounded-full hover:bg-rose-100 disabled:opacity-50 transition-colors shrink-0">
-                    🗑 선택 삭제 ({checkedSessionIds.size})
-                  </button>
-                )}
-              </>
+              <span className="text-xs font-semibold text-gray-500 shrink-0">스크래핑 목록</span>
             )}
             <button onClick={() => setTopCollapsed(v => !v)}
               className="ml-auto px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-semibold rounded-full transition-colors shrink-0">
@@ -201,7 +190,21 @@ export function ProductsListPanel() {
               <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4 shrink-0">
                 <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId}
                   onDelete={isAdmin ? handleDeleteSession : undefined} maxHeightClassName="max-h-48" showClientMall
-                  checkedIds={checkedSessionIds} onToggleCheck={toggleCheckSession} isRowCheckable={isConfirmed} />
+                  checkedIds={checkedSessionIds} onToggleCheck={toggleCheckSession} isRowCheckable={isConfirmed}
+                  extraActions={<>
+                    {checkedSessionIds.size >= 2 && (
+                      <button onClick={handleMergeSessions}
+                        className="px-4 py-1.5 bg-gray-100 text-gray-600 text-xs font-semibold rounded-full hover:bg-gray-200 transition-colors shrink-0">
+                        🔗 선택 병합 ({checkedSessionIds.size})
+                      </button>
+                    )}
+                    {isAdmin && checkedSessionIds.size > 0 && (
+                      <button onClick={handleDeleteChecked} disabled={deleting}
+                        className="px-4 py-1.5 bg-gray-100 text-gray-600 text-xs font-semibold rounded-full hover:bg-gray-200 disabled:opacity-50 transition-colors shrink-0">
+                        🗑 선택 삭제 ({checkedSessionIds.size})
+                      </button>
+                    )}
+                  </>} />
               </div>
             </>
           )}

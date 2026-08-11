@@ -362,6 +362,27 @@ Playwright의 `context.request.get()`(같은 `BrowserContext`라 로그인 쿠�
 세 수정 다 특정 몰 이름으로 예외처리한 게 아니라 범용 로직이라, 같은 유형(카드 중복 링크 / 위젯
 없음 / `page=N` 무반응)의 다른 몰에도 그대로 적용된다.
 
+### 버그 13 — 버그 12로도 못 잡는 카테고리는 여전히 최후수단 순회(최대 50페이지 실제 브라우저)까지 떨어져 틀린 개수로 확정 (수정됨)
+
+버그 12 적용 이후에도 같은 몰(펫투비)의 다른 카테고리("미용용품", category=031003)에서 같은 유형의
+증상이 재현됐다(2026-08-12, 사용자가 브라우저 주소창에 `page=14`까지 올라가는 걸 직접 보고 재보고).
+로그로 원인 추적: 이 카테고리는 "총 N개" 문구가 감지되지 않았고(버그 12의 안전장치가 안 통함), 1페이지
+캘리브레이션(순수 HTTP 확인)이 하필 그 순간 네트워크 오류로 실패해 `useHttp=false`로 확정됐다.
+그런데 지수+이분 탐색은 자기 나름의 캘리브레이션을 별도로 다시 해서 성공했음에도 결국 끝을 못 찾고
+포기했고, 그 뒤 최후수단 순차 순회로 떨어지면서 **앞서 실패했던 `useHttp=false`를 그대로 물려받아**
+50페이지 전부를 실제 브라우저로 순회했다(perPage=114인데 count=462로 확정 — 틀린 값). 근본적으로는
+버그 12에서 이미 확인한 것과 같은 원인: 이 몰은 `?page=N`을 붙여도 실제로 페이지가 안 넘어가는데, 매
+요청마다 내용이 살짝 달라져서 "반복 감지"가 이 사실을 못 잡는다.
+
+**수정**: 위젯을 못 찾은 카테고리는 지수+이분 탐색·최후수단 순회를 시작하기 전에, `paginationActuallyWorks()`
+(신규)로 2페이지가 1페이지와 실제로 다른 상품을 보여주는지 딱 한 번만 가볍게 확인한다. 1페이지에
+없던 새 상품이 하나도 없으면 "이 카테고리엔 페이지 번호가 아무 효과가 없다"고 즉시 판단해 1페이지
+개수를 그대로 총 개수로 확정하고, 그 아래의 모든 탐색(위젯 재확인·지수+이분 탐색·최후수단 순회)을
+전부 건너뛴다. 이 검증을 위해 `countProductsOnPage`/`countProductsFromHtml`/`probeLightweight`/
+`probeCategoryPage`의 반환값에 중복 제거된 href 목록(`hrefs: string[]`)을 추가해, 두 페이지의 상품
+집합을 직접 비교할 수 있게 했다(기존엔 정렬해 이어붙인 문자열 `fingerprint`만 있어 "완전히 같은지"만
+비교 가능했고 "겹치는 게 있는지"는 비교할 수 없었다).
+
 ## 미리보기 중지
 
 미리보기가 오래 걸릴 수 있으니(위 성능 수정 이후에도 몰에 따라 카테고리가 아주 많으면 시간이 걸림)
@@ -562,7 +583,11 @@ React 상태를 전부 초기화하는데, `localStorage`에 저장해두던 항
   `countProductsOnPage`/`countProductsFromHtml`의 `toResult`가 href를 `Set`으로 중복 제거.
   `readStatedTotalCount`(신규) — 몰이 직접 적어둔 "총 N개" 문구를 카테고리 라벨로 검증해 최우선
   신호로 사용. `MAX_PAGE_SEARCH_BOUND`(신규 상수, `AUTO_PAGINATION_CAP*4`=200) — 기존
-  `AUTO_PAGINATION_CAP*100`(5000)이던 `findRealLastPage`의 탐색 상한을 낮춤.
+  `AUTO_PAGINATION_CAP*100`(5000)이던 `findRealLastPage`의 탐색 상한을 낮춤. (2026-08-12, 버그 13)
+  `countProductsOnPage`/`countProductsFromHtml`/`probeLightweight`/`probeCategoryPage`의 반환값에
+  `hrefs: string[]`(신규, 중복 제거된 목록) 추가. `paginationActuallyWorks`(신규) — 위젯 못 찾은
+  카테고리는 지수+이분 탐색·최후수단 순회 전에 2페이지가 1페이지와 실제로 다른 상품을 보여주는지
+  먼저 확인하고, 안 그러면 곧장 1페이지 개수로 확정.
 - `lib/scrape/mallProfile.ts`: (2026-08-11) `summarizeProfile`/`describeDiff`에 `hasPaginationWidget`
   반영.
 - `app/api/scrape/preview-catalog/route.ts`: `previewCatalog`에 `stopSignal: req.signal` 전달.
@@ -636,3 +661,9 @@ img 필수)은 정확히 21로 수렴(라이브 확인)해, 둘 다 31~32를 설
 대상 직접지정" 커스텀 셀렉터(`userSel`)가 관여할 가능성이 있으나 확인 못함. 다만 "총 N개" 신뢰
 로직이 이 계산 자체를 건너뛰게 하므로 이 카테고리에서는 실질적 영향이 없다 — "총 N개" 문구가 없는
 몰에서 `perPage`가 부정확하면 여전히 문제가 될 수 있어, 다음에 그런 몰을 만나면 우선 조사 대상.
+
+버그 13(2026-08-12)은 위에서 예상했던 "'총 N개' 문구가 없는 몰"이 바로 재현된 사례다("미용용품"
+카테고리, 사용자가 브라우저에서 실시간으로 `page=14`까지 올라가는 걸 직접 보고 재보고) — tsc/eslint
+클린. `paginationActuallyWorks`는 코드 리뷰 수준으로는 정확하지만(2페이지 href 집합이 1페이지와
+겹치기만 하면 "페이지네이션 없음"으로 판정), 실제로 이 재발 케이스에 대해 라이브 재실행으로 개수가
+정확해졌는지까지는 다음 실사용에서 확인 예정.

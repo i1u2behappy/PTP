@@ -2540,7 +2540,7 @@ export interface CatalogPreviewResult {
  *  구분할 수 있다. */
 async function countProductsOnPage(
   page: Page, userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
-): Promise<{ count: number; isLoginPage: boolean; fingerprint: string }> {
+): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; hrefs: string[] }> {
   return page.evaluate(({ userSel, platformSel, detailPatternSrc, baseUrl }) => {
     const isLoginPage = !!document.querySelector('input[type="password"]')
     const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc, 'i') : null
@@ -2554,7 +2554,7 @@ async function countProductsOnPage(
     // 실제 21개인 카테고리가 42개로 잡혔다) — 중복 href를 그대로 세면 몰마다 카드 안 링크 개수가 달라
     // count가 들뜨고 불안정해진다(지수+이분 탐색이 "새 페이지"로 오판하는 원인). URL 그대로 중복 제거해
     // 실제 상품 개수만 센다.
-    const toResult = (list: string[]) => { const u = [...new Set(list)]; return { count: u.length, isLoginPage, fingerprint: u.slice().sort().join('|') } }
+    const toResult = (list: string[]) => { const u = [...new Set(list)]; return { count: u.length, isLoginPage, fingerprint: u.slice().sort().join('|'), hrefs: u } }
     if (userSel) return toResult(hrefs(userSel, false, false))
     if (platformSel) {
       const viaProfile = hrefs(platformSel, false, true)
@@ -2682,7 +2682,7 @@ async function readCurrentPageNumber(page: Page, nextPageSelector: string | unde
  *  결과를 낼 수 있다). */
 function countProductsFromHtml(
   html: string, finalUrl: string, userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
-): { count: number; isLoginPage: boolean; fingerprint: string } {
+): { count: number; isLoginPage: boolean; fingerprint: string; hrefs: string[] } {
   const $ = loadHtml(html)
   const isLoginPage = $('input[type="password"]').length > 0
   const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc, 'i') : null
@@ -2697,7 +2697,7 @@ function countProductsFromHtml(
     .filter(href => !applyDetailFilter || !detailRe || detailRe.test(href))
   // countProductsOnPage와 반드시 같은 중복 제거 기준을 유지한다(위 함수 주석 참고 — 상품 카드 하나에
   // 링크가 여러 개인 스킨에서 count가 들뜨는 문제).
-  const toResult = (list: string[]) => { const u = [...new Set(list)]; return { count: u.length, isLoginPage, fingerprint: u.slice().sort().join('|') } }
+  const toResult = (list: string[]) => { const u = [...new Set(list)]; return { count: u.length, isLoginPage, fingerprint: u.slice().sort().join('|'), hrefs: u } }
   if (userSel) return toResult(hrefs(userSel, false, false))
   if (platformSel) {
     const viaProfile = hrefs(platformSel, false, true)
@@ -2754,15 +2754,15 @@ async function probeLightweight(
   context: BrowserContext, url: string,
   userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
   nextPageSelector: string | undefined,
-): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; currentPage: number | null } | null> {
+): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; hrefs: string[]; currentPage: number | null } | null> {
   try {
     const res = await context.request.get(url, { timeout: 15_000 })
     if (!res.ok()) return null
     const html = await res.text()
     const finalUrl = res.url()
-    const { count, isLoginPage, fingerprint } = countProductsFromHtml(html, finalUrl, userSel, platformSel, detailPatternSrc, baseUrl)
+    const { count, isLoginPage, fingerprint, hrefs } = countProductsFromHtml(html, finalUrl, userSel, platformSel, detailPatternSrc, baseUrl)
     const currentPage = count > 0 ? readCurrentPageNumberFromHtml(html, nextPageSelector) : null
-    return { count, isLoginPage, fingerprint, currentPage }
+    return { count, isLoginPage, fingerprint, hrefs, currentPage }
   } catch {
     return null
   }
@@ -2776,16 +2776,36 @@ async function probeCategoryPage(
   workerPage: Page, context: BrowserContext, firstPageUrl: string, pageNum: number, useHttp: boolean,
   userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
   nextPageSelector: string | undefined,
-): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; currentPage: number | null }> {
+): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; hrefs: string[]; currentPage: number | null }> {
   if (useHttp) {
     const lightweight = await probeLightweight(context, withPageParam(firstPageUrl, pageNum), userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
     if (lightweight) return lightweight
   }
   await workerPage.goto(withPageParam(firstPageUrl, pageNum), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
   await settleAfterNav(workerPage)
-  const { count, isLoginPage, fingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+  const { count, isLoginPage, fingerprint, hrefs } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
   const currentPage = count > 0 ? await readCurrentPageNumber(workerPage, nextPageSelector) : null
-  return { count, isLoginPage, fingerprint, currentPage }
+  return { count, isLoginPage, fingerprint, hrefs, currentPage }
+}
+
+/** 지수+이분 탐색이나 최후수단 순회를 시작하기 전에, 2페이지가 1페이지와 실제로 다른 상품을 보여주는지
+ *  딱 한 번만 가볍게 확인한다 — "페이지 번호를 늘리면 다음 상품이 나온다"는, 이후 모든 탐색이 의존하는
+ *  전제 자체를 검증하는 것이다. 위젯이 없는 몰(펫투비 등)은 이 파라미터가 애초에 안 통하는 경우가
+ *  실사용으로 확인됐는데, 그런데도 요청마다 내용이 살짝 달라져(추정: 추천 위젯 등) 기존의 "반복 감지"
+ *  (fingerprint 비교)로는 이 사실을 못 잡고, 지수 탐색이 끝을 못 찾아 헤매다 최후수단(최대 50페이지
+ *  실제 브라우저 순회)까지 떨어져 틀린 개수로 확정됐다(2026-08-12 실사용 확인: perPage=114인 카테고리가
+ *  count=462로 잘못 확정됨 — "사료" 카테고리가 겪은 것과 같은 유형이지만 "총 N개" 문구가 없어 그
+ *  안전장치도 못 썼다). 2페이지에 1페이지와 안 겹치는(=새로운) 상품이 하나도 없으면, 이 카테고리에는
+ *  페이지 번호가 아무 효과가 없다고 보고 이후 모든 탐색을 건너뛴다. */
+async function paginationActuallyWorks(
+  workerPage: Page, context: BrowserContext, firstPageUrl: string, useHttp: boolean, page1Hrefs: string[],
+  userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
+  nextPageSelector: string | undefined,
+): Promise<boolean> {
+  const page2 = await probeCategoryPage(workerPage, context, firstPageUrl, 2, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
+  if (page2.count === 0 || page2.isLoginPage) return false
+  const seenOnPage1 = new Set(page1Hrefs)
+  return page2.hrefs.some(href => !seenOnPage1.has(href))
 }
 
 /** 미리보기 전용 — 카테고리(또는 단일 시작 URL) 하나의 상품 "개수"만 빠르게 구한다. 이름/썸네일/링크는
@@ -2931,7 +2951,7 @@ async function countCategoryProductsOnce(
   const { category } = await detectCategoryLabel(workerPage)
   const label = category || categoryUrl
 
-  const { count: perPage, isLoginPage: perPageIsLogin, fingerprint: perPageFingerprint } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+  const { count: perPage, isLoginPage: perPageIsLogin, fingerprint: perPageFingerprint, hrefs: page1Hrefs } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
   // 1페이지 자체가 로그인 화면이면(이 새 탭이 이 몰의 세션 검증에 걸려 튕겨나간 경우) 뒤 어떤 값도
   // 못 믿는다 — 개수를 0으로 잘못 확정하는 대신 needsLogin만 알리고 즉시 끝낸다(호출부가 "로그인이
   // 끊겼을 수 있다"는 배너를 보여줄 근거가 된다).
@@ -2979,6 +2999,17 @@ async function countCategoryProductsOnce(
   const calibration = await probeLightweight(context, firstPageUrl, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
   const useHttp = !!calibration && !calibration.isLoginPage && calibration.count === perPage
   console.log(`[previewCatalog] "${label}" 캘리브레이션: ${useHttp ? '가벼운 HTTP 방식 사용' : '브라우저 방식(불일치 또는 실패)'} (1페이지 브라우저=${perPage}, HTTP=${calibration?.count ?? 'null'})`)
+
+  // 위젯을 못 찾은 카테고리(maxPage===null)만 지수+이분 탐색·최후수단 순회로 넘어가는데, 그 전에
+  // 이 몰의 페이지 번호 자체가 유효한지부터 확인한다(paginationActuallyWorks 주석 참고) — 안 통하면
+  // 곧바로 1페이지 개수를 확정하고 아래의 모든 탐색을 건너뛴다.
+  if (maxPage === null && !stop()) {
+    const works = await paginationActuallyWorks(workerPage, context, firstPageUrl, useHttp, page1Hrefs, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
+    if (!works) {
+      console.log(`[previewCatalog] "${label}" 2페이지가 1페이지와 다른 상품을 보여주지 않음 → 페이지 번호가 안 통하는 카테고리로 보고 count=${perPage}로 확정`)
+      return { url: categoryUrl, label, count: perPage }
+    }
+  }
 
   if (maxPage !== null) {
     const { count: lastPageCount, isLoginPage: lastPageIsLogin, fingerprint: lastPageFingerprint } =

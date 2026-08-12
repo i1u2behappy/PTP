@@ -200,6 +200,18 @@ export async function mergeStagingItems(ids: number[], opts: { force?: boolean }
   return { merged, skipped, noClient }
 }
 
+/** 확정(merged)된 항목을 다시 미확정(pending)으로 되돌린다 — staging 상태만 되돌리고, 이미 만들어진
+ *  mall_products/product_master(다운로드된 이미지 포함)는 건드리지 않는다(사용자 선택 — 다른 화면에서
+ *  이미 그 데이터를 참조 중일 수 있어 삭제는 위험하고, 나중에 다시 "확정"하면 최신 스크랩값으로 그대로
+ *  덮어써지므로 되돌리기도 쉽다). skipped 항목은 대상이 아니다(별도 개념 — discardStagingItems 참고). */
+export async function unmergeStagingItems(ids: number[]): Promise<{ reverted: number[] }> {
+  const res = await pool.query<{ id: number }>(
+    `UPDATE scrape_staging_items SET status='pending', updated_at=NOW() WHERE id = ANY($1::int[]) AND status='merged' RETURNING id`,
+    [ids],
+  )
+  return { reverted: res.rows.map(r => r.id) }
+}
+
 export async function discardStagingItems(ids: number[]): Promise<void> {
   const rows = await pool.query<{ session_id: number }>(
     `SELECT DISTINCT session_id FROM scrape_staging_items WHERE id = ANY($1::int[]) AND status='pending'`, [ids],

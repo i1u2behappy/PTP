@@ -137,6 +137,10 @@ function formatOptionCombinations(combos: string[][] | undefined): string {
 /** 옵션(옵션1/옵션2/...)은 상품마다 개수가 달라 고정 컬럼이 아니라, 로드된 데이터 중 실제 값이 있는 최대
  *  옵션 개수만큼만 상세이미지 뒤에 동적으로 끼워 넣는다 (컴포넌트 내부의 `columns` 계산 참고). */
 const COLUMNS_BEFORE_OPTIONS: ColumnDef[] = [
+  // 체크박스 바로 옆(맨 앞)에 고정 — 확정/미확정이 뒤쪽에 있으면(예전엔 맨 끝) 찾기 어렵고, 이 값으로
+  // 정렬·필터하려는 요청이 실사용 중 있었다(2026-08-13). colIdx===0 sticky 처리가 위치 기반이라 이
+  // 컬럼을 맨 앞에 두는 것만으로 자동으로 고정된다.
+  { key: 'migration_status', label: '확정여부', getValue: p => STATUS_LABELS[p.status]?.text || p.status },
   { key: 'created_at', label: '스크래핑 일시', getValue: p => p.created_at },
   { key: 'source_url', label: 'URL', getValue: p => p.source_url },
   { key: 'file', label: '파일', getValue: () => '' },
@@ -169,7 +173,6 @@ const COLUMNS_AFTER_OPTIONS: ColumnDef[] = [
   { key: 'detail_text', label: '상세페이지 텍스트', getValue: p => p.raw_data?.detail_text || '' },
   { key: 'extra_info', label: '상품정보고시 전체', getValue: p => (p.raw_data?.extra_info || []).map(e => `${e.label}: ${e.value}`).join(' / ') },
   { key: 'missing', label: '누락 데이터', getValue: p => missingFields(p).join(', ') },
-  { key: 'migration_status', label: '마이그레이션 상태', getValue: p => STATUS_LABELS[p.status]?.text || p.status },
 ]
 
 function compareValues(a: string | number | null, b: string | number | null): number {
@@ -196,9 +199,9 @@ function widthFor(key: string): number {
   return DEFAULT_COL_WIDTH[key] ?? (key.startsWith('option_') ? 180 : key.startsWith('custom_') ? 160 : 120)
 }
 
-// v9: 새로 추가한 '파일' 컬럼이 저장된 옛 순서에서는 그냥 맨 뒤로 붙어버려 URL 옆이라는 의도한 위치가
-// 아니게 된다 — 버전을 올려 기본 순서(URL 바로 옆)로 한 번 리셋한다.
-const COL_ORDER_KEY = 'stagingGrid.colOrder.v9'
+// v10: '확정여부'(migration_status)를 맨 끝에서 맨 앞으로 옮겼다 — 저장된 옛 순서에서는 그냥 유지될 뿐이라
+// (loadColOrder는 새로 추가된 키만 뒤에 붙인다, 기존 키의 위치 이동은 반영 안 함) 버전을 올려 한 번 리셋한다.
+const COL_ORDER_KEY = 'stagingGrid.colOrder.v10'
 const DEFAULT_COL_ORDER = [...COLUMNS_BEFORE_OPTIONS, ...COLUMNS_AFTER_OPTIONS].map(c => c.key)
 
 function loadColOrder(): string[] {
@@ -223,6 +226,7 @@ export function StagingItemsGrid({ sessionId }: {
   const [items, setItems] = useState<StagingRow[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [merging, setMerging] = useState(false)
+  const [unmerging, setUnmerging] = useState(false)
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [sortKeys, setSortKeys] = useState<SortKey[]>([])
   const [showFilters, setShowFilters] = useState(false)
@@ -404,20 +408,30 @@ export function StagingItemsGrid({ sessionId }: {
   // 덮어쓰는 것이 오히려 의도된 동작). "예전 확정 이력 대비 신규/변경분만" 판단은 이 화면이 아니라
   // 별도 메뉴(연속관리 등)에서 필요할 때 다루기로 함 — is_already_migrated 데이터 자체는 그대로 남겨
   // 참고용 배지(아래 "이미가공됨" 표시)로만 계속 보여준다.
+  // merged 행도 선택 가능해졌다(2026-08-13) — "미확정으로 되돌리기"의 대상이라 확정 대상(pending)과는
+  // 별개로 선택할 수 있어야 한다. skipped(건너뛴) 행은 둘 중 어느 액션의 대상도 아니라 여전히 제외한다.
   function isSelectable(p: StagingRow) {
-    return p.status === 'pending'
+    return p.status === 'pending' || p.status === 'merged'
   }
 
   function toggleSelect(id: number) {
     setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
   }
-  const selectableItems = visibleItems.filter(isSelectable)
-  // status !== 'pending'인 행(이미 이 세션에서 확정했거나 건너뛰기한 행)은 여전히 선택 대상에서 빠진다 —
-  // is_already_migrated와는 별개로, 같은 행을 두 번 확정할 수는 없으니 이유를 밝혀둔다.
-  const alreadyMergedCount = visibleItems.filter(p => p.status !== 'pending').length
-  function selectAll() {
-    setSelected(selected.size === selectableItems.length ? new Set() : new Set(selectableItems.map(p => p.id)))
+  // 확정(merged)/미확정(pending) 각각 따로 일괄선택할 수 있어야 한다는 요청 — 하나의 selected Set을
+  // 공유하되, 그룹별로 "이 그룹 전체가 이미 선택돼 있는지"만 따로 판정해 체크박스 두 개로 나눈다.
+  const pendingItems = visibleItems.filter(p => p.status === 'pending')
+  const mergedItems = visibleItems.filter(p => p.status === 'merged')
+  function toggleSelectGroup(group: StagingRow[]) {
+    const ids = group.map(p => p.id)
+    const allSelected = ids.length > 0 && ids.every(id => selected.has(id))
+    setSelected(prev => {
+      const next = new Set(prev)
+      ids.forEach(id => (allSelected ? next.delete(id) : next.add(id)))
+      return next
+    })
   }
+  const selectedPendingIds = pendingItems.filter(p => selected.has(p.id)).map(p => p.id)
+  const selectedMergedIds = mergedItems.filter(p => selected.has(p.id)).map(p => p.id)
 
   function openDetail(p: StagingRow) {
     if (!p.matched_mall_product_id) return
@@ -452,15 +466,15 @@ export function StagingItemsGrid({ sessionId }: {
   }
 
   async function handleMerge() {
-    if (!selected.size) return
+    if (!selectedPendingIds.length) return
     setMerging(true)
     try {
-      const ids = [...selected]
       // force: true — 이 화면은 스크랩 건(세션) 단위로 확정하는 화면이라, 예전에 이미 상품마스터로
       // 확정된 적 있는 상품(is_already_migrated)이라도 이번에 새로 스크랩한 값 기준으로 다시 확정한다.
+      // selected에는 (되돌리기 대상인) merged 행도 섞여 있을 수 있어 pending만 골라 보낸다.
       const res = await fetch('/api/scrape-staging/merge', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids, force: true }),
+        body: JSON.stringify({ ids: selectedPendingIds, force: true }),
       })
       const d = await res.json() as { merged: number[]; skipped: { id: number; reason: string }[]; noClient?: number[] }
       if (d.noClient?.length) {
@@ -472,6 +486,26 @@ export function StagingItemsGrid({ sessionId }: {
       loadItems()
     } finally {
       setMerging(false)
+    }
+  }
+
+  /** 확정을 다시 미확정으로 되돌린다 — staging 상태만 되돌리고, 이미 만들어진 mall_products/
+   *  product_master는 그대로 둔다(unmergeStagingItems 주석 참고: 사용자가 "그대로 두고 되돌리기"를
+   *  선택함, 2026-08-13). */
+  async function handleUnmerge() {
+    if (!selectedMergedIds.length) return
+    setUnmerging(true)
+    try {
+      const res = await fetch('/api/scrape-staging/unmerge', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selectedMergedIds }),
+      })
+      if (!res.ok) { alert('되돌리기에 실패했습니다.'); return }
+      setSelected(new Set())
+      bumpRefresh('staging')
+      loadItems()
+    } finally {
+      setUnmerging(false)
     }
   }
 
@@ -509,12 +543,21 @@ export function StagingItemsGrid({ sessionId }: {
   return (
     <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-0 flex flex-col">
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 shrink-0 flex-wrap gap-2">
-        <div className="flex items-center gap-3 text-xs text-gray-600">
+        <div className="flex items-center gap-4 text-xs text-gray-600 flex-wrap">
+          {/* 체크박스 두 개를 하나의 <label>에 같이 넣지 않는다 — 라벨 텍스트를 클릭하면 그 라벨 안의
+              "첫 번째" 체크박스가 토글돼, 두 번째 체크박스 옆 텍스트를 눌러도 첫 번째가 반응하는 사고가
+              있었다(과거 실사용 확인). 그룹마다 독립된 <label>로 감싼다. */}
           <label className="flex items-center gap-2 cursor-pointer">
-            <input type="checkbox" checked={selected.size === selectableItems.length && selectableItems.length > 0} onChange={selectAll} />
-            전체 선택 ({selectableItems.length}개 선택 가능{(hasFilters || sortKeys.length > 0) && ` · 전체 ${items.length}개 중 ${visibleItems.length}개 표시`}
-            {alreadyMergedCount > 0 && ` · 이미확정됨 ${alreadyMergedCount}개 제외`})
+            <input type="checkbox" checked={pendingItems.length > 0 && pendingItems.every(p => selected.has(p.id))}
+              onChange={() => toggleSelectGroup(pendingItems)} />
+            미확정 전체선택 ({pendingItems.length}개)
           </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={mergedItems.length > 0 && mergedItems.every(p => selected.has(p.id))}
+              onChange={() => toggleSelectGroup(mergedItems)} />
+            확정됨 전체선택 ({mergedItems.length}개)
+          </label>
+          {(hasFilters || sortKeys.length > 0) && <span>전체 {items.length}개 중 {visibleItems.length}개 표시</span>}
         </div>
         <div className="flex gap-2">
           {/* 보조 기능 토글은 rounded-md의 각진 모양으로, 클릭 한 번짜리 액션 버튼(rounded-full)과 구분한다. */}
@@ -532,10 +575,17 @@ export function StagingItemsGrid({ sessionId }: {
             className="px-4 py-1.5 bg-gray-100 text-gray-600 text-xs font-semibold rounded-full hover:bg-gray-200 transition-colors">
             📥 엑셀 다운로드
           </button>
-          <button onClick={handleMerge} disabled={!selected.size || merging}
+          {selectedMergedIds.length > 0 && (
+            <button onClick={handleUnmerge} disabled={unmerging}
+              title="mall_products/상품마스터 데이터는 그대로 두고, 이 스크랩 검토 화면에서만 다시 미확정으로 되돌립니다."
+              className="px-4 py-1.5 bg-gray-100 text-gray-600 text-xs font-semibold rounded-full hover:bg-gray-200 disabled:opacity-40 transition-colors">
+              {unmerging ? '되돌리는 중...' : `↩️ 미확정으로 되돌리기 (${selectedMergedIds.length})`}
+            </button>
+          )}
+          <button onClick={handleMerge} disabled={!selectedPendingIds.length || merging}
             title="확정 시: 이미지 다운로드 + 원본 데이터(mall_products) 반영 + (거래처 연결된 몰이면) 상품마스터 자동 변환까지 처리됩니다."
             className="px-4 py-1.5 bg-teal-500 text-white text-xs font-semibold rounded-full hover:bg-teal-600 disabled:opacity-40 transition-colors">
-            {merging ? '확정 중...' : `확정 (스크랩검수 후) (${selected.size})`}
+            {merging ? '확정 중...' : `확정 (스크랩검수 후) (${selectedPendingIds.length})`}
           </button>
         </div>
       </div>

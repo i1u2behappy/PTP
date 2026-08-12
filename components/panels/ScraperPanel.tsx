@@ -471,9 +471,21 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   }
 
   useEffect(() => {
-    // Mall 목록/거래처 목록에서 특정 몰(또는 거래처)을 지정해 들어온 경우, 그 선택이 우선이므로 이전 세션 복원은 건너뛴다.
-    if (initialSiteId) { selectSite(initialSiteId); return }
-    if (initialClientId) return
+    // Mall 목록/거래처 목록에서 특정 몰(또는 거래처)을 지정해 들어온 경우 그 선택이 우선이지만, 마침
+    // 그 몰의 마지막 세션이 저장돼 있으면(같은 몰이라 사용자 의도와 어긋나지 않는다) 빈 폼 대신 그대로
+    // 복원한다 — 안 그러면 스크랩이 끝난 몰을 목록에서 다시 클릭할 때마다 완료 상태가 사라지고 빈
+    // 폼부터 다시 보였다(2026-08-13 실사용 확인: 세션은 done+1448건으로 정상 완료돼 있었는데도 화면은
+    // 매번 초기화됨).
+    const raw = localStorage.getItem(LAST_SESSION_KEY)
+    let savedSession: { site: Site; sessionId: number } | null = null
+    if (raw) {
+      try { savedSession = JSON.parse(raw) as { site: Site; sessionId: number } } catch { /* 손상된 저장값은 무시 */ }
+    }
+    if (initialSiteId) {
+      if (!savedSession || savedSession.site.id !== initialSiteId) { selectSite(initialSiteId); return }
+    } else if (initialClientId) {
+      return
+    }
 
     const formRaw = localStorage.getItem(FORM_STATE_KEY)
     let savedForm: ScraperFormSavedState | null = null
@@ -481,31 +493,28 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       try { savedForm = JSON.parse(formRaw) as ScraperFormSavedState } catch { /* 손상된 저장값은 무시 */ }
     }
 
-    const raw = localStorage.getItem(LAST_SESSION_KEY)
-    if (raw) {
-      try {
-        const saved = JSON.parse(raw) as { site: Site; sessionId: number }
-        fetch(`/api/scrape/status?sessionId=${saved.sessionId}`).then(r => r.json()).then((d: { status: string; product_count: number; saved_count: number; success_count: number; failed_count: number; error?: string }) => {
-          setSelectedSite(saved.site)
-          setSessionId(saved.sessionId)
-          setStatus(d.status as Status)
-          setProgress({
-            saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error,
-            successCount: Number(d.success_count) || 0, failedCount: Number(d.failed_count) || 0,
-          })
-          // 세션 복원과 별개로, 같은 몰의 카테고리 목록 등 폼 상태도 함께 복원한다 — 예전엔 여기서 그대로
-          // return해버려 "스크랩 완료" 상태는 보이는데 그 위 카테고리 선택 목록은 사라져 보이는 문제가
-          // 있었다(2026-08-10 실사용 확인). selectSite()는 카테고리/진행상황을 전부 초기화하는 함수라
-          // (사용자가 다른 몰을 새로 고를 때 쓰는 용도) 여기서 그대로 쓰면 방금 복원한 세션까지 같이
-          // 지워버리므로 쓰지 않고, 저장해둔 값을 직접 적용한다.
-          if (savedForm && savedForm.siteId === saved.site.id) applyFormState(savedForm)
-        }).catch(() => {})
-        // 진행 로그(URL별 성공/실패)는 탭 전환으로 언마운트됐다 돌아와도 그대로 보여야 하므로 같이 복원한다.
-        fetch(`/api/scrape/log?sessionId=${saved.sessionId}`).then(r => r.json()).then((rows: ItemLogRow[]) => {
-          if (Array.isArray(rows)) setItemLog(rows)
-        }).catch(() => {})
-        return
-      } catch { /* 손상된 저장값은 무시하고 아래 폼 상태 복원으로 진행 */ }
+    if (savedSession) {
+      const saved = savedSession
+      fetch(`/api/scrape/status?sessionId=${saved.sessionId}`).then(r => r.json()).then((d: { status: string; product_count: number; saved_count: number; success_count: number; failed_count: number; error?: string }) => {
+        setSelectedSite(saved.site)
+        setSessionId(saved.sessionId)
+        setStatus(d.status as Status)
+        setProgress({
+          saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error,
+          successCount: Number(d.success_count) || 0, failedCount: Number(d.failed_count) || 0,
+        })
+        // 세션 복원과 별개로, 같은 몰의 카테고리 목록 등 폼 상태도 함께 복원한다 — 예전엔 여기서 그대로
+        // return해버려 "스크랩 완료" 상태는 보이는데 그 위 카테고리 선택 목록은 사라져 보이는 문제가
+        // 있었다(2026-08-10 실사용 확인). selectSite()는 카테고리/진행상황을 전부 초기화하는 함수라
+        // (사용자가 다른 몰을 새로 고를 때 쓰는 용도) 여기서 그대로 쓰면 방금 복원한 세션까지 같이
+        // 지워버리므로 쓰지 않고, 저장해둔 값을 직접 적용한다.
+        if (savedForm && savedForm.siteId === saved.site.id) applyFormState(savedForm)
+      }).catch(() => {})
+      // 진행 로그(URL별 성공/실패)는 탭 전환으로 언마운트됐다 돌아와도 그대로 보여야 하므로 같이 복원한다.
+      fetch(`/api/scrape/log?sessionId=${saved.sessionId}`).then(r => r.json()).then((rows: ItemLogRow[]) => {
+        if (Array.isArray(rows)) setItemLog(rows)
+      }).catch(() => {})
+      return
     }
     // 아직 스크랩을 시작하지 않은 단계(위 세션 복원 대상이 없음)라도, 몰 선택/시작 URL/카테고리 목록만은
     // 그대로 이어서 볼 수 있도록 복원한다. selectSite가 site.url로 targetUrl을 기본값으로 초기화해버리므로,
@@ -2256,23 +2265,32 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </div>
           </div>
           {status === 'running' && (
-            <div className="w-full bg-gray-100 rounded-full h-2 mb-3">
-              <div className="bg-teal-500 h-2 rounded-full transition-all"
+            <div className="relative w-full bg-gray-100 rounded-full h-5 mb-3 overflow-hidden">
+              <div className="bg-teal-500 h-5 rounded-full transition-all"
                 style={{ width: progress.total > 0 ? `${Math.round(progress.saved / progress.total * 100)}%` : '10%' }} />
+              {progress.total > 0 && (
+                <span className="absolute inset-0 flex items-center justify-center text-[11px] font-semibold text-gray-700">
+                  {progress.saved} / {progress.total}개
+                </span>
+              )}
             </div>
           )}
-          {/* 상품 URL 수집(카테고리 목록 순회) 단계는 progress.total이 아직 0이라 아래 "수집 완료: 0개"만
-              보이면 멈춘 것처럼 보인다 — collectProgress가 있으면(그 단계가 진행 중이라는 뜻) 그걸 먼저 보여준다. */}
+          {/* 상품 URL 수집(카테고리 목록 순회) 단계는 progress.total이 아직 0이라 막대 안에 보여줄 수량이
+              없다 — collectProgress가 있으면(그 단계가 진행 중이라는 뜻) 그걸 먼저 보여준다. 수집완료/총
+              수량은 이제 막대 안에 표시하므로, running 중엔 실패 건수만 아래에 별도로 보여준다. 완료 후
+              (running이 아닐 때)는 막대가 사라지므로 최종 요약 문구를 그대로 유지한다. */}
           {status === 'running' && progress.total === 0 && collectProgress && collectProgress.total > 1 ? (
             <p className="text-sm text-gray-600">
               카테고리 목록 수집 중... <strong>{collectProgress.done}</strong> / {collectProgress.total}
             </p>
-          ) : (
+          ) : status !== 'running' ? (
             <p className="text-sm text-gray-600">
               수집 완료: <strong>{progress.saved}</strong>개 {progress.total > 0 && `/ ${progress.total}개`}
               {progress.failedCount > 0 && <span className="text-rose-500"> · 실패 {progress.failedCount}개</span>}
             </p>
-          )}
+          ) : progress.failedCount > 0 ? (
+            <p className="text-sm text-rose-500">실패 {progress.failedCount}개</p>
+          ) : null}
 
           {/* 적응형 동시성이 실제로 조정된 적이 있을 때만 보여준다 — 계속 1로 순차 처리됐다면(가장 흔한 경우)
               보여줄 내용이 없어 아예 렌더링하지 않는다("간략히" 확인 목적이라 평소엔 화면을 차지하지 않음). */}

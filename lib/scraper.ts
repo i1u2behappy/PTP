@@ -2353,13 +2353,24 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
   const linkInfo = new Map<string, { name: string; thumbnail: string }>()
 
   async function scanForProducts(targetPage: Page): Promise<{ href: string; name: string; thumbnail: string }[]> {
-    const items: { href: string; name: string; thumbnail: string }[] = await targetPage.evaluate(({ userSel, platformSel, detailPatternSrc }) => {
+    const items: { href: string; name: string; thumbnail: string }[] = await targetPage.evaluate(({ userSel, platformSel, detailPatternSrc, widgetExcludeSrc }) => {
       // 대소문자 무시 — 같은 고도몰이라도 몰마다 실제 URL의 쿼리파라미터 표기가 "goodsno"/"goodsNo"처럼
       // 다를 수 있다(실제 발견된 사례: 가방쟁이는 goodsNo). 대소문자를 그대로 두면 이 필터에 상품 링크가
       // 전부 걸러져 카테고리에서 상품을 하나도 못 찾는 문제가 있었다.
       const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc, 'i') : null
+      // countProductsOnPage(previewCatalog)와 같은 위젯 제외 기준을 쓴다(WIDGET_CLASS_EXCLUDE_SRC 주석
+      // 참고) — 여기 없으면 "최근 본 상품"/"추천 상품" 위젯이 platformSel까지 그대로 잡혀 실제로는 끝난
+      // 카테고리에서 계속 새 상품이 나오는 것처럼 보여 페이지네이션이 멈추지 않을 수 있다.
+      const widgetRe = new RegExp(widgetExcludeSrc, 'i')
+      const inWidget = (el: Element) => {
+        for (let cur: Element | null = el; cur; cur = cur.parentElement) {
+          if (widgetRe.test(cur.className || '')) return true
+        }
+        return false
+      }
       const pick = (sel: string, requireImg: boolean, applyDetailFilter: boolean) => Array.from(document.querySelectorAll(sel))
         .filter(a => !requireImg || a.querySelector('img'))
+        .filter(a => !applyDetailFilter || !inWidget(a))
         .map(a => {
           const img = a.querySelector('img') as HTMLImageElement | null
           return { href: (a as HTMLAnchorElement).href, name: (img?.alt || a.textContent || '').trim(), thumbnail: img?.src || '' }
@@ -2387,7 +2398,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
         const n = normalize(item.href)
         return n !== currentNorm && n !== originNorm
       })
-    }, { userSel, platformSel, detailPatternSrc: profile.detailUrlPattern?.source })
+    }, { userSel, platformSel, detailPatternSrc: profile.detailUrlPattern?.source, widgetExcludeSrc: WIDGET_CLASS_EXCLUDE_SRC })
     return items.filter(item => item.href.startsWith(baseUrl))
   }
 
@@ -2434,7 +2445,13 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
       if (p >= maxPages - 1) break
       // 스킨마다 다른 "다음" 버튼 클래스에 기대는 대신, page 쿼리파라미터를 다음 번호로 바꿔 직접 이동한다 —
       // cafe24 등 대부분의 몰이 페이지 번호 링크 없이도(숫자가 안 보여도) 이 파라미터로 페이지를 넘겨준다.
-      await workerPage.goto(withPageParam(workerPage.url(), p + 2), { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+      // 이 이동이 타임아웃 등으로 실패하면(예전엔 catch로 조용히 무시) 페이지가 이전 페이지에 그대로
+      // 머물러, 다음 루프의 스캔이 "새 상품이 없다"로 오판해 그 카테고리를 실제보다 훨씬 일찍 끝난
+      // 것으로 잘못 판단한다(실사용 확인: 펫투비 — 위젯/총문구 없는 카테고리에서 실제의 15~24%만
+      // 수집된 채 멈춤). 실패하면 더 긴 타임아웃으로 한 번 더 시도한다.
+      const nextUrl = withPageParam(workerPage.url(), p + 2)
+      const moved = await workerPage.goto(nextUrl, { waitUntil: 'load', timeout: 15_000 }).then(() => true).catch(() => false)
+      if (!moved) await workerPage.goto(nextUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     }
   }
 
@@ -2524,6 +2541,14 @@ export interface CatalogPreviewResult {
   superseded?: boolean
 }
 
+// 상품 그리드가 아닌 "최근 본 상품"/"추천 상품" 위젯이 상품 카드와 같은 셀렉터·URL 패턴을 공유해 개수/
+// 목록에 섞여 들어가는 몰이 있다(카페24 xans-layout-productrecent 대비 폴백 경로에만 제외 로직이 있었음
+// — 실사용 확인: 펫투비 고도몰 스킨은 platformSel(.item_cont/.goods_list)이 위젯까지 그대로 잡아, 위젯
+// 내용만 살짝 달라지는 페이지를 "새 페이지"로 오판해 카테고리 개수가 실제(약 100개대)보다 크게(700개대)
+// 부풀려졌다). userSel(사용자가 직접 지정)에는 적용하지 않아 사용자 의도를 존중한다 — platformSel/폴백
+// 스캔 셋(countProductsOnPage/countProductsFromHtml/scanForProducts) 전부가 이 상수 하나를 같이 쓴다.
+const WIDGET_CLASS_EXCLUDE_SRC = 'productrecent|recent-?list|recent-?view|recently-?viewed|recommend'
+
 /** 상품 링크 매칭 로직만 — scanForProducts(collectProductUrls 내부)와 같은 판정 기준이지만 이름/썸네일은
  *  전혀 만들지 않고 개수만 반환한다(미리보기는 개수 확인만 하면 되고, 나머지는 실제 스크랩 시작 때
  *  어차피 다시 모으므로 여기서 모을 필요가 없다는 사용자 판단).
@@ -2541,11 +2566,19 @@ export interface CatalogPreviewResult {
 async function countProductsOnPage(
   page: Page, userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
 ): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; hrefs: string[] }> {
-  return page.evaluate(({ userSel, platformSel, detailPatternSrc, baseUrl }) => {
+  return page.evaluate(({ userSel, platformSel, detailPatternSrc, baseUrl, widgetExcludeSrc }) => {
     const isLoginPage = !!document.querySelector('input[type="password"]')
     const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc, 'i') : null
+    const widgetRe = new RegExp(widgetExcludeSrc, 'i')
+    const inWidget = (el: Element) => {
+      for (let cur: Element | null = el; cur; cur = cur.parentElement) {
+        if (widgetRe.test(cur.className || '')) return true
+      }
+      return false
+    }
     const hrefs = (sel: string, requireImg: boolean, applyDetailFilter: boolean) => Array.from(document.querySelectorAll(sel))
       .filter(a => !requireImg || a.querySelector('img'))
+      .filter(a => !applyDetailFilter || !inWidget(a))
       .map(a => (a as HTMLAnchorElement).href)
       .filter(href => href && href.startsWith(baseUrl))
       .filter(href => !applyDetailFilter || !detailRe || detailRe.test(href))
@@ -2574,12 +2607,12 @@ async function countProductsOnPage(
     const scopeRoot = document.querySelector('#contents') || document
     const fallback = Array.from(scopeRoot.querySelectorAll('a'))
       .filter(a => a.querySelector('img'))
-      .filter(a => !a.closest('[class*="productrecent" i]'))
+      .filter(a => !inWidget(a))
       .map(a => (a as HTMLAnchorElement).href)
       .filter(href => href && href.startsWith(baseUrl))
       .filter(href => { const n = normalize(href); return n !== currentNorm && n !== originNorm })
     return toResult(fallback)
-  }, { userSel, platformSel, detailPatternSrc, baseUrl })
+  }, { userSel, platformSel, detailPatternSrc, baseUrl, widgetExcludeSrc: WIDGET_CLASS_EXCLUDE_SRC })
 }
 
 /** 페이지네이션 위젯에 보이는 페이지 번호 중 가장 큰 값을 "총 페이지 수"로 읽는다 — 사용자가 요청한
@@ -2690,8 +2723,13 @@ function countProductsFromHtml(
     if (!href) return null
     try { return new URL(href, finalUrl).href } catch { return null }
   }
+  // countProductsOnPage의 위젯 제외와 반드시 같게 유지한다(WIDGET_CLASS_EXCLUDE_SRC 주석 참고).
+  // cheerio-select의 속성선택자 `i` 플래그 지원 여부에 의존하지 않도록, 조상 class는 직접 정규식으로
+  // 검사한다(아래 fallback과 같은 방식).
+  const widgetRe = new RegExp(WIDGET_CLASS_EXCLUDE_SRC, 'i')
   const hrefs = (sel: string, requireImg: boolean, applyDetailFilter: boolean) => $(sel).toArray()
     .filter(el => !requireImg || $(el).find('img').length > 0)
+    .filter(el => !applyDetailFilter || !$(el).parents().toArray().some(p => widgetRe.test($(p).attr('class') || '')))
     .map(el => resolve($(el).attr('href')))
     .filter((href): href is string => !!href && href.startsWith(baseUrl))
     .filter(href => !applyDetailFilter || !detailRe || detailRe.test(href))
@@ -2713,7 +2751,7 @@ function countProductsFromHtml(
   const scopeRoot = contents.length ? contents : $('body')
   const fallback = scopeRoot.find('a').toArray()
     .filter(el => $(el).find('img').length > 0)
-    .filter(el => !$(el).parents().toArray().some(p => /productrecent/i.test($(p).attr('class') || '')))
+    .filter(el => !$(el).parents().toArray().some(p => widgetRe.test($(p).attr('class') || '')))
     .map(el => resolve($(el).attr('href')))
     .filter((href): href is string => !!href && href.startsWith(baseUrl))
     .filter(href => { const n = normalize(href); return n !== currentNorm && n !== originNorm })

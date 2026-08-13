@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import Image from 'next/image'
 import { useTabs } from '../shell/TabsContext'
-import { MASTER_LIST_TAB, PRODUCTS_LIST_TAB } from '../shell/menuTabs'
+import { PRODUCTS_LIST_TAB } from '../shell/menuTabs'
 import { FIXED_FIELD_INFO } from '../../lib/master/schema'
 import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
 
@@ -47,7 +47,7 @@ function marginOf(row: MasterRow): number | null {
 }
 
 export function MasterListPanel() {
-  const { openTab, refreshSignals, bumpRefresh } = useTabs()
+  const { openTab, openDetailModal, refreshSignals, bumpRefresh } = useTabs()
   const { labels: registryLabels } = useRegisteredFieldKeys()
   const fixedFieldLabel = useMemo(() => {
     const m = new Map(DEFAULT_FIELD_LABEL)
@@ -134,7 +134,7 @@ export function MasterListPanel() {
   }
 
   function openDetail(row: MasterRow) {
-    openTab({ ...MASTER_LIST_TAB, type: 'master-detail', params: { masterId: row.id } })
+    openDetailModal('master-detail', { masterId: row.id })
   }
 
   async function genAiName(id: number) {

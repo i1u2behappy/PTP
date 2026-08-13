@@ -4,6 +4,7 @@ import { CurrentUserProvider } from './CurrentUserContext'
 import { Sidebar } from './Sidebar'
 import { TabBar } from './TabBar'
 import { Workspace } from './Workspace'
+import { DetailModal } from './DetailModal'
 
 export function AppShell() {
   return (
@@ -16,6 +17,7 @@ export function AppShell() {
             <TabBar />
           </div>
         </div>
+        <DetailModal />
       </TabsProvider>
     </CurrentUserProvider>
   )

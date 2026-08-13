@@ -2,7 +2,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Image from 'next/image'
 import { useTabs } from '../shell/TabsContext'
-import { MASTER_LIST_TAB } from '../shell/menuTabs'
 import { FIXED_FIELD_INFO } from '../../lib/master/schema'
 import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
 
@@ -57,7 +56,7 @@ const COVERED_KEYS = new Set<string>([...Object.keys(TEXT_FIELD_CONFIG), ...NUMB
 const NUMERIC_EXTRA_KEYS = new Set(['stock_qty'])
 
 export function MasterDetailPanel({ params }: { params?: Record<string, unknown> }) {
-  const { openTab, activeTabId, bumpRefresh } = useTabs()
+  const { openDetailModal, closeDetailModal, bumpRefresh } = useTabs()
   const { keys: registeredKeys, customKeys: registeredCustomKeys, labels: registryLabels } = useRegisteredFieldKeys()
   const masterId = params?.masterId as number
   // 기준 마스터테이블관리에 등록된 필드 중, 위 TEXT_FIELDS/NUMBER_FIELDS로 이미 다루지 않는 것들 — 다른
@@ -85,9 +84,9 @@ export function MasterDetailPanel({ params }: { params?: Record<string, unknown>
     })
   }, [registryLabels, extraFixedKeys, customFieldKeys])
 
-  function backToList() { openTab(MASTER_LIST_TAB) }
+  function backToList() { closeDetailModal() }
   function openProductDetail(mallProductId: number) {
-    openTab({ ...MASTER_LIST_TAB, id: activeTabId, type: 'product-detail', params: { mallProductId } })
+    openDetailModal('product-detail', { mallProductId })
   }
   const [data, setData] = useState<MasterDetail | null>(null)
   const [form, setForm] = useState<Record<string, string>>({})

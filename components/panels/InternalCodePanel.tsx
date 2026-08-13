@@ -1,14 +1,14 @@
 'use client'
 import { useCallback, useEffect, useState } from 'react'
 import { useTabs } from '../shell/TabsContext'
-import { CLIENTS_LIST_TAB, MASTER_LIST_TAB } from '../shell/menuTabs'
+import { CLIENTS_LIST_TAB } from '../shell/menuTabs'
 import { ScrapeScopePicker, type ScrapeScope } from './shared/ScrapeScopePicker'
 
 interface Client { id: number; name: string; code: string | null; auto_internal_code?: boolean }
 interface CodeRow { id: number; internal_code: string | null; name_final: string | null; name_ai: string | null; name_original: string; mall_product_code: string | null }
 
 export function InternalCodePanel({ params }: { params?: Record<string, unknown> }) {
-  const { openTab, refreshSignals, bumpRefresh } = useTabs()
+  const { openTab, openDetailModal, refreshSignals, bumpRefresh } = useTabs()
   const [scope, setScope] = useState<ScrapeScope>({ clientId: '', siteId: '', sessionId: '' })
   const [client, setClient] = useState<Client | null>(null)
   const [rows, setRows] = useState<CodeRow[]>([])
@@ -42,7 +42,7 @@ export function InternalCodePanel({ params }: { params?: Record<string, unknown>
   }
 
   function openMaster(row: CodeRow) {
-    openTab({ ...MASTER_LIST_TAB, type: 'master-detail', params: { masterId: row.id } })
+    openDetailModal('master-detail', { masterId: row.id })
   }
 
   function openClient() {

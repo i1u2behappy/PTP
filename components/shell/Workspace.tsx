@@ -10,7 +10,6 @@ import { ScraperPanel } from '../panels/ScraperPanel'
 import { MigrationDashboardPanel } from '../panels/MigrationDashboardPanel'
 import { MasterSchemaPanel } from '../panels/MasterSchemaPanel'
 import { ProductsListPanel } from '../panels/ProductsListPanel'
-import { ProductDetailPanel } from '../panels/ProductDetailPanel'
 import { InternalCodePanel } from '../panels/InternalCodePanel'
 import { CategoryMappingPanel } from '../panels/CategoryMappingPanel'
 import { SalesCodePanel } from '../panels/SalesCodePanel'
@@ -20,7 +19,6 @@ import { BrandOriginPanel } from '../panels/BrandOriginPanel'
 import { PricingManagementPanel } from '../panels/PricingManagementPanel'
 import { ImageHostPanel } from '../panels/ImageHostPanel'
 import { MasterListPanel } from '../panels/MasterListPanel'
-import { MasterDetailPanel } from '../panels/MasterDetailPanel'
 import { ImageEditPanel } from '../panels/ImageEditPanel'
 import { ExportPanel } from '../panels/ExportPanel'
 import { SettingsPanel } from '../panels/SettingsPanel'
@@ -70,9 +68,7 @@ export function Workspace() {
           case 'pricing-management': return <PricingManagementPanel key={tab.id} params={tab.params} />
           case 'image-host':      return <ImageHostPanel key={tab.id} />
           case 'products-list':  return <ProductsListPanel key={tab.id} />
-          case 'product-detail': return <ProductDetailPanel key={tab.id} params={tab.params} />
           case 'master-list':    return <MasterListPanel key={tab.id} />
-          case 'master-detail':  return <MasterDetailPanel key={tab.id} params={tab.params} />
           case 'image-edit':     return <ImageEditPanel key={tab.id} params={tab.params} />
           case 'export':         return <ExportPanel key={tab.id} />
           case 'settings':       return <SettingsPanel key={tab.id} />

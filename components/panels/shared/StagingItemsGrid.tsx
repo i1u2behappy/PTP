@@ -221,7 +221,7 @@ export function StagingItemsGrid({ sessionId }: {
   sessionId: number | ''
 }) {
   const scopeQuery = sessionId ? `sessionId=${sessionId}` : ''
-  const { openTab, activeTabId, refreshSignals, bumpRefresh } = useTabs()
+  const { openDetailModal, refreshSignals, bumpRefresh } = useTabs()
   const { customKeys: registeredCustomKeys, labels: registryLabels } = useRegisteredFieldKeys()
   const [items, setItems] = useState<StagingRow[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
@@ -433,13 +433,11 @@ export function StagingItemsGrid({ sessionId }: {
   const selectedPendingIds = pendingItems.filter(p => selected.has(p.id)).map(p => p.id)
   const selectedMergedIds = mergedItems.filter(p => selected.has(p.id)).map(p => p.id)
 
+  // 팝업으로 띄운다(탭을 재사용하지 않는다) — 예전엔 지금 탭을 상품 상세로 바꿔치기해서, 하단 탭
+  // 이름이 "스크랩 Raw 확인" 같은 메뉴명 대신 상품명으로 보여 혼란스럽다는 지적이 있었다(2026-08-13).
   function openDetail(p: StagingRow) {
     if (!p.matched_mall_product_id) return
-    openTab({
-      id: activeTabId, type: 'product-detail',
-      title: p.name_original?.slice(0, 14) || `상품 #${p.matched_mall_product_id}`, icon: '📦',
-      params: { mallProductId: p.matched_mall_product_id }, closable: true,
-    })
+    openDetailModal('product-detail', { mallProductId: p.matched_mall_product_id })
   }
 
   async function handleOpenSourceUrl(url: string) {

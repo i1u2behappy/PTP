@@ -2,7 +2,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import Image from 'next/image'
 import { useTabs } from '../shell/TabsContext'
-import { MASTER_LIST_TAB } from '../shell/menuTabs'
 
 interface MallProductDetail {
   id: number
@@ -37,7 +36,7 @@ const FIELDS: { key: keyof MallProductDetail; label: string; type: 'text' | 'num
 ]
 
 export function ProductDetailPanel({ params }: { params?: Record<string, unknown> }) {
-  const { openTab, goBack, bumpRefresh } = useTabs()
+  const { openTab, openDetailModal, goBack, bumpRefresh } = useTabs()
   const mallProductId = params?.mallProductId as number
   const [data, setData]       = useState<MallProductDetail | null>(null)
   const [form, setForm]       = useState<Record<string, string>>({})
@@ -119,7 +118,7 @@ export function ProductDetailPanel({ params }: { params?: Record<string, unknown
       if (!res.ok || !d.masterIds?.length) throw new Error('가공 실패')
       bumpRefresh('products')
       bumpRefresh('master')
-      openTab({ ...MASTER_LIST_TAB, type: 'master-detail', params: { masterId: d.masterIds[0] } })
+      openDetailModal('master-detail', { masterId: d.masterIds[0] })
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e))
     } finally {
@@ -149,7 +148,7 @@ export function ProductDetailPanel({ params }: { params?: Record<string, unknown
             {rescraping ? '재스크랩 중...' : '🔄 재스크랩'}
           </button>
           {data.master_product_id ? (
-            <button onClick={() => openTab({ ...MASTER_LIST_TAB, type: 'master-detail', params: { masterId: data.master_product_id } })}
+            <button onClick={() => openDetailModal('master-detail', { masterId: data.master_product_id })}
               className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-full transition-colors">
               🗂️ 상품마스터 보기
             </button>

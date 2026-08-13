@@ -1,7 +1,6 @@
 'use client'
 import { useEffect, useState, useCallback } from 'react'
 import { useTabs } from '../shell/TabsContext'
-import { MASTER_LIST_TAB } from '../shell/menuTabs'
 
 interface Client { id: number; name: string }
 interface Site { id: number; name: string | null; url: string; client_id: number | null }
@@ -36,7 +35,7 @@ interface RecheckResultRow { mallProductId: number; mallProductCode: string; rea
  * 기존 "마이그레이션" 메뉴에서 다루고, 여기는 이미 만들어진 상품마스터의 "변동 감지 → 갱신"만 담당한다.
  */
 export function ContinuousMigrationPanel() {
-  const { openTab } = useTabs()
+  const { openDetailModal } = useTabs()
   const [clients, setClients] = useState<Client[]>([])
   const [clientId, setClientId] = useState<number | ''>('')
   const [sites, setSites] = useState<Site[]>([])
@@ -336,7 +335,7 @@ export function ContinuousMigrationPanel() {
                       {c.lastScrapedAt ? new Date(c.lastScrapedAt).toLocaleString() : '-'}
                     </td>
                     <td className="px-4 py-2 whitespace-nowrap">
-                      <button onClick={() => openTab({ ...MASTER_LIST_TAB, type: 'master-detail', params: { masterId: c.masterId } })}
+                      <button onClick={() => openDetailModal('master-detail', { masterId: c.masterId })}
                         className="text-teal-500 hover:underline text-xs">상세 보기</button>
                     </td>
                   </tr>

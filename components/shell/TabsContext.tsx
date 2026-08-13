@@ -4,10 +4,19 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 export type TabType =
   | 'dashboard' | 'clients-list' | 'client-detail' | 'sites-list' | 'site-detail' | 'scraper'
   | 'migration-dashboard' | 'master-schema'
-  | 'products-list' | 'product-detail' | 'internal-codes' | 'category-mapping' | 'sales-code' | 'name-management'
+  | 'products-list' | 'internal-codes' | 'category-mapping' | 'sales-code' | 'name-management'
   | 'option-management' | 'brand-origin-management' | 'pricing-management' | 'image-host'
-  | 'master-list' | 'master-detail' | 'image-edit'
+  | 'master-list' | 'image-edit'
   | 'export' | 'settings' | 'transform' | 'continuous-migration'
+
+/** 상품/상품마스터 "상세"는 탭이 아니라 팝업으로 띄운다 — 예전엔 탭(activeTabId 재사용)으로 열어서,
+ *  방금까지 "스크랩 Raw 확인" 등 메뉴 이름이던 탭이 갑자기 상품명으로 바뀌어 보여 혼란스럽다는 지적이
+ *  있었다(2026-08-13). 팝업은 현재 탭을 건드리지 않고 그 위에 겹쳐 뜬다. */
+export type DetailModalType = 'product-detail' | 'master-detail'
+export interface DetailModalState {
+  type: DetailModalType
+  params: Record<string, unknown>
+}
 
 export interface Tab {
   id: string
@@ -43,6 +52,10 @@ interface TabsState {
    *  달라지는 일시적 상태라 저장하지 않는다(새로고침/화면 확대 시 항상 닫힌 상태로 시작). */
   mobileSidebarOpen: boolean
   setMobileSidebarOpen: (v: boolean | ((prev: boolean) => boolean)) => void
+  /** 상품/상품마스터 상세 팝업 — null이면 안 떠 있음. 현재 활성 탭과 독립적이다. */
+  detailModal: DetailModalState | null
+  openDetailModal: (type: DetailModalType, params: Record<string, unknown>) => void
+  closeDetailModal: () => void
 }
 
 const DASHBOARD_TAB: Tab = { id: 'dashboard', type: 'dashboard', title: '대시보드', icon: '📊', closable: false }
@@ -65,6 +78,11 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
   const [guidance, setGuidance] = useState<string | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  const [detailModal, setDetailModal] = useState<DetailModalState | null>(null)
+  const openDetailModal = useCallback((type: DetailModalType, params: Record<string, unknown>) => {
+    setDetailModal({ type, params })
+  }, [])
+  const closeDetailModal = useCallback(() => setDetailModal(null), [])
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -176,8 +194,9 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<TabsState>(() => ({
     openTabs, activeTabId, openTab, closeTab, setActive, canGoBack: history.length > 0, goBack, refreshSignals, bumpRefresh,
     guidance, setGuidance, sidebarCollapsed, setSidebarCollapsed, mobileSidebarOpen, setMobileSidebarOpen,
+    detailModal, openDetailModal, closeDetailModal,
   }), [openTabs, activeTabId, openTab, closeTab, setActive, history.length, goBack, refreshSignals, bumpRefresh, guidance,
-      sidebarCollapsed, mobileSidebarOpen])
+      sidebarCollapsed, mobileSidebarOpen, detailModal, openDetailModal, closeDetailModal])
 
   return <TabsCtx.Provider value={value}>{children}</TabsCtx.Provider>
 }

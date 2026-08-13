@@ -1690,12 +1690,26 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
   // 아직 페이지 이동 전(현재 page가 startUrl) — 카테고리 메뉴/후보 링크 스캔은 반드시 여기서 먼저 한다.
   // 아래(랜딩 페이지 재시도)가 실제로 페이지를 이동시키므로, 이동 후로 미루면 이 몰의 헤더가 안 보일 수 있다.
   const categoryLinkCandidates = await findCategoryLinkCandidates(page)
-  let categoryLinks = await scanCategoryMenu(page)
+  const { links: scannedCategoryLinks, textlessHrefs } = await scanCategoryMenu(page)
+  let categoryLinks = scannedCategoryLinks
   // 메뉴가 텍스트로 못 읽는 형태(이미지 스프라이트 등, 실사용 확인: 진짜양말)면, 후보 링크로 실제 들어가
   // 그 목록 페이지 자신의 카테고리 라벨을 대신 읽는다(discoverCategoriesByVisitingLinks 참고). 페이지를
   // 여러 번 더 열어야 해 무거운 작업이라 deep("몰 구조 파악" 버튼)에서만 한다.
-  if (deep && !categoryLinks.length && categoryLinkCandidates.length) {
-    categoryLinks = await discoverCategoriesByVisitingLinks(page, categoryLinkCandidates)
+  // textlessHrefs(scanCategoryMenu가 이미 cat/lnb/gnb 등 실제 메뉴 영역 안에서 찾은 이미지뿐인 후보)가
+  // 있으면 그걸 우선 쓴다 — categoryLinkCandidates(findCategoryLinkCandidates, 메뉴 영역 안의 모든 링크를
+  // 무조건 15개까지만 담는 훨씬 거친 폴백)는 textlessHrefs가 아예 없을 때만 최후수단으로 쓴다. 예전엔
+  // scannedCategoryLinks가 0개인 경우 항상 categoryLinkCandidates부터 썼는데, 그 15개 제한에 걸려 정작
+  // 필요한 카테고리가 잘려나갔다(진짜양말 실사용 확인, 2026-08-13 — "신발"이 16번째 링크라 제외됨).
+  const zeroScanCandidates = textlessHrefs.length ? textlessHrefs : categoryLinkCandidates
+  if (deep && !categoryLinks.length && zeroScanCandidates.length) {
+    categoryLinks = await discoverCategoriesByVisitingLinks(page, zeroScanCandidates)
+    await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+  } else if (deep && categoryLinks.length && textlessHrefs.length) {
+    // 위와 같은 이유지만 다른 케이스 — 텍스트 메뉴가 이미 몇 개는 찾았어도(그래서 위 분기는 안 탐),
+    // 같은 페이지의 다른 메뉴 영역이 통째로 이미지뿐이면 그 카테고리들만 조용히 빠진다. 남은 이미지
+    // 전용 후보만 추가로 방문해 채운다.
+    const extra = await discoverCategoriesByVisitingLinks(page, textlessHrefs)
+    categoryLinks = [...categoryLinks, ...extra]
     await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
   }
   const categoryMenuNames = categoryLinks.map(c => c.name)
@@ -2026,9 +2040,22 @@ export interface CategoryMenuLink {
  *  높아 하위까지 통째로 건너뛴다. */
 const NON_CATEGORY_TEXT_RE = /로그인|회원가입|로그아웃|장바구니|마이페이지|고객센터|검색어?|주문|배송조회|결제|사이트맵|관리자|촬영명령|입고대?기|입고대령|단가\s*(인상|조정)|재진행|색상?\s*(별)?\s*분류|cart|login|logout|mypage|search|sitemap/i
 
-async function scanCategoryMenu(page: Page): Promise<CategoryMenuLink[]> {
+export interface CategoryMenuScanResult {
+  links: CategoryMenuLink[]
+  /** <li> 안에 글자가 전혀 없어(이미지 스프라이트/아이콘 폰트 메뉴 등) 이름을 못 지은 항목의 href —
+   *  호출부가 discoverCategoriesByVisitingLinks로 실제 방문해 이름을 채워야 한다. */
+  textlessHrefs: string[]
+}
+
+async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResult> {
   return page.evaluate(({ excludeSrc }) => {
     const excludeRe = new RegExp(excludeSrc, 'i')
+    // 이미지 스프라이트/아이콘 폰트 메뉴처럼 <li> 안에 글자가 전혀 없어 이름을 지을 수 없는 항목의 href만
+    // 따로 모아둔다 — 예전엔 이 경우 그냥 버렸는데, 같은 몰의 다른 메뉴 영역이 텍스트로 잘 읽혀 카테고리를
+    // 이미 몇 개 찾았어도(그러면 아래 tier loop가 그 tier에서 멈춤) 이 그룹 자체는 항목 전부가 이미지뿐이라
+    // "최소 2개 이상의 텍스트" 조건에 걸려 통째로 버려지므로, 그 안의 카테고리들이 영원히 누락됐다
+    // (진짜양말 실사용 확인, 2026-08-13 — "신발"/"업데이트" 카테고리가 이 방식으로 빠짐).
+    const textlessHrefs: string[] = []
     // 몰마다(플랫폼/테마마다) 카테고리 메뉴 래퍼의 정확한 class/id가 제각각이라(고도몰 .ovmenu, 카페24
     // 커스텀테마 df-lnb-category, 도매의신 div_cat 등) 매번 실제 몰을 열어보고 하드코딩 셀렉터를 하나씩
     // 추가해왔다 — 근본적으로는 정확한 이름을 다 알 수 없으므로, 이름의 "일부"(부분 문자열)로 넓게
@@ -2060,11 +2087,18 @@ async function scanCategoryMenu(page: Page): Promise<CategoryMenuLink[]> {
     }
     function buildPaths(li: Element, prefix: string[], depth: number, out: { name: string; href: string }[]) {
       if (depth > 3 || out.length > 200) return
+      const childLis = Array.from(li.querySelectorAll(':scope > ul > li, :scope > div > ul > li'))
       const name = ownText(li)
-      if (!isMeaningful(name)) return
+      if (!isMeaningful(name)) {
+        // 이름은 못 지어도(리프일 때만) href는 있을 수 있다 — textlessHrefs에 남겨 나중에 방문 검증한다.
+        if (!childLis.length) {
+          const href = ownHref(li)
+          if (href) textlessHrefs.push(href)
+        }
+        return
+      }
       if (excludeRe.test(name)) return // 이 라벨 자체가 카테고리가 아니면 하위 항목까지 통째로 건너뜀
       const path = [...prefix, name]
-      const childLis = Array.from(li.querySelectorAll(':scope > ul > li, :scope > div > ul > li'))
       if (childLis.length) {
         childLis.forEach(sub => buildPaths(sub, path, depth + 1, out))
       } else {
@@ -2121,10 +2155,13 @@ async function scanCategoryMenu(page: Page): Promise<CategoryMenuLink[]> {
           merged.push({ name: groupLabels.size > 1 && label ? `${label} > ${o.name}` : o.name, href: o.href })
         }
       }
-      if (merged.length) return merged
+      if (merged.length) {
+        const mergedHrefSet = new Set(merged.map(m => m.href))
+        return { links: merged, textlessHrefs: [...new Set(textlessHrefs)].filter(h => !mergedHrefSet.has(h)) }
+      }
     }
-    return []
-  }, { excludeSrc: NON_CATEGORY_TEXT_RE.source }).catch(() => [])
+    return { links: [], textlessHrefs: [...new Set(textlessHrefs)] }
+  }, { excludeSrc: NON_CATEGORY_TEXT_RE.source }).catch(() => ({ links: [], textlessHrefs: [] }))
 }
 
 /** 시작 페이지에 상품 링크가 0개일 때(배너 전용 랜딩 페이지) 따라 들어가볼 카테고리 후보 링크를 모은다.
@@ -2611,6 +2648,12 @@ async function countProductsOnPage(
       .map(a => (a as HTMLAnchorElement).href)
       .filter(href => href && href.startsWith(baseUrl))
       .filter(href => { const n = normalize(href); return n !== currentNorm && n !== originNorm })
+      // 페이지네이션 이전/다음 화살표, 검색·비교 버튼처럼 #contents 안에 있지만 상품이 아닌 <a><img>가
+      // 있다(실사용 확인: 진짜양말 — href="#none"/"#SelectSearch"라 #contents 스코프로도 안 걸러지고,
+      // 프래그먼트라 상세 페이지(#currentNorm)와도 달라 매 페이지 "새 상품 2개"로 잘못 잡혀 지수+이분
+      // 탐색/직접 순회가 실제로는 상품이 2개뿐인 카테고리를 최대 50페이지까지(=100개) 부풀렸다). 알려진
+      // 플랫폼의 상품 상세 URL 패턴이 있으면 여기서도 적용해 이런 비상품 링크를 걸러낸다.
+      .filter(href => !detailRe || detailRe.test(href))
     return toResult(fallback)
   }, { userSel, platformSel, detailPatternSrc, baseUrl, widgetExcludeSrc: WIDGET_CLASS_EXCLUDE_SRC })
 }
@@ -2755,6 +2798,9 @@ function countProductsFromHtml(
     .map(el => resolve($(el).attr('href')))
     .filter((href): href is string => !!href && href.startsWith(baseUrl))
     .filter(href => { const n = normalize(href); return n !== currentNorm && n !== originNorm })
+    // countProductsOnPage의 상세 URL 패턴 필터와 반드시 같게 유지한다(위 함수 주석 참고 — 페이지네이션
+    // 화살표/검색·비교 버튼처럼 #contents 안에 있는 비상품 <a><img>가 상품으로 잘못 잡히는 문제).
+    .filter(href => !detailRe || detailRe.test(href))
   return toResult(fallback)
 }
 
@@ -2920,6 +2966,13 @@ async function findRealLastPage(
   const probeAt = (pageNum: number) => probeCategoryPage(
     workerPage, context, firstPageUrl, pageNum, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector,
   )
+  // "이 페이지가 비었다"(count===0)는 신호 하나만으로 그 자리를 진짜 끝으로 확정하면, 그 한 번의 요청이
+  // 일시적 오류/빈 응답이었을 때(실사용 확인: 진짜양말 — 실제로는 240개씩 꽉 찬 페이지가 더 있었는데
+  // 훨씬 앞에서 멈춰 1646개짜리 카테고리가 1200개로 잘못 확정됨, 2026-08-13) 탐색이 통째로 잘못된 답으로
+  // 끝난다. 같은 페이지를 한 번 더 확인해 두 번 다 비어야만 진짜 끝으로 믿는다.
+  async function confirmedEmpty(pageNum: number): Promise<boolean> {
+    return (await probeAt(pageNum)).count === 0
+  }
 
   while (hi === null) {
     if (stop()) return { page: lo, count: loCount }
@@ -2928,7 +2981,7 @@ async function findRealLastPage(
     const r = await probeAt(probe)
     if (r.isLoginPage) return { page: lo, count: loCount, needsLogin: true }
     const clamped = r.currentPage !== null && r.currentPage !== probe
-    if (r.count === 0 || clamped || r.fingerprint === loFingerprint) { hi = probe; continue }
+    if ((r.count === 0 ? await confirmedEmpty(probe) : false) || clamped || r.fingerprint === loFingerprint) { hi = probe; continue }
     if (stop()) return { page: lo, count: loCount }
     const next = await probeAt(probe + 1)
     if (next.isLoginPage) return { page: lo, count: loCount, needsLogin: true }
@@ -2941,7 +2994,7 @@ async function findRealLastPage(
     const r = await probeAt(mid)
     if (r.isLoginPage) return { page: lo, count: loCount, needsLogin: true }
     const clamped = r.currentPage !== null && r.currentPage !== mid
-    if (r.count === 0 || clamped || r.fingerprint === loFingerprint) hi = mid
+    if ((r.count === 0 ? await confirmedEmpty(mid) : false) || clamped || r.fingerprint === loFingerprint) hi = mid
     else { lo = mid; loCount = r.count; loFingerprint = r.fingerprint }
   }
   return { page: lo, count: loCount }
@@ -3597,10 +3650,22 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
       }
 
       const platform = await detectMallPlatform(scanPage)
-      let categoryLinks = await scanCategoryMenu(scanPage)
+      const { links: scannedCategoryLinks, textlessHrefs } = await scanCategoryMenu(scanPage)
+      let categoryLinks = scannedCategoryLinks
       if (!categoryLinks.length) {
-        const candidates = await findCategoryLinkCandidates(scanPage)
+        // textlessHrefs(scanCategoryMenu가 이미 cat/lnb/gnb 등 실제 메뉴 영역 안에서 찾은 이미지뿐인
+        // 후보)를 우선 쓴다 — findCategoryLinkCandidates(메뉴 영역 안의 모든 링크를 무조건 15개까지만
+        // 담는 훨씬 거친 폴백)는 textlessHrefs가 아예 없을 때만 최후수단으로 쓴다. 예전엔
+        // scannedCategoryLinks가 0개면 항상 findCategoryLinkCandidates부터 썼는데, 그 15개 제한에 걸려
+        // 정작 필요한 카테고리가 잘려나갔다(진짜양말 실사용 확인, 2026-08-13 — "신발"이 16번째 링크라 제외됨).
+        const candidates = textlessHrefs.length ? textlessHrefs : await findCategoryLinkCandidates(scanPage)
         if (candidates.length) categoryLinks = await discoverCategoriesByVisitingLinks(scanPage, candidates)
+      } else if (textlessHrefs.length) {
+        // 텍스트 메뉴가 이미 몇 개는 찾았어도, 같은 페이지의 다른 메뉴 영역이 통째로 이미지뿐이면 그
+        // 카테고리들만 조용히 빠진다(진짜양말 실사용 확인, 2026-08-13 — "신발"/"업데이트") — 남은 이미지
+        // 전용 후보만 추가로 방문해 채운다.
+        const extra = await discoverCategoriesByVisitingLinks(scanPage, textlessHrefs)
+        categoryLinks = [...categoryLinks, ...extra]
       }
 
       const links: CategoryLink[] = categoryLinks.map(c => ({ href: c.href, text: c.name }))

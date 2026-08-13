@@ -1013,6 +1013,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   function isCategoryExcluded(href: string) {
     return excludedCategoryHrefs.includes(href)
   }
+  // "제외" 표시한 카테고리는 전체선택 체크박스(상태 판정 + 클릭 시 대상)에서 뺀다 — toggleAllCategories와
+  // 아래 헤더 체크박스 렌더링이 같은 기준을 쓴다.
+  const selectableCategories = categories.filter(c => !isCategoryExcluded(c.href))
   /** 실제 상품이 없는 카테고리(안내/문의 페이지 등)를 사용자가 직접 열어보고 "이건 아니다"로 표시한다 —
    *  화면엔 바로 반영하고(목록 맨 아래로 정리), 서버에도 남겨 다음에 카테고리를 다시 불러와도 유지되게
    *  한다. 서버 저장이 실패해도 화면 표시는 그대로 두고 조용히 넘어간다 — 실패해도 이번 화면에서 목록을
@@ -1033,9 +1036,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const next = lines.includes(href) ? lines.filter(l => l !== href) : [...lines, href]
     setCategoryUrlsText(next.join('\n'))
   }
+  // "제외"로 표시해둔 카테고리(상품이 없는 안내/게시판 페이지 등)는 전체선택 대상에서 뺀다 — 안 그러면
+  // 전체선택을 누를 때마다 방금 제외해둔 카테고리까지 다시 스크랩 대상으로 딸려 들어간다(실사용 확인,
+  // 2026-08-13).
   function toggleAllCategories() {
-    const allSelected = categories.length > 0 && categories.every(c => isCategorySelected(c.href))
-    setCategoryUrlsText(allSelected ? '' : categories.map(c => c.href).join('\n'))
+    const allSelected = selectableCategories.length > 0 && selectableCategories.every(c => isCategorySelected(c.href))
+    setCategoryUrlsText(allSelected ? '' : selectableCategories.map(c => c.href).join('\n'))
   }
 
   const canPreview = !!targetUrl.trim() || categoryUrlsText.trim().length > 0
@@ -1738,9 +1744,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                               둔다 — 실제 <thead>/<tbody>로 같은 표에 넣어야 폭이 항상 정확히 맞는다. */}
                           <tr className="sticky top-0 z-[2] bg-teal-50 border-b border-teal-100">
                             <th className="px-3 py-1.5 w-6 sticky left-0 z-[1] bg-teal-50 font-normal text-left">
-                              <input type="checkbox" title="전체 선택/해제 (몰 전체상품)"
-                                checked={categories.every(c => isCategorySelected(c.href))}
-                                ref={el => { if (el) el.indeterminate = categories.some(c => isCategorySelected(c.href)) && !categories.every(c => isCategorySelected(c.href)) }}
+                              <input type="checkbox" title="전체 선택/해제 (몰 전체상품, 제외 표시한 카테고리는 빠짐)"
+                                checked={selectableCategories.length > 0 && selectableCategories.every(c => isCategorySelected(c.href))}
+                                ref={el => { if (el) el.indeterminate = selectableCategories.some(c => isCategorySelected(c.href)) && !selectableCategories.every(c => isCategorySelected(c.href)) }}
                                 onChange={toggleAllCategories} />
                             </th>
                             <th colSpan={3} className="px-3 py-1.5 text-gray-500 font-normal text-left">
@@ -2206,7 +2212,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   <tbody>
                     {categoryCounts.map(c => (
                       <tr key={c.url} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
-                        <td className="px-3 py-1.5 text-gray-700 truncate max-w-[320px]" title={c.url}>{c.label}</td>
+                        <td className="px-3 py-1.5 truncate max-w-[320px]" title={c.url}>
+                          <button type="button" onClick={() => handleOpenItem(c.url)} className="text-teal-500 hover:underline text-left">{c.label}</button>
+                        </td>
                         <td className="px-3 py-1.5 text-right text-gray-700">{c.count.toLocaleString()}개</td>
                       </tr>
                     ))}

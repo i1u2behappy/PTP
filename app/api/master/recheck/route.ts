@@ -58,11 +58,16 @@ export async function POST(req: NextRequest) {
   const results: { mallProductId: number; mallProductCode: string; reasons: string[] }[] = []
 
   try {
+    // allowStaleManualLoginProfile: 확정 상품 재체크는 개발자모드(직접로그인 필수) 몰에도 똑같이 적용돼야
+    // 하는데, 그 몰은 실제 크롬을 켜둔 채 쓰는 게 정상 상태라 세션 파일이 잠긴 채 복사돼도(robocopy 일부
+    // 실패) 이 재방문·재수집은 그냥 진행해야 한다 — 안 그러면 개발자모드 몰은 재체크가 사실상 항상
+    // 실패한다(몰 구조분석/카테고리 불러오기에 이미 적용한 것과 동일, 2026-08-16).
     const recheckResults = await recheckMallProducts({
       siteId,
       loginId: site?.login_id || undefined,
       loginPw: site ? decryptSecret(site.login_pw_encrypted, site.login_pw_iv) || undefined : undefined,
       extractionRules: site?.extraction_rules || undefined,
+      allowStaleManualLoginProfile: true,
     }, targets)
 
     for (const r of recheckResults) {

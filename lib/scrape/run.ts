@@ -76,7 +76,7 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
   if (effectiveMode === 'single') {
     const result = await scrapeSingleProduct(scrapeOpts)
     await saveProduct(siteId, sessionId, result)
-    await pool.query(`UPDATE scrape_sessions SET status='done', product_count=1 WHERE id=$1`, [sessionId])
+    await pool.query(`UPDATE scrape_sessions SET status='done', product_count=1, finished_at=NOW() WHERE id=$1`, [sessionId])
     return
   }
 
@@ -92,7 +92,7 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
   // 단종 추정 판정은 스테이징 결과가 실제 병합된 뒤에만 의미가 있으므로 여기서 하지 않는다
   // (lib/scrape/staging.ts의 mergeSessionStaging에서 병합 시점에 수행).
   await pool.query(
-    `UPDATE scrape_sessions SET status=$1, product_count=$2, concurrency_log=$3 WHERE id=$4`,
+    `UPDATE scrape_sessions SET status=$1, product_count=$2, concurrency_log=$3, finished_at=NOW() WHERE id=$4`,
     [stopped ? 'stopped' : 'done', total, JSON.stringify(concurrencyLog), sessionId],
   )
 }

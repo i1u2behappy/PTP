@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
-import { stageScrapedProduct } from '@/lib/scrape/staging'
+import { stageScrapedProduct, clearStalePendingIfConfigChanged } from '@/lib/scrape/staging'
 import { clearStopRequest } from '@/lib/scraper'
-import type { ExtractedProduct } from '@/lib/ai'
+import type { ExtractedProduct, ExtractionRule } from '@/lib/ai'
 
 // chrome-extension:// 출처에서 오는 fetch라 CORS 프리플라이트(OPTIONS)를 직접 응답해야 하고,
 // 로컬(사설망) 주소로 가는 요청이라 Private Network Access 헤더도 같이 내려줘야 브라우저가 막지 않는다.
@@ -51,18 +51,27 @@ export async function POST(req: NextRequest) {
 
   let sessionId = body.sessionId
   if (!sessionId) {
+    const siteRow = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(
+      `SELECT extraction_rules FROM sites WHERE id=$1`, [body.siteId],
+    )
+    const currentRules = siteRow.rows[0]?.extraction_rules || {}
+    // 개발자모드는 카테고리 선택 개념이 없어(지금 활성 탭 기준) categoryUrls를 안 넘긴다 — 추출규칙만
+    // 비교해 "이어서"가 실은 설정이 바뀐 "새로 시작"인지 판단한다(일반모드와 같은 함수 공유, 2026-08-15).
+    await clearStalePendingIfConfigChanged(body.siteId, { extractionRules: currentRules })
+
     const res = await pool.query<{ id: number }>(
-      `INSERT INTO scrape_sessions (url, site_id, status, scope_type, mode)
-       VALUES ($1,$2,'running','products','full') RETURNING id`,
-      [body.url || '', body.siteId],
+      `INSERT INTO scrape_sessions (url, site_id, status, scope_type, mode, scope_params)
+       VALUES ($1,$2,'running','products','full',$3) RETURNING id`,
+      [body.url || '', body.siteId, JSON.stringify({ extractionRules: currentRules })],
     )
     sessionId = res.rows[0].id
   }
 
   if (body.done) {
     // "스크래핑 중지"로 도중에 끝난 것과 정상 완료를 구분해야 PTP 진행상황 화면이 올바른 상태를 보여준다
-    // (일반모드는 이미 'stopped' 상태를 쓰고 있다 — 개발자모드도 같은 상태값으로 맞춘다).
-    await pool.query(`UPDATE scrape_sessions SET status=$2 WHERE id=$1`, [sessionId, body.stopped ? 'stopped' : 'done'])
+    // (일반모드는 이미 'stopped' 상태를 쓰고 있다 — 개발자모드도 같은 상태값으로 맞춘다). finished_at도
+    // 일반모드(lib/scrape/run.ts)와 같은 기준으로 남겨 "소요시간" 표시가 개발자모드 세션에도 나오게 한다.
+    await pool.query(`UPDATE scrape_sessions SET status=$2, finished_at=NOW() WHERE id=$1`, [sessionId, body.stopped ? 'stopped' : 'done'])
     clearStopRequest(sessionId)
     return NextResponse.json({ sessionId }, { headers: corsHeaders() })
   }

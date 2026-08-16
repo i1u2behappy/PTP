@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, Fragment } from 'react'
 import Image from 'next/image'
 import { useTabs } from '../shell/TabsContext'
 import { PRODUCTS_LIST_TAB } from '../shell/menuTabs'
@@ -61,7 +61,7 @@ const SITE_PICKER_COLUMNS: SitePickerColumnDef[] = [
         </span>
       )}
       {s.manual_login_required === null && (
-        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold whitespace-nowrap" title="아직 스크랩 방식이 정해지지 않았습니다 — 선택하면 처음 스크랩할 때 물어봅니다">
+        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold whitespace-nowrap" title="아직 스크랩 방식이 정해지지 않았습니다 — 일단 일반모드로 진행되고, 차단이 반복되면 전환을 제안받습니다">
           ❔ 미정
         </span>
       )}
@@ -156,6 +156,10 @@ interface CategoryCountItem {
   count: number
 }
 
+function elapsedMinutesBetween(createdAt: string, finishedAt: string): number {
+  return Math.round((new Date(finishedAt).getTime() - new Date(createdAt).getTime()) / 60_000)
+}
+
 /** 기준 마스터테이블 필드 키 하나를 미리보기의 실제 스크랩 값으로 풀어낸다 — 표에 보여줄 값이 없는
  *  컬럼(내부관리코드/판매관리코드/마켓별카테고리 등, 스크랩 시점엔 절대 채워지지 않고 후속 절차에서
  *  채워지는 값)은 '-'로 비워둔다(사용자 정책: "값이 없는 컬럼은 비워둘 것"). */
@@ -204,7 +208,7 @@ interface MallStructureReport {
   generatedBy: 'ai' | 'heuristic'
 }
 
-/** lib/scraper.ts의 MallProfileSignals와 같은 모양 — "몰 구조 파악" 버튼 결과 표시용. */
+/** lib/scraper.ts의 MallProfileSignals와 같은 모양 — "몰 구조분석" 버튼 결과 표시용. */
 interface MallProfileSignals {
   sampleCount: number
   platform: string
@@ -221,6 +225,7 @@ interface MallProfileSignals {
   categoryPaths: string[]
   categoryMaxDepth: number
   categoryMenuNames: string[]
+  categoryLinks?: { name: string; href: string }[]
   hasPaginationWidget: boolean
   report: MallStructureReport | null
 }
@@ -278,6 +283,132 @@ function ScrapeStepBox({ description, primary, secondary, children }: {
       </div>
       {children}
     </div>
+  )
+}
+
+/** 개발자모드 안내에서 각 단계를 어디서 하는지(PTP 화면 vs 실제 몰 탭) 한눈에 구분되게 하는 배지 —
+ *  사용자 지적으로 안내를 다시 정리하며 추가(2026-08-15, "위치부터 먼저 표시해달라"). */
+function DevModeLocationBadge({ where }: { where: 'ptp' | 'mall' }) {
+  return (
+    <span className={`inline-block mr-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold align-middle whitespace-nowrap ${
+      where === 'ptp' ? 'bg-teal-100 text-teal-700' : 'bg-indigo-100 text-indigo-700'
+    }`}>
+      {where === 'ptp' ? 'PTP 화면' : '몰 탭'}
+    </span>
+  )
+}
+
+/** "몰 구조분석" 결과 표시 — 일반모드(로그인 카드)/개발자모드(개발자모드 안내 카드) 둘 다에서 공유한다
+ *  (2026-08-15, 개발자모드도 몰 구조분석을 쓸 수 있게 되며 중복을 피하려고 추출). */
+function MallProfileResultDisplay({ error, result, loading }: { error: string; result: ProfileCheckResult | null; loading?: boolean }) {
+  if (!error && !result && !loading) return null
+  // 로딩 중엔 결과가 나올 자리에 같은 모양(그리드)의 스켈레톤을 먼저 보여주고, 도착하면 그 자리에 실제
+  // 값이 그대로 채워지는 형태로 바꿨다 — 예전엔 버튼 글자만 "분석 중..."으로 바뀌고 화면엔 아무것도 안
+  // 나타나 몇 분씩 걸리는 이 작업이 멈춘 것처럼 보였다(사용자 지적, 2026-08-16). 카드 자체를 구분선이
+  // 아니라 완전히 독립된 박스로 둬서 바로 아래 "카테고리 불러오기"와 확실히 나뉘어 보이게 한다.
+  if (loading) {
+    return (
+      <div className="mt-4 bg-white border border-gray-200 rounded-xl p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-base leading-none animate-spin">🔄</span>
+          <span className="text-xs font-semibold text-gray-500">몰 구조를 분석하는 중입니다 — 몰 상태에 따라 몇 분 정도 걸릴 수 있습니다.</span>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          {Array.from({ length: 11 }).map((_, i) => (
+            <div key={i} className="bg-gray-50 rounded-xl px-3 py-2.5 border border-gray-100 animate-pulse">
+              <div className="h-2.5 w-20 bg-gray-200 rounded mb-2" />
+              <div className="h-2.5 w-full bg-gray-200 rounded" />
+              <div className="h-2.5 w-2/3 bg-gray-200 rounded mt-1.5" />
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+  return (
+    <>
+      {error && <p className="text-xs text-rose-500 mt-3">{error}</p>}
+      {result && (
+        <div className="mt-4 bg-white border border-gray-200 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
+              result.isFirstTime ? 'bg-teal-100 text-teal-700'
+              : result.diffs.length ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'
+            }`}>
+              {result.isFirstTime ? '🔍 몰 구조분석 완료' : result.diffs.length ? '⚠ 이전과 구조가 달라짐' : '✓ 이전과 구조 동일'}
+            </span>
+            <span className="text-xs text-gray-400">상품 {result.signals.sampleCount}건 샘플 기준</span>
+            {result.signals.report && (
+              result.signals.report.generatedBy === 'heuristic' ? (
+                <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-100 text-amber-700"
+                  title="AI 호출이 실패해(크레딧 부족 등) 정규식/키워드 매칭으로 대신 채운 결과입니다 — AI 분석보다 정확도가 낮을 수 있습니다.">
+                  ⚠ 규칙 기반 (AI 아님)
+                </span>
+              ) : (
+                <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-teal-100 text-teal-700">🤖 AI 분석</span>
+              )
+            )}
+          </div>
+          {result.diffs.length > 0 && (
+            <ul className="mb-3 text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2 space-y-0.5">
+              {result.diffs.map(d => <li key={d}>· {d}</li>)}
+            </ul>
+          )}
+          {result.autoRuleFields.length > 0 && (
+            <p className="mb-3 text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2">
+              ✓ 이 결과로 추출규칙 자동 생성됨: {result.autoRuleFields.join(', ')} — 이후 미리보기/스크랩부터 바로 적용됩니다.
+            </p>
+          )}
+          {result.signals.report ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {([
+                ['🔗', 'URL 계층', result.signals.report.urlHierarchy],
+                ['🗂️', '카테고리 구조', result.signals.report.categoryStructure],
+                ['🏦', '은행명', result.signals.report.bankName],
+                ['🔢', '계좌번호', result.signals.report.accountNumber],
+                ['🚚', '배송 택배사', result.signals.report.shippingCourier],
+                ['💰', '택배비/배송비', result.signals.report.shippingFeeInfo],
+                ['📮', '배송/반품 주소지', result.signals.report.returnAddress],
+                ['📦', '재고 관리 형태', result.signals.report.stockManagementType],
+                ['☎️', '업체 연락처', result.signals.report.companyContact],
+                ['🧩', '상품페이지 구조', result.signals.report.productPageStructure],
+                ['⚠️', '스크래핑 유의사항', result.signals.report.scrapingNeeds],
+              ] as const).map(([icon, label, value]) => {
+                const notFound = !value || value === '확인 안됨'
+                return (
+                  <div key={label} className="bg-gray-50 rounded-xl px-3 py-2.5 border border-gray-100">
+                    <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-0.5">{icon} {label}</p>
+                    <p className={`text-xs leading-relaxed ${notFound ? 'text-gray-400 italic' : 'text-gray-700'}`}>
+                      {value || '확인 안됨'}
+                    </p>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <p className="text-xs text-amber-600">AI 리포트를 만들지 못했습니다 (ANTHROPIC_API_KEY 미설정·크레딧 부족 등 API 호출 실패이거나 홈/게시판 원문을 못 모았습니다 — 서버 콘솔 로그 확인) — 아래 참고정보만 확인됩니다.</p>
+          )}
+          <div className="flex flex-wrap gap-1.5 mt-3">
+            <span className="text-[11px] bg-white border border-gray-200 text-gray-500 rounded-full px-2 py-0.5">플랫폼 {result.signals.platform}</span>
+            {result.signals.optionUiTypes.length > 0 && (
+              <span className="text-[11px] bg-white border border-gray-200 text-gray-500 rounded-full px-2 py-0.5">
+                옵션 UI {result.signals.optionUiTypes.join('/')}{result.signals.hasCascadingOptions && ' (연쇄옵션)'}
+              </span>
+            )}
+            {!result.signals.report && result.signals.categoryMenuNames.length > 0 && (
+              <span className="text-[11px] bg-white border border-gray-200 text-gray-500 rounded-full px-2 py-0.5">
+                카테고리 메뉴 {result.signals.categoryMenuNames.length}개: {result.signals.categoryMenuNames.join(', ')}
+              </span>
+            )}
+            {!result.signals.hasPaginationWidget && (
+              <span className="text-[11px] bg-amber-50 border border-amber-200 text-amber-700 rounded-full px-2 py-0.5">
+                페이지네이션 위젯 없음 — 미리보기 카테고리 개수 확인 시 지수 탐색으로 바로 진행
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 
@@ -362,6 +493,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 일반모드 카탈로그 미리보기 전용 — 카테고리별 상품 개수만(이름/썸네일 없이). 개발자모드는 이 필드를
   // 채우지 않으므로(확장이 previewItems 쪽만 보냄) 항상 빈 배열로 남아 기존 표시와 자연히 구분된다.
   const [categoryCounts, setCategoryCounts] = useState<CategoryCountItem[]>([])
+  // 카테고리별 개수 표를 최상위 카테고리 단위로 묶어 개별 접기/펴기 — 하위 카테고리가 많은 몰(예: 익스테리어몰딩
+  // 하위 수십 개)에서 한 화면에 다 펼쳐두면 스크롤이 길어지니, 안 볼 그룹은 접어두고 볼 그룹만 펼친다.
+  const [collapsedCategoryGroups, setCollapsedCategoryGroups] = useState<Set<string>>(new Set())
   const [previewLoading, setPreviewLoading] = useState(false)
   // "미리보기 중지" — fetch를 abort하면 서버(previewCatalog)도 opts.stopSignal로 같은 신호를 받아
   // 카테고리 개수 집계를 스스로 멈춘다(lib/scraper.ts 참고). 일반모드 전용(개발자모드는 서버가 아니라
@@ -371,13 +505,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // "카테고리 N/M" 진행 상황을 짧은 주기로 폴링해 보여준다(끝없이 도는 것처럼 보인다는 피드백).
   const [previewProgress, setPreviewProgress] = useState<{ done: number; total: number } | null>(null)
   const previewProgressPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // earlyPreview는 한 번 도착하면 그 실행 동안 값이 바뀌지 않으므로, 이미 반영했으면 매 폴링(1초)마다
+  // 같은 값으로 다시 리렌더하지 않게 막는다.
+  const earlyPreviewAppliedRef = useRef(false)
   // dev 서버가 불안정해 화면이 강제로 새로고침되면(Fast Refresh, 실사용 중 확인된 문제) 미리보기가
   // "그냥 멈춘 것"처럼 보이지만 서버는 계속 돌고 있을 수 있다 — 화면이 다시 뜰 때 이 몰에 아직 도는
   // 미리보기가 있으면 로딩 상태를 이어서 보여주고, 그 사이 끝나면 이 안내를 띄운다(원래 요청의 결과는
   // 새로고침으로 끊긴 그 브라우저 탭 안에서만 받을 수 있어 그대로 복구할 방법은 없다 — 다시 눌러야 함).
   const [previewResumeNotice, setPreviewResumeNotice] = useState<string | null>(null)
 
-  // 이 몰의 로그인 창 탭/프로필을 다른 스크랩 작업(스크래핑 시작/몰 구조 파악/미리보기 등)이 지금 쓰고
+  // 이 몰의 로그인 창 탭/프로필을 다른 스크랩 작업(스크래핑 시작/몰 구조분석/미리보기 등)이 지금 쓰고
   // 있으면, 여기서 누르는 버튼도 그게 끝날 때까지 순서를 기다린다(lib/scraper.ts의 withSiteLock 참고) —
   // 예전엔 이걸 알 방법이 없어 "왜 이렇게 오래 걸리냐"는 질문으로 매번 서버 로그를 뒤져야 했다. 몰을
   // 선택해두는 동안 짧은 주기로 폴링해, 대기 중이면 화면에 바로 보여준다.
@@ -408,6 +545,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [status, setStatus]       = useState<Status>('idle')
   const [sessionId, setSessionId] = useState<number | null>(null)
   const [progress, setProgress]   = useState<{ saved: number; total: number; error?: string; successCount: number; failedCount: number }>({ saved: 0, total: 0, successCount: 0, failedCount: 0 })
+  // 완료(status='done')까지 걸린 시간(분) — scrape_sessions.created_at~finished_at 차이. 진행 중/중지/오류일 땐 안 보여준다.
+  const [elapsedMinutes, setElapsedMinutes] = useState<number | null>(null)
   // 상품 URL 수집(카테고리 목록 순회) 단계는 progress.total이 아직 0이라 위 progress만으로는 "카테고리 몇 개
   // 중 몇 번째"를 보여줄 수 없다 — 미리보기의 previewProgress와 같은 이유·같은 해법(2026-08-11).
   const [collectProgress, setCollectProgress] = useState<{ done: number; total: number } | null>(null)
@@ -457,7 +596,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (saved.previewItems?.length) setPreviewItems(saved.previewItems)
     if (saved.categoryCounts?.length) setCategoryCounts(saved.categoryCounts)
     if (saved.detectedPlatform) setDetectedPlatform(saved.detectedPlatform)
-    // 로그인 확인 상태/발견된 카테고리/몰 구조 파악 결과는 dev 서버가 Fast Refresh로 화면을 강제
+    // 로그인 확인 상태/발견된 카테고리/몰 구조분석 결과는 dev 서버가 Fast Refresh로 화면을 강제
     // 새로고침시켜도(실사용 중 확인된 문제) 사라진 것처럼 보이지 않게 여기서 되살린다. openSessions
     // (로그인 창)는 브라우저만 새로고침됐을 뿐인 같은 서버 프로세스에 그대로 남아있어 loginStep 복원이
     // 실제 상태와 어긋나지 않는다.
@@ -495,7 +634,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
     if (savedSession) {
       const saved = savedSession
-      fetch(`/api/scrape/status?sessionId=${saved.sessionId}`).then(r => r.json()).then((d: { status: string; product_count: number; saved_count: number; success_count: number; failed_count: number; error?: string }) => {
+      fetch(`/api/scrape/status?sessionId=${saved.sessionId}`).then(r => r.json()).then((d: { status: string; product_count: number; saved_count: number; success_count: number; failed_count: number; error?: string; created_at: string; finished_at: string | null }) => {
         setSelectedSite(saved.site)
         setSessionId(saved.sessionId)
         setStatus(d.status as Status)
@@ -503,6 +642,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error,
           successCount: Number(d.success_count) || 0, failedCount: Number(d.failed_count) || 0,
         })
+        setElapsedMinutes(d.status === 'done' && d.finished_at ? elapsedMinutesBetween(d.created_at, d.finished_at) : null)
         // 세션 복원과 별개로, 같은 몰의 카테고리 목록 등 폼 상태도 함께 복원한다 — 예전엔 여기서 그대로
         // return해버려 "스크랩 완료" 상태는 보이는데 그 위 카테고리 선택 목록은 사라져 보이는 문제가
         // 있었다(2026-08-10 실사용 확인). selectSite()는 카테고리/진행상황을 전부 초기화하는 함수라
@@ -633,7 +773,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (!sessionId || status !== 'running') return
     pollRef.current = setInterval(async () => {
       const r = await fetch(`/api/scrape/status?sessionId=${sessionId}`)
-      const d = await r.json() as { status: string; product_count: number; saved_count: number; success_count: number; failed_count: number; error?: string; concurrency_log?: { at: string; level: number; reason: 'ramp_up' | 'block_detected' }[]; collect_progress?: { done: number; total: number } | null }
+      const d = await r.json() as { status: string; product_count: number; saved_count: number; success_count: number; failed_count: number; error?: string; created_at: string; finished_at: string | null; concurrency_log?: { at: string; level: number; reason: 'ramp_up' | 'block_detected' }[]; collect_progress?: { done: number; total: number } | null }
       setProgress({
         saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error,
         successCount: Number(d.success_count) || 0, failedCount: Number(d.failed_count) || 0,
@@ -647,7 +787,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         setStatus(d.status as Status)
         setStopping(false)
         if (pollRef.current) clearInterval(pollRef.current)
-        if (d.status === 'done') bumpRefresh('staging')
+        if (d.status === 'done') {
+          bumpRefresh('staging')
+          if (d.finished_at) setElapsedMinutes(elapsedMinutesBetween(d.created_at, d.finished_at))
+        }
       }
     }, 2000)
     return () => { if (pollRef.current) clearInterval(pollRef.current) }
@@ -699,11 +842,28 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const failedUrls = failedItems.map(r => r.url)
 
   // 이 몰이 "일반모드"(PTP 자동화) / "개발자모드"(크롬 확장) 중 무엇인지 — 아직 정해지지 않았으면(null)
-  // 어느 흐름도 보여주지 않고 선택부터 받는다. PC인증 등으로 자동 로그인이 근본적으로 안 되는 몰인지는
-  // 실제로 겪어보기 전엔 알 수 없어(이미 여러 번 확인된 사실), 최초 스크랩 시점에 사용자가 한 번 고르게 한다.
+  // 미리 고르게 하지 않고 곧바로 일반모드로 취급한다. PC인증 등으로 자동 로그인이 근본적으로 안 되는
+  // 몰인지는 실제로 겪어보기 전엔 알 수 없으니(이미 여러 번 확인된 사실), 미리 묻는 대신 일단 로그인·
+  // 스크랩을 시도해보게 하고, 실제로 차단이 반복 감지되면(아래 concurrencyLog 기반 배너) 그때 개발자모드
+  // 전환을 제안한다(사용자 결정, 2026-08-15).
   const mallMode = !selectedSite ? null
-    : selectedSite.manual_login_required === null ? 'undetermined'
     : selectedSite.manual_login_required ? 'devmode' : 'normal'
+
+  // 개발자모드는 카테고리 선택을 서버(sites.devmode_category_urls)에 저장해둬야 확장이 "스크랩 시작" 때
+  // 읽어갈 수 있다(팝업/백그라운드는 이 화면과 실시간으로 연결돼 있지 않은 별도 실제 크롬 탭이라, DB를
+  // 거쳐야 한다, 2026-08-15) — 체크할 때마다 바로 쏘지 않고 살짝 묶어서(500ms) 보낸다.
+  useEffect(() => {
+    if (mallMode !== 'devmode' || !selectedSite) return
+    const siteId = selectedSite.id
+    const urls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
+    const timer = setTimeout(() => {
+      fetch(`/api/sites/${siteId}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ devmodeCategoryUrls: urls }),
+      }).catch(() => {})
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [mallMode, selectedSite, categoryUrlsText])
 
   /** 로그인확인 이후 단계(몰구조파악/추출규칙/스크랩)의 안내 문구를 정하는 데 쓰는 서버 판정 —
    *  undefined=조회 전, null=이 화면에서 더 안내할 게 없음(스크랩까지 이미 끝남), 그 외엔
@@ -719,9 +879,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // 지금 이 화면(스크래핑)에서 "다음에 뭘 눌러야 하는지"를 전체 과정 순서대로 안내한다 — 몰 선택 →
-  // 스크랩 방식 선택 → (일반모드: 로그인 창 열기 → 로그인 확인 → 몰 구조 파악 → 스크랩 미리보기 →
-  // 스크래핑 시작 / 개발자모드: 브라우저에서 열기+로그인 → 확장으로 미리보기 → 확장으로 스크랩 시작) →
-  // 진행 중 대기 → 완료 후 스크랩 Raw 확인으로 이동, 또는 실패/중지 시 이어서 진행.
+  // (기본 일반모드: 로그인 창 열기 → 로그인 확인 → 몰 구조분석 → 스크랩 미리보기 → 스크래핑 시작 /
+  // 개발자모드: 브라우저에서 열기+로그인 → 확장으로 미리보기 → 확장으로 스크랩 시작) → 진행 중 대기 →
+  // 완료 후 스크랩 Raw 확인으로 이동, 또는 실패/중지 시 이어서 진행. 로그인 창을 열었는데 실제로 로그인이
+  // 안 되면(자동화 브라우저를 막는 몰) 로그인 카드의 "개발자모드로 전환" 링크로 바로 갈아탈 수 있다.
   //
   // status/progress는 개발자모드도 확장이 실제 세션을 만들면(위 checkForRunningSession 폴링) 일반모드와
   // 완전히 같은 값으로 채워지므로, 스크랩이 실제로 시작된 뒤부터는 두 모드가 같은 안내를 그대로 쓴다.
@@ -731,7 +892,6 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   useEffect(() => {
     let text: string | null = null
     if (!selectedSite) text = '"Mall 선택" - 먼저 스크랩할 몰을 선택합니다.'
-    else if (mallMode === 'undetermined') text = '"스크랩 방식 선택" - 일반모드 또는 개발자모드를 선택합니다.'
     else if (status === 'running') text = '스크래핑 진행 중 - 완료될 때까지 기다립니다. (중지하려면 "스크래핑 중지" 버튼을 클릭합니다.)'
     else if (status === 'done') text = '"스크랩 Raw 확인" - 수집된 상품을 확인하러 이동합니다.'
     else if (status === 'error' || status === 'stopped') {
@@ -741,8 +901,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     } else if (mallMode === 'normal') {
       if (loginStep === 'none') text = '"로그인 창 열기" - 몰 로그인 창에서 로그인합니다.'
       else if (loginStep === 'opened') text = '"로그인 확인" - 몰에서 로그인하셨다면 로그인확인 버튼을 클릭합니다.'
-      else if (dbStepKey === 'profile') text = '"몰 구조 파악" - 몰 구조 파악 버튼을 클릭합니다.'
-      else if (dbStepKey === 'rules') text = '"몰 구조 파악" - 다시 클릭해 추출규칙을 생성합니다.'
+      else if (dbStepKey === 'profile') text = '"몰 구조분석" - 몰 구조분석 버튼을 클릭합니다.'
+      else if (dbStepKey === 'rules') text = '"몰 구조분석" - 다시 클릭해 추출규칙을 생성합니다.'
       else if (dbStepKey === 'scrape') {
         text = previewResult
           ? '"스크래핑 시작" - 확인이 끝났다면 스크래핑 시작 버튼을 클릭합니다.'
@@ -751,7 +911,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     } else if (mallMode === 'devmode') {
       text = previewResult
         ? '몰 탭 확장 아이콘에서 "🔄 스크랩 시작"을 눌러 스크랩을 시작합니다.'
-        : '"브라우저에서 바로 열기" - 몰을 열어 로그인한 뒤, 몰 탭 확장 아이콘에서 "🔍 스크랩 미리보기 실행"을 누릅니다.'
+        : '"브라우저에서 바로 열기" - 몰을 열어 로그인한 뒤, 몰 탭 확장 아이콘에서 "🔍 스크랩 미리보기 - (카테선택)"을 누릅니다.'
     }
     setGuidance(text)
     return () => setGuidance(null)
@@ -799,6 +959,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       login_pw: string | null
       extraction_rules?: Record<string, { type: string; value: string }>
       devmode_ai_preview?: boolean
+      devmode_category_urls?: string[]
+      scrape_profile?: MallProfileSignals | null
+      mall_report_updated_at?: string | null
     }
     setSelectedSite({
       id: full.id, name: full.name, url: full.url, login_url: full.login_url, login_id: full.login_id,
@@ -812,14 +975,37 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPickerRules(full.extraction_rules || {})
     setSiteQuery('')
     setTargetUrl(full.url)
-    setCategoryUrlsText('') // 이전 사이트의 카테고리 목록이 남아 시작 URL을 무시하는 것을 방지
+    // 개발자모드는 카테고리 선택이 서버에 저장돼 있다(확장이 "스크랩 시작" 시 읽어가야 하므로) — 그 값을
+    // 그대로 복원한다. 일반모드는 이전 사이트의 카테고리 목록이 남아 시작 URL을 무시하는 걸 막기 위해 비운다.
+    setCategoryUrlsText(full.manual_login_required === true ? (full.devmode_category_urls || []).join('\n') : '')
+    // 이전 몰의 몰구조분석/카테고리 결과가 화면에 그대로 남아있으면 안 된다 — 다른 몰을 선택했는데 방금
+    // 전 몰의 분석 결과·완료/제외 표시가 계속 보이는 문제가 있었다(사용자 지적, 2026-08-16: "몰을
+    // 변경하면 기존 작업내역은 없어져야 하는게 맞지").
     setCategories([])
     setCategoriesCached(null)
     setDetectedPlatform(null)
+    setProfileResult(null)
+    setProfileError('')
+    setScrapedCategoryHrefs([])
+    setAllCategoriesScraped(false)
+    setExcludedCategoryHrefs([])
     setPreviewResult(null)
     setPreviewTotal(null)
     setPreviewItems([]); setCategoryCounts([])
     setSessionExpiredWarning(false)
+    // 반대로, 이 몰이 이전에 몰 구조분석/카테고리 불러오기를 이미 성공적으로 마쳐뒀다면(sites.scrape_profile
+    // 캐시) 그 결과를 곧바로 되살려, 두 단계를 또 거칠 필요 없이 카테고리 선택→스크래핑으로 바로 넘어갈
+    // 수 있게 한다 — 일반모드/개발자모드가 이 상태(categories/categoryChecklistBox/MallProfileResultDisplay)를
+    // 그대로 공유해서 별도 분기 없이 양쪽에 동일하게 적용된다(사용자 요청, 2026-08-16).
+    const cachedProfile = full.scrape_profile
+    if (cachedProfile && cachedProfile.sampleCount > 0) {
+      setProfileResult({ signals: cachedProfile, diffs: [], isFirstTime: false, autoRuleFields: [] })
+    }
+    if (cachedProfile?.categoryLinks?.length) {
+      setCategories(cachedProfile.categoryLinks.map(c => ({ href: c.href, text: c.name })))
+      setDetectedPlatform(cachedProfile.platform || null)
+      setCategoriesCached({ cached: true, updatedAt: full.mall_report_updated_at ?? null })
+    }
     // AI모드는 일반모드에선 그냥 로컬 상태(기본 켜짐)지만, 개발자모드는 확장이 실행 시점마다 서버에서
     // 값을 물어봐야 해서 DB에 저장해둔 값을 그대로 복원한다.
     setAiMode(full.manual_login_required === true ? !!full.devmode_ai_preview : true)
@@ -884,7 +1070,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     }
   }
 
-  /** "몰 구조 파악" — 결제계좌/택배사 등 거래정보를 AI로 분석해(app/api/sites/[id]/profile →
+  /** "몰 구조분석" — 결제계좌/택배사 등 거래정보를 AI로 분석해(app/api/sites/[id]/profile →
    *  runMallStructureReport) 그 자리에서 즉시 결과를 보여준다. 몰 구조 "변경 감지"는 이 메뉴가 아니라
    *  '마이그레이션3_연속관리'에서 한다(2026-08 이전). */
   async function handleProfileMall() {
@@ -894,11 +1080,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     try {
       const res = await fetch(`/api/sites/${selectedSite.id}/profile`, { method: 'POST' })
       const d = await res.json()
-      if (!res.ok) { setProfileError(d.error || '몰 구조 파악에 실패했습니다'); return }
+      if (!res.ok) { setProfileError(d.error || '몰 구조분석에 실패했습니다'); return }
       setProfileResult(d as ProfileCheckResult)
       bumpRefresh('sites')
     } catch {
-      setProfileError('몰 구조 파악에 실패했습니다')
+      setProfileError('몰 구조분석에 실패했습니다')
     } finally {
       setProfileLoading(false)
     }
@@ -1016,6 +1202,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // "제외" 표시한 카테고리는 전체선택 체크박스(상태 판정 + 클릭 시 대상)에서 뺀다 — toggleAllCategories와
   // 아래 헤더 체크박스 렌더링이 같은 기준을 쓴다.
   const selectableCategories = categories.filter(c => !isCategoryExcluded(c.href))
+  // 스크랩 미리보기로 확인된 카테고리별 개수(categoryCounts)를 href 기준으로 찾아, 카테고리 불러오기
+  // 체크리스트에도 같이 보여준다 — url이 곧 categories의 href와 같은 값(둘 다 카테고리 링크)이다.
+  const categoryCountByHref = new Map(categoryCounts.map(c => [c.url, c.count]))
   /** 실제 상품이 없는 카테고리(안내/문의 페이지 등)를 사용자가 직접 열어보고 "이건 아니다"로 표시한다 —
    *  화면엔 바로 반영하고(목록 맨 아래로 정리), 서버에도 남겨 다음에 카테고리를 다시 불러와도 유지되게
    *  한다. 서버 저장이 실패해도 화면 표시는 그대로 두고 조용히 넘어간다 — 실패해도 이번 화면에서 목록을
@@ -1090,6 +1279,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
    *  지워 헷갈리지 않게 하고, 2분 안에 응답이 없으면 "대기 중" 표시만 스스로 풀어준다. */
   async function handleDevPreview() {
     if (!selectedSite) return
+    // 이 버튼은 대기 상태만 준비할 뿐 실제 캡처는 몰 탭의 확장이 해야 한다 — 눌러도 여기서 아무 일도
+    // 안 일어나는 것처럼 보인다는 지적으로, 클릭 즉시 어디서 실행해야 하는지 바로 알려준다(2026-08-15).
+    alert('몰 확장프로그램에서 실행하세요 — "브라우저에서 바로 열기"로 연 몰 탭에서 확장 아이콘 → 팝업의 "🔍 스크랩 미리보기 - (카테선택)"을 클릭하세요.')
     setPreviewResult(null)
     setPreviewTotal(null)
     setPreviewItems([]); setCategoryCounts([])
@@ -1116,6 +1308,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       const d = await res?.json().catch(() => null) as {
         done: number; total: number
         result?: { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; categoryCounts?: CategoryCountItem[]; needsLogin?: boolean }
+        earlyPreview?: { sourceUrl: string; product: PreviewProduct } | null
       } | null
       // 서버(lib/scraper.ts의 endPreviewRun)가 정상 완료된 결과를 잠시 남겨두므로, 있으면 그대로
       // 받아 적용한다 — 새로고침으로 끊긴 원래 요청의 결과를 이 탭이 자동으로 이어받는 경로.
@@ -1125,6 +1318,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         setPreviewLoading(false)
         setPreviewProgress(null)
         return
+      }
+      // 카테고리 개수 집계가 끝나기 전에 서버가 먼저 뽑아둔 상품 1건(earlyPreview) — 아직 완료된
+      // result는 아니지만, 새로고침으로 관찰만 하는 이 경로에서도 먼저 보여줄 수 있으면 보여준다.
+      if (d?.earlyPreview && !earlyPreviewAppliedRef.current) {
+        earlyPreviewAppliedRef.current = true
+        setPreviewResult(d.earlyPreview)
       }
       if (d?.total) { setPreviewProgress(d); return }
       // total도 result도 없다는 건 중지/밀려남/에러 등으로 남길 결과 없이 끝났다는 뜻 — 자동으로
@@ -1147,6 +1346,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPreviewResumeNotice(null)
     setPreviewLoading(true)
     setPreviewResult(null)
+    earlyPreviewAppliedRef.current = false
     setPreviewTotal(null)
     setPreviewItems([]); setCategoryCounts([])
     setPreviewProgress(null)
@@ -1168,7 +1368,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     previewProgressPollRef.current = setInterval(async () => {
       const res = await fetch(`/api/scrape/preview-progress?siteId=${siteId}`).catch(() => null)
       if (!res?.ok) return
-      const d = await res.json() as { done: number; total: number }
+      const d = await res.json() as { done: number; total: number; earlyPreview?: { sourceUrl: string; product: PreviewProduct } | null }
+      // 카테고리 개수 집계가 끝나기 전에 서버가 먼저 뽑아둔 상품 1건 — 개수 집계보다 상품 미리보기를
+      // 먼저 보여달라는 요청(2026-08-14)에 따라, 전체 응답을 기다리지 않고 도착하는 대로 바로 보여준다.
+      if (d.earlyPreview && !earlyPreviewAppliedRef.current) {
+        earlyPreviewAppliedRef.current = true
+        setPreviewResult(d.earlyPreview)
+      }
       if (d.total > 0) setPreviewProgress(d)
     }, 1000)
     try {
@@ -1222,6 +1428,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setStatus('idle')
     setSessionId(null)
     setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
+    setElapsedMinutes(null)
     localStorage.removeItem(LAST_SESSION_KEY)
   }
 
@@ -1231,7 +1438,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
     setStatus('running')
     setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
-    setItemLog([])
+    setItemLog([]); setElapsedMinutes(null)
     // 시작 버튼을 누르면 그 아래 "진행 상황" 섹션으로 자동 스크롤해, 화면을 따로 내리지 않아도 바로 보이게 한다.
     // 이 시점엔 아직 리렌더 전이라 섹션이 DOM에 없을 수 있어(status는 방금 막 바뀜) 다음 페인트 이후로 미룬다.
     requestAnimationFrame(() => progressSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
@@ -1274,7 +1481,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setRetrying(true)
     setStatus('running')
     setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
-    setItemLog([])
+    setItemLog([]); setElapsedMinutes(null)
     try {
       const res = await fetch('/api/scrape', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1303,6 +1510,111 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   const statusColor = { idle: 'text-gray-500', running: 'text-teal-500', done: 'text-emerald-600', error: 'text-rose-600', stopped: 'text-amber-600' }
   const statusLabel = { idle: '대기 중', running: '스크래핑 중...', done: '완료', error: '오류 발생', stopped: '중지됨' }
+
+  // 카테고리 불러오기 결과(캐시 안내/감지된 플랫폼/체크리스트) — 일반모드의 "스크랩 대상" 카드와
+  // 개발자모드 안내 카드가 그대로 같이 쓴다(2026-08-15, 개발자모드도 카테고리를 선택해 그것만 스크랩할
+  // 수 있게 되며 중복을 피하려고 미리 뽑아둠). "몰 구조분석"과 같은 패턴으로, 로딩 중엔 결과가 나올
+  // 자리에 같은 모양(목록 행)의 스켈레톤을 먼저 보여준다(사용자 지적, 2026-08-16: "카테고리불러오기도
+  // 마찬가지로 로딩 중을 위와 같이 표시").
+  const categoryChecklistBox = categoriesLoading ? (
+    <div className="bg-teal-50 border border-teal-100 rounded-xl px-4 py-2.5 mb-3">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-base leading-none animate-spin">🔄</span>
+        <span className="text-xs font-semibold text-teal-700">카테고리를 불러오는 중입니다...</span>
+      </div>
+      <div className="border border-teal-200 bg-white rounded-xl overflow-hidden divide-y divide-gray-100">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <div key={i} className="flex items-center gap-2 px-3 py-2 animate-pulse">
+            <div className="h-3 w-3 bg-gray-200 rounded shrink-0" />
+            <div className="h-2.5 bg-gray-200 rounded" style={{ width: `${45 + (i % 3) * 15}%` }} />
+          </div>
+        ))}
+      </div>
+    </div>
+  ) : (categoriesCached?.cached || detectedPlatform || categories.length > 0) && (
+    <div className="bg-teal-50 border border-teal-100 rounded-xl px-4 py-2.5 mb-3">
+      {/* "몰 구조분석"이 이미 찾아둔 목록을 재사용했으면 즉시 뜨고 그 사실을 알려준다. */}
+      {categoriesCached?.cached && (
+        <p className="text-[11px] text-teal-600" title={categoriesCached.updatedAt ? new Date(categoriesCached.updatedAt).toLocaleString() : undefined}>
+          📋 저장된 몰 구조 기준으로 즉시 불러왔습니다 — 몰 메뉴가 바뀐 것 같으면 &quot;다시 확인&quot;을 눌러주세요.
+        </p>
+      )}
+
+      {detectedPlatform && (
+        <p className="text-xs text-teal-600 mt-1">
+          감지된 몰 유형: <span className="font-medium">{PLATFORM_LABELS[detectedPlatform] || detectedPlatform}</span>
+          {detectedPlatform !== 'unknown' && ' — 해당 플랫폼에 맞는 상품 링크/다음 페이지 방식이 자동으로 적용됩니다.'}
+        </p>
+      )}
+
+      {categories.length > 0 && (
+        <>
+          <p className="text-xs text-teal-700 mt-1">💡 아래에서 여러 카테고리를 체크하면, 체크한 카테고리들을 한 번에 스크랩 대상으로 지정할 수 있습니다.</p>
+          <div className="mt-1.5 border border-teal-200 bg-white rounded-xl overflow-hidden">
+            <div className="h-40 min-h-[80px] max-h-[70vh] resize-y overflow-y-auto">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  {/* 전체선택 체크박스를 우측 텍스트 링크 대신 아래 행 체크박스와 같은 왼쪽 칸에
+                      둔다 — 실제 <thead>/<tbody>로 같은 표에 넣어야 폭이 항상 정확히 맞는다. */}
+                  <tr className="sticky top-0 z-[2] bg-teal-50 border-b border-teal-100">
+                    <th className="px-3 py-1.5 w-6 sticky left-0 z-[1] bg-teal-50 font-normal text-left">
+                      <input type="checkbox" title="전체 선택/해제 (몰 전체상품, 제외 표시한 카테고리는 빠짐)"
+                        checked={selectableCategories.length > 0 && selectableCategories.every(c => isCategorySelected(c.href))}
+                        ref={el => { if (el) el.indeterminate = selectableCategories.some(c => isCategorySelected(c.href)) && !selectableCategories.every(c => isCategorySelected(c.href)) }}
+                        onChange={toggleAllCategories} />
+                    </th>
+                    <th colSpan={3} className="px-3 py-1.5 text-gray-500 font-normal text-left">
+                      발견된 카테고리 {categories.length}개
+                      {categories.some(c => isCategoryScraped(c.href)) &&
+                        ` (완료 ${categories.filter(c => isCategoryScraped(c.href)).length}개)`} — 스크랩할 항목을 선택하세요
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {/* 실제 상품이 없는 항목(안내/문의 페이지 등)을 "제외"로 표시해두면 눈에 잘 안 띄게
+                      맨 아래로 정리한다 — Array.sort는 안정 정렬이라 같은 그룹(제외/비제외) 안에서는
+                      원래 발견 순서가 그대로 유지된다. */}
+                  {[...categories].sort((a, b) => Number(isCategoryExcluded(a.href)) - Number(isCategoryExcluded(b.href))).map(c => {
+                    const count = categoryCountByHref.get(c.href)
+                    return (
+                    <tr key={c.href} onClick={() => toggleCategory(c.href)}
+                      className={`group border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer ${isCategoryExcluded(c.href) ? 'opacity-50' : ''}`}>
+                      <td className="px-3 py-1.5 w-6 sticky left-0 z-[1] bg-white group-hover:bg-gray-50">
+                        <input type="checkbox" checked={isCategorySelected(c.href)} onChange={() => toggleCategory(c.href)} onClick={e => e.stopPropagation()} />
+                      </td>
+                      <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
+                        <span className={isCategoryExcluded(c.href) ? 'line-through' : ''}>{c.text}</span>
+                        {count !== undefined && (
+                          <span className="ml-1.5 text-[10px] font-semibold text-gray-500" title="스크랩 미리보기로 확인된 상품 개수">
+                            ({count.toLocaleString()}개)
+                          </span>
+                        )}
+                        {isCategoryScraped(c.href) && (
+                          <span className="ml-1.5 text-[10px] font-semibold text-teal-600" title="이 카테고리는 이전에 스크래핑을 완료한 적이 있습니다">✓ 완료</span>
+                        )}
+                        {isCategoryExcluded(c.href) && (
+                          <span className="ml-1.5 text-[10px] font-semibold text-gray-400" title="상품 카테고리가 아닌 것으로 표시해뒀습니다">제외됨</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-1.5 text-gray-400 max-w-[320px] truncate" title={c.href}>{c.href}</td>
+                      <td className="px-3 py-1.5 w-12 text-right sticky right-0 bg-white group-hover:bg-gray-50">
+                        <button type="button" onClick={e => { e.stopPropagation(); toggleCategoryExcluded(c.href) }}
+                          title={isCategoryExcluded(c.href) ? '다시 카테고리로 복원합니다' : '상품이 없는 카테고리라 목록 아래로 정리합니다'}
+                          className="text-[10px] text-gray-400 hover:text-rose-500 hover:underline whitespace-nowrap">
+                          {isCategoryExcluded(c.href) ? '복원' : '제외'}
+                        </button>
+                      </td>
+                    </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
 
   return (
     <div>
@@ -1458,26 +1770,6 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         </div>
       )}
 
-      {/* 스크랩 방식 선택 (최초 스크랩 — 아직 정해지지 않은 몰만) */}
-      {mallMode === 'undetermined' && (
-        <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
-          <div className="text-sm font-semibold text-gray-700 mb-1">이 몰은 스크랩 방식이 아직 정해지지 않았습니다</div>
-          <p className="text-xs text-gray-400 mb-4">처음 스크랩할 때 한 번만 선택하면 됩니다 — 나중에 Mall 상세관리에서 다시 바꿀 수 있습니다.</p>
-          <div className="flex gap-3">
-            <button type="button" onClick={() => handleChooseScrapeMode(false)} disabled={modeSaving}
-              className="flex-1 text-left px-4 py-3 rounded-xl border border-gray-300 hover:border-teal-400 disabled:opacity-50 transition-colors">
-              <div className="text-sm font-semibold text-gray-800">🤖 일반모드</div>
-              <div className="text-xs text-gray-400 mt-0.5">PTP가 자동으로 로그인하고 스크랩합니다. 대부분의 몰은 이 방식이면 충분합니다.</div>
-            </button>
-            <button type="button" onClick={() => handleChooseScrapeMode(true)} disabled={modeSaving}
-              className="flex-1 text-left px-4 py-3 rounded-xl border border-gray-300 hover:border-teal-400 disabled:opacity-50 transition-colors">
-              <div className="text-sm font-semibold text-gray-800">🧩 개발자모드</div>
-              <div className="text-xs text-gray-400 mt-0.5">PC인증(윈도우 보안) 등으로 자동 로그인이 안 되는 몰입니다. 크롬 확장으로 직접 스크랩합니다.</div>
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* 로그인 */}
       {selectedSite && mallMode === 'normal' && (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
@@ -1532,7 +1824,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             {loginStep === 'confirmed' && (
               <button onClick={handleProfileMall} disabled={profileLoading}
                 className="px-4 py-2 bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
-                {profileLoading ? '몰 구조 파악 중...' : '🔍 몰 구조 파악'}
+                {profileLoading ? '몰 구조분석 중...' : '🔍 몰 구조분석'}
               </button>
             )}
             {loginStep === 'confirmed' && (
@@ -1547,97 +1839,31 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 {needsLogin ? '브라우저 창에서 로그인을 완료한 뒤 확인을 눌러주세요.' : '브라우저 창이 열리면 확인을 눌러주세요.'}
               </span>
             )}
+            {/* 이 창은 자동화 제어가 붙은 채로만 "화면에 보이는" 것일 뿐이라(launchVisibleWindow), Windows
+                Hello/WebAuthn(PC인증)로 자동화 브라우저 자체를 막는 몰에서는 아이디/비번을 아무리 정확히
+                입력해도 로그인이 안 된다 — 그런 몰은 사용자의 진짜 개인 크롬(개발자모드)이어야 통과된다.
+                "로그인 확인"을 눌러도 실제로는 로그인이 안 된 채로 다음 단계가 전부 실패하는 대신, 여기서
+                바로 전환할 수 있게 한다(사용자 지적으로 추가, 2026-08-15). */}
+            {needsLogin && loginStep === 'opened' && (
+              <p className="w-full text-xs text-amber-600">
+                {/* 깜빡임은 문구에만 건다 — 버튼까지 같이 깜빡이면 마우스를 가져다 대도 옅어지는 순간엔
+                    누르려는 대상이 잘 안 보이니, 버튼은 항상 또렷하게 두고 호버 시 배경을 채워 확실히
+                    인지시킨다(사용자 지적으로 추가, 2026-08-15). */}
+                <span className="animate-[pulse_1s_ease-in-out_infinite]">
+                  ⚠ Windows 보안(PC인증) 창이 뜨거나 로그인이 계속 안 풀리시나요?
+                </span>{' '}
+                <button type="button" onClick={() => handleChooseScrapeMode(true)} disabled={modeSaving}
+                  className="font-semibold underline hover:no-underline hover:bg-amber-100 hover:text-amber-900 rounded px-1 -mx-1 transition-colors disabled:opacity-50">
+                  개발자모드로 전환
+                </button>
+              </p>
+            )}
           </div>
           {!needsLogin && (
-            <p className="text-xs text-gray-400 mt-2">아이디를 입력하지 않으면 로그인 없이 바로 스크래핑을 시작할 수 있습니다. 몰 구조 파악을 쓰려면 위에서 몰 페이지를 먼저 열고 확인을 눌러주세요.</p>
+            <p className="text-xs text-gray-400 mt-2">아이디를 입력하지 않으면 로그인 없이 바로 스크래핑을 시작할 수 있습니다. 몰 구조분석을 쓰려면 위에서 몰 페이지를 먼저 열고 확인을 눌러주세요.</p>
           )}
 
-          {profileError && <p className="text-xs text-rose-500 mt-3">{profileError}</p>}
-          {profileResult && (
-            <div className="mt-4 pt-4 border-t border-gray-100">
-              <div className="flex items-center gap-2 mb-3">
-                <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
-                  profileResult.isFirstTime ? 'bg-teal-100 text-teal-700'
-                  : profileResult.diffs.length ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'
-                }`}>
-                  {profileResult.isFirstTime ? '🔍 몰 구조 파악 완료' : profileResult.diffs.length ? '⚠ 이전과 구조가 달라짐' : '✓ 이전과 구조 동일'}
-                </span>
-                <span className="text-xs text-gray-400">상품 {profileResult.signals.sampleCount}건 샘플 기준</span>
-                {profileResult.signals.report && (
-                  profileResult.signals.report.generatedBy === 'heuristic' ? (
-                    <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-100 text-amber-700"
-                      title="AI 호출이 실패해(크레딧 부족 등) 정규식/키워드 매칭으로 대신 채운 결과입니다 — AI 분석보다 정확도가 낮을 수 있습니다.">
-                      ⚠ 규칙 기반 (AI 아님)
-                    </span>
-                  ) : (
-                    <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-teal-100 text-teal-700">🤖 AI 분석</span>
-                  )
-                )}
-              </div>
-              {profileResult.diffs.length > 0 && (
-                <ul className="mb-3 text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2 space-y-0.5">
-                  {profileResult.diffs.map(d => <li key={d}>· {d}</li>)}
-                </ul>
-              )}
-              {profileResult.autoRuleFields.length > 0 && (
-                <p className="mb-3 text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2">
-                  ✓ 이 결과로 추출규칙 자동 생성됨: {profileResult.autoRuleFields.join(', ')} — 이후 미리보기/스크랩부터 바로 적용됩니다.
-                </p>
-              )}
-              {profileResult.signals.report ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  {([
-                    ['🔗', 'URL 계층', profileResult.signals.report.urlHierarchy],
-                    ['🗂️', '카테고리 구조', profileResult.signals.report.categoryStructure],
-                    ['🏦', '은행명', profileResult.signals.report.bankName],
-                    ['🔢', '계좌번호', profileResult.signals.report.accountNumber],
-                    ['🚚', '배송 택배사', profileResult.signals.report.shippingCourier],
-                    ['💰', '택배비/배송비', profileResult.signals.report.shippingFeeInfo],
-                    ['📮', '배송/반품 주소지', profileResult.signals.report.returnAddress],
-                    ['📦', '재고 관리 형태', profileResult.signals.report.stockManagementType],
-                    ['☎️', '업체 연락처', profileResult.signals.report.companyContact],
-                    ['🧩', '상품페이지 구조', profileResult.signals.report.productPageStructure],
-                    ['⚠️', '스크래핑 유의사항', profileResult.signals.report.scrapingNeeds],
-                  ] as const).map(([icon, label, value]) => {
-                    const notFound = !value || value === '확인 안됨'
-                    return (
-                      <div key={label} className="bg-gray-50 rounded-xl px-3 py-2.5 border border-gray-100">
-                        <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-0.5">{icon} {label}</p>
-                        <p className={`text-xs leading-relaxed ${notFound ? 'text-gray-400 italic' : 'text-gray-700'}`}>
-                          {value || '확인 안됨'}
-                        </p>
-                      </div>
-                    )
-                  })}
-                </div>
-              ) : (
-                <p className="text-xs text-amber-600">AI 리포트를 만들지 못했습니다 (ANTHROPIC_API_KEY 미설정·크레딧 부족 등 API 호출 실패이거나 홈/게시판 원문을 못 모았습니다 — 서버 콘솔 로그 확인) — 아래 참고정보만 확인됩니다.</p>
-              )}
-              <div className="flex flex-wrap gap-1.5 mt-3">
-                <span className="text-[11px] bg-white border border-gray-200 text-gray-500 rounded-full px-2 py-0.5">플랫폼 {profileResult.signals.platform}</span>
-                {profileResult.signals.optionUiTypes.length > 0 && (
-                  <span className="text-[11px] bg-white border border-gray-200 text-gray-500 rounded-full px-2 py-0.5">
-                    옵션 UI {profileResult.signals.optionUiTypes.join('/')}{profileResult.signals.hasCascadingOptions && ' (연쇄옵션)'}
-                  </span>
-                )}
-                {/* AI 리포트의 "카테고리 구조"가 이미 이 목록을 정리해서 보여주므로, 리포트가 없을 때만
-                    (위 "AI 리포트를 만들지 못했습니다 — 아래 참고정보만 확인됩니다"의 그 참고정보로) 원본
-                    목록을 그대로 보여준다 — 둘 다 있으면 같은 내용이 중복 표시된다(사용자 보고로 발견). */}
-                {!profileResult.signals.report && profileResult.signals.categoryMenuNames.length > 0 && (
-                  <span className="text-[11px] bg-white border border-gray-200 text-gray-500 rounded-full px-2 py-0.5">
-                    카테고리 메뉴 {profileResult.signals.categoryMenuNames.length}개: {profileResult.signals.categoryMenuNames.join(', ')}
-                  </span>
-                )}
-                {/* 위젯이 있는 게 정상/기본이라 그 경우엔 굳이 안 보여준다 — 없을 때만 눈에 띄게, 미리보기가
-                    이 신호를 참조해 지수 탐색으로 곧장 넘어간다는 것도 같이 안내한다. */}
-                {!profileResult.signals.hasPaginationWidget && (
-                  <span className="text-[11px] bg-amber-50 border border-amber-200 text-amber-700 rounded-full px-2 py-0.5">
-                    페이지네이션 위젯 없음 — 미리보기 카테고리 개수 확인 시 지수 탐색으로 바로 진행
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
+          <MallProfileResultDisplay error={profileError} result={profileResult} loading={profileLoading} />
           </>}
         </div>
       )}
@@ -1717,82 +1943,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
           {/* 카테고리 불러오기 결과(캐시 안내/감지된 플랫폼/체크리스트)는 위 선택 카드와 달리 폭이 넓게
               필요해 2단 배치 밖에, 전체 너비로 따로 보여준다. */}
-          {(categoriesCached?.cached || detectedPlatform || categories.length > 0) && (
-            <div className="bg-teal-50 border border-teal-100 rounded-xl px-4 py-2.5 mb-3">
-              {/* "몰 구조 파악"이 이미 찾아둔 목록을 재사용했으면 즉시 뜨고 그 사실을 알려준다. */}
-              {categoriesCached?.cached && (
-                <p className="text-[11px] text-teal-600" title={categoriesCached.updatedAt ? new Date(categoriesCached.updatedAt).toLocaleString() : undefined}>
-                  📋 저장된 몰 구조 기준으로 즉시 불러왔습니다 — 몰 메뉴가 바뀐 것 같으면 &quot;다시 확인&quot;을 눌러주세요.
-                </p>
-              )}
-
-              {detectedPlatform && (
-                <p className="text-xs text-teal-600 mt-1">
-                  감지된 몰 유형: <span className="font-medium">{PLATFORM_LABELS[detectedPlatform] || detectedPlatform}</span>
-                  {detectedPlatform !== 'unknown' && ' — 해당 플랫폼에 맞는 상품 링크/다음 페이지 방식이 자동으로 적용됩니다.'}
-                </p>
-              )}
-
-              {categories.length > 0 && (
-                <>
-                  <p className="text-xs text-teal-700 mt-1">💡 아래에서 여러 카테고리를 체크하면, 체크한 카테고리들을 한 번에 스크랩 대상으로 지정할 수 있습니다.</p>
-                  <div className="mt-1.5 border border-teal-200 bg-white rounded-xl overflow-hidden">
-                    <div className="max-h-40 overflow-y-auto">
-                      <table className="w-full text-xs border-collapse">
-                        <thead>
-                          {/* 전체선택 체크박스를 우측 텍스트 링크 대신 아래 행 체크박스와 같은 왼쪽 칸에
-                              둔다 — 실제 <thead>/<tbody>로 같은 표에 넣어야 폭이 항상 정확히 맞는다. */}
-                          <tr className="sticky top-0 z-[2] bg-teal-50 border-b border-teal-100">
-                            <th className="px-3 py-1.5 w-6 sticky left-0 z-[1] bg-teal-50 font-normal text-left">
-                              <input type="checkbox" title="전체 선택/해제 (몰 전체상품, 제외 표시한 카테고리는 빠짐)"
-                                checked={selectableCategories.length > 0 && selectableCategories.every(c => isCategorySelected(c.href))}
-                                ref={el => { if (el) el.indeterminate = selectableCategories.some(c => isCategorySelected(c.href)) && !selectableCategories.every(c => isCategorySelected(c.href)) }}
-                                onChange={toggleAllCategories} />
-                            </th>
-                            <th colSpan={3} className="px-3 py-1.5 text-gray-500 font-normal text-left">
-                              발견된 카테고리 {categories.length}개
-                              {categories.some(c => isCategoryScraped(c.href)) &&
-                                ` (완료 ${categories.filter(c => isCategoryScraped(c.href)).length}개)`} — 스크랩할 항목을 선택하세요
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {/* 실제 상품이 없는 항목(안내/문의 페이지 등)을 "제외"로 표시해두면 눈에 잘 안 띄게
-                              맨 아래로 정리한다 — Array.sort는 안정 정렬이라 같은 그룹(제외/비제외) 안에서는
-                              원래 발견 순서가 그대로 유지된다. */}
-                          {[...categories].sort((a, b) => Number(isCategoryExcluded(a.href)) - Number(isCategoryExcluded(b.href))).map(c => (
-                            <tr key={c.href} onClick={() => toggleCategory(c.href)}
-                              className={`group border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer ${isCategoryExcluded(c.href) ? 'opacity-50' : ''}`}>
-                              <td className="px-3 py-1.5 w-6 sticky left-0 z-[1] bg-white group-hover:bg-gray-50">
-                                <input type="checkbox" checked={isCategorySelected(c.href)} onChange={() => toggleCategory(c.href)} onClick={e => e.stopPropagation()} />
-                              </td>
-                              <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                                <span className={isCategoryExcluded(c.href) ? 'line-through' : ''}>{c.text}</span>
-                                {isCategoryScraped(c.href) && (
-                                  <span className="ml-1.5 text-[10px] font-semibold text-teal-600" title="이 카테고리는 이전에 스크래핑을 완료한 적이 있습니다">✓ 완료</span>
-                                )}
-                                {isCategoryExcluded(c.href) && (
-                                  <span className="ml-1.5 text-[10px] font-semibold text-gray-400" title="상품 카테고리가 아닌 것으로 표시해뒀습니다">제외됨</span>
-                                )}
-                              </td>
-                              <td className="px-3 py-1.5 text-gray-400 max-w-[320px] truncate" title={c.href}>{c.href}</td>
-                              <td className="px-3 py-1.5 w-12 text-right sticky right-0 bg-white group-hover:bg-gray-50">
-                                <button type="button" onClick={e => { e.stopPropagation(); toggleCategoryExcluded(c.href) }}
-                                  title={isCategoryExcluded(c.href) ? '다시 카테고리로 복원합니다' : '상품이 없는 카테고리라 목록 아래로 정리합니다'}
-                                  className="text-[10px] text-gray-400 hover:text-rose-500 hover:underline whitespace-nowrap">
-                                  {isCategoryExcluded(c.href) ? '복원' : '제외'}
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
+          {categoryChecklistBox}
           </>}
         </div>
       )}
@@ -1813,10 +1964,21 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               </button>
             </div>
             <div className="flex flex-col items-end gap-1.5">
-              <button onClick={() => handleOpenMallUrlDirect(selectedSite.login_url || selectedSite.url)}
-                className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full transition-colors shrink-0">
-                🌐 브라우저에서 바로 열기
-              </button>
+              <div className="flex items-center gap-2">
+                <button onClick={() => handleOpenMallUrlDirect(selectedSite.login_url || selectedSite.url)}
+                  className="px-4 py-2 bg-teal-500 hover:bg-teal-600 text-white text-sm font-semibold rounded-full transition-colors shrink-0">
+                  🌐 브라우저에서 바로 열기
+                </button>
+                {/* profileMallStructure가 withContext로 브라우저 컨텍스트를 얻으므로(로그인 창이 없어도
+                    직접로그인 필수 몰의 개인 크롬 프로필 사본을 헤드리스로 재사용) 왼쪽 "브라우저에서 바로
+                    열기"/로그인과 무관하게 아무 때나 눌러도 된다 — 순서상 종속이 아니라 그냥 보조 액션이라
+                    주 액션(teal) 오른쪽에 보조 스타일(흰 테두리)로 둔다(2026-08-15, 사용자 지적으로 순서
+                    조정 — 전엔 왼쪽에 있어 "이걸 먼저 해야 하나"로 오인하기 쉬웠음). */}
+                <button onClick={handleProfileMall} disabled={profileLoading}
+                  className="px-4 py-2 bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors shrink-0">
+                  {profileLoading ? '몰 구조분석 중...' : '🔍 몰 구조분석'}
+                </button>
+              </div>
               {(loginId || loginPw) && (
                 <div className="flex items-center gap-3 text-xs text-gray-500">
                   {loginId && (
@@ -1838,41 +2000,66 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </div>
           </div>
           {!devModeGuideCollapsed && (
-          <ol className="list-decimal list-inside text-sm text-gray-600 space-y-2.5">
+          <>
+          {/* 1순위 흐름만 번호 목록으로 — 몰 구조분석/미리보기/컬럼 직접지정은 이 기본 흐름에 필수가
+              아닌 보조 기능이라 아래 <details>(보조 설명)로 내렸다(사용자 지적, 2026-08-15: "핵심 흐름부터
+              보이고 나머지는 보조설명으로"). */}
+          <ol className="list-decimal list-inside text-sm text-gray-600 space-y-3">
             <li>
-              <b className="text-gray-700">&quot;🌐 브라우저에서 바로 열기&quot;</b>로 {selectedSite.name || selectedSite.url}를 엽니다.
+              <DevModeLocationBadge where="ptp" /><b className="text-gray-700">&quot;🌐 브라우저에서 바로 열기&quot;</b>로 몰 탭을 열고, <DevModeLocationBadge where="mall" />복사해둔 아이디/비밀번호를 <b className="text-gray-700">직접 입력</b>해 로그인합니다(자동입력 안 됨).
             </li>
             <li>
-              위에 복사해둔 아이디/비밀번호를 <b className="text-gray-700">직접 입력</b>해 로그인합니다(자동입력은 안 됩니다 — 자동 로그인 감지 회피를 위해 방금 연 진짜 브라우저 창을 그대로 쓰기 때문입니다).
+              <DevModeLocationBadge where="ptp" />전체 상품을 스크랩할 거면 그냥 다음 단계로 — 특정 카테고리만 스크랩하려면 아래 &quot;카테고리 불러오기&quot;에서 원하는 것만 체크해두세요.
             </li>
             <li>
-              로그인 후 상품이 나열된 <b className="text-gray-700">목록(카테고리) 페이지</b>를 엽니다.
-            </li>
-            <li>
-              <b className="text-gray-700">방금 로그인한 그 브라우저 창</b>의 주소창 오른쪽 위를 보면 확장 프로그램 아이콘들이 있습니다 — 그중{' '}
-              <b className="text-gray-700">&quot;PTP 개발자모드 몰 자동 스크랩&quot;</b> 아이콘을 클릭합니다. 안 보이면 퍼즐 조각(🧩) 모양의
-              &quot;확장 프로그램&quot; 아이콘을 먼저 눌러 목록에서 찾으세요(자주 쓴다면 그 옆 핀 아이콘으로 고정해두면 편합니다). PTP 화면이 아니라{' '}
-              <u>지금 로그인한 몰 탭 쪽</u>에서 열어야 합니다.
-            </li>
-            <li>
-              열린 작은 팝업 창에서 원하는 버튼을 클릭합니다:
-              <ul className="list-disc list-inside ml-4 mt-1 space-y-1 text-gray-500">
-                <li>상품 1건만 먼저 확인 → <b className="text-gray-700">&quot;🔍 스크랩 미리보기 실행&quot;</b> (아래 PTP의 &quot;스크랩 미리보기&quot;는 안 눌러도 결과가 자동으로 반영됩니다 — 먼저 눌러두면 이전 결과를 지우고 대기 상태로 바꿔줄 뿐입니다.)</li>
-                <li>특정 항목을 직접 클릭해서 컬럼을 지정 → 먼저 아래 PTP 화면에서 &quot;스크랩 대상 직접지정&quot;을 누른 뒤, 팝업에서 <b className="text-gray-700">&quot;🎯 스크랩 대상 직접지정&quot;</b></li>
-                <li>확인 없이 바로 전체 스크랩 → <b className="text-gray-700">&quot;🔄 스크랩 시작&quot;</b></li>
-              </ul>
-              {/* unoptimized — 이 dev 환경의 Next 이미지 최적화가 PNG를 처리 못해(실측: 새로 만든 PNG도
-                  전부 400, JPG는 정상) /_next/image 경유 없이 public 정적 파일을 그대로 서빙한다. */}
-              <div className="mt-2 inline-block border border-gray-200 rounded-lg overflow-hidden">
-                <Image src="/devmode-extension-popup.png" alt="실제 확장 프로그램 팝업 화면 — 스크랩 미리보기 실행/스크랩 시작/스크랩 대상 직접지정 버튼"
-                  width={377} height={307} unoptimized className="block" />
-              </div>
-            </li>
-            <li>
-              진행 상황은 아래에 자동으로 나타나며, 완료되면 &quot;스크랩 Raw 확인&quot;으로 바로 이동할 수 있습니다.
+              <DevModeLocationBadge where="mall" />목록(카테고리) 페이지가 열린 상태에서 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🔄 스크랩 시작&quot;</b>을 클릭합니다.{' '}
+              <DevModeLocationBadge where="ptp" />진행 상황은 아래에 자동으로 나타나며, 완료되면 &quot;스크랩 Raw 확인&quot;으로 이동할 수 있습니다.
             </li>
           </ol>
+          <details className="mt-3 text-xs text-gray-500">
+            <summary className="cursor-pointer select-none hover:text-gray-700">보조 설명 — 몰 구조분석 · 상품 1건만 미리보기 · 컬럼 직접지정</summary>
+            <ul className="list-disc list-inside mt-2 space-y-1.5">
+              <li><DevModeLocationBadge where="mall" />(선택, 로그인 전에도 가능) 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🧭 보조 - 몰 구조분석&quot;</b> — 결과는 PTP 화면에 나타납니다.</li>
+              <li><DevModeLocationBadge where="mall" />상품 1건만 먼저 확인하려면 → 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🔍 스크랩 미리보기 - (카테선택)&quot;</b> (PTP의 &quot;스크랩 미리보기&quot;는 안 눌러도 자동 반영됩니다)</li>
+              <li>컬럼을 직접 지정하려면 → 먼저 <DevModeLocationBadge where="ptp" />에서 &quot;스크랩 대상 직접지정&quot; 클릭 → <DevModeLocationBadge where="mall" />팝업의 <b className="text-gray-700">&quot;🎯 보조 - 스크랩 대상 직접지정&quot;</b></li>
+              <li>확장 아이콘이 안 보이면 퍼즐조각(🧩) 아이콘을 먼저 눌러 목록에서 찾으세요(자주 쓰면 그 옆 핀으로 고정).</li>
+            </ul>
+            {/* unoptimized — 이 dev 환경의 Next 이미지 최적화가 PNG를 처리 못해(실측: 새로 만든 PNG도
+                전부 400, JPG는 정상) /_next/image 경유 없이 public 정적 파일을 그대로 서빙한다. */}
+            <div className="mt-2 inline-block border border-gray-200 rounded-lg overflow-hidden">
+              <Image src="/devmode-extension-popup.png" alt="실제 확장 프로그램 팝업 화면 — 몰 구조분석/스크랩 미리보기 실행/스크랩 시작/스크랩 대상 직접지정 버튼"
+                width={304} height={211} unoptimized className="block" />
+            </div>
+          </details>
+          </>
           )}
+          {/* 일반모드의 "카테고리 불러오기"와 같은 기능 — 여러 카테고리를 체크해두면 "스크랩 시작"이 지금
+              탭 위치와 무관하게 그 카테고리들만 순서대로 처리한다(background.js의 run() 참고, 2026-08-15).
+              targetUrl은 selectSite에서 이미 site.url로 채워져 있어 로그인 여부와 무관하게 바로 쓸 수 있다. */}
+          {/* 몰 구조분석 결과 → 카테고리 불러오기 순서로 — 몰 구조를 먼저 파악하고 그 다음 카테고리를
+              고르는 게 자연스러운 흐름이라, 위아래로 붙어 하나처럼 보이던 두 결과를 각자 독립된 박스로
+              완전히 분리했다(사용자 지적, 2026-08-16: "몰구조분석 결과물 아래에 카테고리가져오기가 있어야
+              자연스러움" / "줄로 구분하지 말고 완전히 분리시켜줘" — 구분선 한 줄로는 부족하다고 재지적). */}
+          <MallProfileResultDisplay error={profileError} result={profileResult} loading={profileLoading} />
+          {/* 일반모드의 "모든 카테고리 불러오기"와 같은 ScrapeStepBox를 그대로 써서 버튼 두 개(주 버튼의
+              완료 표시 + "다시 확인")가 항상 같이 보이게 맞췄다 — 예전엔 버튼 하나가 라벨만 바꿔가며
+              "다시 확인"으로 완전히 대체돼, 카테고리를 이미 불러온 뒤엔 "카테고리 불러오기"가 안 보이는
+              것처럼 보였다(사용자 지적, 2026-08-16: "다시 확인 버튼만 보이는데 일반모드 UI와 맞춰줘"). */}
+          <div className="mt-4 bg-white border border-gray-200 rounded-xl p-4">
+            <ScrapeStepBox
+              description="💡 카테고리를 불러와 원하는 것만 체크하면, &quot;스크랩 시작&quot;이 그 카테고리들만 순서대로 처리합니다(선택사항)."
+              primary={{
+                label: '모든 카테고리 불러오기', doneLabel: '카테고리 불러옴', icon: '↻',
+                loading: categoriesLoading, loadingLabel: '불러오는 중...',
+                done: categories.length > 0, colorDone: !!previewResult, disabled: categoriesLoading || !targetUrl,
+                onClick: () => handleLoadCategories(false),
+              }}
+              secondary={categories.length > 0 ? {
+                label: '↻ 다시 확인', title: '몰 메뉴가 바뀌었을 수 있으면 직접 다시 훑어서 최신 목록으로 갱신합니다',
+                disabled: categoriesLoading || !targetUrl, onClick: () => handleLoadCategories(true),
+              } : undefined} />
+            {categoryChecklistBox}
+          </div>
         </div>
       )}
 
@@ -1948,7 +2135,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       🎯 스크랩 대상 직접지정 종료
                     </button>
                   ) : (
-                    <button onClick={() => setPickerActive(true)} disabled={pickerBusy}
+                    // 이 버튼은 PTP 쪽 안내 배너만 켤 뿐 실제 피커는 몰 탭의 확장이 띄운다 — 눌러도 여기서
+                    // 아무 일도 안 일어나는 것처럼 보인다는 지적으로, 클릭 즉시 어디서 실행해야 하는지
+                    // 바로 알려준다(2026-08-15).
+                    <button onClick={() => { setPickerActive(true); alert('몰 확장프로그램에서 실행하세요 — "브라우저에서 바로 열기"로 연 몰 탭에서 확장 아이콘 → 팝업의 "🎯 보조 - 스크랩 대상 직접지정"을 클릭하세요.') }} disabled={pickerBusy}
                       className="px-4 py-2 bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
                       🎯 스크랩 대상 직접지정
                     </button>
@@ -1994,7 +2184,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
           {mallMode === 'devmode' && previewLoading && (
             <p className="text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2 mb-3">
-              🔍 &quot;브라우저에서 바로 열기&quot;로 연 몰 탭의 상품 상세 페이지에서 확장 아이콘(팝업의 &quot;🔍 스크랩 미리보기 실행&quot;)
+              🔍 &quot;브라우저에서 바로 열기&quot;로 연 몰 탭의 상품 상세 페이지에서 확장 아이콘(팝업의 &quot;🔍 스크랩 미리보기 - (카테선택)&quot;)
               또는 우클릭 메뉴를 눌러주세요. 실행하면 몇 초 안에 아래에 결과가 나타납니다.
             </p>
           )}
@@ -2002,7 +2192,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           {pickerActive && (
             <p className="text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2 mb-3">
               {mallMode === 'devmode'
-                ? <>🎯 &quot;브라우저에서 바로 열기&quot;로 연 몰 탭에서 확장 아이콘(팝업의 &quot;🎯 스크랩 대상 직접지정&quot; 또는
+                ? <>🎯 &quot;브라우저에서 바로 열기&quot;로 연 몰 탭에서 확장 아이콘(팝업의 &quot;🎯 보조 - 스크랩 대상 직접지정&quot; 또는
                     우클릭 &quot;PTP 스크랩 대상 직접지정&quot;)을 눌러 그 탭에 뜨는 패널에서 값을 클릭해 지정하세요.</>
                 : <>🎯 로그인 창에 뜬 &quot;PTP 스크랩 대상 직접지정&quot; 패널에서 값을 클릭하거나, 패널의 목록에서
                     바로 값을 입력해 지정하세요.</>}
@@ -2193,15 +2383,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </div>
           )}
 
-          {/* 일반모드 카탈로그 미리보기 전용 — 상품 1건만 위에서 상세 확인하고, 나머지는 이름/썸네일
-              없이 카테고리별 "개수"만 보여준다(어차피 "스크래핑 시작"이 전체를 다시 훑으므로 미리보기는
-              개수 확인만 하면 된다는 판단). */}
+          </>}
+
           {categoryCounts.length > 0 && (
             <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
               <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500">
                 카테고리별 상품 개수 (목록 페이지 기준 — 상세페이지는 열어보지 않아 빠릅니다)
               </div>
-              <div className="max-h-[124px] overflow-y-auto">
+              {/* 세로로 드래그해서 원하는 높이만큼 늘려볼 수 있게(resize-y) — 행이 많은 몰에서 고정
+                  높이/스크롤만으론 답답하다는 피드백. */}
+              <div className="h-[200px] min-h-[80px] max-h-[70vh] resize-y overflow-y-auto">
                 <table className="w-full text-xs border-collapse">
                   <thead className="sticky top-0 z-10 bg-gray-50">
                     <tr className="border-b border-gray-200 text-gray-500 font-semibold">
@@ -2210,20 +2401,68 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {categoryCounts.map(c => (
-                      <tr key={c.url} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
-                        <td className="px-3 py-1.5 truncate max-w-[320px]" title={c.url}>
-                          <button type="button" onClick={() => handleOpenItem(c.url)} className="text-teal-500 hover:underline text-left">{c.label}</button>
-                        </td>
-                        <td className="px-3 py-1.5 text-right text-gray-700">{c.count.toLocaleString()}개</td>
-                      </tr>
-                    ))}
+                    {(() => {
+                      // label은 "최상위 > 하위" 형태(lib/scraper.ts가 path.join(' > ')로 만듦) — 최상위
+                      // 기준으로 묶는다. 최상위 하나에 하위가 1개뿐이면 굳이 접을 필요 없어 기존처럼 그대로 보여준다.
+                      const groups: { key: string; total: number; items: CategoryCountItem[] }[] = []
+                      const groupIndexByKey = new Map<string, number>()
+                      for (const c of categoryCounts) {
+                        const top = c.label.split(' > ')[0]
+                        let idx = groupIndexByKey.get(top)
+                        if (idx === undefined) {
+                          idx = groups.length
+                          groupIndexByKey.set(top, idx)
+                          groups.push({ key: top, total: 0, items: [] })
+                        }
+                        groups[idx].total += c.count
+                        groups[idx].items.push(c)
+                      }
+                      return groups.map(g => {
+                        if (g.items.length === 1) {
+                          const c = g.items[0]
+                          return (
+                            <tr key={c.url} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                              <td className="px-3 py-1.5 truncate max-w-[320px]" title={c.url}>
+                                <button type="button" onClick={() => handleOpenItem(c.url)} className="text-teal-500 hover:underline text-left">{c.label}</button>
+                              </td>
+                              <td className="px-3 py-1.5 text-right text-gray-700">{c.count.toLocaleString()}개</td>
+                            </tr>
+                          )
+                        }
+                        const collapsed = collapsedCategoryGroups.has(g.key)
+                        return (
+                          <Fragment key={g.key}>
+                            <tr className="border-b border-gray-100 bg-gray-50/60 hover:bg-gray-100">
+                              <td className="px-3 py-1.5 font-semibold text-gray-700">
+                                <button type="button" onClick={() => setCollapsedCategoryGroups(prev => {
+                                  const next = new Set(prev)
+                                  if (next.has(g.key)) next.delete(g.key); else next.add(g.key)
+                                  return next
+                                })} className="hover:underline text-left">
+                                  {collapsed ? '▸' : '▾'} {g.key} ({g.items.length}개 카테고리)
+                                </button>
+                              </td>
+                              <td className="px-3 py-1.5 text-right text-gray-700 font-semibold">{g.total.toLocaleString()}개</td>
+                            </tr>
+                            {!collapsed && g.items.map(c => (
+                              <tr key={c.url} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                                <td className="pl-6 pr-3 py-1.5 truncate max-w-[320px]" title={c.url}>
+                                  <button type="button" onClick={() => handleOpenItem(c.url)} className="text-teal-500 hover:underline text-left">
+                                    {c.label.slice(g.key.length).replace(/^ > /, '')}
+                                  </button>
+                                </td>
+                                <td className="px-3 py-1.5 text-right text-gray-700">{c.count.toLocaleString()}개</td>
+                              </tr>
+                            ))}
+                          </Fragment>
+                        )
+                      })
+                    })()}
                   </tbody>
                 </table>
               </div>
             </div>
           )}
-          </>}
         </div>
       )}
 
@@ -2295,6 +2534,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             <p className="text-sm text-gray-600">
               수집 완료: <strong>{progress.saved}</strong>개 {progress.total > 0 && `/ ${progress.total}개`}
               {progress.failedCount > 0 && <span className="text-rose-500"> · 실패 {progress.failedCount}개</span>}
+              {status === 'done' && elapsedMinutes !== null && <span className="text-gray-400"> · 소요시간 {elapsedMinutes}분</span>}
             </p>
           ) : progress.failedCount > 0 ? (
             <p className="text-sm text-rose-500">실패 {progress.failedCount}개</p>
@@ -2319,6 +2559,21 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   ))}
                 </ul>
               )}
+            </div>
+          )}
+
+          {/* 일반모드(PTP 자동화)인데 차단이 반복 감지되면(2회 이상) — 이 몰이 자동화 브라우저 자체를
+              걸러내는 몰일 가능성이 높다는 뜻이라, 미리 묻는 대신 여기서 개발자모드 전환을 제안한다
+              (mallMode 주석 참고, 2026-08-15). */}
+          {mallMode === 'normal' && concurrencyLog.filter(e => e.reason === 'block_detected').length >= 2 && (
+            <div className="mt-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 flex items-center justify-between gap-3">
+              <p className="text-xs text-amber-700">
+                ⚠ 차단이 반복 감지됐습니다 — 이 몰이 자동화 브라우저를 걸러내는 몰일 수 있습니다. 개발자모드(크롬 확장)로 전환해보시겠어요?
+              </p>
+              <button type="button" onClick={() => handleChooseScrapeMode(true)} disabled={modeSaving}
+                className="px-3 py-1 bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors shrink-0">
+                🧩 개발자모드로 전환
+              </button>
             </div>
           )}
 

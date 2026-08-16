@@ -30,6 +30,9 @@ export async function POST(_: NextRequest, { params }: { params: Promise<{ id: s
   const sessionId = sessionRes.rows[0].id
 
   try {
+    // allowStaleManualLoginProfile: "재스크랩" 버튼은 몰 종류(일반모드/개발자모드) 구분 없이 항상 보인다
+    // — 개발자모드 몰은 실제 크롬을 켜둔 채 쓰는 게 정상 상태라 세션 파일이 잠긴 채 복사돼도(robocopy
+    // 일부 실패) 이 재수집은 그냥 진행해야 한다(몰 구조분석 등에 이미 적용한 것과 동일, 2026-08-16).
     const result = await scrapeSingleProduct({
       url: mallProduct.source_url,
       siteId: mallProduct.site_id,
@@ -38,6 +41,7 @@ export async function POST(_: NextRequest, { params }: { params: Promise<{ id: s
       nameSelector: site?.custom_name_selector || undefined,
       priceSelector: site?.custom_price_selector || undefined,
       thumbnailSelector: site?.custom_thumbnail_selector || undefined,
+      allowStaleManualLoginProfile: true,
     })
     const { id: stagingId } = await stageScrapedProduct({ siteId: mallProduct.site_id, sessionId }, result)
 

@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
   try {
     // "스크랩 대상 직접지정"으로 저장한 그 몰 전용 규칙을 미리보기에도 동일하게 적용한다 (app/api/scrape/preview 참고).
     let extractionRules: Record<string, ExtractionRule> | undefined
-    // "몰 구조 파악"이 이미 이 몰엔 읽을 수 있는 페이지네이션 위젯이 없다고 확인해뒀으면, 카테고리별
+    // "몰 구조분석"이 이미 이 몰엔 읽을 수 있는 페이지네이션 위젯이 없다고 확인해뒀으면, 카테고리별
     // 개수 집계가 매번 같은 확인을 반복하지 않고 곧장 지수+이분 탐색으로 넘어가게 한다(knownNoPaginationWidget
     // 참고) — "몰구조파악 한 내용은 미리보기/스크래핑 때 반드시 참조돼야 한다"는 기존 원칙과 동일.
     let knownNoPaginationWidget = false

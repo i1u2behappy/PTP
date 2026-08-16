@@ -9,7 +9,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     `SELECT id, name, url, login_url, login_id, login_pw_encrypted, login_pw_iv, client_id,
             custom_name_selector, custom_price_selector, custom_thumbnail_selector,
             auto_scrape_enabled, auto_scrape_hour, manual_login_required, main_items, extraction_rules,
-            last_adjustment_preview, devmode_ai_preview, scrape_profile, scrape_profile_updated_at, memo
+            last_adjustment_preview, devmode_ai_preview, devmode_category_urls, scrape_profile, scrape_profile_updated_at, memo
      FROM sites WHERE id = $1`,
     [id],
   )
@@ -36,9 +36,14 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     extraction_rules: site.extraction_rules,
     last_adjustment_preview: site.last_adjustment_preview,
     devmode_ai_preview: site.devmode_ai_preview,
-    // "몰 구조 파악"의 거래정보 리포트(있으면) — SiteDetailPanel이 운영 메모 아래 참고용으로 표시한다.
+    devmode_category_urls: site.devmode_category_urls || [],
+    // "몰 구조분석"의 거래정보 리포트(있으면) — SiteDetailPanel이 운영 메모 아래 참고용으로 표시한다.
     mall_report: site.scrape_profile?.report ?? null,
     mall_report_updated_at: site.scrape_profile_updated_at,
+    // 몰 구조분석/카테고리 불러오기를 이미 문제없이 끝내둔 몰이면, 다음에 이 몰을 다시 선택했을 때
+    // 그 결과를 곧바로 화면에 되살려 두 단계를 또 거치지 않고 바로 카테고리 선택→스크래핑으로 넘어갈 수
+    // 있게 한다(ScraperPanel.tsx의 selectSite 참고, 2026-08-16).
+    scrape_profile: site.scrape_profile ?? null,
     latest_memo: latestMemo ? { content: latestMemo.content, createdAt: latestMemo.created_at } : null,
     profile_dir: profileDir(site.id),
   })
@@ -85,15 +90,20 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
  * 갖고 있지 않아, PUT을 그대로 쓰면 나머지 필드를 실수로 지울 위험이 있다). */
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const b = await req.json() as { manualLoginRequired?: boolean; devmodeAiPreview?: boolean }
-  if (typeof b.manualLoginRequired !== 'boolean' && typeof b.devmodeAiPreview !== 'boolean') {
-    return NextResponse.json({ error: 'manualLoginRequired 또는 devmodeAiPreview 중 하나가 필요합니다' }, { status: 400 })
+  const b = await req.json() as { manualLoginRequired?: boolean; devmodeAiPreview?: boolean; devmodeCategoryUrls?: string[] }
+  if (typeof b.manualLoginRequired !== 'boolean' && typeof b.devmodeAiPreview !== 'boolean' && !b.devmodeCategoryUrls) {
+    return NextResponse.json({ error: 'manualLoginRequired, devmodeAiPreview, devmodeCategoryUrls 중 하나가 필요합니다' }, { status: 400 })
   }
   if (typeof b.manualLoginRequired === 'boolean') {
     await pool.query(`UPDATE sites SET manual_login_required=$1 WHERE id=$2`, [b.manualLoginRequired, id])
   }
   if (typeof b.devmodeAiPreview === 'boolean') {
     await pool.query(`UPDATE sites SET devmode_ai_preview=$1 WHERE id=$2`, [b.devmodeAiPreview, id])
+  }
+  // 개발자모드 "카테고리 불러오기" 체크박스 선택 — 확장이 "스크랩 시작" 시 /api/sites/resolve로 읽어간다
+  // (devmode_ai_preview와 같은 이유, lib/db.ts 컬럼 주석 참고).
+  if (b.devmodeCategoryUrls) {
+    await pool.query(`UPDATE sites SET devmode_category_urls=$1 WHERE id=$2`, [JSON.stringify(b.devmodeCategoryUrls), id])
   }
   return NextResponse.json({ ok: true })
 }

@@ -440,7 +440,16 @@ export function StagingItemsGrid({ sessionId }: {
     openDetailModal('product-detail', { mallProductId: p.matched_mall_product_id })
   }
 
-  async function handleOpenSourceUrl(url: string) {
+  /** 로그인 창(그 몰의 로그인 쿠키 재사용)으로 먼저 열어 로그인된 상태로 보여준다 — ScraperPanel의
+   *  handleOpenItem과 같은 우선순위(1순위 로그인 재사용, 2순위 Chrome/Edge, 3순위 일반 새 탭). */
+  async function handleOpenSourceUrl(url: string, rowSessionId: number) {
+    try {
+      const res = await fetch('/api/scrape/open-url', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: rowSessionId, url }),
+      })
+      if (res.ok) return
+    } catch { /* 폴백으로 진행 */ }
     try {
       const res = await fetch('/api/system/open-in-browser', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -705,7 +714,7 @@ export function StagingItemsGrid({ sessionId }: {
                 extra_info: { node: extraInfoText || '-', title: extraInfoText },
                 source_url: {
                   node: p.source_url
-                    ? <button type="button" onClick={() => handleOpenSourceUrl(p.source_url!)} className="text-teal-500 hover:underline">열기 ↗</button>
+                    ? <button type="button" onClick={() => handleOpenSourceUrl(p.source_url!, p.session_id)} className="text-teal-500 hover:underline">열기 ↗</button>
                     : '-',
                   className: 'px-2 py-2 text-xs truncate', stop: true,
                 },

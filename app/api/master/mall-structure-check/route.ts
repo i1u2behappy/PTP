@@ -23,11 +23,17 @@ export async function POST(req: NextRequest) {
   const site = res.rows[0]
   if (!site?.url) return NextResponse.json({ error: '이 몰에 등록된 URL이 없습니다' }, { status: 400 })
 
+  // allowStaleManualLoginProfile: 이 라우트는 "직접로그인 필수 몰(개발자모드)도 포함해 모든 몰 유형에서
+  // 동작한다"고 문서화돼 있는데, 그 몰은 실제 크롬을 켜둔 채 쓰는 게 정상 상태라 세션 파일이 잠긴 채
+  // 복사돼도(robocopy 일부 실패) 이 가벼운 구조 확인은 그냥 진행해야 한다 — 안 그러면 개발자모드
+  // 몰에서는 이 기능이 사실상 항상 실패한다(몰 구조분석/카테고리 불러오기에 이미 적용한 것과 동일,
+  // 2026-08-16).
   const result = await runMallProfileCheckForScrape({
     url: site.url,
     siteId,
     loginId: site.login_id || undefined,
     loginPw: decryptSecret(site.login_pw_encrypted, site.login_pw_iv) || undefined,
+    allowStaleManualLoginProfile: true,
   })
 
   if (!result) return NextResponse.json({ error: '몰 구조를 확인하지 못했습니다 (접속 실패 등)' }, { status: 500 })

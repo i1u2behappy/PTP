@@ -8,7 +8,7 @@ function getClient() {
 }
 
 // 원래 "AI모드 스크래핑"(규칙 자동생성 + 옵션 판별)과 "스크랩 조정"(사용자 지적 기반 규칙 생성) 전용으로
-// (Anthropic 크레딧을 충전하지 않기로 하고) 도입했다가, "몰 구조 파악"도 Anthropic이 실패하면(크레딧
+// (Anthropic 크레딧을 충전하지 않기로 하고) 도입했다가, "몰 구조분석"도 Anthropic이 실패하면(크레딧
 // 부족 등) 이 Gemini로 자동 재시도하도록 확장함(2026-07-29) — generateMallProfileReport 참고. 나머지 AI
 // 기능(상품명 생성/Transform)은 여전히 Anthropic 전용.
 function getGeminiClient() {
@@ -201,7 +201,7 @@ export async function generateExtractionRules(
   userPrompt: string,
   currentValues: Partial<ExtractedProduct>,
   pageText: string,
-  /** "몰 구조 파악"으로 미리 확인해둔 이 몰의 구조 정보(있으면) — 플랫폼/옵션 UI 형태/재고 표기 방식 등을
+  /** "몰 구조분석"으로 미리 확인해둔 이 몰의 구조 정보(있으면) — 플랫폼/옵션 UI 형태/재고 표기 방식 등을
    *  참고해 더 정확한 규칙을 만들 수 있다. lib/scraper.ts의 MallProfileSignals와 같은 모양. */
   mallProfile?: Record<string, unknown> | null,
 ): Promise<Record<string, ExtractionRule>> {
@@ -225,7 +225,7 @@ export async function generateExtractionRules(
   if (newFieldMatch) properties[newFieldMatch[1]] = ruleSchema
 
   const mallProfileBlock = mallProfile
-    ? `\n[이 몰에 대해 "몰 구조 파악"으로 미리 확인해둔 정보 — 참고만 하고, 실제 페이지 내용과 다르면 실제 페이지를 따른다]\n${JSON.stringify(mallProfile)}\n`
+    ? `\n[이 몰에 대해 "몰 구조분석"으로 미리 확인해둔 정보 — 참고만 하고, 실제 페이지 내용과 다르면 실제 페이지를 따른다]\n${JSON.stringify(mallProfile)}\n`
     : ''
 
   const prompt = `몰 '${mallName}'의 상품 페이지를 스크랩하는데 값이 잘못 추출되고 있다.
@@ -282,7 +282,7 @@ origin)에 없는 완전히 새로운 종류의 정보라도 상관없다. 그 �
  *
  * 사용자 요청으로 이 함수만 Gemini(GEMINI_API_KEY)를 쓴다 — Anthropic API 크레딧을 충전하지 않기로
  * 했고, "스크래핑을 위한 AI모드"에만 국한해서 다른 AI를 붙여달라고 확정함. 나머지 AI 기능(스크랩 조정,
- * 상품명 생성, Transform)은 전부 그대로 Anthropic을 쓴다 — 전체 교체가 아니다. ("몰 구조 파악"은 이후
+ * 상품명 생성, Transform)은 전부 그대로 Anthropic을 쓴다 — 전체 교체가 아니다. ("몰 구조분석"은 이후
  * Anthropic 실패 시 Gemini로 자동 재시도하도록 별도로 확장됨 — generateMallProfileReport 참고.)
  */
 export async function generateAutoExtractionRules(
@@ -304,7 +304,7 @@ export async function generateAutoExtractionRules(
   EXTRACTION_RULE_FIELDS.forEach(f => { properties[f] = ruleSchema })
 
   const mallProfileBlock = mallProfile
-    ? `\n[이 몰에 대해 "몰 구조 파악"으로 미리 확인해둔 정보 — 참고만 하고, 실제 페이지 내용과 다르면 실제 페이지를 따른다]\n${JSON.stringify(mallProfile)}\n`
+    ? `\n[이 몰에 대해 "몰 구조분석"으로 미리 확인해둔 정보 — 참고만 하고, 실제 페이지 내용과 다르면 실제 페이지를 따른다]\n${JSON.stringify(mallProfile)}\n`
     : ''
 
   const prompt = `몰 '${mallName}'의 상품 페이지 구조를 처음 분석한다("AI모드 스크래핑"). 사용자가 지적한
@@ -436,7 +436,7 @@ const MALL_REPORT_FIELDS: { key: keyof MallStructureReport; label: string; hint:
 ]
 
 /**
- * "몰 구조 파악"을 실제 몰들에서 반복하며 얻은 경험적 지식 — PTP의 기본 노하우로 축적해, 다음에 처음
+ * "몰 구조분석"을 실제 몰들에서 반복하며 얻은 경험적 지식 — PTP의 기본 노하우로 축적해, 다음에 처음
  * 보는 몰을 분석할 때도 AI가 어디를 살펴봐야 할지 미리 참고하게 한다(이 몰이 실제로 그렇다는 뜻이 아니라
  * "이런 경우가 있더라"는 힌트일 뿐 — 항상 실제 원문이 최우선이라고 프롬프트에서도 명시함).
  * 새로운 몰을 분석하다 실사용으로 확인된 패턴/함정이 또 나오면 이 목록에 한 줄씩 추가한다.
@@ -472,7 +472,7 @@ ${categoryHints.join(', ') || '(확인 안됨)'}
 ${contextText.slice(0, 20_000)}`
 }
 
-/** Anthropic으로 "몰 구조 파악" 리포트를 생성한다. ANTHROPIC_API_KEY가 없거나 크레딧 부족 등으로
+/** Anthropic으로 "몰 구조분석" 리포트를 생성한다. ANTHROPIC_API_KEY가 없거나 크레딧 부족 등으로
  *  실패하면 null — 호출부(generateMallProfileReport)가 Gemini로 재시도한다. */
 async function generateMallProfileReportAnthropic(
   mallName: string, platform: string, categoryHints: string[], sampleProductUrl: string, contextText: string,
@@ -542,7 +542,7 @@ async function generateMallProfileReportGemini(
 }
 
 /**
- * "몰 구조 파악" 기능 — 실제로 수집한 원문(홈/게시판/상품페이지 텍스트)만 근거로 사용자가 알고 싶어하는
+ * "몰 구조분석" 기능 — 실제로 수집한 원문(홈/게시판/상품페이지 텍스트)만 근거로 사용자가 알고 싶어하는
  * 11개 항목(URL 계층/카테고리/은행명/계좌번호/택배사/택배비/반품주소/재고관리/연락처/상품페이지 구조/
  * 스크래핑 유의사항)을 채운다. 원문에 없는 내용을 추측하지 않도록 프롬프트에서 명시적으로 금지하고,
  * 확인 못한 항목은 "확인 안됨"으로 답하게 한다. Anthropic을 먼저 시도하고, 크레딧 부족 등으로 실패하면
@@ -605,7 +605,7 @@ function findContact(text: string): string {
 
 /**
  * generateMallProfileReport의 AI 호출 없이(과금 없이) 같은 11개 항목을 채우는 대체 경로 — ANTHROPIC_API_KEY
- * 크레딧이 없어도 "몰 구조 파악"이 동작해야 한다는 요구에 따른 것(월 정액 claude.ai/Claude Code 구독과
+ * 크레딧이 없어도 "몰 구조분석"이 동작해야 한다는 요구에 따른 것(월 정액 claude.ai/Claude Code 구독과
  * Anthropic API 크레딧은 별개 — 이 앱의 API 호출은 구독으로 대체할 방법이 없어, 과금 자체를 안 쓰는 이
  * 경로를 대신 마련했다). URL 계층/카테고리/재고/상품페이지 구조는 이미 확보된 구조적 신호를 그대로
  * 문장으로 조립하고(신뢰도 높음), 은행명/계좌번호/택배사/택배비/반품주소/연락처는 원문에서 알려진

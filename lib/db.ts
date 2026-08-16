@@ -186,6 +186,11 @@ export async function initDb() {
     -- 실제로 그 값을 참고하는 건 확장(별도 실제 크롬 탭)이라 DB에 저장해두고 /api/sites/resolve로 매번
     -- 같이 받아가게 한다.
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS devmode_ai_preview BOOLEAN NOT NULL DEFAULT false;
+    -- 개발자모드에서 "카테고리 불러오기"로 선택한 카테고리 URL 목록 — 일반모드의 categoryUrlsText와 같은
+    -- 개념이지만, 확장(별도 실제 크롬 탭)이 나중에 "스크랩 시작"을 누를 때 읽어가야 해서 DB에 저장해두고
+    -- /api/sites/resolve로 같이 받아가게 한다(devmode_ai_preview와 같은 이유). 비어있으면(기본값) 기존
+    -- 동작 그대로 "지금 탭 위치"만 처리한다.
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS devmode_category_urls JSONB NOT NULL DEFAULT '[]';
 
     -- 카테고리 목록의 "이미 스크랩함" 표시가 이 시각 이후의 완료 세션만 기준으로 삼는다(app/api/scrape/
     -- categories) — 로그인을 다시 하면 이전 로그인 때 완료한 카테고리는 더 이상 참고 대상이 아니라는
@@ -282,6 +287,8 @@ export async function initDb() {
     -- 적응형 동시성(scrapeCatalogPage)이 이번 회차에 동시 처리 수를 올리거나(연속 성공) 차단 감지로
     -- 다시 낮춘 시점들을 기록 — 스크래핑 후 "간략히" 확인할 수 있게 세션에 남긴다.
     ALTER TABLE scrape_sessions ADD COLUMN IF NOT EXISTS concurrency_log JSONB DEFAULT '[]';
+    -- 완료/중지/오류로 끝난 시각 — created_at과의 차이로 진행 화면에 총 소요시간을 보여준다.
+    ALTER TABLE scrape_sessions ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
     CREATE INDEX IF NOT EXISTS idx_scrape_sessions_merge_group ON scrape_sessions(merge_group_id) WHERE merge_group_id IS NOT NULL;
     -- Mall 상세관리 목록(GET /api/sites)이 몰마다 "가장 최근 세션" 하나를 LATERAL로 조회하는데,
     -- site_id에 인덱스가 없어 scrape_sessions가 쌓일수록 몰 수만큼 순차 스캔이 반복돼 점점 느려졌다.

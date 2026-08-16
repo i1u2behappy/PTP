@@ -233,7 +233,7 @@ export function SiteDetailPanel({ params }: Props) {
             ))}
           </div>
           <p className="text-xs text-gray-400 mt-1">
-            {manualLoginRequired === null && '처음 스크랩을 시도할 때 스크래핑 화면에서 한 번 선택하면 됩니다 — 어떤 몰인지 미리 알 수 없어 기본값입니다.'}
+            {manualLoginRequired === null && '어떤 몰인지 미리 알 수 없어 기본값입니다 — 일단 일반모드로 진행되고, 스크랩 중 차단이 반복 감지되면 스크래핑 화면에서 개발자모드 전환을 제안받습니다.'}
             {manualLoginRequired === false && 'PTP가 자동으로 로그인하고 스크랩합니다. 대부분의 몰은 이 방식이면 충분합니다.'}
             {manualLoginRequired === true && 'Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 근본적으로 안 되는 몰입니다. 스크래핑 화면에서 자동 실행 대신, 사용자가 실제 브라우저에서 직접 로그인한 상태로 크롬 확장을 이용해 스크랩하는 방법을 안내합니다. 사람이 직접 브라우저를 열고 클릭해야 하는 방식이라 매일 자동 재스크랩은 지원하지 않습니다.'}
           </p>
@@ -310,7 +310,7 @@ export function SiteDetailPanel({ params }: Props) {
           </div>
           <p className="text-xs text-gray-400 mb-3">
             {mallReportUpdatedAt ? `${formatDateTime(mallReportUpdatedAt)} 기준 — ` : ''}
-            스크래핑 화면의 &quot;몰 구조 파악&quot;으로 자동 분석된 내용입니다. 정확하다고 확인되면 위 운영 메모에 직접 옮겨 적어주세요.
+            스크래핑 화면의 &quot;몰 구조분석&quot;으로 자동 분석된 내용입니다. 정확하다고 확인되면 위 운영 메모에 직접 옮겨 적어주세요.
           </p>
           <pre className="text-xs text-gray-700 whitespace-pre-wrap bg-gray-50 rounded-lg px-3 py-2 font-sans">{formatMallReport(mallReport)}</pre>
         </div>

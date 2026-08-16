@@ -6,8 +6,7 @@
 <title>PTP 개발자모드</title>
 <style>
   body { width: 280px; font-family: -apple-system, "Segoe UI", sans-serif; padding: 12px; margin: 0; }
-  h1 { font-size: 13px; margin: 0 0 4px; color: #333; }
-  p.hint { font-size: 11px; color: #9ca3af; margin: 0 0 10px; }
+  h1 { font-size: 13px; margin: 0 0 8px; color: #333; }
   button { display: block; width: 100%; padding: 8px 10px; margin-bottom: 6px; border-radius: 8px; border: 1px solid #d1d5db; background: #fff; font-size: 12px; text-align: left; cursor: pointer; }
   button:hover { background: #f3f4f6; }
   button.primary { background: #14b8a6; color: #fff; border-color: #14b8a6; }
@@ -20,10 +19,10 @@
 </head>
 <body>
   <h1>🧩 PTP 개발자모드 — 지금 활성 탭 기준</h1>
-  <p class="hint">AI모드는 PTP 스크래핑 화면에서 설정하세요. 여기서는 실행만 합니다.</p>
-  <button type="button" id="btn-preview">🔍 스크랩 미리보기 실행</button>
+  <button type="button" id="btn-profile">🧭 보조 - 몰 구조분석</button>
+  <button type="button" id="btn-preview">🔍 스크랩 미리보기 - (카테선택)</button>
   <button type="button" id="btn-start" class="primary">🔄 스크랩 시작</button>
-  <button type="button" id="btn-picker">🎯 스크랩 대상 직접지정</button>
+  <button type="button" id="btn-picker">🎯 보조 - 스크랩 대상 직접지정</button>
   <div id="status"></div>
   <script src="popup.js"></script>
 </body>

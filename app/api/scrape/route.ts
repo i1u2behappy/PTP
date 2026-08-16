@@ -2,8 +2,12 @@ import { NextRequest, NextResponse } from 'next/server'
 import pool, { initDb } from '@/lib/db'
 import { getOpenPageUrl } from '@/lib/scraper'
 import { runScraping } from '@/lib/scrape/run'
+import { clearStalePendingIfConfigChanged } from '@/lib/scrape/staging'
+import type { ExtractionRule } from '@/lib/ai'
 
 type ScopeType = 'all' | 'category' | 'products' | 'page_range'
+
+type ExtractionRules = Record<string, ExtractionRule>
 
 interface ScrapeRequestBody {
   url?: string
@@ -53,13 +57,31 @@ export async function POST(req: NextRequest) {
   const scopeType = body.scopeType || (body.productUrls?.length ? 'products' : body.categoryUrls?.length ? 'category' : 'all')
   const scrapeMode = body.scrapeMode || 'full'
 
-  // scope_params에 실제 선택된 카테고리 URL 목록을 남겨둔다 — 나중에 "이 몰에서 어떤 카테고리를 이미
-  // 스크랩했는지"를 세션 기록에서 되짚어볼 수 있어야 한다(부분적으로 나눠 스크랩하는 경우, /api/scrape/
-  // categories가 이 값을 모아 카테고리 목록에 "완료" 표시를 붙이는 데 쓴다).
+  const siteRow = await pool.query<{ extraction_rules: ExtractionRules | null }>(
+    `SELECT extraction_rules FROM sites WHERE id=$1`, [body.siteId],
+  )
+  const currentRules = siteRow.rows[0]?.extraction_rules || {}
+
+  // "이어서 스크랩하기"(중지/오류 세션 재시작)는 그 세션이 멈춘 시점의 카테고리/추출 규칙과 지금 설정이
+  // 같을 때만 진짜 "이어서"다 — 그 사이 카테고리를 바꾸거나 "스크랩 대상 직접지정"/AI모드로 추출 규칙을
+  // 고쳤다면, 중지 전 미검토 결과는 옛 규칙으로 뽑힌 것이라 그대로 이어가면 같은 몰 안에 옛 규칙/새 규칙
+  // 데이터가 섞인다. productUrls 지정 스크랩(실패 재시도)은 이 판단과 무관한 별개 용도라 제외한다
+  // (사용자 확인, 2026-08-15 — 설정이 바뀌면 자동으로 "새로 시작" 취급하고, 그 중지된 세션이 만들어둔
+  // 미검토(pending) staging 결과만 지운다. 이미 확정/병합된 결과나 다른 세션 결과는 건드리지 않는다).
+  // 개발자모드(extension-ingest)도 같은 함수를 공유한다.
+  if (!body.productUrls?.length) {
+    await clearStalePendingIfConfigChanged(body.siteId, { categoryUrls: body.categoryUrls || [], url: resolvedUrl, extractionRules: currentRules })
+  }
+
+  // scope_params에 실제 선택된 카테고리 URL 목록/그 시점 추출 규칙을 남겨둔다 — 나중에 "이 몰에서 어떤
+  // 카테고리를 이미 스크랩했는지"를 세션 기록에서 되짚어보는 데(부분적으로 나눠 스크랩하는 경우,
+  // /api/scrape/categories가 이 값을 모아 카테고리 목록에 "완료" 표시를 붙이는 데 씀), 그리고 다음
+  // 재시작 때 위 "설정이 바뀌었는지" 판단의 기준으로 쓴다.
   const sessionRes = await pool.query<{ id: number }>(
     `INSERT INTO scrape_sessions (url, site_id, login_id, status, scope_type, mode, scope_params)
      VALUES ($1,$2,$3,'running',$4,$5,$6) RETURNING id`,
-    [resolvedUrl, body.siteId, body.loginId || null, scopeType, scrapeMode, JSON.stringify({ categoryUrls: body.categoryUrls || [] })],
+    [resolvedUrl, body.siteId, body.loginId || null, scopeType, scrapeMode,
+     JSON.stringify({ categoryUrls: body.categoryUrls || [], extractionRules: currentRules })],
   )
   const sessionId = sessionRes.rows[0].id
 

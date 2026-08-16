@@ -48,6 +48,25 @@ scrape-preview-catalog-count-and-target-ui.md`의 "버그 10" 참고)까지 카�
   목록 맨 아래로 자동 정렬된다(`Array.sort`의 안정 정렬 특성상 같은 그룹 안에서는 원래 발견 순서
   유지). 선택(체크박스) 동작 자체는 건드리지 않았다 — 표시/정리 목적으로만 동작.
 
+## 후속 (2026-08-16) — 몰 전환 시 이전 몰 상태 미초기화 버그 + 캐시된 분석결과 자동 복원
+
+**버그 — 다른 몰을 선택해도 이전 몰의 몰구조분석/완료·제외 표시가 남아있음.** `selectSite()`가
+`categories`/`categoriesCached`/`detectedPlatform`/`previewResult`는 초기화하면서도 `profileResult`/
+`profileError`(몰 구조분석 결과)와 `scrapedCategoryHrefs`/`allCategoriesScraped`/`excludedCategoryHrefs`
+(완료/제외 표시)는 초기화 코드가 아예 없었다 — 다른 몰을 선택해도 방금 전 몰의 몰구조분석 결과·완료
+표시가 화면에 그대로 남아있는 버그였다(사용자 지적: "몰을 변경하면 기존 작업내역은 없어져야 하는게
+맞지"). `selectSite()`에 나머지 초기화도 추가.
+
+**기능 — 몰구조분석+카테고리 불러오기를 이미 마친 몰은 재선택 시 바로 카테고리 선택으로.** 이전에는
+캐시(`sites.scrape_profile`)가 있어도 몰을 다시 선택할 때마다 "몰 구조분석"/"카테고리 불러오기"를 또
+눌러야 결과가 보였다. `GET /api/sites/[id]`가 이제 `scrape_profile`(신규 필드, 이미 조회해둔 값 그대로
+반환) 전체를 같이 내려주고, `selectSite()`가 이 값에 `sampleCount > 0`(분석 이력 있음)이면 `profileResult`
+를, `categoryLinks`가 있으면 `categories`/`detectedPlatform`/`categoriesCached`(캐시 안내 문구 포함)를
+곧바로 채운다 — 몰을 고르자마자 두 단계를 또 거치지 않고 카테고리 체크→스크래핑으로 바로 넘어갈 수 있다.
+한 번도 분석 안 한 몰(캐시 없음)은 기존처럼 빈 상태로 시작해 무거운 스캔이 자동으로 걸리지 않는다.
+`selectSite()` 하나에 구현해 일반모드/개발자모드 양쪽에 동일하게 적용된다(두 모드가 `categories`/
+`categoryChecklistBox`/`MallProfileResultDisplay` 상태·컴포넌트를 그대로 공유하므로 별도 분기 불필요).
+
 ## 관련 파일
 
 - `components/panels/ScraperPanel.tsx`: `applyFormState`(신규 헬퍼), `scrapedCategoryHrefs`/
@@ -60,8 +79,16 @@ scrape-preview-catalog-count-and-target-ui.md`의 "버그 10" 참고)까지 카�
 - `app/api/scrape/categories/exclude/route.ts`(신규).
 - `app/api/scrape/login-confirm/route.ts`: `sites.last_login_confirmed_at` 갱신.
 - `lib/db.ts`: `sites.last_login_confirmed_at TIMESTAMPTZ`(신규 컬럼).
+- `app/api/sites/[id]/route.ts`(2026-08-16): GET 응답에 `scrape_profile`(전체) 추가.
+- `components/panels/ScraperPanel.tsx`(2026-08-16): `selectSite()` — 몰 전환 시 `profileResult`/
+  `profileError`/`scrapedCategoryHrefs`/`allCategoriesScraped`/`excludedCategoryHrefs` 초기화 추가,
+  `scrape_profile` 캐시로 `profileResult`/`categories`/`detectedPlatform`/`categoriesCached` 자동 복원.
 
 ## 상태
 
 **구현 완료.** tsc/eslint 클린. 실제 앱 화면에서의 최종 확인(탭 전환 후 카테고리 유지, 완료/제외
 표시)은 사용자가 다음 사용 시 확인 예정.
+
+**후속 (2026-08-16).** 몰 전환 시 상태 미초기화 버그 수정 + 캐시된 몰구조분석/카테고리 자동 복원
+기능 추가(위 섹션 참고). tsc 클린, `GET /api/sites/{id}` 응답에 `scrape_profile`이 정상 포함되는 것까지
+직접 호출로 확인.

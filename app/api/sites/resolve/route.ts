@@ -33,9 +33,10 @@ export async function GET(req: NextRequest) {
 
   const res = await pool.query<{
     id: number; name: string | null; url: string; extraction_rules: unknown; devmode_ai_preview: boolean
+    devmode_category_urls: string[] | null
     last_adjustment_preview: { preview?: { product: Record<string, unknown> } | null } | null
   }>(
-    `SELECT id, name, url, extraction_rules, devmode_ai_preview, last_adjustment_preview FROM sites WHERE manual_login_required = true`,
+    `SELECT id, name, url, extraction_rules, devmode_ai_preview, devmode_category_urls, last_adjustment_preview FROM sites WHERE manual_login_required = true`,
   )
   const targetHost = normalizeHost(host)
   const match = res.rows.find(row => {
@@ -56,8 +57,12 @@ export async function GET(req: NextRequest) {
   // 연결돼 있지 않아(별도 실제 크롬 탭) 실행 시점마다 이 값을 물어봐야 한다. previewProduct: 마지막
   // "스크랩 미리보기 실행"에서 캡처된 상품 — 피커 패널이 일반모드처럼 필드별 "자동값" 힌트(대표/상세
   // 이미지 장수 포함)를 보여주려면 이 값이 있어야 한다(없으면 모든 필드가 힌트 없이 빈 채로 보인다).
+  // categoryUrls: PTP 화면의 "카테고리 불러오기"에서 체크해둔 카테고리 목록 — 비어있으면 확장은 기존처럼
+  // "지금 탭 위치"만 처리하고, 있으면 "스크랩 시작" 때 그 목록을 순서대로 전부 처리한다(background.js의
+  // run() 참고).
   return NextResponse.json({
     id: match.id, name: match.name, extractionRules: match.extraction_rules || {}, aiPreviewMode: match.devmode_ai_preview,
+    categoryUrls: match.devmode_category_urls || [],
     masterLabels, masterOrder, previewProduct: match.last_adjustment_preview?.preview?.product || null,
   }, { headers: corsHeaders() })
 }

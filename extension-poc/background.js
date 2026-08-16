@@ -21,8 +21,8 @@ let running = false
 
 /** 현재 탭의 도메인으로 PTP에 "이 몰이 몇 번 site냐"고 물어본다 — 몰마다 확장을 새로 만들지 않기 위함.
  * "스크랩 조정" 기능이 그 몰에 대해 학습해둔 추출 규칙(extractionRules)과, PTP 화면(일반모드와 같은 자리)
- * 의 AI모드 토글 상태(aiPreviewMode)도 같이 받아온다 — 확장은 PTP와 직접 연결돼 있지 않아(별도 실제
- * 크롬 탭) 실행 시점마다 이 값을 물어봐야 한다. */
+ * 의 AI모드 토글 상태(aiPreviewMode)/카테고리 불러오기 선택 목록(categoryUrls)도 같이 받아온다 — 확장은
+ * PTP와 직접 연결돼 있지 않아(별도 실제 크롬 탭) 실행 시점마다 이 값들을 물어봐야 한다. */
 async function resolveSite(hostname) {
   const res = await fetch(`${RESOLVE_ENDPOINT}?host=${encodeURIComponent(hostname)}`)
   if (!res.ok) return null
@@ -30,6 +30,7 @@ async function resolveSite(hostname) {
   if (data.id == null) return null
   return {
     id: data.id, extractionRules: data.extractionRules || {}, aiPreviewMode: !!data.aiPreviewMode,
+    categoryUrls: data.categoryUrls || [],
     masterLabels: data.masterLabels || {}, masterOrder: data.masterOrder || [], previewProduct: data.previewProduct || null,
   }
 }
@@ -56,14 +57,40 @@ function throttle() { return delay(1200 + Math.random() * 1200) }
  *  attach를 시도하면 "자기 자신의 이전 연결"을 기억 못 한 채 "Another debugger is already attached"로
  *  실패한다(실제 발견된 사례). 실패하면 한 번 detach 후 재시도해 자기 자신의 낡은 연결이면 회복하고,
  *  진짜 다른 디버거(예: F12 개발자도구)가 붙어있는 경우에만 에러를 그대로 알린다. */
+// chrome.debugger의 attach/sendCommand는 자체 타임아웃이 없다 — CDP 연결이 어떤 이유로든 응답을 안 주면
+// 영원히 멈춘다(콘솔에 로그 한 줄도 안 남고, navigate()의 "완료" 대기와 같은 종류의 문제였다는 게
+// 실사용 중 확인됨, 2026-08-15). 매번 이 래퍼로 감싸 넉넉한 시간 안에 응답이 없으면 명확한 에러로
+// 실패시킨다 — 그래야 최소한 팝업/콘솔에 "왜 멈췄는지"가 남는다.
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} — ${Math.round(ms / 1000)}초 안에 응답이 없습니다`)), ms)),
+  ])
+}
+
+// chrome.debugger.detach도 attach/sendCommand와 같은 이유로 자체 타임아웃이 없다 — 그리고 이게 실제
+// 병목이었다: 피커("스크랩 대상 직접지정") 세션이 아직 붙어있는 탭에 미리보기가 attachDebugger의
+// "already attached" 복구 경로를 타면 바로 이 detach를 부르는데, 이 detach 자체가 멈춰버리면 재시도
+// attach도, 이후 어떤 콘솔 로그도 없이 통째로 멈춘다("피커 쓴 뒤 미리보기가 멈춘다" 보고, 2026-08-15).
+// 모든 detach 호출을 이걸로 통일한다.
+async function safeDetach(tabId) {
+  await withTimeout(chrome.debugger.detach({ tabId }), 5_000, '디버거 해제').catch(() => {})
+}
+
 async function attachDebugger(tabId) {
   try {
-    await chrome.debugger.attach({ tabId }, '1.3')
+    await withTimeout(chrome.debugger.attach({ tabId }, '1.3'), 10_000, '디버거 연결')
   } catch (e) {
     if (!/already attached/i.test(e.message)) throw e
-    await chrome.debugger.detach({ tabId }).catch(() => {})
+    await safeDetach(tabId)
+    // 방금 뗀 연결이 "스크랩 대상 직접지정"(runPicker)이 쥐고 있던 것이었을 수 있다 — 예를 들어 피커
+    // 패널을 열어둔 채(종료 안 누름) 미리보기/스크랩 시작을 또 누르면 여기서 그 연결을 강제로 뗀다.
+    // pickerSessions에 낡은 기록이 남아있으면 화면(패널)은 여전히 "떠 있는 것처럼" 보이는데 실제
+    // CDP 연결은 끊겨 저장이 전부 조용히 실패하는 불일치가 생긴다 — 이 시점에 같이 정리한다
+    // (2026-08-15, 실사용 중 "피커 쓴 뒤 미리보기가 멈춘다" 보고로 확인).
+    pickerSessions.delete(tabId)
     try {
-      await chrome.debugger.attach({ tabId }, '1.3')
+      await withTimeout(chrome.debugger.attach({ tabId }, '1.3'), 10_000, '디버거 연결(재시도)')
     } catch {
       throw new Error(`${e.message} — 이 탭에서 개발자도구(F12)가 열려있다면 닫고 다시 시도하세요.`)
     }
@@ -71,7 +98,10 @@ async function attachDebugger(tabId) {
 }
 
 async function evalInTab(tabId, expression) {
-  const res = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
+  const res = await withTimeout(
+    chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }),
+    25_000, 'Runtime.evaluate',
+  )
   if (res.exceptionDetails) {
     // exceptionDetails.text는 보통 "Uncaught" 같은 분류명일 뿐이고, 실제 메시지는 exception 쪽에 있다.
     const detail = res.exceptionDetails.exception?.description || res.exceptionDetails.exception?.value || res.exceptionDetails.text || 'evaluate failed'
@@ -83,13 +113,24 @@ async function evalInTab(tabId, expression) {
 async function navigate(tabId, url) {
   await chrome.tabs.update(tabId, { url })
   await new Promise(resolve => {
+    let done = false
+    function finish() {
+      if (done) return
+      done = true
+      chrome.tabs.onUpdated.removeListener(onUpdated)
+      clearTimeout(timer)
+      resolve()
+    }
     function onUpdated(id, info) {
-      if (id === tabId && info.status === 'complete') {
-        chrome.tabs.onUpdated.removeListener(onUpdated)
-        resolve()
-      }
+      if (id === tabId && info.status === 'complete') finish()
     }
     chrome.tabs.onUpdated.addListener(onUpdated)
+    // "complete" 상태가 영영 안 올 수 있다(SPA형 다음 페이지 전환, 몰의 비표준 로딩 등) — 실제로 이
+    // 대기가 끝없이 멈춰(디버거가 "이 브라우저를 디버깅 중" 배너를 띄운 채) 미리보기/스크랩이 통째로
+    // 안 끝나는 사례가 콘솔에 로그 한 줄도 없이 확인됐다(2026-08-15). 넉넉히 기다리되 영원히는 안
+    // 기다리고, 그 시점 내용 그대로 다음 단계로 진행한다 — 그 페이지가 실제로 덜 로드됐으면 이어지는
+    // evalInTab이 그 페이지 하나만 실패로 남기고 나머지는 계속 진행된다.
+    const timer = setTimeout(finish, 20_000)
   })
   await delay(500) // 로딩 완료 이벤트 이후 스크립트 초기화 여유
 }
@@ -453,59 +494,73 @@ async function reportDone(stopped) {
   }).catch(() => {})
 }
 
-async function run(tabId, startUrl) {
+/**
+ * categoryUrls(PTP "카테고리 불러오기"에서 체크해둔 목록)가 있으면 그 목록을 순서대로 각각 끝까지(다음
+ * 페이지까지) 처리하고, 없으면(기존 동작 그대로) "지금 탭 위치" 하나만 다음 링크를 따라간다 — 일반모드가
+ * 여러 카테고리를 한 번에 스크랩하는 것과 같은 편의를 개발자모드에도 주기 위함(2026-08-15). 카테고리
+ * 사이를 옮겨 다닐 때도 여전히 같은 실제 탭(chrome.debugger)만 쓴다 — 새 브라우저 컨텍스트를 띄우지
+ * 않으므로 개발자모드가 원래 존재하는 이유(자동화 감지 회피)와 충돌하지 않는다.
+ */
+async function run(tabId, startUrl, categoryUrls) {
   running = true
   let processed = 0
   let stoppedByUser = false
+  const listingStarts = categoryUrls && categoryUrls.length ? categoryUrls : [null]
   try {
     outer:
-    while (processed < MAX_PRODUCTS) {
-      const { links, nextUrl, category, brandFromCategory } = await evalInTab(tabId, COLLECT_LINKS_EXPR)
-      console.log(`[PTP] 이 페이지에서 상품 ${links.length}개 발견`)
-      if (links.length === 0) {
-        const diag = await evalInTab(tabId, `({
-          title: document.title,
-          url: location.href,
-          totalLinks: document.querySelectorAll('a').length,
-          totalImgs: document.querySelectorAll('img').length,
-          productDetailLinks: Array.from(document.querySelectorAll('a[href*="detail.html"], a[href*="product_no"]')).map(a => a.getAttribute('href')).slice(0, 10),
-          linksContainingProduct: [...new Set(Array.from(document.querySelectorAll('a[href*="/product/"]')).map(a => a.getAttribute('href')))].slice(0, 15),
-          onclickWithProduct: Array.from(document.querySelectorAll('[onclick]'))
-            .map(el => el.getAttribute('onclick')).filter(v => /product|detail|prdNo|prd_no/i.test(v)).slice(0, 10),
-          classesLikePrd: [...new Set(Array.from(document.querySelectorAll('[class*="prd" i], [class*="item" i], [class*="goods" i]')).map(el => el.className))].slice(0, 15),
-          firstPrdListItemHtml: document.querySelector('.prdList_normal li, .prdList_normal > *')?.outerHTML.slice(0, 2000) || null,
-          bodyTextSample: document.body.innerText.replace(/\\s+/g, ' ').trim().slice(0, 300),
-        })`)
-        console.log('[PTP] 진단 정보:', JSON.stringify(diag, null, 2))
-      }
-      for (const link of links) {
-        if (processed >= MAX_PRODUCTS) break
-        // PTP의 "스크래핑 중지" 버튼이 눌렸는지 상품마다 확인한다 — 다음 상품으로 넘어가기 전에 반영된다.
-        if (await checkStopRequested(sessionId)) {
-          console.log('[PTP] 중지 요청을 확인해 스크래핑을 멈춥니다.')
-          stoppedByUser = true
-          break outer
-        }
-        await navigate(tabId, link)
-        try {
-          const product = await evalInTab(tabId, buildExtractExpr(extractionRules))
-          // 카테고리는 상품 상세페이지가 아니라 방금 있던 목록(카테고리) 페이지에서만 알 수 있으므로,
-          // 상세페이지 추출 결과 위에 덮어씌운다.
-          if (category) product.category = category
-          if (brandFromCategory) product.brand = brandFromCategory
-          const result = await report(link, product)
-          console.log(`[PTP] ${processed + 1}/${links.length} 저장:`, product.name, result)
-        } catch (e) {
-          console.log('[PTP] 추출 실패:', link, e.message)
-          await reportFailure(link, e.message).catch(() => {})
-        }
-        processed++
+    for (const listingStart of listingStarts) {
+      if (listingStart) {
+        await navigate(tabId, listingStart)
         await throttle()
       }
+      while (processed < MAX_PRODUCTS) {
+        const { links, nextUrl, category, brandFromCategory } = await evalInTab(tabId, COLLECT_LINKS_EXPR)
+        console.log(`[PTP] 이 페이지에서 상품 ${links.length}개 발견`)
+        if (links.length === 0) {
+          const diag = await evalInTab(tabId, `({
+            title: document.title,
+            url: location.href,
+            totalLinks: document.querySelectorAll('a').length,
+            totalImgs: document.querySelectorAll('img').length,
+            productDetailLinks: Array.from(document.querySelectorAll('a[href*="detail.html"], a[href*="product_no"]')).map(a => a.getAttribute('href')).slice(0, 10),
+            linksContainingProduct: [...new Set(Array.from(document.querySelectorAll('a[href*="/product/"]')).map(a => a.getAttribute('href')))].slice(0, 15),
+            onclickWithProduct: Array.from(document.querySelectorAll('[onclick]'))
+              .map(el => el.getAttribute('onclick')).filter(v => /product|detail|prdNo|prd_no/i.test(v)).slice(0, 10),
+            classesLikePrd: [...new Set(Array.from(document.querySelectorAll('[class*="prd" i], [class*="item" i], [class*="goods" i]')).map(el => el.className))].slice(0, 15),
+            firstPrdListItemHtml: document.querySelector('.prdList_normal li, .prdList_normal > *')?.outerHTML.slice(0, 2000) || null,
+            bodyTextSample: document.body.innerText.replace(/\\s+/g, ' ').trim().slice(0, 300),
+          })`)
+          console.log('[PTP] 진단 정보:', JSON.stringify(diag, null, 2))
+        }
+        for (const link of links) {
+          if (processed >= MAX_PRODUCTS) break
+          // PTP의 "스크래핑 중지" 버튼이 눌렸는지 상품마다 확인한다 — 다음 상품으로 넘어가기 전에 반영된다.
+          if (await checkStopRequested(sessionId)) {
+            console.log('[PTP] 중지 요청을 확인해 스크래핑을 멈춥니다.')
+            stoppedByUser = true
+            break outer
+          }
+          await navigate(tabId, link)
+          try {
+            const product = await evalInTab(tabId, buildExtractExpr(extractionRules))
+            // 카테고리는 상품 상세페이지가 아니라 방금 있던 목록(카테고리) 페이지에서만 알 수 있으므로,
+            // 상세페이지 추출 결과 위에 덮어씌운다.
+            if (category) product.category = category
+            if (brandFromCategory) product.brand = brandFromCategory
+            const result = await report(link, product)
+            console.log(`[PTP] ${processed + 1}/${links.length} 저장:`, product.name, result)
+          } catch (e) {
+            console.log('[PTP] 추출 실패:', link, e.message)
+            await reportFailure(link, e.message).catch(() => {})
+          }
+          processed++
+          await throttle()
+        }
 
-      if (!nextUrl) break
-      await navigate(tabId, nextUrl)
-      await throttle()
+        if (!nextUrl) break
+        await navigate(tabId, nextUrl)
+        await throttle()
+      }
     }
     console.log(stoppedByUser ? `[PTP] 중지됨 — 총 ${processed}개 처리` : `[PTP] 완료 — 총 ${processed}개 처리`)
   } finally {
@@ -532,8 +587,9 @@ async function startScrape(tab, site) {
     return { ok: false, error: `디버거 연결 실패: ${e.message}` }
   }
   // run()은 상품 여러 개를 순회하며 오래 걸릴 수 있어(수 분) 완료를 기다리지 않고 백그라운드로 흘려보낸다
-  // — 팝업은 "시작했다"는 응답만 받고, 진행상황은 PTP 화면의 기존 5초 폴링이 이어받는다.
-  run(tab.id, tab.url).finally(() => chrome.debugger.detach({ tabId: tab.id }).catch(() => {}))
+  // — 팝업은 "시작했다"는 응답만 받고, 진행상황은 PTP 화면의 기존 5초 폴링이 이어받는다. site.categoryUrls가
+  // 있으면(PTP에서 카테고리를 체크해뒀으면) 그 목록을 전부 순회하고, 없으면 기존처럼 지금 탭 위치만 처리한다.
+  run(tab.id, tab.url, site.categoryUrls).finally(() => safeDetach(tab.id))
   return { ok: true }
 }
 
@@ -609,7 +665,7 @@ async function runPreview(tab, site, aiMode) {
     console.log('[PTP] 미리보기 중 오류:', e.message)
     return { ok: false, error: e.message }
   } finally {
-    await chrome.debugger.detach({ tabId: tab.id }).catch(() => {})
+    await safeDetach(tab.id)
   }
 }
 
@@ -640,7 +696,7 @@ function pickerBindingListener(source, method, params) {
     (async () => {
       if (session) await Promise.all(session.pendingSaves)
       pickerSessions.delete(source.tabId)
-      await chrome.debugger.detach({ tabId: source.tabId }).catch(() => {})
+      await safeDetach(source.tabId)
     })()
   }
 }
@@ -1113,15 +1169,17 @@ async function runPicker(tab, site) {
     return { ok: false, error: `디버거 연결 실패: ${e.message}` }
   }
   try {
-    await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.addBinding', { name: 'ptpSavePick' })
-    await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.addBinding', { name: 'ptpPickerClose' })
+    // evalInTab과 같은 이유로 타임아웃을 건다 — 이 두 호출도 chrome.debugger.sendCommand라 자체
+    // 타임아웃이 없다(2026-08-15, 같은 종류 문제 재발 방지).
+    await withTimeout(chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.addBinding', { name: 'ptpSavePick' }), 10_000, 'Runtime.addBinding(ptpSavePick)')
+    await withTimeout(chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.addBinding', { name: 'ptpPickerClose' }), 10_000, 'Runtime.addBinding(ptpPickerClose)')
     pickerSessions.set(tab.id, { siteId: site.id, pendingSaves: [] })
     const seed = { previewProduct: site.previewProduct, extractionRules: site.extractionRules, masterLabels: site.masterLabels, masterOrder: site.masterOrder, siteId: site.id }
     await evalInTab(tab.id, buildPickerScript(seed))
     return { ok: true }
   } catch (e) {
     pickerSessions.delete(tab.id)
-    await chrome.debugger.detach({ tabId: tab.id }).catch(() => {})
+    await safeDetach(tab.id)
     console.log('[PTP] 피커 시작 중 오류:', e.message)
     return { ok: false, error: e.message }
   }
@@ -1144,6 +1202,22 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   else await runPicker(tab, site)
 })
 
+/** "몰 구조분석" — 일반모드가 쓰는 서버 쪽 몰 구조분석(lib/scraper.ts의 profileMallStructure, PTP
+ *  화면의 "🔍 몰 구조분석"과 완전히 같은 엔드포인트)을 그대로 트리거한다. 그 함수는 withContext로
+ *  브라우저 컨텍스트를 얻는데, 직접로그인 필수 몰(개발자모드로 등록된 몰)은 이미 신뢰가 쌓인 사용자의
+ *  개인 크롬 프로필 사본을 서버가 스스로 헤드리스로 띄워 처리한다 — 그래서 chrome.debugger나 "지금 이
+ *  탭"이 전혀 필요 없고, 그냥 요청만 쏘아두면 된다(결과는 PTP 화면이 폴링해서 보여줌). */
+async function runProfile(site) {
+  try {
+    const res = await fetch(`${SITE_API_BASE}/${site.id}/profile`, { method: 'POST' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) return { ok: false, error: data.error || String(res.status) }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+}
+
 /** 팝업(popup.js)이 보내는 메시지 — 우클릭이 막힌 몰에서도 기능을 쓸 수 있는 기본 경로.
  *  탭 조회는 popup.js가 이미 자신이 매인 창 기준으로 끝내고 tabId/tabUrl로 넘겨준다 — 이 서비스 워커
  *  자신은 "현재 창"이라는 개념이 없어(특정 창에 매인 UI가 아니다) 여기서 다시 chrome.tabs.query를
@@ -1160,6 +1234,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.action === 'start') sendResponse(await startScrape(tab, site))
     else if (msg.action === 'preview') sendResponse(await runPreview(tab, site, site.aiPreviewMode))
     else if (msg.action === 'picker') sendResponse(await runPicker(tab, site))
+    else if (msg.action === 'profile') sendResponse(await runProfile(site))
     else sendResponse({ ok: false, error: `알 수 없는 action: ${msg.action}` })
   })()
   return true // 비동기 sendResponse를 쓰겠다는 표시

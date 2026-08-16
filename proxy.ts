@@ -16,9 +16,10 @@ const PUBLIC_API_PREFIXES = [
 ]
 // 몰 id가 경로 중간에 끼어 있어(/api/sites/{id}/...) 단순 prefix로 못 걸러 정규식으로 따로 둔다 — 개발자모드
 // 크롬 확장이 세션 쿠키 없이 호출하는 엔드포인트들. preview-capture(스크래핑 전 단건 미리보기),
-// picker/rule(스크랩 대상 직접지정, Runtime.addBinding 경유 저장).
+// picker/rule(스크랩 대상 직접지정, Runtime.addBinding 경유 저장), profile(팝업의 "몰 구조분석" 버튼 —
+// 빠뜨렸다가 확장에서 매번 401 unauthorized로 실패하는 게 실사용 중 확인됨, 2026-08-15).
 const PUBLIC_API_PATTERNS = [
-  /^\/api\/sites\/\d+\/preview-capture$/, /^\/api\/sites\/\d+\/picker\/rule$/,
+  /^\/api\/sites\/\d+\/preview-capture$/, /^\/api\/sites\/\d+\/picker\/rule$/, /^\/api\/sites\/\d+\/profile$/,
 ]
 
 export function proxy(request: NextRequest) {

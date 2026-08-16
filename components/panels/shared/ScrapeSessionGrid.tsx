@@ -14,6 +14,8 @@ interface SessionLike {
   merge_group_id?: number | null
   /** 병합된 시각 — 병합 안 된 세션이면 null. */
   merged_at?: string | null
+  /** 완료/중지/오류로 끝난 시각 — 아직 진행 중이거나(running) 이 컬럼이 생기기 전 세션이면 null. */
+  finished_at?: string | null
 }
 
 interface ColumnDef<T> {
@@ -33,7 +35,7 @@ type SortDir = 'asc' | 'desc'
 interface SortKey { key: string; dir: SortDir }
 
 const DEFAULT_COL_WIDTH: Record<string, number> = {
-  created_at: 140, client_name: 110, site_name: 110, url: 280, staged_count: 150, pending_count: 170, merged_at: 140,
+  created_at: 140, client_name: 110, site_name: 110, url: 280, staged_count: 150, pending_count: 170, merged_at: 140, finished_at: 90,
 }
 const MIN_COL_WIDTH = 50
 function widthFor(key: string): number {
@@ -99,6 +101,10 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
         className: 'font-medium whitespace-nowrap' },
       { key: 'merged_at', label: '병합 일시', getValue: s => s.merged_at || '',
         render: s => s.merged_at ? new Date(s.merged_at).toLocaleString() : '-', className: 'text-gray-400 whitespace-nowrap' },
+      { key: 'finished_at', label: '소요시간',
+        getValue: s => s.finished_at ? new Date(s.finished_at).getTime() - new Date(s.created_at).getTime() : -1,
+        render: s => s.finished_at ? `${Math.round((new Date(s.finished_at).getTime() - new Date(s.created_at).getTime()) / 60_000)}분` : '-',
+        className: 'text-gray-400 whitespace-nowrap' },
     )
     return cols
   }, [showClientMall])

@@ -45,7 +45,7 @@ async function findScrapedCategoryHrefs(siteId: number): Promise<{ hrefs: string
 }
 
 /** "카테고리 불러오기"는 예전엔 매번 몰을 직접 훑었는데(후보가 많으면 실사용이 어려울 만큼 느림),
- *  "몰 구조 파악"이 이미 같은 방식으로 찾아 sites.scrape_profile에 저장해둔 카테고리 목록이 있으면
+ *  "몰 구조분석"이 이미 같은 방식으로 찾아 sites.scrape_profile에 저장해둔 카테고리 목록이 있으면
  *  그걸 그대로 즉시 돌려준다. 아직 한 번도 분석 안 한 몰이거나 force로 새로고침을 요청하면 그때만
  *  discoverCategoryLinks로 직접 훑고, 다음 번을 위해 결과를 캐시에 반영해둔다. */
 export async function POST(req: NextRequest) {
@@ -70,7 +70,11 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const result = await discoverCategoryLinks({ url, siteId, loginId, loginPw })
+  // allowStaleManualLoginProfile: 개발자모드는 실제 크롬을 켜둔 채 쓰는 게 정상 상태라(예: 스크랩
+  // 미리보기 직후 이어서 이 버튼을 누르는 경우), 그 크롬의 세션 파일이 잠긴 채 복사돼도(robocopy 일부
+  // 실패) 진행한다 — 안 그러면 개발자모드에서는 캐시가 없는 몰/"다시 확인"이 사실상 항상 실패한다
+  // (몰 구조분석에서 이미 같은 이유로 적용한 것과 동일, 2026-08-16).
+  const result = await discoverCategoryLinks({ url, siteId, loginId, loginPw, allowStaleManualLoginProfile: true })
   if (siteId && result.links.length) {
     const categoryLinks = result.links.map(l => ({ name: l.text, href: l.href }))
     await pool.query(

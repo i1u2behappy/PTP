@@ -1,6 +1,7 @@
 import pool from '../db'
 import type { ScrapeResult } from '../scraper'
 import type { ExtractedProduct } from '../ai'
+import type { ExtractionRule } from '../ai'
 import { upsertMallProduct, markMissingAsDiscontinued } from './incremental'
 import { downloadProductImages, resolveScrapeFolderName } from '../images'
 import { migrateToMaster } from '../master/migrate'
@@ -8,6 +9,54 @@ import { migrateToMaster } from '../master/migrate'
 export interface StageOptions {
   siteId: number
   sessionId: number
+}
+
+function sameStringSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  const sa = [...a].sort()
+  const sb = [...b].sort()
+  return sa.every((v, i) => v === sb[i])
+}
+
+// 픽커/AI모드가 저장한 추출 규칙 비교용 — 객체 키 순서에 안 흔들리게 정렬해서 비교한다.
+function rulesKey(rules: Record<string, ExtractionRule> | null | undefined): string {
+  return JSON.stringify(Object.entries(rules || {}).sort(([a], [b]) => a.localeCompare(b)))
+}
+
+function sameScope(
+  prevScopeParams: { categoryUrls?: string[] } | null, prevUrl: string,
+  current: { categoryUrls?: string[]; url?: string },
+): boolean {
+  // categoryUrls 개념 자체가 없는 호출(개발자모드 — "지금 활성 탭"만 있고 카테고리 선택이 없음)은
+  // 스코프 비교를 건너뛰고 추출 규칙만 본다.
+  if (current.categoryUrls === undefined) return true
+  const prevCategoryUrls = prevScopeParams?.categoryUrls || []
+  const curCategoryUrls = current.categoryUrls || []
+  return (prevCategoryUrls.length > 0) === (curCategoryUrls.length > 0) &&
+    (curCategoryUrls.length > 0 ? sameStringSet(prevCategoryUrls, curCategoryUrls) : prevUrl === current.url)
+}
+
+/**
+ * "이어서" 재시작이 실은 설정이 바뀐 "새로 시작"인지 판단해, 그렇다면 그 중지된 세션이 만든 미검토
+ * (pending) staging 결과를 지운다 — 옛 카테고리/추출규칙으로 뽑힌 데이터와 새 설정 결과가 섞이는 것을
+ * 막기 위함(사용자 확인, 2026-08-15). 일반모드(`/api/scrape`)와 개발자모드(`/api/scrape/extension-ingest`)
+ * 세션 생성 직전에 공유해서 쓴다 — 개발자모드는 categoryUrls를 넘기지 않아 규칙만 비교한다.
+ */
+export async function clearStalePendingIfConfigChanged(
+  siteId: number, current: { categoryUrls?: string[]; url?: string; extractionRules: Record<string, ExtractionRule> },
+): Promise<void> {
+  const prevRes = await pool.query<{ id: number; url: string; scope_params: { categoryUrls?: string[]; extractionRules?: Record<string, ExtractionRule> } | null }>(
+    `SELECT id, url, scope_params FROM scrape_sessions WHERE site_id=$1 AND status IN ('stopped','error') ORDER BY id DESC LIMIT 1`,
+    [siteId],
+  )
+  const prev = prevRes.rows[0]
+  if (!prev) return
+
+  const scopeMatches = sameScope(prev.scope_params, prev.url, current)
+  const rulesMatch = rulesKey(prev.scope_params?.extractionRules) === rulesKey(current.extractionRules)
+  if (!scopeMatches || !rulesMatch) {
+    await pool.query(`DELETE FROM scrape_staging_items WHERE session_id=$1 AND status='pending'`, [prev.id])
+  }
 }
 
 /**

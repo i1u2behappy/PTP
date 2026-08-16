@@ -7,7 +7,7 @@ export async function GET(req: NextRequest) {
   if (!sessionId) return NextResponse.json({ error: 'sessionId required' }, { status: 400 })
 
   const res = await pool.query(
-    `SELECT s.id, s.site_id, s.status, s.product_count, s.error, s.created_at, s.concurrency_log,
+    `SELECT s.id, s.site_id, s.status, s.product_count, s.error, s.created_at, s.finished_at, s.concurrency_log,
             (SELECT COUNT(*) FROM scrape_staging_items si WHERE si.session_id = s.id) AS saved_count,
             -- 진행 화면의 "수집 성공/실패" 개수 표시용 — /api/scrape/log는 화면에 다 그리기엔 너무 많을 수
             -- 있어 최근 200건만 돌려주는데(성능), 그 캡 걸린 목록의 length를 그대로 개수로 쓰면 실제로는

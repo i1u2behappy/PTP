@@ -39,6 +39,9 @@ async function run(action, busyText) {
   }
 }
 
+// 몰 구조분석은 지금 탭이 아니라 서버가 별도로 여는 헤드리스 브라우저로 하므로(background.js의 runProfile
+// 참고) chrome.debugger가 필요 없다 — 그냥 트리거만 하고 결과는 PTP 화면에서 확인한다.
+document.getElementById('btn-profile').addEventListener('click', () => run('profile', '몰 구조를 분석하는 중...'))
 document.getElementById('btn-preview').addEventListener('click', () => run('preview', '지금 페이지를 캡처하는 중...'))
 document.getElementById('btn-start').addEventListener('click', () => run('start', '스크랩을 시작합니다...'))
 document.getElementById('btn-picker').addEventListener('click', () => run('picker', '직접지정 패널을 여는 중...'))

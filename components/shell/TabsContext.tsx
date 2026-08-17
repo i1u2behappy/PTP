@@ -59,6 +59,13 @@ interface TabsState {
 }
 
 const DASHBOARD_TAB: Tab = { id: 'dashboard', type: 'dashboard', title: '대시보드', icon: '📊', closable: false }
+// sessionStorage에 저장한다(localStorage 아님) — localStorage는 같은 브라우저의 모든 탭이 공유해서,
+// 다른 탭(또는 예전 세션)이 열어뒀던 탭 목록/파라미터(예: 스크래핑 탭의 siteId)가 지금 탭에 새어
+// 들어올 수 있다. 개발서버의 Fast Refresh 강제 새로고침으로 화면이 통째로 다시 마운트되면서, 지금
+// 보고 있던 몰과 무관한 다른 몰(예전에 다른 탭에서 열어뒀던 siteId)로 조용히 바뀌어버린 사고로 실제
+// 확인됨(2026-08-17) — sessionStorage는 탭 하나에만 묶이고 그 탭을 닫기 전까진 새로고침해도 그대로
+// 남아있어, "새로고침해도 열린 탭이 안 사라진다"는 기존 목적은 그대로 지키면서 다른 탭의 상태가 섞여
+// 들어오는 일은 없앤다.
 const STORAGE_KEY = 'scrape.tabs.v1'
 const SIDEBAR_COLLAPSED_KEY = 'scrape.sidebar.collapsed'
 const MAX_HISTORY = 20
@@ -118,7 +125,7 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY)
+      const raw = sessionStorage.getItem(STORAGE_KEY)
       if (raw) {
         const saved = JSON.parse(raw) as { openTabs: Tab[]; activeTabId: string }
         if (saved.openTabs?.length) {
@@ -133,7 +140,7 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!hydrated) return
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ openTabs, activeTabId }))
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ openTabs, activeTabId }))
   }, [openTabs, activeTabId, hydrated])
 
   const openTab = useCallback((tab: Tab) => {

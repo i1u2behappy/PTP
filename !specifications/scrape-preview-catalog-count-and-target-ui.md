@@ -383,6 +383,68 @@ Playwright의 `context.request.get()`(같은 `BrowserContext`라 로그인 쿠�
 집합을 직접 비교할 수 있게 했다(기존엔 정렬해 이어붙인 문자열 `fingerprint`만 있어 "완전히 같은지"만
 비교 가능했고 "겹치는 게 있는지"는 비교할 수 없었다).
 
+### 버그 14 — clamp 판정이 "요청과 다르면 무조건 clamp"라, 위젯이 엉뚱한 번호를 잘못 읽으면 진짜 새 페이지도 clamp로 오판 (수정됨)
+
+2026-08-17 실사용 확인(girlsgoob.cafe24.com "여성화 > WEDGE", `cate_no=43`): 실제로는 7페이지(303개)인
+카테고리가 계속 5페이지(240개)에서 멈췄다. `readMaxPageWithRetry`(위젯 늦게 뜨는 경우 재시도)와
+`confirmedEnd`(끝 신호 3종 전부 재확인 — 버그 6의 clamp 판정을 count===0/fingerprint 중복과 함께
+이중검증하도록 일반화)를 먼저 시도했지만 라이브 재현에서 둘 다 증상을 못 고쳤다. 디버그 로그를 임시로
+심어 지수+이분 탐색의 각 probe를 직접 관찰해 원인을 확정:
+
+```
+bin-probe lo=4 hi=8 mid=6 count=48 currentPage=7 clamped=true fpMatch=false looksLikeEnd=true
+```
+
+6페이지를 요청했는데 진짜 새 상품 48개(직전 페이지와 fingerprint 다름)가 나왔는데도, 위젯이 자기
+"현재 페이지"를 6이 아니라 7로 잘못 보고해(추정: 마지막 블록에서 "마지막 페이지로" 이동 링크의
+목표 번호를 `readCurrentPageNumber`의 "클래스가 다수와 다른 하나" 판정이 현재 페이지로 잘못 집음)
+`clamped = currentPage !== 요청` 조건에 그대로 걸려 "여기가 끝"으로 오판했다. 버그 6~7의 clamp 개념은
+"범위 밖 페이지를 요청했더니 몰이 이전의 유효한(더 작은) 페이지로 되돌려준" 경우만 상정했는데, 실제
+비교식은 방향을 안 가리고 있었다 — 요청보다 **큰** 번호가 나온 이번 경우까지 같은 취급을 받았다.
+
+**수정**: clamp는 항상 "요청한 페이지보다 작은 번호로 되돌아간" 경우만 인정하도록(`currentPage < 요청`)
+방향성을 추가 — 범위 밖 요청을 미래의 더 큰 페이지로 보내주는 몰은 있을 수 없으므로, 더 큰 번호가
+나오면 그건 clamp가 아니라 `readCurrentPageNumber`의 오독이다. `findRealLastPage`의 지수 확장/이분
+탐색/`confirmedEnd` 3곳과 `countCategoryProductsOnce`의 `maxPage+1` 확인(`afterLastClamped`) 1곳,
+총 4곳 전부 동일하게 고쳤다. **검증**: cate_no=43 재실행 → 실제 마지막 페이지 7, count=303(사용자가
+실제 몰에서 육안 확인한 "300여개"와 일치)로 정확해짐 — 로그도 `maxPage=null(불신) → 실제 마지막
+페이지=7 → count=303`으로 확인.
+
+### 버그 15 — 대형 카테고리 안전 상한(50페이지=2,400개)이 낮아 정말 그보다 큰 카테고리에서 조용히 잘림 + 이 상한이 실제 스크랩과도 공유됨 (수정됨)
+
+버그 14 수정 뒤 재검증하던 중, "SOLD OUT" 카테고리가 계속 정확히 2,400개(48개×50페이지)로 멈추고
+`truncated:true`("2,400개 이상")로 표시되는 걸 발견 — 사용자가 "정확히 전체 수량이 되어야만 한다"고
+명확히 요구. 조사 결과 이건 버그 14와 다른 원인: `findRealLastPage`가 `MAX_PAGE_SEARCH_BOUND`(당시
+200페이지) 안에서 끝을 못 찾고("탐색도 실패") `countCategoryProductsOnce`의 최후수단 직접 순회로
+떨어졌는데, 그 순회 자체가 `AUTO_PAGINATION_CAP=50`페이지에서 멈추도록 만들어져 있었다 — 즉 이
+카테고리는 실제로 50페이지(2,400개)보다 컸다.
+
+**더 심각한 발견**: `AUTO_PAGINATION_CAP`은 이 미리보기 폴백 하나만 쓰는 게 아니라, `collectProductUrls`
+(실제 스크랩의 목록 페이지 수집 함수)의 **기본 `maxPages` 값으로도 그대로 쓰이고 있었다**(다른 어떤
+호출부도 `maxPages`를 명시적으로 넘기지 않음). 즉 이 상한은 미리보기 표시만의 문제가 아니라, **실제
+스크래핑도 50페이지에서 조용히 멈춰 그 이후 상품을 전부 놓치는** 데이터 완전성 버그였다 — "실제
+스크래핑은 미리보기 수량과 무관하게 끝까지 페이징한다"고 안내했던 이전 설명이 50페이지 넘는 대형
+카테고리에 한해서는 틀렸던 셈이다.
+
+**수정**: `AUTO_PAGINATION_CAP`을 50 → 1000으로 올렸다(`MAX_PAGE_SEARCH_BOUND`는 그 4배라 자동으로
+200 → 4000). 이 상한이 낮게 유지돼야 했던 이유(버그 12·13 — `?page=N`이 안 통하는 몰에서 지수 탐색이
+끝없이 헤맴)는 이미 `paginationActuallyWorks()`가 그런 몰을 탐색 시작 전에 걸러내므로 더 이상 유효하지
+않다고 판단. 지수+이분 탐색은 O(log n)이라 상한을 올려도 정상 카테고리의 확인 속도에는 영향이 없다.
+**검증**: SOLD OUT 재실행 → 로그 `maxPage=null(불신) → 실제 마지막 페이지=416 → count=19953`, 응답에
+`truncated` 없음(총 1m38s) — 상한이 아니라 지수+이분 탐색이 실제 끝을 정확히 찾아낸 것으로 확인.
+
+**개발자모드(Chrome 확장, `extension-poc/background.js`)에도 같은 유형의 문제가 별도로 있어 같이
+수정**: devmode의 "스크랩 미리보기 실행"이 쓰는 `collectCategoryLinks()`가 (1) 페이지 상한 50을
+그대로 갖고 있었고, (2) 실제 상세페이지를 방문·추출하는 `run()`의 세션당 처리량 제한
+`MAX_PRODUCTS=300`("이 이상은 세션을 나눠서 다시 실행"이라는 별개 설계)을 개수 집계 루프에도 그대로
+공유하고 있어, 개수만 세는 목적인데도 **300개(약 6~7페이지)에서 더 낮게 잘렸다** — 게다가 devmode
+쪽은 `truncated` 신호 자체가 없어 잘린 값을 정확한 값처럼 보여주고 있었다(서버 쪽보다 더 나쁜
+상태). **수정**: `collectCategoryLinks` 전용 상한 `MAX_PREVIEW_PAGES=1000`을 신설해 `MAX_PRODUCTS`
+공유를 끊고(개수만 세는 건 상세 추출만큼 비용이 크지 않아 `run()`의 세션-분할 제한과 성격이 다름),
+페이지 상한에 걸려 멈췄을 때 `truncated: true`를 반환해 `runPreview()`가 `categoryCounts`에
+같이 실어 보내도록 했다(`app/api/sites/[id]/preview-capture/route.ts`의 `CapturedCategoryCount`에도
+`truncated?: boolean` 추가). 확장 버전 1.38 → 1.39.
+
 ## 미리보기 중지
 
 미리보기가 오래 걸릴 수 있으니(위 성능 수정 이후에도 몰에 따라 카테고리가 아주 많으면 시간이 걸림)
@@ -545,6 +607,24 @@ React 상태를 전부 초기화하는데, `localStorage`에 저장해두던 항
 "상품 페이지 미리보기" 카드만 "▲ 결과 접기"/"▼ 결과 펼치기"로 다르게 표기되던 것을, 다른 4곳
 (Mall 선택/로그인 정보/스크랩 대상/개발자모드 안내)과 같은 "▲ 접기"/"▼ 펼치기"로 통일.
 
+### 버튼을 누르면 결과가 나올 자리로 자동 스크롤 (2026-08-17)
+
+"스크랩 미리보기"를 누르면 버튼만 보이고 아래 결과(카테고리별 개수 등)는 화면 밖이라 매번 직접
+스크롤해야 한다는 요청. `handleStart`(스크래핑 시작)에 이미 있던 패턴(`progressSectionRef` +
+`requestAnimationFrame(() => ref.current?.scrollIntoView({behavior:'smooth', block:'start'}))`)을
+같은 방식으로 확장했다 — 상태 변경 직후 스크롤을 걸어야 방금 리렌더된 DOM(로딩 스켈레톤 포함)을
+대상으로 스크롤된다.
+
+- `previewSectionRef`: "상품 페이지 미리보기" 카드 전체(버튼 포함) — `handlePreview`/`handleDevPreview`
+  시작 시.
+- `profileResultRef`: `MallProfileResultDisplay`를 감싼 래퍼(일반모드/개발자모드 두 렌더 지점에 각각
+  부착, 상호 배타적이라 하나의 ref 공유 가능) — `handleProfileMall` 시작 시.
+- `categoryResultRef`: `categoryChecklistBox`를 감싼 래퍼(마찬가지로 두 지점 공유) — `handleLoadCategories`
+  시작 시.
+
+세 결과 컴포넌트 다 로딩 중에도 같은 모양의 스켈레톤을 먼저 그리므로(위 "결과가 나올 자리에 스켈레톤"
+패턴), 클릭 즉시(응답 도착 전)에도 스크롤 대상이 이미 DOM에 존재해 바로 스크롤된다.
+
 ## 화면 전역 자동 재시도 (`components/shell/GlobalErrorNet.tsx`)
 
 사용자가 h/w 상황을 통제할 수 없어 "다시 시도"를 언제 눌러야 할지 판단하기 어렵다는 피드백에 따라,
@@ -606,6 +686,19 @@ React 상태를 전부 초기화하는데, `localStorage`에 저장해두던 항
 - `app/layout.tsx`: `<GlobalErrorNet />` 마운트.
 - (2026-08-11) `components/panels/ScraperPanel.tsx`: 로컬 `MallProfileSignals` 타입에
   `hasPaginationWidget` 추가 + 위젯 없을 때만 보이는 안내 배지.
+- (2026-08-17, 버그 14) `lib/scraper.ts`의 `findRealLastPage`(지수 확장/이분 탐색/`confirmedEnd`)와
+  `countCategoryProductsOnce`(`afterLastClamped`) — clamp 판정을 `currentPage !== 요청`에서
+  `currentPage < 요청`(방향성 있는 비교)으로 수정.
+- (2026-08-17, 버그 15) `lib/scraper.ts`: `AUTO_PAGINATION_CAP` 50 → 1000(`MAX_PAGE_SEARCH_BOUND`도
+  연동해 200 → 4000) — `collectProductUrls`(실제 스크랩)의 기본 `maxPages`와 미리보기 최후수단 순회가
+  이 상수를 공유하므로 둘 다 같이 늘어남. `extension-poc/background.js`: `collectCategoryLinks`가
+  `MAX_PRODUCTS`(300, `run()`의 세션-분할 제한과 무관) 대신 전용 `MAX_PREVIEW_PAGES=1000`을 쓰도록
+  분리 + 상한에 걸리면 `truncated: true` 반환, `runPreview()`가 `categoryCounts`에 그대로 실어 보냄.
+  `app/api/sites/[id]/preview-capture/route.ts`의 `CapturedCategoryCount`에 `truncated?: boolean`
+  추가. 확장 버전 1.38 → 1.39.
+- (2026-08-17) `components/panels/ScraperPanel.tsx`: `previewSectionRef`/`profileResultRef`/
+  `categoryResultRef`(신규) — 미리보기/몰구조분석/카테고리 불러오기 시작 시 결과 자리로 자동 스크롤
+  (`progressSectionRef`와 같은 패턴).
 
 ## 상태
 
@@ -667,3 +760,18 @@ img 필수)은 정확히 21로 수렴(라이브 확인)해, 둘 다 31~32를 설
 클린. `paginationActuallyWorks`는 코드 리뷰 수준으로는 정확하지만(2페이지 href 집합이 1페이지와
 겹치기만 하면 "페이지네이션 없음"으로 판정), 실제로 이 재발 케이스에 대해 라이브 재실행으로 개수가
 정확해졌는지까지는 다음 실사용에서 확인 예정.
+
+버그 14·15(2026-08-17)는 tsc/eslint 클린이고, 실제 계정(girlsgoob.cafe24.com)으로 두 케이스 다
+라이브 재현·검증했다: cate_no=43(여성화 > WEDGE)은 240 → 303(실제 마지막 페이지 5 → 7)으로, SOLD
+OUT(cate_no=45)은 2,400개 이상(50페이지 상한) → 19,953개(실제 마지막 페이지 416)로 정확해짐을
+직접 확인했다. 버그 15는 특히 `AUTO_PAGINATION_CAP`이 실제 스크랩(`collectProductUrls`)의 기본
+페이지 상한과 공유된다는 걸 그 과정에서 뒤늦게 발견한 것이라 — 이전에는 "실제 스크랩은 미리보기와
+무관하게 끝까지 페이징한다"고 안내했었는데, 50페이지가 넘는 대형 카테고리에 한해서는 그 설명 자체가
+틀렸었다. 사용자 요청으로 걸스굽의 63개 카테고리 전체를 다시 훑는 재검증도 진행했다(`categoryUrls`에 63개를
+모두 실어 한 번에 요청, 총 682초) — 결과에 `truncated`/`needsLogin`이 하나도 없었고, 이전 버그의
+전형적 증상이던 "서로 다른 카테고리가 정확히 같은 개수"로 나오는 패턴도 더 이상 없었다(0~19,953까지
+카테고리마다 자연스럽게 다른 값). 개발자모드(Chrome 확장)의 별도 카운팅 구현(`collectCategoryLinks`)도
+같은 유형의 문제가 있어 같이 고쳤지만, 이쪽은 실제 devmode 몰로 라이브 재현·검증은 하지 못했다(정적
+코드 검토만). 다른 몰(고도몰류)까지 라이브로 재검증하지는 않았는데, 버그 8에서 이미 고도몰은 이번
+clamp류 문제 자체가 없다는 걸 확인해뒀고(범위 밖 페이지에 정직하게 0개 반환) 이번 수정도 특정 몰
+전용이 아닌 범용 로직이라 우선순위를 낮췄다 — 다음에 그 몰들을 다시 스크랩할 때 확인 예정으로 남긴다.

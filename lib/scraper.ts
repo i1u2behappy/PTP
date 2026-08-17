@@ -304,9 +304,14 @@ export function getSiteLockStatus(siteId: number): { label: string; sinceMs: num
 /** 지금 어떤 몰이든(siteId 무관) 브라우저 세션을 쓰는 작업이 하나라도 진행 중인지 — scrapeCatalogPage/
  *  previewCatalog/몰 구조분석 등 withContext를 거치는 작업은 전부 시작부터 끝까지 withSiteLock을 쥐고
  *  있으므로, 이게 비어있으면 이 프로세스 안에서 지금 브라우저를 쓰는 작업이 전혀 없다는 뜻이다. 메모리
- *  임계치 초과 시 자동 재시작(lib/scheduler.ts) 전에 "작업 중간에 끼어들지 않는지" 확인하는 용도. */
+ *  임계치 초과 시 자동 재시작(lib/scheduler.ts) 전에 "작업 중간에 끼어들지 않는지" 확인하는 용도.
+ *  openSessions(일반모드 "로그인 창 열기"로 띄워둔, 사용자가 지금 직접 아이디/비번을 입력 중일 수 있는
+ *  창)도 같이 본다 — 로그인 창을 여는 것 자체는 withSiteLock을 아주 잠깐만 쥐고 곧바로 풀리므로, 그
+ *  창이 화면에 열려있는 동안(사용자가 입력하는 중) siteLockStatus만 보면 "유휴"로 잘못 판단해 자동
+ *  재시작이 로그인 도중에 끼어들 수 있었다(걸스굽 실사용 확인, 2026-08-17 — 로그인 창 입력 중에
+ *  자동 재시작이 화면을 대시보드로 강제 새로고침시킴). */
 export function isAnySiteBusy(): boolean {
-  return siteLockStatus.size > 0
+  return siteLockStatus.size > 0 || openSessions.size > 0
 }
 
 const previewRuns = globalThis.__previewRuns ?? (globalThis.__previewRuns = new Map<number, PreviewRunState>())
@@ -2490,17 +2495,23 @@ interface CollectedLinks {
 
 // 사용자가 최대 페이지 수를 지정하지 않으면 "다음 페이지" 링크가 더 이상 없을 때까지 끝까지 따라간다 —
 // 카테고리가 몇 페이지인지 미리 알 수 없는 게 보통이라 매번 페이지 수를 추측해 입력하게 하지 않는다.
-// 이 숫자는 페이지네이션이 무한 루프에 빠지는 몰을 대비한 안전장치용 상한일 뿐, 실제로는 다음 페이지
-// 링크가 사라지는 순간(아래 반복문의 break) 그보다 훨씬 먼저 끝난다.
-const AUTO_PAGINATION_CAP = 50
+// 이 숫자는 페이지네이션이 무한 루프에 빠지는 몰을 대비한 안전장치용 상한일 뿐, 정상적인 몰은 다음
+// 페이지 링크가 사라지는 순간(아래 반복문의 break) 그보다 훨씬 먼저 끝난다.
+// 이 상한은 previewCatalog의 개수 집계뿐 아니라 실제 스크랩(collectProductUrls의 기본 maxPages)에도
+// 그대로 쓰인다 — 예전엔 50(2,400개)으로 낮게 잡았는데, 걸스굽 "SOLD OUT"처럼 정말로 이보다 큰
+// 카테고리가 있으면 미리보기가 "2,400개 이상"으로 부정확하게 표시될 뿐 아니라, 실제 스크랩도 50페이지에서
+// 조용히 멈춰 그 뒤 상품을 전부 놓치는 훨씬 심각한 문제였다(사용자 지적, 2026-08-17: "정확히 전체
+// 수량이 되어야만 한다"). paginationActuallyWorks()가 이미 페이지 번호가 안 통하는 몰을 먼저 걸러내므로
+// (2페이지가 1페이지와 같으면 이 상한까지 갈 필요 없이 훨씬 앞에서 멈춤), 정상적으로 페이지네이션되는
+// 대형 카테고리를 놓치지 않도록 넉넉히 올린다.
+const AUTO_PAGINATION_CAP = 1000
 
-// findRealLastPage(지수+이분 탐색)의 절대 상한. 예전엔 AUTO_PAGINATION_CAP*100(5000페이지)까지 허용했는데,
+// findRealLastPage(지수+이분 탐색)의 절대 상한 — 위 AUTO_PAGINATION_CAP에 맞춰 함께 늘어난다. 예전엔
 // "?page=N"이 실제로는 아무 효과가 없는 몰(펫투비 등, 실사용 확인·2026-08-11 — 매 요청마다 내용이 조금씩
-// 달라져 지수 탐색이 "새 페이지"로 계속 오판)에서 이 상한을 거의 다 쓸 때까지 안 멈춰, 실제 21개짜리
-// 카테고리를 512페이지·16,363개로 잘못 확정하는 사고로 이어졌다. 진짜 대형 카테고리(1020bag.com 5622개,
-// 189개/페이지 기준 약 30페이지)도 이 값의 15% 안쪽이라, 훨씬 낮춰도 정상적인 대형 카테고리는 여전히
-// 여유 있게 찾는다 — 대신 위 안전장치들(총 N개 문구, href 중복 제거)이 실패하는 몰에서는 훨씬 빨리
-// "못 찾음"으로 포기하고 안전한 폴백으로 넘어가게 한다.
+// 달라져 지수 탐색이 "새 페이지"로 계속 오판)에서 상한을 거의 다 쓸 때까지 안 멈춰 사고로 이어진 적이
+// 있었지만, 그 뒤 paginationActuallyWorks()가 이런 몰을 탐색 시작 전에 먼저 걸러내는 안전장치로 추가돼
+// 이 상한 자체를 낮게 유지해야 할 이유가 줄었다 — 지수+이분 탐색은 O(log n)이라 상한을 올려도(4,000)
+// 정상 카테고리 확인 속도에는 사실상 영향이 없다.
 const MAX_PAGE_SEARCH_BOUND = AUTO_PAGINATION_CAP * 4
 
 /**
@@ -2733,6 +2744,13 @@ export interface CategoryCount {
   /** true면 이 카테고리를 세는 도중 로그인 화면으로 리다이렉트됐다 — count는 로그인 화면으로 튕기기
    *  전까지 확인된 값(불완전할 수 있음)이다. previewCatalog가 이 값들을 모아 최상위 needsLogin에 반영한다. */
   needsLogin?: boolean
+  /** true면 위젯 판독·지수+이분 탐색이 전부 실패해 마지막 수단(최대 AUTO_PAGINATION_CAP 페이지 직접
+   *  순회)까지 갔는데 그 상한에도 새 상품이 계속 나와(=아직 안 끝남) 셈을 멈춘 것이다 — count는 "최소
+   *  이만큼은 있다"는 하한이지 정확한 총합이 아니다(실사용 확인, 2026-08-16: 걸스굽 "SOLD OUT"/"여성화"가
+   *  정확히 상한(50페이지×48개=2400)에서 멈췄는데도 그 값을 그대로 정답처럼 보여줘 사용자가 실제 개수와
+   *  안 맞다고 지적함 — 몰 응답 속도상 상한 없이 끝까지 세는 건 previewCatalog 취지(빠른 확인)에 안
+   *  맞아, 대신 "이 값은 하한이다"를 알려 UI가 "2,400개 이상"처럼 정직하게 표시하게 한다). */
+  truncated?: boolean
 }
 
 export interface CatalogPreviewResult {
@@ -3041,12 +3059,22 @@ async function probeCategoryPage(
   workerPage: Page, context: BrowserContext, firstPageUrl: string, pageNum: number, useHttp: boolean,
   userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
   nextPageSelector: string | undefined,
+  // true면 (1) probeLightweight(순수 HTTP GET, 브라우저 없음) 지름길을 건너뛰고 실제 브라우저로,
+  // (2) domcontentloaded+500ms 상한 대신 'load'(실제 스크래핑의 collectFromListing과 동일)까지 기다린다.
+  // 걸스굽 cate_no=43 실사용 확인(2026-08-17): 진짜 마지막 페이지는 7인데도 useHttp 캘리브레이션이
+  // 통과해(1페이지 개수가 HTTP/브라우저 동일) 이후 모든 probe가 순수 HTTP GET으로만 이뤄졌고, 그 경로가
+  // 6페이지부터 실제로는 있는 상품을 계속 "없음"으로 돌려줬다(로그인 브라우저로 직접 열면 정상 노출 —
+  // 아마 이 몰이 일반 페이지 내비게이션과 순수 HTTP GET을 다르게 취급하는 것으로 추정). domcontentloaded
+  // 대기시간만 늘리는 patient 1차 시도는 이 HTTP 지름길 자체를 안 타서 효과가 없었다. "이 페이지가
+  // 끝인 것 같다"는 중요한 결론을 내리기 직전에만 patient=true로 이 지름길을 건너뛰고 한 번 더
+  // 확인하므로, 매 probe를 다 브라우저로 돌리는 것보다 비용이 훨씬 적다.
+  patient = false,
 ): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; hrefs: string[]; currentPage: number | null }> {
-  if (useHttp) {
+  if (useHttp && !patient) {
     const lightweight = await probeLightweight(context, withPageParam(firstPageUrl, pageNum), userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
     if (lightweight) return lightweight
   }
-  await workerPage.goto(withPageParam(firstPageUrl, pageNum), { waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
+  await workerPage.goto(withPageParam(firstPageUrl, pageNum), { waitUntil: patient ? 'load' : 'domcontentloaded', timeout: patient ? 30_000 : 15_000 }).catch(() => {})
   await settleAfterNav(workerPage)
   const { count, isLoginPage, fingerprint, hrefs } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
   const currentPage = count > 0 ? await readCurrentPageNumber(workerPage, nextPageSelector) : null
@@ -3144,15 +3172,30 @@ async function findRealLastPage(
   const useHttp = !!calibration && !calibration.isLoginPage && calibration.count === knownNonEmptyCount
   console.log(`[previewCatalog] 지수+이분 탐색: ${useHttp ? '가벼운 HTTP 방식' : '브라우저 방식(캘리브레이션 불일치 또는 실패)'} 사용 (기준 페이지=${knownNonEmptyPage}, 기준 개수=${knownNonEmptyCount}, 확인된 개수=${calibration?.count ?? 'null'})`)
 
-  const probeAt = (pageNum: number) => probeCategoryPage(
-    workerPage, context, firstPageUrl, pageNum, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector,
+  const probeAt = (pageNum: number, patient = false) => probeCategoryPage(
+    workerPage, context, firstPageUrl, pageNum, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector, patient,
   )
-  // "이 페이지가 비었다"(count===0)는 신호 하나만으로 그 자리를 진짜 끝으로 확정하면, 그 한 번의 요청이
-  // 일시적 오류/빈 응답이었을 때(실사용 확인: 진짜양말 — 실제로는 240개씩 꽉 찬 페이지가 더 있었는데
-  // 훨씬 앞에서 멈춰 1646개짜리 카테고리가 1200개로 잘못 확정됨, 2026-08-13) 탐색이 통째로 잘못된 답으로
-  // 끝난다. 같은 페이지를 한 번 더 확인해 두 번 다 비어야만 진짜 끝으로 믿는다.
-  async function confirmedEmpty(pageNum: number): Promise<boolean> {
-    return (await probeAt(pageNum)).count === 0
+  // "이 페이지가 끝이다"라는 신호(count===0, clamp, 직전 페이지와 fingerprint 중복) 중 하나만 보고 그
+  // 자리를 진짜 끝으로 확정하면, 그 한 번의 요청이 일시적 오류/빈 응답/캐시된 이전 페이지 내용이었을 때
+  // 탐색이 통째로 잘못된 답으로 끝난다 — 처음엔 count===0 신호만 재확인했는데(실사용 확인: 진짜양말 —
+  // 실제로는 240개씩 꽉 찬 페이지가 더 있었는데 훨씬 앞에서 멈춰 1646개짜리 카테고리가 1200개로 잘못
+  // 확정됨, 2026-08-13), clamp/fingerprint-중복 신호도 똑같이 일시적일 수 있다는 게 나중에 확인됐다
+  // (걸스굽 실사용 확인, 2026-08-17 — 진짜 마지막 페이지가 7인데 5에서 멈춰 카테고리 개수가 실제보다
+  // 적게(240 vs 300여개) 나옴). 세 신호 전부, 같은 페이지를 한 번 더 확인해 두 번 다 "끝"으로 보여야만
+  // 진짜 끝으로 믿는다. 이 재확인은 같은 페이지를 patient=true로 다시 연다 — 처음 확인과 똑같이 빠른
+  // 대기로 재확인하면, 이 몰처럼 렌더링이 느려서(빠른 대기로는 못 잡는 시점에) 매번 똑같이 "끝"으로
+  // 잘못 보이는 경우 재확인조차 같은 오탐을 반복할 뿐이다(2026-08-17 걸스굽 재현 — 이 이중확인을
+  // 추가한 뒤에도 여전히 5에서 멈춤).
+  // clamp는 요청한 페이지가 범위를 벗어나 몰이 유효한 페이지로 되돌려준 경우만 뜻한다 — 항상 요청한
+  // 페이지보다 작은 번호로 되돌아가야 정상이다. currentPage가 요청보다 큰 경우는 실제 clamp가 아니라
+  // 이 currentPage 판독 자체가 잘못된 것이다(걸스굽 cate_no=43 실사용 확인, 2026-08-17 — 마지막
+  // 페이지 블록에서 "마지막 페이지로" 이동 링크의 목표 번호(7)를 현재 페이지로 잘못 집어, 6페이지의
+  // 진짜 새 상품 48개를 매번 "clamp됨"으로 오판해 실제 마지막 페이지(7)보다 앞(5)에서 멈췄다). 그래서
+  // 작은 쪽으로 벗어난 경우만 clamp로 인정한다.
+  async function confirmedEnd(pageNum: number, dupFingerprint: string): Promise<boolean> {
+    const r = await probeAt(pageNum, true)
+    const clamped = r.currentPage !== null && r.currentPage < pageNum
+    return r.count === 0 || clamped || r.fingerprint === dupFingerprint
   }
 
   while (hi === null) {
@@ -3161,8 +3204,9 @@ async function findRealLastPage(
     if (probe > bound) return null
     const r = await probeAt(probe)
     if (r.isLoginPage) return { page: lo, count: loCount, needsLogin: true }
-    const clamped = r.currentPage !== null && r.currentPage !== probe
-    if ((r.count === 0 ? await confirmedEmpty(probe) : false) || clamped || r.fingerprint === loFingerprint) { hi = probe; continue }
+    const clamped = r.currentPage !== null && r.currentPage < probe
+    const looksLikeEnd = r.count === 0 || clamped || r.fingerprint === loFingerprint
+    if (looksLikeEnd && await confirmedEnd(probe, loFingerprint)) { hi = probe; continue }
     if (stop()) return { page: lo, count: loCount }
     const next = await probeAt(probe + 1)
     if (next.isLoginPage) return { page: lo, count: loCount, needsLogin: true }
@@ -3174,8 +3218,9 @@ async function findRealLastPage(
     const mid = Math.floor((lo + hi) / 2)
     const r = await probeAt(mid)
     if (r.isLoginPage) return { page: lo, count: loCount, needsLogin: true }
-    const clamped = r.currentPage !== null && r.currentPage !== mid
-    if ((r.count === 0 ? await confirmedEmpty(mid) : false) || clamped || r.fingerprint === loFingerprint) hi = mid
+    const clamped = r.currentPage !== null && r.currentPage < mid
+    const looksLikeEnd = r.count === 0 || clamped || r.fingerprint === loFingerprint
+    if (looksLikeEnd && await confirmedEnd(mid, loFingerprint)) hi = mid
     else { lo = mid; loCount = r.count; loFingerprint = r.fingerprint }
   }
   return { page: lo, count: loCount }
@@ -3248,8 +3293,20 @@ async function countCategoryProductsOnce(
   // null이 나와 기존 readMaxPageNumber로 자동 폴백한다. "몰 구조분석"이 이미 이 몰엔 위젯이 아예
   // 없다고 확인해뒀으면(knownNoPaginationWidget), 카테고리마다 이 확인을 반복해도 항상 null만 나올 뿐이라
   // 곧장 건너뛴다(펫투비 등에서 실사용 확인, 2026-08-11).
-  const maxPage = knownNoPaginationWidget ? null
-    : (await readLastPageFromNavButton(workerPage)) ?? (await readMaxPageNumber(workerPage, nextPageSelector))
+  // 위 goto는 domcontentloaded + settleAfterNav(networkidle 500ms 상한)로 일부러 짧게 대기한다(속도
+  // 우선) — 그런데 이 몰(걸스굽)은 그 시점에 위젯이 아직 안 그려져 있을 때가 있어(같은 요청을 반복
+  // 재현해보니 위젯이 있다/없다 오락가락함, 실사용 확인 2026-08-17) "위젯 없음"으로 잘못 판단해 아래
+  // 지수+이분 탐색으로 떨어지고, 그 탐색이 실제 마지막 페이지(7)보다 앞(5)에서 잘못 멈춰 카테고리 개수가
+  // 실제보다 적게(240 vs 300여개) 나온 사례가 있었다. 첫 시도에서 위젯을 못 찾았을 때만(=여기서 막
+  // 새 카테고리로 이동한 직후 1회) 위젯이 나타나길 짧게 한 번 더 기다렸다 재시도한다 — 이후 탐색/순회의
+  // 반복 페이지 방문에는 이 여유를 안 줘 전체 속도에는 영향이 없다.
+  async function readMaxPageWithRetry(): Promise<number | null> {
+    const first = (await readLastPageFromNavButton(workerPage)) ?? (await readMaxPageNumber(workerPage, nextPageSelector))
+    if (first !== null) return first
+    await workerPage.waitForSelector('[class*="paging" i], [class*="pagination" i]', { timeout: 1_500 }).catch(() => {})
+    return (await readLastPageFromNavButton(workerPage)) ?? (await readMaxPageNumber(workerPage, nextPageSelector))
+  }
+  const maxPage = knownNoPaginationWidget ? null : await readMaxPageWithRetry()
   // maxPage가 정말로(위젯을 읽어서) 1 이하로 확인된 경우만 곧바로 믿는다 — 위젯을 아예 못 찾은 경우
   // (maxPage===null)는 "1페이지짜리 카테고리"인지 "위젯 클래스명이 특이해서 못 읽은 대형 카테고리"인지
   // 구분이 안 되므로, 곧장 믿지 않고 아래 maxPage!==null 블록을 건너뛰어 이 함수 뒤쪽의 지수+이분 탐색
@@ -3304,7 +3361,13 @@ async function countCategoryProductsOnce(
       // 여부로 대신 판단한다(기존 방식). 어느 쪽이든 진짜 빈 페이지와 똑같이 취급해 여기서 확정한다 —
       // 안 그러면 아래 findRealLastPage가 "새 페이지"로 착각한 채 끝을 못 찾고 페이지 번호만 계속
       // 올리며 헤맨다.
-      const afterLastClamped = afterLastCurrentPage !== null && afterLastCurrentPage !== maxPage + 1
+      // "클램프"는 요청한 페이지가 범위를 벗어나 몰이 유효한 페이지로 되돌려준 경우만 뜻한다 — 항상
+      // 요청한 페이지보다 작은 번호로 되돌아가야 정상이다(범위 밖 요청을 미래의 더 큰 페이지로 보내주는
+      // 몰은 없다). currentPage가 요청보다 큰 경우는 "클램프"가 아니라 이 currentPage 판독 자체가
+      // 잘못된 것이다(걸스굽 실사용 확인, 2026-08-17 — 마지막 블록에 있는 "마지막 페이지" 이동 링크의
+      // 목표 번호를 현재 페이지로 잘못 집어, 6페이지의 진짜 새 상품 48개를 "클램프됨"으로 오판해 실제
+      // 마지막 페이지(7)보다 앞에서 멈춤). 그래서 작은 쪽으로만 비교한다.
+      const afterLastClamped = afterLastCurrentPage !== null && afterLastCurrentPage < maxPage + 1
       if (afterLastCount === 0 || afterLastClamped || afterLastFingerprint === lastPageFingerprint) {
         const count = perPage * (maxPage - 1) + lastPageCount
         console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage} lastPageCount=${lastPageCount} → count=${count} url=${firstPageUrl} lastPageUrl=${withPageParam(firstPageUrl, maxPage)}`)
@@ -3352,22 +3415,39 @@ async function countCategoryProductsOnce(
   // 예전엔 여기만 캘리브레이션과 무관하게 항상 브라우저로 돌아 카테고리 하나에 페이지 수십 개를 실제
   // 탐색하며 몰 응답이 느리면 페이지당 최대 15초까지 허비했다(실사용 확인: pettob.co.kr 미리보기가
   // 카테고리 몇 개만에 30분 넘게 걸림, 2026-08-11).
-  let total = 0
-  let prevFingerprint: string | null = null
-  for (let p = 0; p < AUTO_PAGINATION_CAP; p++) {
-    if (stop()) break
-    const { count, isLoginPage, fingerprint } = p === 0
-      ? { count: perPage, isLoginPage: false, fingerprint: perPageFingerprint }
-      : await probeCategoryPage(workerPage, context, firstPageUrl, p + 1, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
-    if (isLoginPage) return { url: categoryUrl, label, count: total, needsLogin: true }
-    // 여기도 위와 같은 이유로 fingerprint가 바로 앞 페이지와 같으면(범위 밖 page를 마지막 유효 페이지로
-    // 그대로 되돌려주는 몰) 새 페이지로 착각해 더하지 않고 여기서 끝낸다.
-    if (count === 0 || fingerprint === prevFingerprint) break
-    prevFingerprint = fingerprint
-    total += count
+  // href(상품 고유 식별자) 누적 집합으로 개수를 센다 — 이전엔 "바로 앞 페이지와 원문 fingerprint가
+  // 같은지"만 봤는데, 위젯이 없는 몰은 페이지 번호가 실제로는 안 통하는데도 추천 위젯 등 때문에 매번
+  // 원문이 살짝 달라 보여(paginationActuallyWorks 주석의 "여성화"류 사례와 같은 원인) 이 검사를 속아
+  // 넘어갈 수 있다 — href 집합 기준이면 원문이 달라 보여도 "이 페이지가 실제로 새 상품을 보여줬는가"만
+  // 정확히 판정되고, 페이지 간 상품이 일부 겹쳐도(운영 중 순서가 바뀌는 등) 중복 없이 정확한 개수가
+  // 나온다(paginationActuallyWorks가 이미 같은 방식으로 검증됨).
+  const seenHrefs = new Set<string>(page1Hrefs)
+  let hitCap = true
+  for (let pageNum = 2; pageNum <= AUTO_PAGINATION_CAP; pageNum++) {
+    if (stop()) { hitCap = false; break }
+    let { count, isLoginPage, hrefs } = await probeCategoryPage(workerPage, context, firstPageUrl, pageNum, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
+    if (isLoginPage) return { url: categoryUrl, label, count: seenHrefs.size, needsLogin: true }
+    let newCount = hrefs.filter(h => !seenHrefs.has(h)).length
+    // findRealLastPage의 confirmedEnd와 같은 이유(렌더링이 느린 몰은 빠른 대기로 매번 같은 빈 페이지로
+    // 오탐할 수 있음) — "끝난 것 같다"고 처음 판단됐을 때만 patient=true로 한 번 더 열어 재확인한다.
+    if (count === 0 || newCount === 0) {
+      const retry = await probeCategoryPage(workerPage, context, firstPageUrl, pageNum, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector, true)
+      if (retry.isLoginPage) return { url: categoryUrl, label, count: seenHrefs.size, needsLogin: true }
+      count = retry.count; hrefs = retry.hrefs
+      newCount = hrefs.filter(h => !seenHrefs.has(h)).length
+    }
+    if (count === 0 || newCount === 0) { hitCap = false; break } // 재확인까지 같았다 — 실제로 끝난 것
+    hrefs.forEach(h => seenHrefs.add(h))
   }
-  console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage}(불신, 탐색도 실패) → 직접 순회 count=${total} url=${firstPageUrl}`)
-  return { url: categoryUrl, label, count: total }
+  const total = seenHrefs.size
+  // hitCap이 true라는 건 루프가 "끝을 찾아서" 멈춘 게 아니라 AUTO_PAGINATION_CAP까지 다 돌고도 매 페이지
+  // 새 상품이 계속 나왔다는 뜻이다 — 이 카테고리가 진짜로 이 상한보다 크다는 신호이지 개수가 정확히
+  // total이라는 보장이 아니다(실사용 확인, 2026-08-16: 걸스굽 "SOLD OUT"/"여성화"가 정확히
+  // 상한(50페이지×48개=2400)에서 멈췄는데 그 값을 그대로 보여줘 사용자가 실제 개수와 안 맞다고 지적함 —
+  // 몰 응답 속도상 상한 없이 끝까지 세는 건 previewCatalog 취지(빠른 확인)에 안 맞아, 대신 "이 값은
+  // 최소치다"를 같이 알려 UI가 "2,400개 이상"처럼 정직하게 표시하게 한다).
+  console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage}(불신, 탐색도 실패) → 직접 순회 count=${total}${hitCap ? `(상한 도달, 실제로는 더 많을 수 있음)` : ''} url=${firstPageUrl}`)
+  return { url: categoryUrl, label, count: total, truncated: hitCap }
 }
 
 /** 위 settleAfterNav로 대부분 막히지만, 그래도 남는 드문 레이스는 카테고리 하나의 개수 계산 전체를

@@ -20,21 +20,24 @@ export async function OPTIONS() {
 }
 
 interface CapturedPreviewItem { url: string; name: string; thumbnail: string }
+interface CapturedCategoryCount { url: string; label: string; count: number; truncated?: boolean }
 
 /**
- * 개발자모드 "스크랩 미리보기 실행" — 확장이 지금 보고 있는 페이지가 카테고리(목록)면 링크를 끝까지
- * 페이징해 모은 뒤 첫 상품 페이지의 HTML을, 이미 상품 상세 페이지 그 자체면 그 페이지 HTML을 그대로
- * 캡처해 보낸다(어느 쪽이든 확장이 판단해서 보냄, 이 라우트는 항상 "상품 1건의 HTML"만 받는다). 목록
- * 모드면 total/items도 같이 실어 보낸다 — 결과를 일반모드의 "스크랩 미리보기"(previewCatalog)와 같은
- * 모양(total/platform/preview/items)으로 last_adjustment_preview에 저장해두면, PTP 화면이 폴링으로
- * 읽어가 같은 applyCatalogPreview로 보여준다(두 모드가 같은 UI 하나를 공유).
+ * 개발자모드 "스크랩 미리보기 실행" — PTP에서 카테고리를 선택해뒀으면(site.categoryUrls) 확장이 그
+ * 카테고리들을 각각 끝까지 페이징해 얻은 카테고리별 개수(categoryCounts)를, 선택 안 했으면 지금 보고
+ * 있는 페이지 하나의 total/items를 실어 보낸다 — 첫 카테고리(또는 지금 페이지)의 첫 상품 HTML은 항상
+ * 같이 온다(이 라우트는 항상 "상품 1건의 HTML"만 받는다). 결과를 일반모드의 "스크랩 미리보기"
+ * (previewCatalog)와 같은 모양(total/platform/preview/items/categoryCounts)으로
+ * last_adjustment_preview에 저장해두면, PTP 화면이 폴링으로 읽어가 같은 applyCatalogPreview로
+ * 보여준다(두 모드가 같은 UI 하나를 공유).
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const siteId = Number(id)
   const body = await req.json() as {
     url: string; html: string; aiMode?: boolean
-    total?: number; items?: CapturedPreviewItem[]; category?: string; brandFromCategory?: string
+    total?: number; items?: CapturedPreviewItem[]; categoryCounts?: CapturedCategoryCount[]
+    category?: string; brandFromCategory?: string
   }
   if (!body.url || !body.html) return NextResponse.json({ error: 'url과 html이 필요합니다' }, { status: 400, headers: corsHeaders() })
 
@@ -64,9 +67,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const preview = product ? { sourceUrl: body.url, product } : null
   const total = body.total ?? (preview ? 1 : 0)
   const items = body.items || []
+  const categoryCounts = body.categoryCounts || []
   await pool.query(
     `UPDATE sites SET last_adjustment_preview=$1 WHERE id=$2`,
-    [JSON.stringify({ total, platform: 'unknown', preview, items }), siteId],
+    [JSON.stringify({ total, platform: 'unknown', preview, items, categoryCounts }), siteId],
   )
 
   return NextResponse.json({ preview }, { headers: corsHeaders() })

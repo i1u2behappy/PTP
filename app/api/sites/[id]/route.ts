@@ -9,7 +9,8 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     `SELECT id, name, url, login_url, login_id, login_pw_encrypted, login_pw_iv, client_id,
             custom_name_selector, custom_price_selector, custom_thumbnail_selector,
             auto_scrape_enabled, auto_scrape_hour, manual_login_required, main_items, extraction_rules,
-            last_adjustment_preview, devmode_ai_preview, devmode_category_urls, scrape_profile, scrape_profile_updated_at, memo
+            last_adjustment_preview, devmode_ai_preview, devmode_category_urls, scrape_profile, scrape_profile_updated_at,
+            last_login_confirmed_at, memo
      FROM sites WHERE id = $1`,
     [id],
   )
@@ -21,6 +22,13 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     `SELECT content, created_at FROM site_memos WHERE site_id=$1 ORDER BY created_at DESC LIMIT 1`, [id],
   )
   const latestMemo = memoRes.rows[0]
+  // last_login_confirmed_at만으로는 부족하다 — 실제 스크랩은 저장된 아이디/비번으로 자동 로그인해(withContext)
+  // 돌기도 해서, "로그인 창 열기 → 로그인 확인"이라는 화면 UI를 한 번도 안 거치고도 정상적으로 여러 번
+  // 완료된 몰이 있다(걸스굽 실사용 확인, 2026-08-16 — 완료 세션 4건이 있는데도 로그인 확인 기록은 없어
+  // "일반모드가 결정된 몰"인데도 PC인증 힌트가 계속 떴음). 완료된 스크랩 세션이 하나라도 있으면 그 자체가
+  // "일반모드가 실제로 동작함이 검증됨"의 더 확실한 증거다.
+  const doneRes = await pool.query(`SELECT 1 FROM scrape_sessions WHERE site_id=$1 AND status='done' LIMIT 1`, [id])
+  const hasCompletedScrape = doneRes.rows.length > 0
   return NextResponse.json({
     id: site.id, name: site.name, url: site.url, login_url: site.login_url, login_id: site.login_id,
     login_pw: decryptSecret(site.login_pw_encrypted, site.login_pw_iv),
@@ -44,6 +52,12 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     // 그 결과를 곧바로 화면에 되살려 두 단계를 또 거치지 않고 바로 카테고리 선택→스크래핑으로 넘어갈 수
     // 있게 한다(ScraperPanel.tsx의 selectSite 참고, 2026-08-16).
     scrape_profile: site.scrape_profile ?? null,
+    // 일반모드 "로그인 확인"이 한 번이라도 성공한 적 있는지 + 완료된 스크랩 세션이 있는지 — 로그인
+    // 카드의 "PC인증 때문에 안 풀리면 개발자모드로 전환?" 힌트는 아직 이 몰의 로그인 방식이 검증 안 된
+    // 최초 시도 때만 의미가 있고, 둘 중 하나라도 있으면(일반모드가 실제로 동작함이 증명됨) 계속 보일
+    // 이유가 없다(ScraperPanel.tsx 참고, 2026-08-16).
+    last_login_confirmed_at: site.last_login_confirmed_at,
+    has_completed_scrape: hasCompletedScrape,
     latest_memo: latestMemo ? { content: latestMemo.content, createdAt: latestMemo.created_at } : null,
     profile_dir: profileDir(site.id),
   })

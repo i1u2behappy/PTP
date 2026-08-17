@@ -13,6 +13,11 @@ const RESOLVE_ENDPOINT = `${PTP_ORIGIN}/api/sites/resolve`
 const SITE_API_BASE = `${PTP_ORIGIN}/api/sites`
 const STOP_REQUESTED_ENDPOINT = `${PTP_ORIGIN}/api/scrape/stop-requested`
 const MAX_PRODUCTS = 300 // 안전장치 — 이 이상은 세션을 나눠서 다시 실행
+// collectCategoryLinks(미리보기 개수 집계 전용) 페이지 상한 — lib/scraper.ts의 AUTO_PAGINATION_CAP과
+// 같은 이유로 50 → 1000으로 올렸다(2026-08-17): 걸스굽 "SOLD OUT"처럼 정말로 50페이지(MAX_PRODUCTS와
+// 별개로 세면 2,400여개)보다 큰 카테고리가 있으면 "정확한 총 개수"라던 주석과 달리 조용히 그 상한에서
+// 잘려 실제보다 훨씬 적게 보고됐다.
+const MAX_PREVIEW_PAGES = 1000
 
 let siteId = null
 let extractionRules = {}
@@ -599,16 +604,21 @@ chrome.runtime.onInstalled.addListener(() => {
 })
 
 /** 카테고리(목록) 페이지부터 다음 페이지까지 따라가며 상품 링크 전체를 모은다 — "스크랩 미리보기 실행"이
- *  일반모드의 previewCatalog처럼 정확한 총 개수를 보여줄 수 있게 끝까지 페이징한다(run()과 같은 루프
- *  구조, MAX_PRODUCTS 안전장치 공유). 지금 페이지 자체가 이미 상품 상세 페이지라 링크가 하나도 안
- *  잡히면 빈 목록을 그대로 돌려준다 — 호출부(runPreview)가 그 경우 지금 페이지 자체를 상품 1건으로
- *  처리한다. */
+ *  일반모드의 previewCatalog처럼 정확한 총 개수를 보여줄 수 있게 끝까지 페이징한다. 개수만 세는 용도라
+ *  run()의 MAX_PRODUCTS(실제 상세페이지를 방문·추출하는 세션 하나당 상품 수 제한, 그래서 300개씩
+ *  나눠 실행하는 설계)와는 성격이 달라 그 상한을 공유하지 않는다 — 목록 페이지의 링크만 세는 건 상세
+ *  추출만큼 비용이 크지 않다(2026-08-17, 걸스굽 "SOLD OUT"이 MAX_PRODUCTS(300)에서 조용히 잘려 실제보다
+ *  훨씬 적게 보고된 문제 수정). 지금 페이지 자체가 이미 상품 상세 페이지라 링크가 하나도 안 잡히면
+ *  빈 목록을 그대로 돌려준다 — 호출부(runPreview)가 그 경우 지금 페이지 자체를 상품 1건으로 처리한다.
+ *  truncated는 "다음 페이지"가 있는데도 상한(MAX_PREVIEW_PAGES)에 걸려 멈췄다는 뜻 — 호출부가 이 값을
+ *  그대로 개수와 함께 보여줘 정직하게 "이 이상"임을 알릴 수 있게 한다. */
 async function collectCategoryLinks(tabId) {
   const linkOrder = []
   const linkInfo = {}
   const categoryByUrl = {}
   let pages = 0
-  while (linkOrder.length < MAX_PRODUCTS && pages < 50) {
+  let truncated = false
+  while (pages < MAX_PREVIEW_PAGES) {
     const { links, linkInfo: pageLinkInfo, nextUrl, category, brandFromCategory } = await evalInTab(tabId, COLLECT_LINKS_EXPR)
     for (const href of links) {
       if (href in linkInfo) continue
@@ -618,16 +628,22 @@ async function collectCategoryLinks(tabId) {
     }
     pages++
     if (!nextUrl) break
+    if (pages >= MAX_PREVIEW_PAGES) { truncated = true; break }
     await navigate(tabId, nextUrl)
     await throttle()
   }
-  return { links: linkOrder, linkInfo, categoryByUrl }
+  return { links: linkOrder, linkInfo, categoryByUrl, truncated }
 }
 
-/** "스크랩 미리보기 실행" — 일반모드의 "스크랩 미리보기"(previewCatalog)와 같은 절차: 지금 보고 있는
- *  페이지가 카테고리(목록)면 링크를 끝까지 모아 총 개수를 세고, 첫 상품을 열어 전체 상세를 캡처하고,
- *  나머지는 목록 페이지 정보(상품명/썸네일)만 돌려준다. 지금 페이지 자체가 이미 상품 상세 페이지(링크가
- *  하나도 안 잡힘)면 그 페이지 하나만 상품 1건으로 캡처한다. 끝나면 원래 보고 있던 페이지로 되돌아간다. */
+/** "스크랩 미리보기 실행" — 일반모드의 "스크랩 미리보기"(previewCatalog)와 같은 절차. PTP에서 카테고리를
+ *  선택해뒀으면(site.categoryUrls, run()과 같은 순회 방식) 그 카테고리들을 각각 끝까지 페이징해
+ *  카테고리별 개수를 구하고, 그중 첫 카테고리의 첫 상품만 실제로 열어 전체 상세를 캡처한다 — 예전엔
+ *  선택한 카테고리와 무관하게 "지금 탭이 보고 있는 페이지" 하나만 봤다(사용자 지적, 2026-08-16: "선택한
+ *  카테고리에 대해 미리보기가 되어야 한다"). 카테고리를 선택 안 했으면 예전처럼 지금 페이지 하나만 보고,
+ *  그 목록의 나머지 상품 정보(이름/썸네일)까지 items로 채운다(카테고리를 여러 개 선택했을 때는 일반모드의
+ *  previewCatalog와 같은 이유로 개수만 본다 — 실제 목록은 스크랩 시작 때 얻으므로). 링크가 하나도 안
+ *  잡히면(카테고리 미선택 + 지금 페이지 자체가 이미 상품 상세) 그 페이지 하나를 상품 1건으로 캡처한다.
+ *  끝나면 원래 보고 있던 페이지로 되돌아간다. */
 async function runPreview(tab, site, aiMode) {
   try {
     await attachDebugger(tab.id)
@@ -637,23 +653,37 @@ async function runPreview(tab, site, aiMode) {
   }
   const startUrl = tab.url
   try {
-    const { links, linkInfo, categoryByUrl } = await collectCategoryLinks(tab.id)
-    let firstUrl = startUrl
+    const listingStarts = site.categoryUrls && site.categoryUrls.length ? site.categoryUrls : [null]
+    const categoryCounts = []
+    let firstUrl = null
+    let firstCat = null
     let items = []
-    let total
-    if (links.length > 0) {
-      firstUrl = links[0]
-      total = links.length
-      items = links.slice(1).map(href => ({ url: href, name: linkInfo[href]?.name || '', thumbnail: linkInfo[href]?.thumbnail || '' }))
-      await navigate(tab.id, firstUrl)
+
+    for (const listingStart of listingStarts) {
+      if (listingStart) { await navigate(tab.id, listingStart); await throttle() }
+      const { links, linkInfo, categoryByUrl, truncated } = await collectCategoryLinks(tab.id)
+      if (!links.length) continue
+      const cat = categoryByUrl[links[0]]
+      categoryCounts.push({ url: listingStart || startUrl, label: cat?.category || listingStart || startUrl, count: links.length, truncated })
+      if (!firstUrl) {
+        firstUrl = links[0]
+        firstCat = cat
+        // 카테고리를 하나만 보는 경우(미선택 포함)에만 나머지 목록을 그대로 보여준다 — 여러 카테고리를
+        // 선택했을 때는 일반모드처럼 카테고리별 개수만 확인하면 충분하다.
+        if (listingStarts.length === 1) items = links.slice(1).map(href => ({ url: href, name: linkInfo[href]?.name || '', thumbnail: linkInfo[href]?.thumbnail || '' }))
+      }
     }
+    if (!firstUrl) firstUrl = startUrl // 링크가 하나도 없으면 지금 페이지 자체를 상품 1건으로 캡처
+
+    if (firstUrl !== tab.url) await navigate(tab.id, firstUrl)
     const html = await evalInTab(tab.id, '(() => document.documentElement.outerHTML.slice(0, 200000))()')
-    const cat = categoryByUrl[firstUrl]
+    const total = categoryCounts.length ? categoryCounts.reduce((sum, c) => sum + c.count, 0) : undefined
     const res = await fetch(`${SITE_API_BASE}/${site.id}/preview-capture`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         url: firstUrl, html, aiMode: !!aiMode, total, items,
-        category: cat?.category || '', brandFromCategory: cat?.brandFromCategory || '',
+        categoryCounts: categoryCounts.length ? categoryCounts : undefined,
+        category: firstCat?.category || '', brandFromCategory: firstCat?.brandFromCategory || '',
       }),
     })
     const data = await res.json()

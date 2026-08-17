@@ -445,6 +445,47 @@ bin-probe lo=4 hi=8 mid=6 count=48 currentPage=7 clamped=true fpMatch=false look
 같이 실어 보내도록 했다(`app/api/sites/[id]/preview-capture/route.ts`의 `CapturedCategoryCount`에도
 `truncated?: boolean` 추가). 확장 버전 1.38 → 1.39.
 
+## 카테고리 간 중복 제거 총계 확인 (2026-08-17, 신규 기능)
+
+버그 14·15 대화 중 사용자 질문: 카테고리 목록에 "가격대별"(가로 분류)과 "여성화/남성화"(세로 분류)가
+같이 있는데, 둘 다 선택하면 같은 상품이 두 번 집계돼 미리보기 총계가 부풀려지는 게 아닌지? 실제
+스크랩도 같은 문제를 겪는지?
+
+**분석**: 실제 스크랩(`collectProductUrls`)은 선택된 모든 카테고리를 하나의 공유 `Set<string>`
+(`productUrlSet`)에 모아 URL 기준으로 자동 중복 제거하므로 문제없다 — 같은 상품이 몇 개 카테고리에
+걸쳐 있든 정확히 1번만 스크랩된다. 반면 `previewCatalog`의 총계(`total = doneCounts.reduce((sum,c)
+=> sum+c.count, 0)`)는 카테고리별로 독립적으로 구한 개수를 그냥 더한 값이라 겹치는 카테고리를 같이
+선택하면 실제보다 크게 나온다(실사용 확인: 걸스굽 63개 전체 선택 시 합계 62,334 vs "전체상품보기"
+9,523). 카테고리별 빠른 집계(위젯 수식/지수+이분 탐색)는 애초에 "실제 URL 목록을 안 모으고 숫자만
+빠르게 구하는" 방식이라(버그 1~15에서 다져온 최적화의 핵심 전제) 카테고리 간 상품이 겹치는지 비교할
+재료(실제 URL) 자체가 없다 — 정확한 중복 제거 총계를 구하려면 결국 실제 스크랩과 같은 방식(URL을
+실제로 모음)을 써야 해서 그 최적화들을 못 쓰게 된다.
+
+**설계 결정(사용자 선택)**: 세 가지 안(① 항상 정확히 자동 계산 ② 버튼으로 필요할 때만 계산 ③ 안내
+문구만 추가) 중 ②를 선택 — 카테고리별 총계는 지금처럼 빠르게 두고, "중복 제거된 정확한 총 개수가
+궁금할 때만" 별도 버튼으로 계산한다.
+
+**구현**:
+- `lib/scraper.ts`: `countDedupedProductUrls(opts)`(신규 export) — `withContext`로 감싸
+  `collectProductUrls`를 호출하고 `urls.length`만 반환한다(상품 상세는 안 열어 실제 스크랩보다 빠름).
+  `collectProductUrls`/`collectFromListing`이 기존엔 `isStopRequested(sessionId)`(DB 세션 기반, 실제
+  스크랩 전용)만 봤는데, 이 신규 함수는 미리보기처럼 DB 세션이 없는 단발 요청이라 `stopSignal`
+  (AbortSignal)도 같이 보는 `shouldStop()` 헬퍼로 통합했다(3곳).
+- `app/api/scrape/exact-total/route.ts`(신규): 위 함수를 감싼 엔드포인트. `previewCatalog`와 같은
+  패턴으로 `req.signal`을 `stopSignal`로 전달해 클라이언트가 중지(fetch abort)하면 서버 쪽 URL 수집도
+  다음 페이지 전에 스스로 멈춘다.
+- `components/panels/ScraperPanel.tsx`: `exactTotal`/`exactTotalLoading`/`exactTotalAbortRef`(신규).
+  선택된 카테고리가 2개 이상일 때만(1개면 중복 우려 자체가 없음) "🎯 정확한 총 개수 확인(중복 제거)"
+  버튼이 뜨고, 결과를 "→ 실제로는 정확히 N개(중복 제거)"로 보여준다. `handlePreview`/`handleDevPreview`가
+  새로 시작될 때(스크랩 대상이 바뀔 수 있으므로) 이전 확인값을 같이 지운다.
+
+**검증**: 걸스굽에서 겹치지 않는 두 카테고리(WEDGE 303 + 가격대별 15,000~19,900의 1,466)로 테스트 →
+정확히 1,769(=단순합, 이 조합은 실제로 안 겹침)로 정상 응답. 겹침이 확실한 조합(상위 "여성화" +
+그 하위 "FLAT&LOAFER", 173페이지짜리 대형 카테고리 포함)으로도 에러 없이 4.7분 만에 정상 완료됨을
+로그로 확인했다 — 다만 이 두 번째 테스트는 클라이언트 쪽(curl) 타임아웃으로 실제 중복 제거 수치 자체는
+받아오지 못했다(서버는 200으로 정상 완료, Set 기반 중복 제거 로직 자체는 실제 스크랩에서 이미 오래
+검증된 코드라 그 결과값까지 별도로 재확인하지는 않았다).
+
 ## 미리보기 중지
 
 미리보기가 오래 걸릴 수 있으니(위 성능 수정 이후에도 몰에 따라 카테고리가 아주 많으면 시간이 걸림)
@@ -625,6 +666,16 @@ React 상태를 전부 초기화하는데, `localStorage`에 저장해두던 항
 세 결과 컴포넌트 다 로딩 중에도 같은 모양의 스켈레톤을 먼저 그리므로(위 "결과가 나올 자리에 스켈레톤"
 패턴), 클릭 즉시(응답 도착 전)에도 스크롤 대상이 이미 DOM에 존재해 바로 스크롤된다.
 
+### 로그인 확인을 누르면 이미 보이던 몰구조분석 결과가 사라짐 (수정됨, 2026-08-17)
+
+사용자 재현: 캐시된 몰구조분석 결과가 몰 선택 시 이미 복원돼 보이고 있었는데, "로그인 확인"을 누르면
+그 내용이 사라졌다. 원인: `handleConfirmLogin`의 `setProfileResult(null)`이 몰구조분석 캐시 복원
+기능(위 "선택형 레이아웃"/`selectSite`)이 생기기 전(커밋 `ca10f5d`)에 추가된 코드로, 그땐 로그인
+확인마다 분석 결과를 비우는 게 맞았지만(그때는 애초에 복원해서 보여줄 캐시가 없었음) 지금은 이미
+보여주고 있던 캐시 결과를 로그인 확인 한 번에 지워버리는 부작용이 됐다. **수정**: 이 리셋을 제거 —
+로그인 확인은 몰 구조가 바뀌었는지와 무관한 동작이라 건드리지 않고, "몰 구조분석"을 다시 누르면 그때
+새 결과로 덮어써진다.
+
 ## 화면 전역 자동 재시도 (`components/shell/GlobalErrorNet.tsx`)
 
 사용자가 h/w 상황을 통제할 수 없어 "다시 시도"를 언제 눌러야 할지 판단하기 어렵다는 피드백에 따라,
@@ -699,6 +750,12 @@ React 상태를 전부 초기화하는데, `localStorage`에 저장해두던 항
 - (2026-08-17) `components/panels/ScraperPanel.tsx`: `previewSectionRef`/`profileResultRef`/
   `categoryResultRef`(신규) — 미리보기/몰구조분석/카테고리 불러오기 시작 시 결과 자리로 자동 스크롤
   (`progressSectionRef`와 같은 패턴).
+- (2026-08-17) `components/panels/ScraperPanel.tsx`: `handleConfirmLogin`의 `setProfileResult(null)`
+  제거 — 캐시 복원된 몰구조분석 결과가 로그인 확인 한 번에 사라지던 문제 수정.
+- (2026-08-17, 카테고리 간 중복 제거 총계) `lib/scraper.ts`: `countDedupedProductUrls`(신규 export),
+  `collectProductUrls`/`collectFromListing`의 정지 체크를 `shouldStop()`(`isStopRequested`+`stopSignal`)
+  으로 통합. `app/api/scrape/exact-total/route.ts`(신규). `components/panels/ScraperPanel.tsx`:
+  `exactTotal`/`exactTotalLoading`/`exactTotalAbortRef`(신규), "🎯 정확한 총 개수 확인(중복 제거)" 버튼.
 
 ## 상태
 
@@ -775,3 +832,12 @@ OUT(cate_no=45)은 2,400개 이상(50페이지 상한) → 19,953개(실제 마�
 코드 검토만). 다른 몰(고도몰류)까지 라이브로 재검증하지는 않았는데, 버그 8에서 이미 고도몰은 이번
 clamp류 문제 자체가 없다는 걸 확인해뒀고(범위 밖 페이지에 정직하게 0개 반환) 이번 수정도 특정 몰
 전용이 아닌 범용 로직이라 우선순위를 낮췄다 — 다음에 그 몰들을 다시 스크랩할 때 확인 예정으로 남긴다.
+
+로그인 확인 시 몰구조분석 결과가 사라지던 문제(2026-08-17)는 원인이 되는 리셋 한 줄만 제거한
+단순한 수정이라 tsc 클린 확인만 하고 별도 라이브 재검증은 하지 않았다.
+
+카테고리 간 중복 제거 총계(2026-08-17)는 tsc 클린. 겹치지 않는 두 카테고리 조합으로 정확히 단순합이
+나옴을 라이브로 확인했고, 173페이지짜리 대형 카테고리를 포함한 조합도 에러 없이(4.7분) 완료됨을
+서버 로그로 확인했다 — 다만 그 두 번째 테스트는 클라이언트 타임아웃으로 실제 중복 제거 수치 자체는
+못 받아왔다(중복 제거 로직인 `Set<string>`은 실제 스크랩에서 이미 오래 쓰인 코드라 별도 재확인은
+생략). 실제 화면에서 버튼을 눌러본 사용자 확인은 아직 받지 못한 상태.

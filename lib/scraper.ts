@@ -2553,6 +2553,9 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
   if (opts.productUrls?.length) {
     return { urls: opts.productUrls, platform: 'unknown', categoryByUrl: new Map(), linkInfo: new Map(), needsLogin: false, stopped: false }
   }
+  // 실제 스크랩(sessionId+isStopRequested)뿐 아니라, DB 세션이 없는 단발 호출(정확한 총 개수 확인 —
+  // countDedupedProductUrls)도 이 수집 단계를 쓴다 — previewCatalog와 같은 이유로 stopSignal도 같이 본다.
+  const shouldStop = () => isStopRequested(opts.sessionId) || !!opts.stopSignal?.aborted
 
   const listingUrls = (opts.categoryUrls?.length ? opts.categoryUrls : (opts.url ? [opts.url] : [page.url()])).map(resetToFirstPage)
   const maxPages = Math.max(1, opts.maxPages || AUTO_PAGINATION_CAP)
@@ -2646,7 +2649,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
     let prevHrefs: Set<string> | null = null
 
     for (let p = 0; p < maxPages; p++) {
-      if (isStopRequested(opts.sessionId)) { collectionStopped = true; break }
+      if (shouldStop()) { collectionStopped = true; break }
       let matched = await scanForProducts(workerPage)
       let hrefsThisPage = new Set(matched.map(m => m.href))
       const isDeadEnd = (hrefs: Set<string>) => hrefs.size === 0 || (prevHrefs !== null && [...hrefs].every(h => prevHrefs!.has(h)))
@@ -2689,7 +2692,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
     let cursor = 0
     async function worker(workerPage: Page) {
       while (true) {
-        if (isStopRequested(opts.sessionId)) { collectionStopped = true; return }
+        if (shouldStop()) { collectionStopped = true; return }
         const i = cursor++
         if (i >= listingUrls.length) return
         await collectFromListing(workerPage, listingUrls[i]).catch(() => {})
@@ -2703,7 +2706,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
     await Promise.all(workerPages.slice(1).map(p => p.close().catch(() => {})))
   } else {
     for (const listingUrl of listingUrls) {
-      if (isStopRequested(opts.sessionId)) { collectionStopped = true; break }
+      if (shouldStop()) { collectionStopped = true; break }
       await collectFromListing(page, listingUrl)
       if (opts.sessionId != null) collectProgress.get(opts.sessionId)!.done++
     }
@@ -2716,6 +2719,22 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
 
   if (opts.sessionId != null) collectProgress.delete(opts.sessionId)
   return { urls, platform, categoryByUrl, linkInfo, needsLogin, stopped: collectionStopped }
+}
+
+/**
+ * "정확한 총 개수 확인" — previewCatalog의 카테고리별 개수(위젯 수식/지수+이분 탐색으로 빠르게 구한
+ * 값)는 카테고리마다 독립적으로 세기 때문에, 선택한 카테고리들끼리 상품이 겹치면(예: "가격대별" 같은
+ * 가로 분류와 "여성화/남성화" 같은 세로 분류를 같이 선택) 그 총합이 실제로 스크랩될 상품 수보다 크게
+ * 나온다(실제 스크랩은 collectProductUrls가 모든 선택 카테고리를 하나의 Set으로 모아 자동으로 중복을
+ * 제거하므로 이 문제가 없다 — 사용자 질문, 2026-08-17). 정확한 총계를 보여주려면 그 실제 수집과 같은
+ * 방식(목록 페이지를 전부 훑어 URL을 모음, 상품 상세는 열지 않음)을 써야 해서 카테고리별 빠른 집계보다
+ * 느릴 수 있다 — 그래서 previewCatalog의 기본 총계 옆에 버튼으로 두고 필요할 때만 호출한다.
+ */
+export async function countDedupedProductUrls(opts: ScrapeOptions): Promise<{ total: number; needsLogin: boolean; stopped: boolean }> {
+  return withContext(opts, async (page, context) => {
+    const { urls, needsLogin, stopped } = await collectProductUrls(page, opts, context)
+    return { total: urls.length, needsLogin, stopped }
+  }, '정확한 총 개수 확인')
 }
 
 /**

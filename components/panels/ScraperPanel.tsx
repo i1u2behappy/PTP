@@ -502,6 +502,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 로그인 창을 다시 띄우고 이 배너로 재확인을 안내한다.
   const [sessionExpiredWarning, setSessionExpiredWarning] = useState(false)
   const [previewTotal, setPreviewTotal]     = useState<number | null>(null)
+  // "정확한 총 개수 확인" — previewTotal(카테고리별 빠른 합계, 카테고리 간 상품이 겹치면 중복 포함될 수
+  // 있음)과 별개로, 버튼을 눌렀을 때만 실제 스크랩과 같은 방식으로 중복 제거된 정확한 개수를 구한다
+  // (사용자 요청, 2026-08-17 — lib/scraper.ts의 countDedupedProductUrls 참고).
+  const [exactTotal, setExactTotal] = useState<{ total: number; needsLogin: boolean } | null>(null)
+  const [exactTotalLoading, setExactTotalLoading] = useState(false)
+  const exactTotalAbortRef = useRef<AbortController | null>(null)
   const [previewItems, setPreviewItems]     = useState<PreviewItem[]>([])
   // 일반모드 카탈로그 미리보기 전용 — 카테고리별 상품 개수만(이름/썸네일 없이). 개발자모드는 이 필드를
   // 채우지 않으므로(확장이 previewItems 쪽만 보냄) 항상 빈 배열로 남아 기존 표시와 자연히 구분된다.
@@ -1090,7 +1096,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       // (방금 이 몰의 로그인이 실제로 성공했음에도) 다시 뜨지 않도록 로컬 상태도 같이 갱신해둔다 — 서버
       // 값은 login-confirm 라우트가 이미 갱신했으니, 다음에 몰을 다시 선택하면 거기서도 그대로 반영된다.
       setSelectedSite(prev => prev && { ...prev, last_login_confirmed_at: new Date().toISOString() })
-      setProfileResult(null)
+      // 예전엔(몰구조분석 캐시 복원이 생기기 전) 로그인 확인마다 profileResult를 비웠는데, 지금은
+      // selectSite가 캐시된 분석 결과를 이미 복원해서 보여주고 있어 그걸 로그인 확인 한 번으로 지워버리면
+      // 방금 보이던 내용이 사라지는 것처럼 보인다(사용자 지적, 2026-08-17). 로그인 확인 자체는 몰 구조가
+      // 바뀌었는지와 무관하니 건드리지 않는다 — "몰 구조분석"을 다시 누르면 그때 새 결과로 덮어써진다.
       setProfileError('')
       setPickerActive(false)
       setSessionExpiredWarning(false)
@@ -1328,6 +1337,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPreviewTotal(null)
     setPreviewItems([]); setCategoryCounts([])
     setPreviewLoading(true)
+    // 스크랩 대상이 다시 정해지는 시점이므로, 이전 선택 기준으로 구한 "정확한 총 개수"는 더 이상 안
+    // 맞을 수 있어 같이 지운다(선택이 안 바뀌었으면 그냥 다시 눌러 확인).
+    exactTotalAbortRef.current?.abort(); setExactTotal(null); setExactTotalLoading(false)
     // handleStart와 같은 이유로, 미리보기 시작 시 결과가 나올 카드로 화면을 스크롤해 버튼만 누르고 아래
     // 결과를 못 보는 일이 없게 한다(사용자 요청, 2026-08-17).
     requestAnimationFrame(() => previewSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
@@ -1395,6 +1407,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPreviewTotal(null)
     setPreviewItems([]); setCategoryCounts([])
     setPreviewProgress(null)
+    // 스크랩 대상이 다시 정해지는 시점이므로, 이전 선택 기준으로 구한 "정확한 총 개수"는 더 이상 안
+    // 맞을 수 있어 같이 지운다(선택이 안 바뀌었으면 그냥 다시 눌러 확인).
+    exactTotalAbortRef.current?.abort(); setExactTotal(null); setExactTotalLoading(false)
     // handleStart와 같은 이유로, 미리보기 시작 시 결과가 나올 카드로 화면을 스크롤해 버튼만 누르고 아래
     // 결과를 못 보는 일이 없게 한다(사용자 요청, 2026-08-17).
     requestAnimationFrame(() => previewSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
@@ -1467,6 +1482,44 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (previewProgressPollRef.current) { clearInterval(previewProgressPollRef.current); previewProgressPollRef.current = null }
     setPreviewLoading(false)
     setPreviewProgress(null)
+  }
+
+  /** "정확한 총 개수 확인" — previewTotal(카테고리별 빠른 합계)이 카테고리 간 중복을 포함할 수 있어,
+   *  실제로 스크랩될 상품이 몇 개인지 궁금할 때만 누르는 버튼. 실제 스크랩(collectProductUrls)과 같은
+   *  방식으로 선택된 카테고리 전체의 상품 URL을 모아 중복 제거한 개수를 구하므로, 카테고리별 집계보다
+   *  느릴 수 있다 — 그래서 항상 자동으로 하지 않고 버튼으로 둔다(사용자 요청, 2026-08-17). */
+  async function handleCheckExactTotal() {
+    if (!selectedSite) return
+    setExactTotalLoading(true)
+    setExactTotal(null)
+    const controller = new AbortController()
+    exactTotalAbortRef.current = controller
+    try {
+      const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
+      const res = await fetch('/api/scrape/exact-total', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          url: categoryUrls.length ? undefined : (targetUrl || undefined),
+          categoryUrls: categoryUrls.length ? categoryUrls : undefined,
+          loginId: loginId || undefined, loginPw: loginPw || undefined,
+          siteId: selectedSite.id, concurrencyMode, concurrency,
+        }),
+      })
+      if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`확인 실패: ${e.error || res.status}`); return }
+      const d = await res.json() as { total: number; needsLogin: boolean; stopped: boolean }
+      setExactTotal({ total: d.total, needsLogin: d.needsLogin })
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === 'AbortError')) throw err
+    } finally {
+      setExactTotalLoading(false)
+      exactTotalAbortRef.current = null
+    }
+  }
+
+  function handleStopExactTotal() {
+    exactTotalAbortRef.current?.abort()
   }
 
   const needsLogin = !!loginId
@@ -2322,6 +2375,31 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 <span className="text-amber-600"> (일부 카테고리는 확인 상한에 도달해 최소치만 확인됨 — 아래 개수별 "이상" 표시 참고)</span>
               )}
             </p>
+          )}
+
+          {/* 위 총계는 카테고리별로 각자 세서 더한 값이라, "가격대별"처럼 서로 겹치는 분류를 여러 개
+              선택하면 실제보다 많게 나올 수 있다 — 정확히 몇 개가 스크랩될지는 실제 스크랩과 같은 방식
+              (URL을 모아 중복 제거)으로만 알 수 있어 느릴 수 있으므로, 카테고리가 2개 이상일 때만 버튼으로
+              둔다(사용자 요청, 2026-08-17). */}
+          {categoryCounts.length > 1 && (
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              <button type="button" onClick={handleCheckExactTotal} disabled={exactTotalLoading}
+                className="px-3 py-1 bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 text-xs font-semibold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                {exactTotalLoading ? '중복 제거 확인 중...' : '🎯 정확한 총 개수 확인(중복 제거)'}
+              </button>
+              {exactTotalLoading && (
+                <button type="button" onClick={handleStopExactTotal}
+                  className="px-3 py-1 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-xs font-semibold rounded-full transition-colors">
+                  ⏹ 중지
+                </button>
+              )}
+              {exactTotal && (
+                <span className="text-xs text-gray-600">
+                  → 실제로는 정확히 <strong>{exactTotal.total.toLocaleString()}</strong>개(중복 제거)
+                  {exactTotal.needsLogin && <span className="text-amber-600"> ⚠ 로그인 세션이 끊긴 상태로 확인된 것 같습니다</span>}
+                </span>
+              )}
+            </div>
           )}
 
           {previewResult && (

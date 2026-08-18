@@ -7,6 +7,10 @@ interface CachedCategoryCount { count: number; truncated?: boolean; label: strin
 interface CachedProfile {
   platform?: MallPlatform
   categoryLinks?: { name: string; href: string }[]
+  /** categoryLinks를 찾을 때 AI(detectCategoryLinksWithAI)가 실제로 기여했는지 — 캐시된 결과를 다시
+   *  내려줄 때도 화면에 표시할 수 있도록 discoverCategoryLinks의 결과(aiUsed)를 그대로 같이 저장한다
+   *  (사용자 요청, 2026-08-18). */
+  categoryLinksAiUsed?: boolean
   excludedCategoryHrefs?: string[]
   categoryCounts?: Record<string, CachedCategoryCount>
 }
@@ -87,6 +91,7 @@ export async function POST(req: NextRequest) {
         updatedAt: cached.rows[0].scrape_profile_updated_at, scrapedHrefs, allScraped,
         excludedCategoryHrefs: profile.excludedCategoryHrefs || [],
         categoryCounts, categoryScrapeHistory,
+        aiUsed: !!profile.categoryLinksAiUsed,
       })
     }
   }
@@ -101,10 +106,12 @@ export async function POST(req: NextRequest) {
     await pool.query(
       `UPDATE sites SET
          scrape_profile = COALESCE(scrape_profile, '{}'::jsonb)
-           || jsonb_build_object('platform', $1::text, 'categoryLinks', $2::jsonb, 'categoryMenuNames', $3::jsonb),
+           || jsonb_build_object(
+                'platform', $1::text, 'categoryLinks', $2::jsonb, 'categoryMenuNames', $3::jsonb,
+                'categoryLinksAiUsed', $4::boolean),
          scrape_profile_updated_at = NOW()
-       WHERE id=$4`,
-      [result.platform, JSON.stringify(categoryLinks), JSON.stringify(categoryLinks.map(c => c.name)), siteId],
+       WHERE id=$5`,
+      [result.platform, JSON.stringify(categoryLinks), JSON.stringify(categoryLinks.map(c => c.name)), !!result.aiUsed, siteId],
     )
   }
   const { hrefs: scrapedHrefs, allScraped } = siteId ? await findScrapedCategoryHrefs(siteId) : { hrefs: [], allScraped: false }

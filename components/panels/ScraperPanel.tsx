@@ -281,6 +281,8 @@ interface MallProfileSignals {
   categoryMaxDepth: number
   categoryMenuNames: string[]
   categoryLinks?: { name: string; href: string }[]
+  /** categoryLinks를 찾을 때 AI가 실제로 기여했는지 — 사용자 요청으로 체크리스트에 작게 표시(2026-08-18). */
+  categoryLinksAiUsed?: boolean
   excludedCategoryHrefs?: string[]
   hasPaginationWidget: boolean
   report: MallStructureReport | null
@@ -538,6 +540,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 알려준다(사용자 실사용 확인, 2026-08-18 — 크롬을 완전히 닫고 새로 복사해도 로그인이 반영 안 됨을
   // 직접 재현해 확정).
   const [loginBlockedExpansion, setLoginBlockedExpansion] = useState(false)
+  // 카테고리 목록을 찾을 때 AI(Gemini)가 실제로 기여했는지 — 사용자 요청으로 체크리스트에 작게
+  // 표시한다(2026-08-18). GEMINI_API_KEY가 없거나 AI가 매번 빈 결과를 줘 기존 셀렉터 히스틱으로만
+  // 채워졌으면 false.
+  const [categoryAiUsed, setCategoryAiUsed] = useState(false)
   const [detectedPlatform, setDetectedPlatform] = useState<string | null>(null)
   // 카테고리를 나눠서(오늘 일부, 나중에 나머지) 스크랩하는 경우가 있어, 이 몰의 과거 완료 세션들을 훑어
   // "이미 스크랩해본 카테고리"를 체크박스 목록에 표시한다(app/api/scrape/categories가 계산해 내려줌).
@@ -1071,6 +1077,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setCategories([])
     setCategoriesCached(null)
     setLoginBlockedExpansion(false)
+    setCategoryAiUsed(false)
     setDetectedPlatform(null)
     setProfileResult(null)
     setProfileError('')
@@ -1094,6 +1101,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       setCategories(dedupeCategoryLinks(cachedProfile.categoryLinks.map(c => ({ href: c.href, text: c.name }))))
       setDetectedPlatform(cachedProfile.platform || null)
       setCategoriesCached({ cached: true, updatedAt: full.mall_report_updated_at ?? null })
+      setCategoryAiUsed(!!cachedProfile.categoryLinksAiUsed)
       // "제외"로 표시해둔 카테고리는 몰을 다시 선택했을 때도(카테고리 불러오기를 새로 누르지 않아도)
       // 그대로 유지돼야 한다 — 서버(sites.scrape_profile.excludedCategoryHrefs)에는 이미 저장돼 있었지만,
       // 캐시 복원 경로가 이 필드를 안 읽어와 화면에서는 매번 비어 보이던 문제(사용자 지적, 2026-08-16).
@@ -1289,9 +1297,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         categoryCounts?: Record<string, { count: number; truncated?: boolean; label: string; checkedAt: string }>
         categoryScrapeHistory?: Record<string, { lastScrapedAt: string | null; clientName: string | null }>
         loginBlockedExpansion?: boolean
+        aiUsed?: boolean
       }
       setCategories(dedupeCategoryLinks(d.links || []))
       setDetectedPlatform(d.platform || null)
+      setCategoryAiUsed(!!d.aiUsed)
       setCategoriesCached({ cached: d.cached, updatedAt: d.updatedAt ?? null })
       setLoginBlockedExpansion(!!d.loginBlockedExpansion)
       setScrapedCategoryHrefs(d.scrapedHrefs || [])
@@ -1729,6 +1739,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       {categoriesCached?.cached && (
         <p className="text-[11px] text-teal-600" title={categoriesCached.updatedAt ? new Date(categoriesCached.updatedAt).toLocaleString() : undefined}>
           📋 저장된 몰 구조 기준으로 즉시 불러왔습니다 — 몰 메뉴가 바뀐 것 같으면 &quot;다시 확인&quot;을 눌러주세요.
+        </p>
+      )}
+
+      {/* 이 카테고리 목록을 찾을 때 AI(Gemini)가 실제로 기여했는지 작게 표시 — 사용자 요청, 2026-08-18.
+          detectCategoryLinksWithAI(lib/ai.ts)가 최상위 탐지나 허브 하위메뉴 탐지 중 하나라도 결과를
+          채택했으면 discoverCategoryLinks가 aiUsed:true를 내려주고, sites.scrape_profile에도 같이
+          저장돼 캐시로 다시 불러와도 표시가 유지된다. */}
+      {categoryAiUsed && (
+        <p className="text-[11px] text-sky-600 mt-1">
+          🤖 AI가 이 카테고리 구조를 확인했습니다.
         </p>
       )}
 

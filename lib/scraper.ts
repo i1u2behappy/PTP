@@ -12,7 +12,7 @@ import { promisify } from 'util'
 import { chromium, type BrowserContext, type Page } from 'playwright'
 import { load as loadHtml } from 'cheerio'
 import type { ExtractedProduct } from './ai'
-import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, type MallStructureReport, type OptionCandidate } from './ai'
+import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, type MallStructureReport, type OptionCandidate } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
@@ -2391,6 +2391,34 @@ async function findCategoryLinkCandidates(page: Page): Promise<string[]> {
   }).catch(() => [])
 }
 
+/** "카테고리 메뉴/구조 탐지"를 AI(detectCategoryLinksWithAI)에게 맡기기 위한 후보 수집 — scanCategoryMenu처럼
+ *  cat/lnb/gnb 같은 컨테이너 셀렉터를 고르지 않고, 페이지의 모든 같은 출처 링크를 텍스트와 함께 그대로
+ *  모은다. DOM 중첩 깊이/래퍼 구조와 무관해, 셀렉터 히스틱이 실패해온 사례들(2겹 이상 wrapper, slick.js
+ *  캐러셀이 <li>를 한 겹 더 감싸는 것, 탭 위젯 뒤에 숨은 패널 등 — display:none이어도 DOM엔 남아있어
+ *  그대로 잡힌다)을 애초에 컨테이너를 안 골라서 자연히 피한다. 상품 상세페이지 링크까지 전부 섞여
+ *  들어오는 게 정상이다 — "이 중 뭐가 카테고리냐"는 판단을 AI가 하므로 여기서는 최대한 넓게, 이름이
+ *  없는(이미지뿐이고 alt도 없는) 링크만 걸러 모은다. */
+async function collectAllPageLinks(page: Page): Promise<{ text: string; href: string }[]> {
+  return page.evaluate(() => {
+    const origin = location.origin
+    const current = location.href.replace(/\/+$/, '')
+    const seen = new Set<string>()
+    const result: { text: string; href: string }[] = []
+    for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+      if (result.length >= 400) break // 몰 하나의 AI 호출 비용을 안전하게 상한선 안에 두기 위한 캡
+      const href = (a as HTMLAnchorElement).href
+      if (!href.startsWith(origin)) continue
+      const norm = href.replace(/\/+$/, '')
+      if (norm === current || norm === origin || seen.has(norm)) continue
+      const text = (a.textContent || '').trim() || (a.querySelector('img[alt]') as HTMLImageElement | null)?.alt.trim() || ''
+      if (!text) continue
+      seen.add(norm)
+      result.push({ text, href })
+    }
+    return result
+  }).catch(() => [])
+}
+
 /** scanCategoryMenu가 메뉴 텍스트를 못 읽을 때(이미지 스프라이트/아이콘 폰트 메뉴 등이라 <li> 안에 글자가
  *  전혀 없는 경우, 실사용 확인: 진짜양말 — alt 없는 메뉴 이미지라 이름이 마크업 어디에도 없음)의 대안이다.
  *  메뉴 자체는 못 읽어도 "링크"(href)는 findCategoryLinkCandidates로 얻을 수 있으니, 그 링크로 실제
@@ -3992,6 +4020,11 @@ export interface CategoryDiscoveryResult {
    *  몰은 "다시 확인"을 몇 번을 눌러도 하위 카테고리가 펼쳐지지 않는다 — 화면에서 그 이유를 알려주기
    *  위한 신호다(사용자 실사용 확인, 2026-08-18). */
   loginBlockedExpansion?: boolean
+  /** 최상위 카테고리 탐지나 허브 하위메뉴 탐지 중 하나라도 AI(detectCategoryLinksWithAI) 결과를 그대로
+   *  채택했으면 true — 화면에 "AI가 이번 결과에 실제로 기여했다"는 걸 작게 표시하기 위한 신호
+   *  (사용자 요청, 2026-08-18). GEMINI_API_KEY가 없거나 AI가 매번 빈 결과를 줘 기존 히스틱으로만
+   *  전부 채워졌으면 false. */
+  aiUsed?: boolean
 }
 
 /** 시작 URL 페이지에서 카테고리 메뉴로 보이는 링크를 찾아 사용자가 고를 수 있도록 목록으로 반환한다.
@@ -4023,22 +4056,38 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
       }
 
       const platform = await detectMallPlatform(scanPage)
-      const { links: scannedCategoryLinks, textlessHrefs } = await scanCategoryMenuRobust(scanPage)
-      let categoryLinks = scannedCategoryLinks
+      // "카테고리 메뉴/구조 탐지"를 우선 AI(Gemini)에게 맡긴다 — 컨테이너 셀렉터를 안 고르고 페이지의
+      // 모든 링크를 그대로 보여주는 방식이라 scanCategoryMenu가 몰마다 새 패턴을 추가해와야 했던 문제
+      // (2겹 이상 wrapper, slick.js 캐러셀, 탭 위젯 등)를 애초에 피한다. 몰당 1회뿐이라 Gemini 무료
+      // tier로도 비용/요청량 부담이 없다(2026-08-18 검토). GEMINI_API_KEY가 없거나 판단 실패/빈 결과면
+      // 기존 셀렉터 히스틱 체인(scanCategoryMenuRobust → findCategoryLinkCandidates)으로 그대로
+      // 폴백한다 — AI 문제로 "카테고리 불러오기" 자체가 막히면 안 된다.
+      const mallName = opts.siteId ? (await siteInfo(opts.siteId)).name : new URL(url).hostname
+      const aiTopLevelCandidates = await collectAllPageLinks(scanPage)
+      let categoryLinks: CategoryMenuLink[] = await detectCategoryLinksWithAI(mallName, aiTopLevelCandidates).catch(() => [])
+      // 화면에 "AI가 실제로 이번 결과에 기여했는지"를 작게 표시해주기 위한 신호(사용자 요청, 2026-08-18) —
+      // 최상위 탐지든 아래 허브 하위메뉴 탐지든 AI 결과를 하나라도 그대로 채택했으면 true.
+      let aiUsed = categoryLinks.length > 0
+      let textlessHrefs: string[] = []
       if (!categoryLinks.length) {
-        // textlessHrefs(scanCategoryMenu가 이미 cat/lnb/gnb 등 실제 메뉴 영역 안에서 찾은 이미지뿐인
-        // 후보)를 우선 쓴다 — findCategoryLinkCandidates(메뉴 영역 안의 모든 링크를 무조건 15개까지만
-        // 담는 훨씬 거친 폴백)는 textlessHrefs가 아예 없을 때만 최후수단으로 쓴다. 예전엔
-        // scannedCategoryLinks가 0개면 항상 findCategoryLinkCandidates부터 썼는데, 그 15개 제한에 걸려
-        // 정작 필요한 카테고리가 잘려나갔다(진짜양말 실사용 확인, 2026-08-13 — "신발"이 16번째 링크라 제외됨).
-        const candidates = textlessHrefs.length ? textlessHrefs : await findCategoryLinkCandidates(scanPage)
-        if (candidates.length) categoryLinks = await discoverCategoriesByVisitingLinks(scanPage, candidates)
-      } else if (textlessHrefs.length) {
-        // 텍스트 메뉴가 이미 몇 개는 찾았어도, 같은 페이지의 다른 메뉴 영역이 통째로 이미지뿐이면 그
-        // 카테고리들만 조용히 빠진다(진짜양말 실사용 확인, 2026-08-13 — "신발"/"업데이트") — 남은 이미지
-        // 전용 후보만 추가로 방문해 채운다.
-        const extra = await discoverCategoriesByVisitingLinks(scanPage, textlessHrefs)
-        categoryLinks = [...categoryLinks, ...extra]
+        const scanned = await scanCategoryMenuRobust(scanPage)
+        categoryLinks = scanned.links
+        textlessHrefs = scanned.textlessHrefs
+        if (!categoryLinks.length) {
+          // textlessHrefs(scanCategoryMenu가 이미 cat/lnb/gnb 등 실제 메뉴 영역 안에서 찾은 이미지뿐인
+          // 후보)를 우선 쓴다 — findCategoryLinkCandidates(메뉴 영역 안의 모든 링크를 무조건 15개까지만
+          // 담는 훨씬 거친 폴백)는 textlessHrefs가 아예 없을 때만 최후수단으로 쓴다. 예전엔
+          // scannedCategoryLinks가 0개면 항상 findCategoryLinkCandidates부터 썼는데, 그 15개 제한에 걸려
+          // 정작 필요한 카테고리가 잘려나갔다(진짜양말 실사용 확인, 2026-08-13 — "신발"이 16번째 링크라 제외됨).
+          const candidates = textlessHrefs.length ? textlessHrefs : await findCategoryLinkCandidates(scanPage)
+          if (candidates.length) categoryLinks = await discoverCategoriesByVisitingLinks(scanPage, candidates)
+        } else if (textlessHrefs.length) {
+          // 텍스트 메뉴가 이미 몇 개는 찾았어도, 같은 페이지의 다른 메뉴 영역이 통째로 이미지뿐이면 그
+          // 카테고리들만 조용히 빠진다(진짜양말 실사용 확인, 2026-08-13 — "신발"/"업데이트") — 남은 이미지
+          // 전용 후보만 추가로 방문해 채운다.
+          const extra = await discoverCategoriesByVisitingLinks(scanPage, textlessHrefs)
+          categoryLinks = [...categoryLinks, ...extra]
+        }
       }
 
       // 대분류=상품목록인 카테고리와 대분류=중분류허브(그 자체엔 상품이 없고 하위 메뉴로만 이어짐)인
@@ -4079,8 +4128,17 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
             .catch(() => ({ count: 0, isLoginPage: false, fingerprint: '', hrefs: [] }))
           if (probe.isLoginPage) loginBlockedExpansion = true
           if (probe.count > 0 || probe.isLoginPage) { expandedByIndex[i] = [c]; continue }
-          const sub = await scanCategoryMenuRobust(workerPage)
-          const realChildren = sub.links.filter(s => !topLevelHrefSet.has(s.href))
+          // 하위 메뉴 탐지도 위 최상위 탐지와 같은 이유로 AI를 우선 시도하고, 실패하면 기존
+          // scanCategoryMenuRobust 히스틱으로 폴백한다.
+          const aiSubCandidates = await collectAllPageLinks(workerPage)
+          let realChildren = (await detectCategoryLinksWithAI(mallName, aiSubCandidates, c.name).catch(() => []))
+            .filter(s => !topLevelHrefSet.has(s.href))
+          if (realChildren.length) {
+            aiUsed = true
+          } else {
+            const sub = await scanCategoryMenuRobust(workerPage)
+            realChildren = sub.links.filter(s => !topLevelHrefSet.has(s.href))
+          }
           // 하위 메뉴도 못 찾으면(진짜로 빈 카테고리일 수도 있음) 원래 항목을 그대로 남긴다.
           expandedByIndex[i] = realChildren.length
             ? realChildren.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
@@ -4103,7 +4161,7 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
       categoryLinks = categoryLinks.filter(c => (seenHrefs.has(c.href) ? false : (seenHrefs.add(c.href), true)))
 
       const links: CategoryLink[] = categoryLinks.map(c => ({ href: c.href, text: c.name }))
-      return { platform, links, loginBlockedExpansion }
+      return { platform, links, loginBlockedExpansion, aiUsed }
     } finally {
       await scanPage.close().catch(() => {})
     }

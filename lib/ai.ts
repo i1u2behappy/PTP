@@ -405,6 +405,77 @@ ${pageText.slice(0, 20_000)}`
   }
 }
 
+export interface CategoryLinkCandidate { name: string; href: string }
+
+/**
+ * "카테고리 메뉴/구조 탐지" — 페이지에서 발견한 모든 같은 출처 링크(텍스트+href) 중 실제 상품
+ * 카테고리로 이동하는 것만 AI가 골라낸다. lib/scraper.ts의 scanCategoryMenu(class/id에 cat/lnb/gnb가
+ * 들어간 영역을 찾아 그 안의 <li> 구조를 분석하는 셀렉터 히스틱)가 몰마다 마크업이 달라(2겹 이상 wrapper,
+ * slick.js 캐러셀, 탭 위젯, 이미지 스프라이트 메뉴 등) 실사용 중 계속 새 패턴을 추가해와야 했던 문제를
+ * 대신한다 — "이 링크가 진짜 카테고리냐 아니냐"는 판단(fuzzy) 문제라 셀렉터/정규식보다 AI가 잘 맞고,
+ * 후보 링크는 DOM 위치/중첩 깊이와 무관하게 "페이지의 모든 링크를 그대로 나열"하는 것으로 충분해
+ * 컨테이너 셀렉터 튜닝 자체가 필요 없어진다.
+ * 링크 목록 대신 "인덱스"만 반환하게 해서 href를 AI가 잘못 옮겨 적을(할루시네이션) 위험을 없앤다.
+ * 몰당 1회(카테고리 불러오기 시)만 호출되고 결과가 캐시되므로, Gemini 무료 tier(분당 5회 제한)로도
+ * 충분하다(2026-08-18 검토 — 상품마다 호출하는 filterRealProductOptions와 달리 몰 단위라 비용/요청량
+ * 부담이 사실상 없음). GEMINI_API_KEY가 없거나 판단 실패/빈 결과면 빈 배열 반환 — 호출부가 기존
+ * scanCategoryMenu 히스틱 체인으로 그대로 폴백한다.
+ */
+export async function detectCategoryLinksWithAI(
+  mallName: string,
+  linkCandidates: { text: string; href: string }[],
+  /** 지정하면 "이 카테고리의 하위 카테고리만 골라라"는 허브 펼치기 모드로 동작한다(discoverCategoryLinks의
+   *  대분류 허브 확장과 같은 용도) — 생략하면 몰 전체의 최상위 카테고리 탐지 모드. */
+  parentCategoryName?: string,
+): Promise<CategoryLinkCandidate[]> {
+  if (!process.env.GEMINI_API_KEY || !linkCandidates.length) return []
+
+  const scopeInstruction = parentCategoryName
+    ? `이 링크들은 '${mallName}' 몰의 '${parentCategoryName}' 카테고리 페이지 안에 있던 것이다 — 이
+'${parentCategoryName}'의 하위(중분류) 상품 카테고리로 보이는 링크만 골라라. '${parentCategoryName}'
+자기 자신이나 다른 대분류 메뉴로 돌아가는 링크는 하위 카테고리가 아니니 제외한다.`
+    : `이 링크들은 '${mallName}' 몰의 홈페이지(또는 전체메뉴)에 있던 것이다 — 실제 상품 대분류
+카테고리로 이동하는 링크만 골라라.`
+
+  const prompt = `${scopeInstruction}
+로그인/회원가입/장바구니/마이페이지/고객센터/검색/공지사항/이용약관/사업자정보/이벤트 배너처럼 사이트
+운영용이거나 상품 카테고리가 아닌 링크, 그리고 카테고리 목록이 아니라 상품 상세페이지로 바로 가는
+링크는 절대 포함하지 마라. 확실하지 않으면 빼라.
+
+[링크 목록 (인덱스. "링크텍스트" → URL)]
+${linkCandidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
+
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_category_link_indices',
+          description: '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
+          parameters: {
+            type: Type.OBJECT,
+            properties: { indices: { type: Type.ARRAY, items: { type: Type.INTEGER }, description: '카테고리 링크인 항목의 0-based 인덱스 목록' } },
+            required: ['indices'],
+          },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_category_link_indices'] } },
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) return []
+    const { indices } = call.args as { indices?: number[] }
+    const seen = new Set<number>()
+    return (indices || [])
+      .filter(i => Number.isInteger(i) && i >= 0 && i < linkCandidates.length && !seen.has(i) && seen.add(i))
+      .map(i => ({ name: linkCandidates[i].text, href: linkCandidates[i].href }))
+  } catch {
+    // filterRealProductOptions와 같은 이유로 조용히 빈 배열 — 호출부가 기존 히스틱으로 폴백하므로
+    // "카테고리 불러오기" 자체가 막히면 안 된다(AI모드 스크래핑/스크랩 조정과 달리 이건 항상-보조 기능).
+    return []
+  }
+}
+
 export interface MallStructureReport {
   urlHierarchy: string
   categoryStructure: string

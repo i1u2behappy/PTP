@@ -1,11 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
-import { discoverCategoryLinks, type CategoryLink, type MallPlatform } from '@/lib/scraper'
+import { discoverCategoryLinks, getCategoryScrapeHistory, type CategoryLink, type MallPlatform } from '@/lib/scraper'
+
+interface CachedCategoryCount { count: number; truncated?: boolean; label: string; checkedAt: string }
 
 interface CachedProfile {
   platform?: MallPlatform
   categoryLinks?: { name: string; href: string }[]
   excludedCategoryHrefs?: string[]
+  categoryCounts?: Record<string, CachedCategoryCount>
+}
+
+/** 체크리스트의 "상품개수"/"확인일시"/"최근 스크랩"/"업체" 컬럼용 — previewCatalog가 저장해둔
+ *  카테고리별 개수(href 기준)와, 그 라벨로 매칭한 스크랩/마이그레이션 이력을 함께 내려준다
+ *  (lib/scraper.ts의 persistCategoryCounts/getCategoryScrapeHistory 참고, 사용자 요청 2026-08-17). */
+async function getCategoryCountInfo(siteId: number): Promise<{
+  categoryCounts: Record<string, CachedCategoryCount>
+  categoryScrapeHistory: Record<string, { lastScrapedAt: string | null; clientName: string | null }>
+}> {
+  const res = await pool.query<{ scrape_profile: CachedProfile | null }>(
+    `SELECT scrape_profile FROM sites WHERE id=$1`, [siteId],
+  )
+  const categoryCounts = res.rows[0]?.scrape_profile?.categoryCounts || {}
+  const labels = [...new Set(Object.values(categoryCounts).map(c => c.label))]
+  const categoryScrapeHistory = await getCategoryScrapeHistory(siteId, labels)
+  return { categoryCounts, categoryScrapeHistory }
 }
 
 /** 사용자가 "제외"로 표시해둔 카테고리 href 목록(app/api/scrape/categories/exclude가 기록) — force로
@@ -62,10 +81,12 @@ export async function POST(req: NextRequest) {
     if (profile?.categoryLinks?.length) {
       const links: CategoryLink[] = profile.categoryLinks.map(c => ({ href: c.href, text: c.name }))
       const { hrefs: scrapedHrefs, allScraped } = await findScrapedCategoryHrefs(siteId)
+      const { categoryCounts, categoryScrapeHistory } = await getCategoryCountInfo(siteId)
       return NextResponse.json({
         platform: profile.platform || 'unknown', links, cached: true,
         updatedAt: cached.rows[0].scrape_profile_updated_at, scrapedHrefs, allScraped,
         excludedCategoryHrefs: profile.excludedCategoryHrefs || [],
+        categoryCounts, categoryScrapeHistory,
       })
     }
   }
@@ -88,5 +109,10 @@ export async function POST(req: NextRequest) {
   }
   const { hrefs: scrapedHrefs, allScraped } = siteId ? await findScrapedCategoryHrefs(siteId) : { hrefs: [], allScraped: false }
   const excludedCategoryHrefs = siteId ? await getExcludedCategoryHrefs(siteId) : []
-  return NextResponse.json({ ...result, cached: false, scrapedHrefs, allScraped, excludedCategoryHrefs })
+  const { categoryCounts, categoryScrapeHistory } = siteId
+    ? await getCategoryCountInfo(siteId) : { categoryCounts: {}, categoryScrapeHistory: {} }
+  return NextResponse.json({
+    ...result, cached: false, scrapedHrefs, allScraped, excludedCategoryHrefs, categoryCounts, categoryScrapeHistory,
+    loginBlockedExpansion: !!result.loginBlockedExpansion,
+  })
 }

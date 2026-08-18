@@ -163,13 +163,56 @@ interface CategoryCountItem {
   url: string
   label: string
   count: number
-  /** true면 이 개수는 정확한 총합이 아니라 최소치다 — 위젯/탐색이 다 실패해 상한(50페이지)까지 직접
-   *  세다 멈췄는데 그때까지도 새 상품이 계속 나온 경우(lib/scraper.ts의 CategoryCount 참고). */
+  /** true면 이 개수는 정확한 총합이 아니라 최소치다 — 위젯/탐색이 다 실패해 상한(lib/scraper.ts의
+   *  AUTO_PAGINATION_CAP)까지 직접 세다 멈췄는데 그때까지도 새 상품이 계속 나온 경우(CategoryCount 참고). */
   truncated?: boolean
+}
+
+/** 카테고리 체크리스트의 "상품개수"/"확인일시"/"최근 스크랩"/"업체" 컬럼용 — href를 키로 한다.
+ *  count~checkedAt은 previewCatalog가 저장해둔 값(href 기준), lastScrapedAt/clientName은 그 라벨로
+ *  매칭한 실제 스크랩/마이그레이션 이력(사용자 요청, 2026-08-17). */
+interface CategoryInfoEntry {
+  count?: number
+  truncated?: boolean
+  label?: string
+  checkedAt?: string
+  lastScrapedAt?: string | null
+  clientName?: string | null
 }
 
 function elapsedMinutesBetween(createdAt: string, finishedAt: string): number {
   return Math.round((new Date(finishedAt).getTime() - new Date(createdAt).getTime()) / 60_000)
+}
+
+/** discoverCategoryLinks의 중분류 허브 펼치기(lib/scraper.ts, 2026-08-17)가 고쳐지기 전에 이미
+ *  sites.scrape_profile에 저장돼버린 카테고리 목록은 같은 href가 두 번 들어있을 수 있다 — href를
+ *  React key로 그대로 쓰는 체크리스트가 이걸 그대로 렌더링하면 key 중복 경고/오동작이 난다(모자사러
+ *  실사용 확인, 2026-08-18). 먼저 나온 항목을 남기고 뒤에 나온 중복만 제거한다. */
+function dedupeCategoryLinks<T extends { href: string }>(links: T[]): T[] {
+  const seen = new Set<string>()
+  return links.filter(c => (seen.has(c.href) ? false : (seen.add(c.href), true)))
+}
+
+/** href 기준 개수(countsByHref, previewCatalog가 저장해둔 값)와 라벨 기준 스크랩/마이그레이션 이력
+ *  (historyByLabel)을 합쳐 체크리스트가 바로 쓸 수 있는 href 기준 맵으로 만든다. */
+function mergeCategoryInfo(
+  countsByHref: Record<string, { count: number; truncated?: boolean; label: string; checkedAt: string }>,
+  historyByLabel: Record<string, { lastScrapedAt: string | null; clientName: string | null }>,
+): Record<string, CategoryInfoEntry> {
+  const next: Record<string, CategoryInfoEntry> = {}
+  for (const [href, c] of Object.entries(countsByHref)) {
+    const hist = historyByLabel[c.label]
+    next[href] = {
+      count: c.count, truncated: c.truncated, label: c.label, checkedAt: c.checkedAt,
+      lastScrapedAt: hist?.lastScrapedAt ?? null, clientName: hist?.clientName ?? null,
+    }
+  }
+  return next
+}
+
+/** 체크리스트 컬럼용 짧은 날짜 표시 — 전체 값은 title(툴팁)로 볼 수 있다. */
+function formatShortDate(iso: string): string {
+  return new Date(iso).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
 /** 기준 마스터테이블 필드 키 하나를 미리보기의 실제 스크랩 값으로 풀어낸다 — 표에 보여줄 값이 없는
@@ -241,6 +284,8 @@ interface MallProfileSignals {
   excludedCategoryHrefs?: string[]
   hasPaginationWidget: boolean
   report: MallStructureReport | null
+  /** 카테고리 체크리스트 컬럼용 — previewCatalog가 저장해둔 카테고리별 개수(href 기준, 사용자 요청 2026-08-17) */
+  categoryCounts?: Record<string, { count: number; truncated?: boolean; label: string; checkedAt: string }>
 }
 interface ProfileCheckResult {
   signals: MallProfileSignals
@@ -486,6 +531,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 몰 구조분석이 이미 찾아둔 카테고리 목록을 재사용했으면(cached) 즉시 뜨고, 한 번도 분석 안 한 몰이라
   // 지금 막 새로 훑었으면(false) 시간이 걸린다 — 사용자가 그 차이를 알 수 있도록 상태만 같이 보여준다.
   const [categoriesCached, setCategoriesCached] = useState<{ cached: boolean; updatedAt: string | null } | null>(null)
+  // discoverCategoryLinks가 하위 카테고리 확인차 대분류 페이지를 열었다가 로그인 페이지로 튕긴 적이
+  // 있으면 true — 회원전용 도매몰(모자사러 등)은 개인 크롬 프로필을 통째로 복사해도 로그인 세션 자체가
+  // 넘어오지 않는다는 게 이미 확인된 구조적 한계라(!specifications/manual-login-required-malls.md
+  // 2026-07-18 항목), "다시 확인"을 몇 번을 눌러도 하위 카테고리가 펼쳐지지 않는 이유를 화면에서 바로
+  // 알려준다(사용자 실사용 확인, 2026-08-18 — 크롬을 완전히 닫고 새로 복사해도 로그인이 반영 안 됨을
+  // 직접 재현해 확정).
+  const [loginBlockedExpansion, setLoginBlockedExpansion] = useState(false)
   const [detectedPlatform, setDetectedPlatform] = useState<string | null>(null)
   // 카테고리를 나눠서(오늘 일부, 나중에 나머지) 스크랩하는 경우가 있어, 이 몰의 과거 완료 세션들을 훑어
   // "이미 스크랩해본 카테고리"를 체크박스 목록에 표시한다(app/api/scrape/categories가 계산해 내려줌).
@@ -512,6 +564,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 일반모드 카탈로그 미리보기 전용 — 카테고리별 상품 개수만(이름/썸네일 없이). 개발자모드는 이 필드를
   // 채우지 않으므로(확장이 previewItems 쪽만 보냄) 항상 빈 배열로 남아 기존 표시와 자연히 구분된다.
   const [categoryCounts, setCategoryCounts] = useState<CategoryCountItem[]>([])
+  // 카테고리 체크리스트 컬럼용(위 CategoryInfoEntry 참고) — href를 키로 한다.
+  const [categoryInfo, setCategoryInfo] = useState<Record<string, CategoryInfoEntry>>({})
   // 카테고리별 개수 표를 최상위 카테고리 단위로 묶어 개별 접기/펴기 — 하위 카테고리가 많은 몰(예: 익스테리어몰딩
   // 하위 수십 개)에서 한 화면에 다 펼쳐두면 스크롤이 길어지니, 안 볼 그룹은 접어두고 볼 그룹만 펼친다.
   const [collapsedCategoryGroups, setCollapsedCategoryGroups] = useState<Set<string>>(new Set())
@@ -719,7 +773,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     return sites.filter(s => {
       if (clientFilter !== '' && s.client_id !== clientFilter) return false
       if (!q) return true
-      return (s.name || '').toLowerCase().includes(q) || s.url.toLowerCase().includes(q) || (s.main_items || '').toLowerCase().includes(q)
+      // 검색창 placeholder("Mall 이름·메인 품목·URL 검색...")가 그리드에 실제로 보이는 컬럼 중 "거래처"를
+      // 빠뜨리고 있었다 — SITE_PICKER_COLUMNS(그리드가 쓰는 것과 같은 getValue)를 그대로 재사용해 지금
+      // 보이는 컬럼 전부를 검색 대상으로 삼는다(사용자 지적, 2026-08-17). 컬럼이 나중에 추가/변경돼도
+      // 이 검색이 자동으로 같이 따라간다.
+      return SITE_PICKER_COLUMNS.some(col => col.getValue(s).toLowerCase().includes(q))
     })
   }, [sites, siteQuery, clientFilter])
 
@@ -989,6 +1047,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       devmode_category_urls?: string[]
       scrape_profile?: MallProfileSignals | null
       mall_report_updated_at?: string | null
+      category_scrape_history?: Record<string, { lastScrapedAt: string | null; clientName: string | null }>
     }
     setSelectedSite({
       id: full.id, name: full.name, url: full.url, login_url: full.login_url, login_id: full.login_id,
@@ -1011,12 +1070,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     // 변경하면 기존 작업내역은 없어져야 하는게 맞지").
     setCategories([])
     setCategoriesCached(null)
+    setLoginBlockedExpansion(false)
     setDetectedPlatform(null)
     setProfileResult(null)
     setProfileError('')
     setScrapedCategoryHrefs([])
     setAllCategoriesScraped(false)
     setExcludedCategoryHrefs([])
+    setCategoryInfo({})
     setPreviewResult(null)
     setPreviewTotal(null)
     setPreviewItems([]); setCategoryCounts([])
@@ -1030,13 +1091,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       setProfileResult({ signals: cachedProfile, diffs: [], isFirstTime: false, autoRuleFields: [] })
     }
     if (cachedProfile?.categoryLinks?.length) {
-      setCategories(cachedProfile.categoryLinks.map(c => ({ href: c.href, text: c.name })))
+      setCategories(dedupeCategoryLinks(cachedProfile.categoryLinks.map(c => ({ href: c.href, text: c.name }))))
       setDetectedPlatform(cachedProfile.platform || null)
       setCategoriesCached({ cached: true, updatedAt: full.mall_report_updated_at ?? null })
       // "제외"로 표시해둔 카테고리는 몰을 다시 선택했을 때도(카테고리 불러오기를 새로 누르지 않아도)
       // 그대로 유지돼야 한다 — 서버(sites.scrape_profile.excludedCategoryHrefs)에는 이미 저장돼 있었지만,
       // 캐시 복원 경로가 이 필드를 안 읽어와 화면에서는 매번 비어 보이던 문제(사용자 지적, 2026-08-16).
       setExcludedCategoryHrefs(cachedProfile.excludedCategoryHrefs || [])
+      // 카테고리 체크리스트의 상품개수/확인일시/최근 스크랩/업체 컬럼 복원(사용자 요청, 2026-08-17).
+      if (cachedProfile.categoryCounts) {
+        setCategoryInfo(mergeCategoryInfo(cachedProfile.categoryCounts, full.category_scrape_history || {}))
+      }
     }
     // AI모드는 일반모드에선 그냥 로컬 상태(기본 켜짐)지만, 개발자모드는 확장이 실행 시점마다 서버에서
     // 값을 물어봐야 해서 DB에 저장해둔 값을 그대로 복원한다.
@@ -1221,13 +1286,19 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       const d = await res.json() as {
         links: { href: string; text: string }[]; platform: string; cached: boolean; updatedAt: string | null
         scrapedHrefs?: string[]; allScraped?: boolean; excludedCategoryHrefs?: string[]
+        categoryCounts?: Record<string, { count: number; truncated?: boolean; label: string; checkedAt: string }>
+        categoryScrapeHistory?: Record<string, { lastScrapedAt: string | null; clientName: string | null }>
+        loginBlockedExpansion?: boolean
       }
-      setCategories(d.links || [])
+      setCategories(dedupeCategoryLinks(d.links || []))
       setDetectedPlatform(d.platform || null)
       setCategoriesCached({ cached: d.cached, updatedAt: d.updatedAt ?? null })
+      setLoginBlockedExpansion(!!d.loginBlockedExpansion)
       setScrapedCategoryHrefs(d.scrapedHrefs || [])
       setAllCategoriesScraped(!!d.allScraped)
       setExcludedCategoryHrefs(d.excludedCategoryHrefs || [])
+      // 카테고리 체크리스트의 상품개수/확인일시/최근 스크랩/업체 컬럼(사용자 요청, 2026-08-17).
+      setCategoryInfo(mergeCategoryInfo(d.categoryCounts || {}, d.categoryScrapeHistory || {}))
     } finally {
       setCategoriesLoading(false)
     }
@@ -1265,8 +1336,15 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   }
   function toggleCategory(href: string) {
     const lines = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
-    const next = lines.includes(href) ? lines.filter(l => l !== href) : [...lines, href]
-    setCategoryUrlsText(next.join('\n'))
+    const next = new Set(lines)
+    if (next.has(href)) next.delete(href); else next.add(href)
+    // 체크리스트에 있는 항목은 클릭한 순서가 아니라 체크리스트가 보여주는 순서(발견 순서) 그대로
+    // 정렬해서 넣는다 — 예전엔 클릭한 순서 그대로 뒤에 붙여서, 아래 "카테고리별 상품 개수" 표(이
+    // 목록 순서를 그대로 따름)가 체크리스트와 순서가 안 맞았다(사용자 지적, 2026-08-17). 체크리스트에
+    // 없는 직접 입력 URL은 원래 있던 순서를 그대로 유지해 뒤에 붙인다.
+    const known = categories.filter(c => next.has(c.href)).map(c => c.href)
+    const manual = lines.filter(h => next.has(h) && !categories.some(c => c.href === h))
+    setCategoryUrlsText([...known, ...manual].join('\n'))
   }
   // "제외"로 표시해둔 카테고리(상품이 없는 안내/게시판 페이지 등)는 전체선택 대상에서 뺀다 — 안 그러면
   // 전체선택을 누를 때마다 방금 제외해둔 카테고리까지 다시 스크랩 대상으로 딸려 들어간다(실사용 확인,
@@ -1283,6 +1361,19 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setDetectedPlatform(d.platform || null)
     setPreviewItems((d.items || []).slice(d.preview ? 1 : 0)) // 첫 상품은 위 상세 카드에 이미 나오니 그리드에서는 제외
     setCategoryCounts(d.categoryCounts || [])
+    // 체크리스트의 상품개수/확인일시 컬럼도 곧바로 갱신한다 — 서버(lib/scraper.ts의 persistCategoryCounts)에도
+    // 저장은 되지만, 이 탭이 그 값을 다시 받으려면 새로고침해야 하니 방금 받은 결과를 바로 반영한다.
+    // 최근 스크랩/업체는 이 응답에 없어(DB 조회가 더 필요함) 기존 값을 그대로 둔다(사용자 요청, 2026-08-17).
+    if (d.categoryCounts?.length) {
+      const checkedAt = new Date().toISOString()
+      setCategoryInfo(prev => {
+        const next = { ...prev }
+        for (const c of d.categoryCounts!) {
+          next[c.url] = { ...next[c.url], count: c.count, truncated: c.truncated, label: c.label, checkedAt }
+        }
+        return next
+      })
+    }
     if (d.preview) setPreviewResult(d.preview)
     setSessionExpiredWarning(!!d.needsLogin)
     if (d.needsLogin) handleOpenLogin()
@@ -1641,6 +1732,20 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         </p>
       )}
 
+      {/* 회원전용 몰(개발자모드)은 개인 크롬 프로필을 통째로 복사해도 로그인 세션 자체가 넘어오지
+          않는다는 게 이미 확인된 구조적 한계라(!specifications/manual-login-required-malls.md
+          2026-07-18 항목 — 모자사러로 직접 재현 확정, 2026-08-18), 하위 카테고리 자동 펼치기가 로그인
+          페이지에 막혀 몇 번을 "다시 확인"해도 그대로일 수 있다 — 크롬을 닫아도 소용없다는 게 핵심이라
+          "닫고 다시 시도하라"고 안내하지 않는다. */}
+      {loginBlockedExpansion && (
+        <p className="text-[11px] text-amber-600 mt-1">
+          ⚠ 로그인이 필요한 페이지가 있어 일부 카테고리의 하위 구조를 자동으로 확인하지 못했습니다 — 이
+          몰은 프로필을 복사해도 로그인 세션이 넘어오지 않는 구조라(크롬을 닫고 다시 해도 동일) 자동
+          펼치기의 구조적 한계입니다. 실제로 하위 카테고리가 있다면 사이트에서 URL을 직접 복사해 아래
+          &quot;카테고리 URL 목록&quot;에 추가해주세요.
+        </p>
+      )}
+
       {detectedPlatform && (
         <p className="text-xs text-teal-600 mt-1">
           감지된 몰 유형: <span className="font-medium">{PLATFORM_LABELS[detectedPlatform] || detectedPlatform}</span>
@@ -1650,13 +1755,21 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
       {categories.length > 0 && (
         <>
-          <p className="text-xs text-teal-700 mt-1">💡 아래에서 여러 카테고리를 체크하면, 체크한 카테고리들을 한 번에 스크랩 대상으로 지정할 수 있습니다.</p>
+          <p className="text-xs text-teal-700 mt-1">
+            💡 아래에서 여러 카테고리를 체크하면, 체크한 카테고리들을 한 번에 스크랩 대상으로 지정할 수 있습니다.
+            발견된 카테고리 {categories.length}개
+            {categories.some(c => isCategoryScraped(c.href)) &&
+              ` (완료 ${categories.filter(c => isCategoryScraped(c.href)).length}개)`}.
+          </p>
           <div className="mt-1.5 border border-teal-200 bg-white rounded-xl overflow-hidden">
-            <div className="h-40 min-h-[80px] max-h-[70vh] resize-y overflow-y-auto">
+            <div className="h-40 min-h-[80px] max-h-[70vh] resize-y overflow-auto">
               <table className="w-full text-xs border-collapse">
                 <thead>
                   {/* 전체선택 체크박스를 우측 텍스트 링크 대신 아래 행 체크박스와 같은 왼쪽 칸에
-                      둔다 — 실제 <thead>/<tbody>로 같은 표에 넣어야 폭이 항상 정확히 맞는다. */}
+                      둔다 — 실제 <thead>/<tbody>로 같은 표에 넣어야 폭이 항상 정확히 맞는다. 예전엔
+                      카테고리명/URL/제외 3칸을 "발견된 카테고리 N개..." 한 문구로 묶어 보여줬는데, 상품개수/
+                      확인일시/최근 스크랩/업체 컬럼이 추가되며 각자 라벨이 있는 게 명확해 위 문단으로
+                      옮기고 컬럼마다 이름을 붙였다(사용자 요청, 2026-08-17). */}
                   <tr className="sticky top-0 z-[2] bg-teal-50 border-b border-teal-100">
                     <th className="px-3 py-1.5 w-6 sticky left-0 z-[1] bg-teal-50 font-normal text-left">
                       <input type="checkbox" title="전체 선택/해제 (몰 전체상품, 제외 표시한 카테고리는 빠짐)"
@@ -1664,11 +1777,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                         ref={el => { if (el) el.indeterminate = selectableCategories.some(c => isCategorySelected(c.href)) && !selectableCategories.every(c => isCategorySelected(c.href)) }}
                         onChange={toggleAllCategories} />
                     </th>
-                    <th colSpan={3} className="px-3 py-1.5 text-gray-500 font-normal text-left">
-                      발견된 카테고리 {categories.length}개
-                      {categories.some(c => isCategoryScraped(c.href)) &&
-                        ` (완료 ${categories.filter(c => isCategoryScraped(c.href)).length}개)`} — 스크랩할 항목을 선택하세요
-                    </th>
+                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap">카테고리</th>
+                    <th className="px-3 py-1.5 text-gray-500 font-normal text-right whitespace-nowrap" title="스크랩 미리보기로 확인된 상품 개수">상품개수</th>
+                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="상품개수를 마지막으로 확인한 시각">확인일시</th>
+                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="이 카테고리 상품이 실제로 스크랩된 가장 최근 시각">최근 스크랩</th>
+                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="가장 최근에 이 카테고리 상품을 마이그레이션한 업체">업체</th>
+                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left">URL</th>
+                    <th className="px-3 py-1.5 w-12 sticky right-0 bg-teal-50" />
                   </tr>
                 </thead>
                 <tbody>
@@ -1676,7 +1791,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       맨 아래로 정리한다 — Array.sort는 안정 정렬이라 같은 그룹(제외/비제외) 안에서는
                       원래 발견 순서가 그대로 유지된다. */}
                   {[...categories].sort((a, b) => Number(isCategoryExcluded(a.href)) - Number(isCategoryExcluded(b.href))).map(c => {
-                    const countItem = categoryCountByHref.get(c.href)
+                    // 이번 세션에 방금 미리보기를 돌렸으면(categoryCountByHref) 그 값이 가장 최신이고,
+                    // 아직 안 돌렸으면 저장돼 있던 값(categoryInfo, 몰 선택 시 또는 카테고리 불러오기 시
+                    // 복원됨)을 보여준다(사용자 요청, 2026-08-17 — 예전엔 이 정보가 카테고리명 옆 배지로만
+                    // 있었는데 컬럼으로 분리했다).
+                    const info = categoryInfo[c.href]
+                    const live = categoryCountByHref.get(c.href)
+                    const count = live ?? (info?.count != null ? { count: info.count, truncated: info.truncated } : undefined)
+                    const truncatedTitle = '확인 상한에 도달할 때까지도 새 상품이 계속 나와 멈췄습니다 — 실제로는 더 많을 수 있습니다.'
                     return (
                     <tr key={c.href} onClick={() => toggleCategory(c.href)}
                       className={`group border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer ${isCategoryExcluded(c.href) ? 'opacity-50' : ''}`}>
@@ -1685,20 +1807,24 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       </td>
                       <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
                         <span className={isCategoryExcluded(c.href) ? 'line-through' : ''}>{c.text}</span>
-                        {countItem !== undefined && (
-                          <span className="ml-1.5 text-[10px] font-semibold text-gray-500"
-                            title={countItem.truncated
-                              ? '확인 상한(50페이지)에 도달할 때까지도 새 상품이 계속 나와 멈췄습니다 — 실제로는 더 많을 수 있습니다.'
-                              : '스크랩 미리보기로 확인된 상품 개수'}>
-                            ({countItem.count.toLocaleString()}{countItem.truncated ? '개 이상' : '개'})
-                          </span>
-                        )}
                         {isCategoryScraped(c.href) && (
                           <span className="ml-1.5 text-[10px] font-semibold text-teal-600" title="이 카테고리는 이전에 스크래핑을 완료한 적이 있습니다">✓ 완료</span>
                         )}
                         {isCategoryExcluded(c.href) && (
                           <span className="ml-1.5 text-[10px] font-semibold text-gray-400" title="상품 카테고리가 아닌 것으로 표시해뒀습니다">제외됨</span>
                         )}
+                      </td>
+                      <td className="px-3 py-1.5 text-right text-gray-600 whitespace-nowrap" title={count?.truncated ? truncatedTitle : undefined}>
+                        {count ? `${count.count.toLocaleString()}${count.truncated ? '개 이상' : '개'}` : '-'}
+                      </td>
+                      <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap" title={info?.checkedAt ? new Date(info.checkedAt).toLocaleString() : undefined}>
+                        {info?.checkedAt ? formatShortDate(info.checkedAt) : '-'}
+                      </td>
+                      <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap" title={info?.lastScrapedAt ? new Date(info.lastScrapedAt).toLocaleString() : undefined}>
+                        {info?.lastScrapedAt ? formatShortDate(info.lastScrapedAt) : '-'}
+                      </td>
+                      <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap truncate max-w-[120px]" title={info?.clientName || undefined}>
+                        {info?.clientName || '-'}
                       </td>
                       <td className="px-3 py-1.5 max-w-[320px] truncate">
                         <button type="button" onClick={e => { e.stopPropagation(); handleOpenItem(c.href) }}
@@ -1773,8 +1899,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 </select>
               </label>
               <label className="flex-1 min-w-[200px] block">
-                <span className="sr-only">Mall 이름 · 메인 품목 · URL 검색</span>
-                <input value={siteQuery} onChange={e => setSiteQuery(e.target.value)} placeholder="Mall 이름·메인 품목·URL 검색..."
+                <span className="sr-only">Mall 이름 · 메인 품목 · 거래처 · URL 검색</span>
+                <input value={siteQuery} onChange={e => setSiteQuery(e.target.value)} placeholder="Mall 이름·메인 품목·거래처·URL 검색..."
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
               </label>
             </div>
@@ -2573,53 +2699,82 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
           </>}
 
-          {categoryCounts.length > 0 && (
-            <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
-              <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500">
-                카테고리별 상품 개수 (목록 페이지 기준 — 상세페이지는 열어보지 않아 빠릅니다)
-              </div>
-              {/* 세로로 드래그해서 원하는 높이만큼 늘려볼 수 있게(resize-y) — 행이 많은 몰에서 고정
-                  높이/스크롤만으론 답답하다는 피드백. */}
-              <div className="h-[200px] min-h-[80px] max-h-[70vh] resize-y overflow-y-auto">
-                <table className="w-full text-xs border-collapse">
-                  <thead className="sticky top-0 z-10 bg-gray-50">
-                    <tr className="border-b border-gray-200 text-gray-500 font-semibold">
-                      <th className="px-3 py-2 text-left">카테고리</th>
-                      <th className="px-3 py-2 text-right w-20">개수</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(() => {
-                      // label은 "최상위 > 하위" 형태(lib/scraper.ts가 path.join(' > ')로 만듦) — 최상위
-                      // 기준으로 묶는다. 최상위 하나에 하위가 1개뿐이면 굳이 접을 필요 없어 기존처럼 그대로 보여준다.
-                      const groups: { key: string; total: number; truncated: boolean; items: CategoryCountItem[] }[] = []
-                      const groupIndexByKey = new Map<string, number>()
-                      for (const c of categoryCounts) {
-                        const top = c.label.split(' > ')[0]
-                        let idx = groupIndexByKey.get(top)
-                        if (idx === undefined) {
-                          idx = groups.length
-                          groupIndexByKey.set(top, idx)
-                          groups.push({ key: top, total: 0, truncated: false, items: [] })
-                        }
-                        groups[idx].total += c.count
-                        groups[idx].truncated = groups[idx].truncated || !!c.truncated
-                        groups[idx].items.push(c)
-                      }
-                      // truncated면 상한(50페이지)에 도달할 때까지도 새 상품이 계속 나와 멈춘 것이라 count가
-                      // 정확한 총합이 아니라 최소치다(lib/scraper.ts의 CategoryCount.truncated 참고) — "N개
-                      // 이상"으로 정직하게 표시한다.
-                      const countLabel = (c: { count: number; truncated?: boolean }) => `${c.count.toLocaleString()}개${c.truncated ? ' 이상' : ''}`
-                      const truncatedTitle = '확인 상한(50페이지)에 도달할 때까지도 새 상품이 계속 나와 멈췄습니다 — 실제로는 더 많을 수 있습니다.'
-                      return groups.map(g => {
+          {(() => {
+            // 이 표는 예전엔 마지막 미리보기 응답(categoryCounts)만 그렸는데, 그러면 (1) 위 체크리스트에서
+            // 선택했지만 아직 그 회차에 포함 안 된(또는 개발자모드에서 부분적으로만 확인된) 카테고리는
+            // 행 자체가 안 보이고, (2) 순서도 응답 순서를 그대로 따라 체크리스트 순서와 어긋날 수 있었다
+            // (사용자 지적, 2026-08-17: "위 카테고리불러오기에는 있는데 아래엔 없는 게 있다" + "순서도
+            // 맞춰야지"). 지금 선택된 카테고리 전체(categoryUrlsText, 체크리스트와 항상 같은 순서 —
+            // toggleCategory 참고)를 기준으로 그리고, 개수를 아직 모르면 "미확인"으로 행만 보여준다.
+            const selectedHrefs = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
+            if (!selectedHrefs.length) return null
+            const categoryTextByHref = new Map(categories.map(c => [c.href, c.text]))
+            type Row = { url: string; label: string; count: number | null; truncated: boolean }
+            const rows: Row[] = selectedHrefs.map(href => {
+              // 이번 세션에 방금 미리보기를 돌렸으면(categoryCountByHref) 그 값이 가장 최신이고, 아니면
+              // 저장된 값(categoryInfo)을 쓴다 — 체크리스트 컬럼과 같은 우선순위(사용자 요청, 2026-08-17).
+              const live = categoryCountByHref.get(href)
+              const info = categoryInfo[href]
+              return {
+                url: href,
+                label: live?.label || info?.label || categoryTextByHref.get(href) || href,
+                count: live?.count ?? info?.count ?? null,
+                truncated: live?.truncated ?? info?.truncated ?? false,
+              }
+            })
+            // label은 "최상위 > 하위" 형태(lib/scraper.ts가 path.join(' > ')로 만듦) — 최상위 기준으로
+            // 묶는다. 아직 미확인이라 label이 체크리스트 텍스트(하위 구분 없음)뿐인 행은 그 텍스트 전체를
+            // 최상위로 본다. 최상위 하나에 하위가 1개뿐이면 굳이 접을 필요 없어 그대로 보여준다.
+            const groups: { key: string; total: number; truncated: boolean; unknownCount: number; items: Row[] }[] = []
+            const groupIndexByKey = new Map<string, number>()
+            for (const r of rows) {
+              const top = r.label.split(' > ')[0]
+              let idx = groupIndexByKey.get(top)
+              if (idx === undefined) {
+                idx = groups.length
+                groupIndexByKey.set(top, idx)
+                groups.push({ key: top, total: 0, truncated: false, unknownCount: 0, items: [] })
+              }
+              if (r.count == null) groups[idx].unknownCount++
+              else groups[idx].total += r.count
+              groups[idx].truncated = groups[idx].truncated || !!r.truncated
+              groups[idx].items.push(r)
+            }
+            // truncated면 상한(lib/scraper.ts의 AUTO_PAGINATION_CAP)에 도달할 때까지도 새 상품이
+            // 계속 나와 멈춘 것이라 count가 정확한 총합이 아니라 최소치다(CategoryCount.truncated
+            // 참고) — "N개 이상"으로 정직하게 표시한다.
+            const countLabel = (r: { count: number | null; truncated?: boolean }) =>
+              r.count == null ? '미확인' : `${r.count.toLocaleString()}개${r.truncated ? ' 이상' : ''}`
+            const truncatedTitle = '확인 상한에 도달할 때까지도 새 상품이 계속 나와 멈췄습니다 — 실제로는 더 많을 수 있습니다.'
+            const unconfirmedTitle = '아직 이 카테고리로 "스크랩 미리보기"를 돌리지 않아 개수를 모릅니다.'
+            return (
+              <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
+                <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500">
+                  카테고리별 상품 개수 (목록 페이지 기준 — 상세페이지는 열어보지 않아 빠릅니다) — 위 체크리스트에서 선택한 카테고리 전체를 같은 순서로 보여줍니다.
+                </div>
+                {/* 세로로 드래그해서 원하는 높이만큼 늘려볼 수 있게(resize-y) — 행이 많은 몰에서 고정
+                    높이/스크롤만으론 답답하다는 피드백. */}
+                <div className="h-[200px] min-h-[80px] max-h-[70vh] resize-y overflow-y-auto">
+                  <table className="w-full text-xs border-collapse">
+                    <thead className="sticky top-0 z-10 bg-gray-50">
+                      <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+                        <th className="px-3 py-2 text-left">카테고리</th>
+                        <th className="px-3 py-2 text-right w-20">개수</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {groups.map(g => {
                         if (g.items.length === 1) {
-                          const c = g.items[0]
+                          const r = g.items[0]
                           return (
-                            <tr key={c.url} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
-                              <td className="px-3 py-1.5 truncate max-w-[320px]" title={c.url}>
-                                <button type="button" onClick={() => handleOpenItem(c.url)} className="text-teal-500 hover:underline text-left">{c.label}</button>
+                            <tr key={r.url} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                              <td className="px-3 py-1.5 truncate max-w-[320px]" title={r.url}>
+                                <button type="button" onClick={() => handleOpenItem(r.url)} className="text-teal-500 hover:underline text-left">{r.label}</button>
                               </td>
-                              <td className="px-3 py-1.5 text-right text-gray-700" title={c.truncated ? truncatedTitle : undefined}>{countLabel(c)}</td>
+                              <td className={`px-3 py-1.5 text-right ${r.count == null ? 'text-gray-400' : 'text-gray-700'}`}
+                                title={r.count == null ? unconfirmedTitle : r.truncated ? truncatedTitle : undefined}>
+                                {countLabel(r)}
+                              </td>
                             </tr>
                           )
                         }
@@ -2636,27 +2791,32 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                                   {collapsed ? '▸' : '▾'} {g.key} ({g.items.length}개 카테고리)
                                 </button>
                               </td>
-                              <td className="px-3 py-1.5 text-right text-gray-700 font-semibold" title={g.truncated ? truncatedTitle : undefined}>{countLabel({ count: g.total, truncated: g.truncated })}</td>
+                              <td className="px-3 py-1.5 text-right text-gray-700 font-semibold" title={g.truncated ? truncatedTitle : undefined}>
+                                {g.total.toLocaleString()}개{g.truncated ? ' 이상' : ''}{g.unknownCount > 0 && ` (+미확인 ${g.unknownCount}개)`}
+                              </td>
                             </tr>
-                            {!collapsed && g.items.map(c => (
-                              <tr key={c.url} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
-                                <td className="pl-6 pr-3 py-1.5 truncate max-w-[320px]" title={c.url}>
-                                  <button type="button" onClick={() => handleOpenItem(c.url)} className="text-teal-500 hover:underline text-left">
-                                    {c.label.slice(g.key.length).replace(/^ > /, '')}
+                            {!collapsed && g.items.map(r => (
+                              <tr key={r.url} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                                <td className="pl-6 pr-3 py-1.5 truncate max-w-[320px]" title={r.url}>
+                                  <button type="button" onClick={() => handleOpenItem(r.url)} className="text-teal-500 hover:underline text-left">
+                                    {r.label.slice(g.key.length).replace(/^ > /, '') || r.label}
                                   </button>
                                 </td>
-                                <td className="px-3 py-1.5 text-right text-gray-700" title={c.truncated ? truncatedTitle : undefined}>{countLabel(c)}</td>
+                                <td className={`px-3 py-1.5 text-right ${r.count == null ? 'text-gray-400' : 'text-gray-700'}`}
+                                  title={r.count == null ? unconfirmedTitle : r.truncated ? truncatedTitle : undefined}>
+                                  {countLabel(r)}
+                                </td>
                               </tr>
                             ))}
                           </Fragment>
                         )
-                      })
-                    })()}
-                  </tbody>
-                </table>
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
-          )}
+            )
+          })()}
         </div>
       )}
 
@@ -2688,7 +2848,26 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             {status === 'stopped' || status === 'error' ? '이어서 스크랩하기 (기존 상품 제외)' : status === 'done' ? '✓ 스크래핑 완료 (다시 시작)' : '스크래핑 시작'}
           </button>
         </>
-      ) : null}
+      ) : (
+        // 개발자모드는 실제 스크랩을 PTP가 아니라 사용자의 개인 크롬 확장이 몰 탭에서 직접 실행한다
+        // (자동화 감지 회피) — 그래서 버튼이 있어야 할 자리를 통째로 비워두면 "버튼이 없어졌다/고장났다"로
+        // 보인다는 지적(2026-08-17)이 있었다. 처음엔 안내 문구만 남겼는데, 일반모드와 똑같은 자리에
+        // 똑같은 모양의 "스크래핑 시작" 버튼을 두고 — 미리보기/직접지정 버튼과 같은 방식으로 누르면
+        // 실행하는 대신 어디서 눌러야 하는지 안내만 하도록 다시 바꿨다(2026-08-17 재지적). 진행 중
+        // 표시는 이 버튼과 별개로 아래 "진행 상황" 카드가 이미 맡는다 — 개발자모드도 확장이 세션을 만들면
+        // 5초 간격 폴링(checkForRunningSession)이 감지해 status를 'running'으로 바꾸고, 그 순간 이
+        // 자리 자체가 위 "⏸ 스크래핑 중지" 버튼으로 자동 교체되며 그 카드의 롤링 아이콘(🔄)이 뜬다.
+        <button onClick={async () => {
+          if (loginStep === 'none' && selectedSite) {
+            await handleOpenMallUrlDirect(selectedSite.login_url || selectedSite.url)
+            alert('몰 탭을 열었습니다 — 로그인 후 확장 아이콘 → 팝업의 "🔄 스크랩 시작"을 클릭하세요.')
+          } else {
+            alert('몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🔄 스크랩 시작"을 클릭하세요.')
+          }
+        }} className="w-full py-3 rounded-2xl font-semibold text-sm bg-teal-500 text-white hover:bg-teal-600 transition-colors">
+          스크래핑 시작
+        </button>
+      )}
 
       {/* 진행 상황 */}
       {status !== 'idle' && (

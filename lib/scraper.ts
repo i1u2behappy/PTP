@@ -561,6 +561,14 @@ export async function withContext<T>(
               headless: true, channel: 'chrome', chromiumSandbox: true,
               args: profileDirName !== 'Default' ? [`--profile-directory=${profileDirName}`] : [],
             })
+            // launchVisibleWindow와 같은 이유 — navigator.webdriver=true는 Playwright로 띄운 크롬임을
+            // 드러내는 가장 흔한 신호다. 이 경로는 로그인을 다시 시도하지 않아(이미 유효한 쿠키 재사용)
+            // PC인증 자체에 걸릴 일은 없지만, "카테고리 불러오기"/"몰 구조분석"이 헤드리스로 도는 동안
+            // 자동화 탐지에 걸려 다른 응답을 받을 위험을 줄인다(사용자 지적, 2026-08-17 — 확장으로
+            // 옮기지 않고 이 경로를 계속 쓰기로 한 결정에 맞춰 안전장치만 보강).
+            await context.addInitScript(() => {
+              Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
+            })
           } catch (e) {
             throw new Error(`개인 크롬 프로필 복사본 실행에 실패했습니다: ${e instanceof Error ? e.message : String(e)}`)
           }
@@ -2737,6 +2745,63 @@ export async function countDedupedProductUrls(opts: ScrapeOptions): Promise<{ to
   }, '정확한 총 개수 확인')
 }
 
+/** "카테고리 불러오기" 체크리스트에 상품개수/확인일시 컬럼을 보여주기 위해, 미리보기(일반모드
+ *  previewCatalog/개발자모드 preview-capture)가 구한 카테고리별 개수를 sites.scrape_profile에 누적
+ *  저장한다(사용자 요청, 2026-08-17). href를 키로 하는 맵에 얕은 병합(||)만 하므로, 이번에 확인한
+ *  카테고리만 갱신되고 그 전에 다른 회차에서 확인해둔 나머지 카테고리 값은 그대로 남는다 — 몰 전체를
+ *  한 번에 미리보기하지 않고 몇 개씩 나눠 확인해도 각자 자기 확인 시각을 유지한다. */
+export async function persistCategoryCounts(
+  siteId: number, counts: { url: string; label: string; count: number; truncated?: boolean }[],
+): Promise<void> {
+  if (!counts.length) return
+  const checkedAt = new Date().toISOString()
+  const map: Record<string, { count: number; truncated?: boolean; label: string; checkedAt: string }> = {}
+  for (const c of counts) map[c.url] = { count: c.count, truncated: c.truncated, label: c.label, checkedAt }
+  await pool.query(
+    `UPDATE sites SET
+       scrape_profile = COALESCE(scrape_profile, '{}'::jsonb)
+         || jsonb_build_object('categoryCounts',
+              COALESCE(scrape_profile->'categoryCounts', '{}'::jsonb) || $1::jsonb)
+     WHERE id=$2`,
+    [JSON.stringify(map), siteId],
+  )
+}
+
+/** 카테고리 체크리스트에 "이 카테고리는 최근에 언제 스크랩됐고 어느 업체로 마이그레이션됐는지" 보여주기
+ *  위한 조회(사용자 요청, 2026-08-17). 카테고리는 href(URL) 단위지만 실제 스크랩된 상품(mall_products)은
+ *  href를 남기지 않고 목록 페이지에서 감지한 텍스트 라벨(mall_category, detectCategoryLabel과 동일
+ *  형식)만 남기므로, href가 아니라 라벨로 매칭한다 — persistCategoryCounts가 저장해둔 categoryCounts의
+ *  label을 그대로 쓰면 previewCatalog가 쓴 것과 같은 라벨이라 매칭 정확도가 가장 높다.
+ *  업체는 한 카테고리가 여러 업체로 나눠 마이그레이션됐을 수 있어 "가장 최근에 마이그레이션된 업체
+ *  하나"만 보여주기로 했다(사용자 선택, 2026-08-17) — DISTINCT ON으로 라벨별 최신 product_master
+ *  1건만 뽑는다. */
+export async function getCategoryScrapeHistory(
+  siteId: number, labels: string[],
+): Promise<Record<string, { lastScrapedAt: string | null; clientName: string | null }>> {
+  const result: Record<string, { lastScrapedAt: string | null; clientName: string | null }> = {}
+  if (!labels.length) return result
+  const scrapedRes = await pool.query<{ mall_category: string; last_scraped_at: string | null }>(
+    `SELECT mall_category, MAX(last_scraped_at) AS last_scraped_at FROM mall_products
+     WHERE site_id=$1 AND mall_category = ANY($2) GROUP BY mall_category`,
+    [siteId, labels],
+  )
+  for (const row of scrapedRes.rows) result[row.mall_category] = { lastScrapedAt: row.last_scraped_at, clientName: null }
+  const clientRes = await pool.query<{ mall_category: string; client_name: string }>(
+    `SELECT DISTINCT ON (mp.mall_category) mp.mall_category, sc.name AS client_name
+     FROM product_master pmaster
+     JOIN mall_products mp ON mp.id = pmaster.mall_product_id
+     JOIN supply_clients sc ON sc.id = pmaster.client_id
+     WHERE mp.site_id=$1 AND mp.mall_category = ANY($2)
+     ORDER BY mp.mall_category, pmaster.created_at DESC`,
+    [siteId, labels],
+  )
+  for (const row of clientRes.rows) {
+    if (!result[row.mall_category]) result[row.mall_category] = { lastScrapedAt: null, clientName: null }
+    result[row.mall_category].clientName = row.client_name
+  }
+  return result
+}
+
 /**
  * '단일 상품 페이지' 모드로 스크랩을 시작해도, 실제로는 상품이 여럿 있는 카테고리(목록) URL을 넣는
  * 실수가 흔하다. 시작 URL에서 자기 자신이 아닌 다른 상품 링크가 여럿 발견되면 목록으로 판단해, 실제
@@ -3921,6 +3986,12 @@ export interface CategoryLink {
 export interface CategoryDiscoveryResult {
   platform: MallPlatform
   links: CategoryLink[]
+  /** 하위 카테고리 확인차 대분류 페이지를 방문했다가 로그인 페이지로 튕긴 적이 있으면 true — 회원전용
+   *  도매몰(모자사러 등)은 프로필을 통째로 복사해도 로그인 세션 자체가 넘어오지 않는다는 게 이미
+   *  확인된 구조적 한계라(!specifications/manual-login-required-malls.md 2026-07-18 항목 참고), 이런
+   *  몰은 "다시 확인"을 몇 번을 눌러도 하위 카테고리가 펼쳐지지 않는다 — 화면에서 그 이유를 알려주기
+   *  위한 신호다(사용자 실사용 확인, 2026-08-18). */
+  loginBlockedExpansion?: boolean
 }
 
 /** 시작 URL 페이지에서 카테고리 메뉴로 보이는 링크를 찾아 사용자가 고를 수 있도록 목록으로 반환한다.
@@ -3970,8 +4041,69 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
         categoryLinks = [...categoryLinks, ...extra]
       }
 
+      // 대분류=상품목록인 카테고리와 대분류=중분류허브(그 자체엔 상품이 없고 하위 메뉴로만 이어짐)인
+      // 카테고리가 섞여 있는 몰이 있다(모자사러 실사용 확인, 2026-08-17 — "캡모자"는 볼캡/캠프캡/군모
+      // 등 중분류로 가는 허브일 뿐 그 자체엔 상품 링크가 0개라, 미리보기/스크랩 단계의 "링크 0개면
+      // 조용히 건너뛴다" 처리 때문에 체크리스트에 카테고리가 있어도 개수가 영영 안 나왔다). 발견된
+      // 카테고리마다 실제로 상품이 있는지 한 번 확인하고, 없으면 그 페이지 안의 하위 메뉴를 찾아 그
+      // 하위 카테고리들로 대신 펼친다 — 1단계만 펼치고 재귀는 하지 않는다(무한 확장 방지, 실사용상
+      // 대분류>중분류 2단이면 충분). 처음엔 카테고리마다 순서대로 하나씩(waitUntil:'load') 확인했는데,
+      // "카테고리만 불러오는데 몇 분씩 걸린다"는 지적(2026-08-17)으로 두 가지를 같이 고쳤다: (1) 상품
+      // 링크만 보면 되니 이미지까지 기다리는 'load' 대신 'domcontentloaded'로 충분하다(카운팅 로직이
+      // 이미 같은 이유로 쓰는 것과 동일), (2) collectProductUrls의 LISTING_CONCURRENCY와 같은 방식으로
+      // 탭 여러 개를 동시에 열어 확인한다. 그래도 카테고리 수만큼 페이지를 더 열어야 하는 건 그대로라
+      // "카테고리 불러오기"/"다시 확인"은 여전히 이전보다 느리지만, 결과가 캐시되므로 매 미리보기마다
+      // 반복되지는 않는다(사용자 동의, 2026-08-17).
+      const profile = PLATFORM_PROFILES[platform]
+      const userSel = opts.productLinkSelector || null
+      const platformSel = profile.productLinkSelector
+      const detailPatternSrc = profile.detailUrlPattern?.source
+      const baseUrl = new URL(url).origin
+      const expandedByIndex: CategoryMenuLink[][] = new Array(categoryLinks.length)
+      const EXPAND_CONCURRENCY = Math.min(resolveConcurrency(opts, 4), categoryLinks.length || 1)
+      // 대분류 자기 자신의 href 목록 — 어느 카테고리 상세 페이지를 열어도 사이트 전체 대분류 메뉴(GNB)가
+      // 항상 그대로 떠 있어, scanCategoryMenuRobust를 그 페이지에서 다시 돌리면 "하위 메뉴"가 아니라 이
+      // GNB를 그대로 다시 찾아버릴 수 있다(모자사러 실사용 확인, 2026-08-17 — "캡모자"의 하위로 신발/가방
+      // 같은 다른 대분류가 잘못 붙어 나옴). 대분류 자신의 href와 겹치는 항목은 진짜 하위 메뉴가 아니라 그
+      // GNB 재검출이므로 걸러낸다.
+      const topLevelHrefSet = new Set(categoryLinks.map(c => c.href))
+      let cursor = 0
+      let loginBlockedExpansion = false
+      async function expandWorker(workerPage: Page) {
+        while (true) {
+          const i = cursor++
+          if (i >= categoryLinks.length) return
+          const c = categoryLinks[i]
+          const probe = await workerPage.goto(c.href, { waitUntil: 'domcontentloaded', timeout: 20_000 })
+            .then(() => countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl))
+            .catch(() => ({ count: 0, isLoginPage: false, fingerprint: '', hrefs: [] }))
+          if (probe.isLoginPage) loginBlockedExpansion = true
+          if (probe.count > 0 || probe.isLoginPage) { expandedByIndex[i] = [c]; continue }
+          const sub = await scanCategoryMenuRobust(workerPage)
+          const realChildren = sub.links.filter(s => !topLevelHrefSet.has(s.href))
+          // 하위 메뉴도 못 찾으면(진짜로 빈 카테고리일 수도 있음) 원래 항목을 그대로 남긴다.
+          expandedByIndex[i] = realChildren.length
+            ? realChildren.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
+            : [c]
+        }
+      }
+      if (categoryLinks.length) {
+        const workerPages = await Promise.all(
+          Array.from({ length: EXPAND_CONCURRENCY }, (_, idx) => (idx === 0 ? scanPage : context.newPage())),
+        )
+        await Promise.all(workerPages.map(expandWorker))
+        await Promise.all(workerPages.slice(1).map(p => p.close().catch(() => {})))
+      }
+      categoryLinks = expandedByIndex.flat()
+
+      // 서로 다른 대분류 허브가 겹치는 하위 카테고리로 펼쳐지면 같은 href가 두 번 나올 수 있다(모자사러
+      // 실사용 확인, 2026-08-18 — 체크리스트가 href를 React key로 그대로 쓰기 때문에 중복이 있으면
+      // 렌더링 경고/오동작이 난다). 먼저 나온 것을 남기고 뒤에 나온 중복만 제거한다.
+      const seenHrefs = new Set<string>()
+      categoryLinks = categoryLinks.filter(c => (seenHrefs.has(c.href) ? false : (seenHrefs.add(c.href), true)))
+
       const links: CategoryLink[] = categoryLinks.map(c => ({ href: c.href, text: c.name }))
-      return { platform, links }
+      return { platform, links, loginBlockedExpansion }
     } finally {
       await scanPage.close().catch(() => {})
     }

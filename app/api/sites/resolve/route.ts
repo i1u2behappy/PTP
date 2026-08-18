@@ -35,8 +35,10 @@ export async function GET(req: NextRequest) {
     id: number; name: string | null; url: string; extraction_rules: unknown; devmode_ai_preview: boolean
     devmode_category_urls: string[] | null
     last_adjustment_preview: { preview?: { product: Record<string, unknown> } | null } | null
+    scrape_profile: { categoryLinks?: { name: string; href: string }[] } | null
   }>(
-    `SELECT id, name, url, extraction_rules, devmode_ai_preview, devmode_category_urls, last_adjustment_preview FROM sites WHERE manual_login_required = true`,
+    `SELECT id, name, url, extraction_rules, devmode_ai_preview, devmode_category_urls, last_adjustment_preview, scrape_profile
+     FROM sites WHERE manual_login_required = true`,
   )
   const targetHost = normalizeHost(host)
   const match = res.rows.find(row => {
@@ -59,10 +61,14 @@ export async function GET(req: NextRequest) {
   // 이미지 장수 포함)를 보여주려면 이 값이 있어야 한다(없으면 모든 필드가 힌트 없이 빈 채로 보인다).
   // categoryUrls: PTP 화면의 "카테고리 불러오기"에서 체크해둔 카테고리 목록 — 비어있으면 확장은 기존처럼
   // "지금 탭 위치"만 처리하고, 있으면 "스크랩 시작" 때 그 목록을 순서대로 전부 처리한다(background.js의
-  // run() 참고).
+  // run() 참고). categoryLinks: "카테고리 불러오기"가 찾아둔 대분류 전체(선택 여부 무관) — 팝업의 "🧭
+  // 카테고리 하위구조 자동확인"(runExpandCategories)이 이 목록을 순회하며 로그인된 실제 탭에서 하위
+  // 카테고리를 확인한다(2026-08-18, discoverCategoryLinks의 서버 헤드리스 방식은 로그인 필요 몰에서
+  // 세션이 넘어오지 않아 항상 실패하는 게 확인됨 — !specifications/manual-login-required-malls.md 참고).
   return NextResponse.json({
     id: match.id, name: match.name, extractionRules: match.extraction_rules || {}, aiPreviewMode: match.devmode_ai_preview,
     categoryUrls: match.devmode_category_urls || [],
+    categoryLinks: match.scrape_profile?.categoryLinks || [],
     masterLabels, masterOrder, previewProduct: match.last_adjustment_preview?.preview?.product || null,
   }, { headers: corsHeaders() })
 }

@@ -1736,13 +1736,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           않는다는 게 이미 확인된 구조적 한계라(!specifications/manual-login-required-malls.md
           2026-07-18 항목 — 모자사러로 직접 재현 확정, 2026-08-18), 하위 카테고리 자동 펼치기가 로그인
           페이지에 막혀 몇 번을 "다시 확인"해도 그대로일 수 있다 — 크롬을 닫아도 소용없다는 게 핵심이라
-          "닫고 다시 시도하라"고 안내하지 않는다. */}
+          "닫고 다시 시도하라"고 안내하지 않는다. 대신 실제 로그인된 탭에서 대신 확인해주는 확장 버튼
+          (extension-poc/background.js의 runExpandCategories, 2026-08-18 추가)으로 안내한다. */}
       {loginBlockedExpansion && (
         <p className="text-[11px] text-amber-600 mt-1">
-          ⚠ 로그인이 필요한 페이지가 있어 일부 카테고리의 하위 구조를 자동으로 확인하지 못했습니다 — 이
-          몰은 프로필을 복사해도 로그인 세션이 넘어오지 않는 구조라(크롬을 닫고 다시 해도 동일) 자동
-          펼치기의 구조적 한계입니다. 실제로 하위 카테고리가 있다면 사이트에서 URL을 직접 복사해 아래
-          &quot;카테고리 URL 목록&quot;에 추가해주세요.
+          ⚠ 로그인이 필요한 페이지가 있어 일부 카테고리의 하위 구조를 자동으로 확인하지 못했습니다(이
+          몰은 프로필을 복사해도 로그인 세션이 넘어오지 않는 구조라 크롬을 닫고 다시 해도 동일합니다).
+          몰 탭에서 확장 팝업의 &quot;🧭 보조 - 카테고리 하위구조 자동확인&quot;을 실행한 뒤 여기서
+          &quot;다시 확인&quot;을 눌러주세요.
         </p>
       )}
 
@@ -2264,9 +2265,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </li>
           </ol>
           <details className="mt-3 text-xs text-gray-500">
-            <summary className="cursor-pointer select-none hover:text-gray-700">보조 설명 — 몰 구조분석 · 상품 1건만 미리보기 · 컬럼 직접지정</summary>
+            <summary className="cursor-pointer select-none hover:text-gray-700">보조 설명 — 몰 구조분석 · 카테고리 하위구조 확인 · 상품 1건만 미리보기 · 컬럼 직접지정</summary>
             <ul className="list-disc list-inside mt-2 space-y-1.5">
               <li><DevModeLocationBadge where="mall" />(선택, 로그인 전에도 가능) 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🧭 보조 - 몰 구조분석&quot;</b> — 결과는 PTP 화면에 나타납니다.</li>
+              <li>아래 &quot;카테고리 불러오기&quot;에서 일부 카테고리가 하위구조 없이 그대로만 나온다면(로그인이 필요한 몰) → <DevModeLocationBadge where="mall" />로그인한 상태에서 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🧭 보조 - 카테고리 하위구조 자동확인&quot;</b> 실행 → <DevModeLocationBadge where="ptp" />완료 후 &quot;다시 확인&quot;을 누르면 반영됩니다.</li>
               <li><DevModeLocationBadge where="mall" />상품 1건만 먼저 확인하려면 → 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🔍 스크랩 미리보기 - (카테선택)&quot;</b> (PTP의 &quot;스크랩 미리보기&quot;는 안 눌러도 자동 반영됩니다)</li>
               <li>컬럼을 직접 지정하려면 → 먼저 <DevModeLocationBadge where="ptp" />에서 &quot;스크랩 대상 직접지정&quot; 클릭 → <DevModeLocationBadge where="mall" />팝업의 <b className="text-gray-700">&quot;🎯 보조 - 스크랩 대상 직접지정&quot;</b></li>
               <li>확장 아이콘이 안 보이면 퍼즐조각(🧩) 아이콘을 먼저 눌러 목록에서 찾으세요(자주 쓰면 그 옆 핀으로 고정).</li>

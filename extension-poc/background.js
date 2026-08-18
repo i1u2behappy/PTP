@@ -14,10 +14,15 @@ const SITE_API_BASE = `${PTP_ORIGIN}/api/sites`
 const STOP_REQUESTED_ENDPOINT = `${PTP_ORIGIN}/api/scrape/stop-requested`
 const MAX_PRODUCTS = 300 // 안전장치 — 이 이상은 세션을 나눠서 다시 실행
 // collectCategoryLinks(미리보기 개수 집계 전용) 페이지 상한 — lib/scraper.ts의 AUTO_PAGINATION_CAP과
-// 같은 이유로 50 → 1000으로 올렸다(2026-08-17): 걸스굽 "SOLD OUT"처럼 정말로 50페이지(MAX_PRODUCTS와
-// 별개로 세면 2,400여개)보다 큰 카테고리가 있으면 "정확한 총 개수"라던 주석과 달리 조용히 그 상한에서
-// 잘려 실제보다 훨씬 적게 보고됐다.
-const MAX_PREVIEW_PAGES = 1000
+// 같은 이유로 50에서 한 번 올렸다가(2026-08-17: 걸스굽 "SOLD OUT"처럼 정말로 50페이지보다 큰 카테고리가
+// 있으면 조용히 그 상한에서 잘려 실제보다 훨씬 적게 보고됨), 1000은 너무 높았다는 게 바로 재현됨
+// (2026-08-17, 모자사러) — Node쪽(lib/scraper.ts)은 위젯 수식/지수+이분 탐색으로 1000이어도 몇 번만
+// 열어보고 끝나지만, 이 확장은 그런 지름길이 없어 정말로 한 페이지씩 순회한다(페이지마다 throttle()로
+// 1.2~2.4초씩 쉼) — 카테고리를 여러 개 선택해두면 그중 페이지가 많은 것 하나만 있어도 체감상 "멈춘 것
+// 같다"는 신고로 이어질 만큼 오래 걸렸다. Node쪽 지름길이 없는 이 환경에 맞춰 훨씬 낮은 값으로 다시
+// 내린다 — 원래 문제(SOLD OUT류 대형 카테고리 하한 노출)는 여전히 막아주면서, 최악의 경우에도
+// 카테고리 하나당 몇 분 안에는 끝나게 한다.
+const MAX_PREVIEW_PAGES = 150
 
 let siteId = null
 let extractionRules = {}
@@ -35,7 +40,7 @@ async function resolveSite(hostname) {
   if (data.id == null) return null
   return {
     id: data.id, extractionRules: data.extractionRules || {}, aiPreviewMode: !!data.aiPreviewMode,
-    categoryUrls: data.categoryUrls || [],
+    categoryUrls: data.categoryUrls || [], categoryLinks: data.categoryLinks || [],
     masterLabels: data.masterLabels || {}, masterOrder: data.masterOrder || [], previewProduct: data.previewProduct || null,
   }
 }
@@ -140,6 +145,17 @@ async function navigate(tabId, url) {
   await delay(500) // 로딩 완료 이벤트 이후 스크립트 초기화 여유
 }
 
+// URL의 page 쿼리파라미터를 지정한 값으로 바꾼다(없으면 추가) — lib/scraper.ts의 withPageParam과 동일.
+function withPageParam(url, pageNum) {
+  try {
+    const u = new URL(url)
+    u.searchParams.set('page', String(pageNum))
+    return u.toString()
+  } catch {
+    return url
+  }
+}
+
 // 상품 링크/다음페이지 링크 수집 — 페이지 이동 없이 현재 문서만 읽는다. 몰마다 플랫폼이 달라(카페24
 // SEO형, 카페24 고전형, 신우 같은 구형 자체 솔루션, 고도몰 등) 여러 패턴을 다 시도한다(lib/scraper.ts의
 // PLATFORM_PROFILES와 같은 패턴을 씀 — 두 구현이 갈라지지 않도록 플랫폼이 추가되면 항상 같이 반영):
@@ -217,6 +233,54 @@ const COLLECT_LINKS_EXPR = `(() => {
 
   return { links: uniqueLinks, linkInfo: Object.fromEntries(linkInfo), nextUrl, category, brandFromCategory }
 })()`
+
+// 카테고리를 여러 개 선택했을 때(collectCategoryLinks의 fastCountOk) 개수만 필요하면, 페이지를 하나씩
+// 순회하지 않고 이 신호로 몇 번만 열어봐서 정확한 개수를 바로 얻는다 — lib/scraper.ts의
+// readStatedTotalCount/readLastPageFromNavButton과 같은 원리(2026-08-17, 모자사러 실사용 확인: 이
+// 지름길이 없어서 카테고리를 여러 개 선택하면 정말로 페이지 수만큼 순회해 체감상 멈춘 것처럼 보일 만큼
+// 오래 걸렸다). "총 N개" 문구가 있으면 그게 최우선 정답이고(페이지를 더 열 필요조차 없음), 없으면
+// 페이지네이션의 "마지막 페이지로" 이동 버튼 href에 인코딩된 번호를 읽는다 — 이 버튼은 지금 몰이 보여주는
+// 페이지가 몇 번이든 항상 진짜 마지막 페이지를 가리켜야 하는 구조라 신뢰도가 높다(Node쪽에서 이미
+// 여러 카페24 몰로 검증됨). 텍스트로 보이는 페이지 번호 중 최댓값을 읽는 방식(readMaxPageNumber)은
+// "화면에 보이는 번호 묶음의 끝"일 뿐일 수 있어 추가 확인이 필요해 여기서는 포팅하지 않았다 — 못 찾으면
+// 그냥 기존 순회로 폴백한다(정확도가 최우선이라 이쪽이 더 안전하다).
+// leafLabel(카테고리 경로의 마지막 구간)로 "총 N개" 문구 주변을 검증하는 이유: document.body 전체를
+// 무작정 훑으면 이 카테고리와 무관한 사이트 전체 배지 숫자를 잘못 집을 위험이 있다 — Node쪽에서 실제로
+// 겪은 문제(펫투비: 21개짜리 카테고리가 무관한 숫자 때문에 16,363개로 잘못 확정)와 같은 사고를 막는다.
+function buildPaginationSignalExpr(leafLabel) {
+  return `(() => {
+  const leafLabel = ${JSON.stringify(leafLabel || '')}
+  const bodyText = document.body.innerText
+  const totalRe = /(총|전체)\\s*([\\d,]+)\\s*(개|건)/g
+  let m
+  while ((m = totalRe.exec(bodyText))) {
+    const n = Number(m[2].replace(/,/g, ''))
+    if (!Number.isInteger(n) || n <= 0 || n >= 1000000) continue
+    if (leafLabel) {
+      const contextStart = Math.max(0, m.index - 30)
+      if (!bodyText.slice(contextStart, m.index + m[0].length).includes(leafLabel)) continue
+    }
+    return { statedTotal: n, lastPage: null }
+  }
+
+  const roots = Array.from(document.querySelectorAll('[class*="paging" i], [class*="pagination" i]'))
+  for (const el of roots) {
+    const candidates = Array.from(el.querySelectorAll('a[href]')).filter(a => {
+      const cls = a.className || ''
+      const alt = a.querySelector('img')?.getAttribute('alt') || ''
+      return /last|마지막/i.test(cls) || /last|마지막/i.test(alt)
+    })
+    for (const a of candidates) {
+      try {
+        const u = new URL(a.href, location.href)
+        const n = Number(u.searchParams.get('page'))
+        if (Number.isInteger(n) && n > 0) return { statedTotal: null, lastPage: n }
+      } catch {}
+    }
+  }
+  return { statedTotal: null, lastPage: null }
+})()`
+}
 
 // 상품 상세 페이지 추출 — lib/extract.ts의 규칙기반 추출과 같은 원칙(ld+json → og 태그 →
 // 화면 요소 → hidden input 순 폴백)을 그대로 따른다. 카페24 표준 마크업(#prdDetail 등) 기준.
@@ -611,28 +675,55 @@ chrome.runtime.onInstalled.addListener(() => {
  *  훨씬 적게 보고된 문제 수정). 지금 페이지 자체가 이미 상품 상세 페이지라 링크가 하나도 안 잡히면
  *  빈 목록을 그대로 돌려준다 — 호출부(runPreview)가 그 경우 지금 페이지 자체를 상품 1건으로 처리한다.
  *  truncated는 "다음 페이지"가 있는데도 상한(MAX_PREVIEW_PAGES)에 걸려 멈췄다는 뜻 — 호출부가 이 값을
- *  그대로 개수와 함께 보여줘 정직하게 "이 이상"임을 알릴 수 있게 한다. */
-async function collectCategoryLinks(tabId) {
+ *  그대로 개수와 함께 보여줘 정직하게 "이 이상"임을 알릴 수 있게 한다.
+ *  fastCountOk(카테고리를 여러 개 선택했을 때만 true — 그때는 개수만 필요하고 전체 목록은 필요 없음)면
+ *  1페이지에서 buildPaginationSignalExpr로 "총 N개"/"마지막 페이지" 신호를 먼저 찾아보고, 있으면
+ *  최대 2페이지(1페이지 + 마지막 페이지)만 열어 정확한 개수를 곧바로 확정한다 — 못 찾으면(위젯이 없는
+ *  스킨 등) 기존처럼 한 페이지씩 순회한다. */
+async function collectCategoryLinks(tabId, fastCountOk) {
   const linkOrder = []
   const linkInfo = {}
   const categoryByUrl = {}
-  let pages = 0
-  let truncated = false
-  while (pages < MAX_PREVIEW_PAGES) {
-    const { links, linkInfo: pageLinkInfo, nextUrl, category, brandFromCategory } = await evalInTab(tabId, COLLECT_LINKS_EXPR)
-    for (const href of links) {
-      if (href in linkInfo) continue
+  const addPage = (result) => {
+    result.links.forEach(href => {
+      if (href in linkInfo) return
       linkOrder.push(href)
-      linkInfo[href] = pageLinkInfo[href] || { name: '', thumbnail: '' }
-      if (category) categoryByUrl[href] = { category, brandFromCategory }
+      linkInfo[href] = result.linkInfo[href] || { name: '', thumbnail: '' }
+      if (result.category) categoryByUrl[href] = { category: result.category, brandFromCategory: result.brandFromCategory }
+    })
+  }
+
+  const first = await evalInTab(tabId, COLLECT_LINKS_EXPR)
+  addPage(first)
+  const perPage = first.links.length
+
+  if (fastCountOk && perPage > 0) {
+    const leafLabel = (first.category || '').split(' > ').pop()?.trim() || ''
+    const signal = await evalInTab(tabId, buildPaginationSignalExpr(leafLabel)).catch(() => null)
+    if (signal?.statedTotal) return { links: linkOrder, linkInfo, categoryByUrl, truncated: false, count: signal.statedTotal }
+    if (signal?.lastPage === 1) return { links: linkOrder, linkInfo, categoryByUrl, truncated: false, count: perPage }
+    if (signal?.lastPage && signal.lastPage > 1) {
+      const tab = await chrome.tabs.get(tabId)
+      await navigate(tabId, withPageParam(tab.url, signal.lastPage))
+      await throttle()
+      const last = await evalInTab(tabId, COLLECT_LINKS_EXPR)
+      addPage(last)
+      return { links: linkOrder, linkInfo, categoryByUrl, truncated: false, count: perPage * (signal.lastPage - 1) + last.links.length }
     }
-    pages++
-    if (!nextUrl) break
-    if (pages >= MAX_PREVIEW_PAGES) { truncated = true; break }
+  }
+
+  let pages = 1
+  let nextUrl = first.nextUrl
+  while (nextUrl && pages < MAX_PREVIEW_PAGES) {
     await navigate(tabId, nextUrl)
     await throttle()
+    const result = await evalInTab(tabId, COLLECT_LINKS_EXPR)
+    addPage(result)
+    pages++
+    nextUrl = result.nextUrl
   }
-  return { links: linkOrder, linkInfo, categoryByUrl, truncated }
+  const truncated = !!nextUrl && pages >= MAX_PREVIEW_PAGES
+  return { links: linkOrder, linkInfo, categoryByUrl, truncated, count: linkOrder.length }
 }
 
 /** "스크랩 미리보기 실행" — 일반모드의 "스크랩 미리보기"(previewCatalog)와 같은 절차. PTP에서 카테고리를
@@ -661,10 +752,12 @@ async function runPreview(tab, site, aiMode) {
 
     for (const listingStart of listingStarts) {
       if (listingStart) { await navigate(tab.id, listingStart); await throttle() }
-      const { links, linkInfo, categoryByUrl, truncated } = await collectCategoryLinks(tab.id)
+      // 카테고리를 여러 개 선택했을 때만(fastCountOk) collectCategoryLinks가 "총 N개"/"마지막 페이지"
+      // 지름길을 시도한다 — 하나만 볼 때는 items(나머지 목록)가 필요해 어차피 전부 순회해야 한다.
+      const { links, linkInfo, categoryByUrl, truncated, count } = await collectCategoryLinks(tab.id, listingStarts.length > 1)
       if (!links.length) continue
       const cat = categoryByUrl[links[0]]
-      categoryCounts.push({ url: listingStart || startUrl, label: cat?.category || listingStart || startUrl, count: links.length, truncated })
+      categoryCounts.push({ url: listingStart || startUrl, label: cat?.category || listingStart || startUrl, count, truncated })
       if (!firstUrl) {
         firstUrl = links[0]
         firstCat = cat
@@ -695,6 +788,134 @@ async function runPreview(tab, site, aiMode) {
     console.log('[PTP] 미리보기 중 오류:', e.message)
     return { ok: false, error: e.message }
   } finally {
+    await safeDetach(tab.id)
+  }
+}
+
+// lib/scraper.ts의 NON_CATEGORY_TEXT_RE와 반드시 같은 값을 유지한다(같은 코드를 두 곳에 두는 이유는
+// buildExtractExpr과 동일 — Node 서버↔크롬 확장이 서로 import를 못 함).
+const NON_CATEGORY_TEXT_SRC = '로그인|회원가입|로그아웃|장바구니|마이페이지|고객센터|검색어?|주문|배송조회|결제|사이트맵|관리자|촬영명령|입고대?기|입고대령|단가\\s*(인상|조정)|재진행|색상?\\s*(별)?\\s*분류|공지사항|공지\\b|납품\\s*사례|제작\\s*문의|도매\\s*인증|상품\\s*문의|notice|cart|login|logout|mypage|search|sitemap'
+
+/** discoverCategoryLinks(lib/scraper.ts)의 대분류 허브 자동 펼치기(대분류 페이지에 상품이 없으면 그
+ *  페이지의 하위 메뉴로 대신 펼침)와 같은 판정을 한다 — 다만 그 서버 쪽 버전은 로그인 필요 몰에서
+ *  개인 크롬 프로필을 통째로 복사해도 로그인 세션이 넘어오지 않아(!specifications/
+ *  manual-login-required-malls.md 2026-07-18/2026-08-18 항목, 모자사러로 직접 재현 확정) 항상
+ *  로그인 페이지에 막힌다. 이 함수는 그 대신 실제 로그인된 탭에서 대분류마다 직접 방문해 확인한다.
+ *  scanCategoryMenu(lib/scraper.ts)의 라이브 DOM 판정 기준(class/id에 cat/lnb/snb/ovmenu/gnb가 들어간
+ *  영역, 그룹당 최소 2개 이상, href 기준 dedup)을 그대로 옮겼다 — 탭 위젯 라벨 병합/이미지전용
+ *  메뉴(textlessHrefs) 폴백은 이 화면(로그인 필요 몰 한정)에서 아직 필요한 사례가 없어 포팅하지
+ *  않았다(필요해지면 추가). topLevelHrefs와 겹치는 항목은 대분류 페이지에서 GNB를 다시 찾은 것일 뿐
+ *  진짜 하위메뉴가 아니므로 제외한다(discoverCategoryLinks의 topLevelHrefSet 필터와 동일). */
+function buildScanSubmenuExpr(topLevelHrefs) {
+  return `(() => {
+  const excludeRe = new RegExp(${JSON.stringify(NON_CATEGORY_TEXT_SRC)}, 'i')
+  const topLevelHrefSet = new Set(${JSON.stringify(topLevelHrefs)})
+  const isMeaningful = (s) => !!s && /[\\uac00-\\ud7a3a-zA-Z0-9]/.test(s)
+  function ownText(li) {
+    const ownAnchor = li.querySelector(':scope > a')
+    if (ownAnchor) {
+      const anchorText = (ownAnchor.textContent || '').trim()
+      if (anchorText) return anchorText
+      const img = ownAnchor.querySelector('img[alt]')
+      if (img && img.alt && img.alt.trim()) return img.alt.trim()
+    }
+    const clone = li.cloneNode(true)
+    clone.querySelectorAll('ul, ol').forEach(n => n.remove())
+    return (clone.textContent || '').trim()
+  }
+  function ownHref(li) {
+    const clone = li.cloneNode(true)
+    clone.querySelectorAll('ul, ol').forEach(n => n.remove())
+    const a = clone.querySelector('a[href]')
+    return a ? a.href : ''
+  }
+  function buildPaths(li, prefix, depth, out) {
+    if (depth > 3 || out.length > 200) return
+    const childLis = Array.from(li.querySelectorAll(':scope > ul > li, :scope > div > ul > li'))
+    const name = ownText(li)
+    if (!isMeaningful(name)) return
+    if (excludeRe.test(name)) return
+    const path = prefix.concat([name])
+    if (childLis.length) {
+      childLis.forEach(sub => buildPaths(sub, path, depth + 1, out))
+    } else {
+      const href = ownHref(li)
+      if (href && !topLevelHrefSet.has(href)) out.push({ name: path.join(' > '), href })
+    }
+  }
+  const SELECTOR_TIERS = [
+    '[class*="cat" i], [id*="cat" i]',
+    '[class*="lnb" i], [id*="lnb" i], [class*="snb" i], [id*="snb" i], [class*="ovmenu" i]',
+    '[class*="gnb" i], [id*="gnb" i], nav',
+  ]
+  for (const tierSelector of SELECTOR_TIERS) {
+    let candidates
+    try { candidates = Array.from(document.querySelectorAll(tierSelector)) } catch { continue }
+    const merged = []
+    const seenHrefs = new Set()
+    for (const root of candidates) {
+      let topLis = Array.from(root.querySelectorAll(':scope > ul > li, :scope > li, :scope > div > ul > li, :scope .slick-slide > li'))
+      if (!topLis.length) {
+        const firstUl = root.querySelector('ul')
+        if (firstUl) topLis = Array.from(firstUl.querySelectorAll(':scope > li'))
+      }
+      const out = []
+      topLis.forEach(item => buildPaths(item, [], 0, out))
+      const seenNames = new Set()
+      const uniq = out.filter(o => (seenNames.has(o.name) ? false : (seenNames.add(o.name), true)))
+      if (uniq.length < 2) continue
+      uniq.forEach(o => { if (!seenHrefs.has(o.href)) { seenHrefs.add(o.href); merged.push(o) } })
+    }
+    if (merged.length) return { links: merged }
+  }
+  return { links: [] }
+})()`
+}
+
+/** "🧭 카테고리 하위구조 자동확인" — PTP의 "카테고리 불러오기"가 이미 찾아둔 대분류 목록(site.categoryLinks)을
+ *  순서대로 실제 탭에서 방문해, 상품이 있으면 그대로 두고 없으면(허브 카테고리) 그 페이지의 하위 메뉴로
+ *  대신 펼친다 — discoverCategoryLinks가 로그인 필요 몰에서 하지 못하는 일을 실제 로그인된 브라우저로
+ *  대신 해준다. 결과는 새 href 기준으로 합쳐(중복 제거) sites.scrape_profile.categoryLinks에 그대로
+ *  덮어써, PTP에서 "카테고리 불러오기"를 다시 누르면 캐시로 바로 반영된다. */
+async function runExpandCategories(tab, site) {
+  if (!site.categoryLinks || !site.categoryLinks.length) {
+    return { ok: false, error: 'PTP 화면에서 "카테고리 불러오기"를 먼저 한 번 실행해주세요(대분류 목록이 아직 없습니다).' }
+  }
+  try {
+    await attachDebugger(tab.id)
+  } catch (e) {
+    return { ok: false, error: `디버거 연결 실패: ${e.message}` }
+  }
+  const startUrl = tab.url
+  try {
+    const topLevelHrefs = site.categoryLinks.map(c => c.href)
+    const expanded = []
+    for (const c of site.categoryLinks) {
+      await navigate(tab.id, c.href)
+      const probe = await evalInTab(tab.id, COLLECT_LINKS_EXPR).catch(() => ({ links: [] }))
+      if (probe.links.length > 0) {
+        expanded.push(c)
+      } else {
+        const sub = await evalInTab(tab.id, buildScanSubmenuExpr(topLevelHrefs)).catch(() => ({ links: [] }))
+        if (sub.links.length) sub.links.forEach(s => expanded.push({ name: `${c.name} > ${s.name}`, href: s.href }))
+        else expanded.push(c) // 하위 메뉴도 못 찾으면(진짜로 빈 카테고리일 수도 있음) 원래 항목을 그대로 남긴다.
+      }
+      await throttle()
+    }
+    const seenHrefs = new Set()
+    const deduped = expanded.filter(c => (seenHrefs.has(c.href) ? false : (seenHrefs.add(c.href), true)))
+
+    const res = await fetch(`${SITE_API_BASE}/${site.id}/categories/expand`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ links: deduped }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) return { ok: false, error: data.error || String(res.status) }
+    return { ok: true, count: deduped.length }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  } finally {
+    await navigate(tab.id, startUrl).catch(() => {})
     await safeDetach(tab.id)
   }
 }
@@ -1265,6 +1486,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     else if (msg.action === 'preview') sendResponse(await runPreview(tab, site, site.aiPreviewMode))
     else if (msg.action === 'picker') sendResponse(await runPicker(tab, site))
     else if (msg.action === 'profile') sendResponse(await runProfile(site))
+    else if (msg.action === 'expand-categories') sendResponse(await runExpandCategories(tab, site))
     else sendResponse({ ok: false, error: `알 수 없는 action: ${msg.action}` })
   })()
   return true // 비동기 sendResponse를 쓰겠다는 표시

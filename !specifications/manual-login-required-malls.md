@@ -437,6 +437,47 @@ Cookies 파일 잠금으로 최신 로그인을 못 옮겨서"(단순 stale 복�
 사용자 실사용 확인 필요(로직 경로는 위 재현 테스트로 검증됨 — 로그인 페이지 감지 → 플래그 세팅 →
 API 응답 → 프론트 표시).
 
+### 후속 — 바로 위 "남은 한계"를 해소: 확장으로 카테고리 하위구조 자동확인 (2026-08-18, 같은 날)
+
+사용자 지시: "자동화로 구현해줘." 바로 위 항목에서 "별도 작업 필요"로 남겨둔 것 그대로, 실제 로그인된
+탭을 직접 읽는 `chrome.debugger` 확장에 새 실행 트리거를 추가해 서버(`discoverCategoryLinks`)가 못 하는
+일을 대신하게 했다. `startScrape`/`runPreview`가 이미 하는 것과 같은 패턴(팝업 버튼 → 메시지 →
+`attachDebugger` → 실제 탭에서 순회 → 서버에 결과 전송)을 그대로 따랐다:
+
+- **`app/api/sites/resolve/route.ts`**: 확장이 순회할 대분류 전체 목록을 알아야 해서 `categoryLinks`
+  (`sites.scrape_profile.categoryLinks`)를 응답에 추가.
+- **`extension-poc/background.js`**:
+  - `buildScanSubmenuExpr(topLevelHrefs)` — `scanCategoryMenu`(lib/scraper.ts, 라이브 DOM 버전)의 판정
+    기준(class/id에 cat/lnb/snb/ovmenu/gnb, 그룹당 최소 2개, href dedup)을 그대로 포팅한 라이브 DOM
+    스캔 함수. 탭 위젯 라벨 병합/이미지전용 메뉴 폴백은 이 화면에서 아직 필요한 사례가 없어 생략(같은
+    코드를 Node 서버와 확장 양쪽에 두는 이유는 `buildExtractExpr`과 동일 — 서로 import 불가).
+  - `runExpandCategories(tab, site)` — `site.categoryLinks`를 순서대로 실제 탭에서 방문해, 상품
+    링크가 있으면(`COLLECT_LINKS_EXPR` 재사용) 그대로 두고 없으면 `buildScanSubmenuExpr`로 하위메뉴를
+    찾아 `"부모 > 자식"`으로 펼친다 — `discoverCategoryLinks`의 확장 로직과 판정 기준은 같고, 서버
+    헤드리스 복사본 대신 실제 로그인된 탭을 쓴다는 점만 다르다. 결과는 href 기준 dedupe 후
+    새 엔드포인트로 전송.
+  - `msg.action === 'expand-categories'` 메시지 분기 추가.
+- **`app/api/sites/[id]/categories/expand/route.ts`** (신규): 확장이 보낸 최종 목록을
+  `sites.scrape_profile.categoryLinks`에 덮어쓴다(`discoverCategoryLinks`가 스스로 찾았을 때와 같은
+  자리 — "카테고리 불러오기"가 다음 조회부터 캐시로 그대로 돌려줌). `proxy.ts`의
+  `PUBLIC_API_PATTERNS`에 등록(세션 쿠키 없이 `chrome-extension://` 출처에서 호출).
+- **`extension-poc/popup.html`/`popup.js`**: "🧭 보조 - 카테고리 하위구조 자동확인" 버튼 추가. 대분류
+  개수만큼 페이지를 하나씩 순서대로 열어봐야 해서(1.2~2.4초 throttle 포함) 몰 규모에 따라 몇 분 걸릴 수
+  있다는 안내 문구 포함. 매니페스트 1.41→1.42.
+- **`components/panels/ScraperPanel.tsx`**: `loginBlockedExpansion` 경고 문구를 "크롬을 닫아도
+  소용없다"는 진단에서 "몰 탭에서 이 버튼을 실행한 뒤 다시 확인을 눌러달라"는 실행 가능한 안내로 교체.
+  개발자모드 안내의 "보조 설명"에도 같은 버튼을 추가 안내.
+
+**전제조건**: 이 버튼이 동작하려면 `site.categoryLinks`(대분류 목록)가 이미 있어야 한다 — 즉 PTP에서
+"카테고리 불러오기"를 최소 한 번 실행해 대분류 이름/href를 확보해둔 뒤에 이 버튼을 눌러야 한다(대분류
+자체는 로그인 없이도 공개 HTML로 찾아진다 — 이 세션 초반에 이미 확인됨). 없으면 그렇게 안내하는
+에러를 반환한다.
+
+검증: `tsc --noEmit` 클린, `node --check`로 `background.js`/`popup.js` 문법 확인, `buildScanSubmenuExpr`가
+생성하는 문자열을 Node에서 `new Function()`으로 파싱해 문법 오류 없음을 확인. 실제 크롬 확장 재로드 후
+모자사러로 클릭 테스트는 이 환경에 실제 크롬 세션이 없어 사용자 실사용 확인 필요 — 확장을
+`chrome://extensions`에서 새로고침해야 반영된다.
+
 ## 상태
 
 **구현 완료 (2026-07-18, 크롬 확장 방식으로 전환).** 이전 개인 프로필 방식 커밋: `a74832f`, `3e517e9`,

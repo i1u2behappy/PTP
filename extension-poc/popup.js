@@ -28,6 +28,7 @@ async function run(action, busyText) {
     if (res?.ok) {
       setStatus(action === 'start' ? '✓ 시작했습니다 — PTP 화면에서 진행상황을 확인하세요.'
         : action === 'picker' ? '✓ 몰 탭에 직접지정 패널이 열렸습니다 — 그 패널에서 값을 클릭해 지정하세요.'
+        : action === 'expand-categories' ? `✓ 카테고리 ${res.count}개 확인 완료 — PTP에서 "카테고리 불러오기"를 다시 눌러 확인하세요.`
         : '✓ 완료했습니다 — PTP 화면에서 결과를 확인하세요.', 'ok')
     } else {
       setStatus(`✗ ${res?.error || '알 수 없는 오류'}`, 'error')
@@ -42,6 +43,9 @@ async function run(action, busyText) {
 // 몰 구조분석은 지금 탭이 아니라 서버가 별도로 여는 헤드리스 브라우저로 하므로(background.js의 runProfile
 // 참고) chrome.debugger가 필요 없다 — 그냥 트리거만 하고 결과는 PTP 화면에서 확인한다.
 document.getElementById('btn-profile').addEventListener('click', () => run('profile', '몰 구조를 분석하는 중...'))
+// 대분류 개수만큼 페이지를 하나씩 순서대로 열어봐야 해서(카테고리 사이 1.2~2.4초 대기 포함) 몰 규모에
+// 따라 몇 분 걸릴 수 있다 — PTP의 "카테고리 불러오기"를 먼저 한 번 실행해 대분류 목록을 만들어둬야 한다.
+document.getElementById('btn-expand-categories').addEventListener('click', () => run('expand-categories', '카테고리마다 하위구조를 확인하는 중... (몰 규모에 따라 몇 분 걸릴 수 있습니다)'))
 document.getElementById('btn-preview').addEventListener('click', () => run('preview', '지금 페이지를 캡처하는 중...'))
 document.getElementById('btn-start').addEventListener('click', () => run('start', '스크랩을 시작합니다...'))
 document.getElementById('btn-picker').addEventListener('click', () => run('picker', '직접지정 패널을 여는 중...'))

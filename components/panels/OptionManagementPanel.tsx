@@ -32,6 +32,7 @@ export function OptionManagementPanel({ params }: { params?: Record<string, unkn
     }).catch(() => {})
   }, [scope.sessionId])
 
+  /* eslint-disable-next-line react-hooks/set-state-in-effect */
   useEffect(() => { load() }, [load])
 
   async function save(id: number) {

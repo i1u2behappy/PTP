@@ -25,6 +25,7 @@ export function CategoryMappingPanel({ params }: { params?: Record<string, unkno
     }).catch(() => {})
   }, [scope.sessionId])
 
+  /* eslint-disable-next-line react-hooks/set-state-in-effect */
   useEffect(() => { load() }, [load])
 
   async function saveCell(masterCategory: string, marketplaceCode: string, value: string) {

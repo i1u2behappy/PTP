@@ -21,7 +21,7 @@ const PUBLIC_API_PREFIXES = [
 // categories/expand(팝업의 "카테고리 하위구조 자동확인" 결과 저장, 2026-08-18).
 const PUBLIC_API_PATTERNS = [
   /^\/api\/sites\/\d+\/preview-capture$/, /^\/api\/sites\/\d+\/picker\/rule$/, /^\/api\/sites\/\d+\/profile$/,
-  /^\/api\/sites\/\d+\/categories\/expand$/,
+  /^\/api\/sites\/\d+\/categories\/expand$/, /^\/api\/sites\/\d+\/sort-options$/,
 ]
 
 export function proxy(request: NextRequest) {

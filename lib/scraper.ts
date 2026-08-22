@@ -12,7 +12,7 @@ import { promisify } from 'util'
 import { chromium, type BrowserContext, type Page } from 'playwright'
 import { load as loadHtml } from 'cheerio'
 import type { ExtractedProduct } from './ai'
-import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, type MallStructureReport, type OptionCandidate } from './ai'
+import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsWithAI, type MallStructureReport, type OptionCandidate } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
@@ -99,14 +99,20 @@ export interface ScrapeOptions {
   nextPageSelector?: string
   /** 목록 페이지당 최대 페이지 수 (기본 1 = 페이지네이션 없음) */
   maxPages?: number
+  /** "카테고리별 정렬기준 설정" 기능용 — categoryUrls의 각 URL(정렬 파라미터가 이미 반영된 최종 URL) 을
+   *  키로, 그 카테고리 하나만 따로 적용할 상한을 지정한다. 'pages'는 maxPages를 이 값으로 대체(더 크게는
+   *  못 늘림), 'count'는 이 카테고리에서 실제로 담을 상품 개수 자체를 제한한다. 지정 안 한 카테고리는
+   *  기존처럼 전역 maxPages/무제한 그대로 적용된다 — collectFromListing 참고. */
+  categoryLimits?: Record<string, { mode: 'count' | 'pages'; value: number }>
   /** 이미 스크랩된 상품 URL — 목록에서 발견해도 건너뛴다 */
   excludeUrls?: string[]
   /** 상품 페이지 방문 사이 최소 지연(ms). 실제 지연은 이 값~2배 사이 랜덤 (차단 방지) */
   delayMs?: number
   /** 'manual'이면 아래 concurrency 값을 카테고리/상품 동시 처리 개수로 고정해서 쓴다(1~8). 생략 또는
    *  'auto'면 기존 동작 그대로 — scrapeCatalogPage는 몰 반응을 보며 1에서 최대 8까지 스스로 올리고(적응형
-   *  동시성), previewCatalog/collectProductUrls의 카테고리 집계는 4로 고정된다. 동시에 여는 탭 수가
-   *  메모리 사용량에 직결돼(각 탭이 이미지까지 로드) 메모리 이슈를 진단/완화하려면 수동으로 낮춰본다. */
+   *  동시성), previewCatalog/collectProductUrls의 카테고리 집계도 8로 고정된다(2026-08-20 PC 업그레이드
+   *  전엔 4였음). 이 상한(8)은 로컬 하드웨어가 아니라 스크랩 대상 몰 서버가 동시 요청을 얼마나 견디는지에
+   *  대한 임의의 안전 마진이라 — 몰 차단(캡차 등)이 잦아지면 수동으로 낮춰본다. */
   concurrencyMode?: 'auto' | 'manual'
   /** concurrencyMode가 'manual'일 때만 쓰이는 동시 처리 개수(1~8, 범위 밖 값은 안전하게 clamp됨).
    *  recheckMallProducts(연속관리 재체크)는 concurrencyMode와 무관하게 항상 이 값을 그대로 쓴다(기존 동작,
@@ -1043,6 +1049,12 @@ export interface MallProfileSignals {
    *  고도몰 스킨에서 실사용 확인, 2026-08-11 — 이 몰은 카테고리 하나에 최후수단 순회까지 떨어져 미리보기가
    *  30분 넘게 걸렸다). */
   hasPaginationWidget: boolean
+  /** "카테고리별 정렬기준 설정" 기능용 — 이 몰의 목록 페이지가 지원하는 정렬 옵션(최신순/낮은가격순 등
+   *  표준 라벨)과, 그 정렬을 적용하려면 카테고리 URL에 추가해야 하는 쿼리파라미터. 샘플 카테고리 1개
+   *  기준으로 추출한 "파라미터 차이"라 다른 카테고리(base 쿼리파라미터가 달라도, 예: ?code=0049 vs
+   *  ?cate_no=45) URL에도 그대로 덧붙여 재사용할 수 있다. deep(="몰 구조분석")에서만 채워지고, 가벼운
+   *  구조변화감지(deep=false)나 지원 안 되는 몰은 빈 배열. */
+  sortOptions: { label: string; paramsToAdd: Record<string, string> }[]
   /** URL 계층/카테고리/결제계좌/택배사/재고관리형태/업체연락처/상품페이지구조/스크래핑 유의사항을 실제로
    *  수집한 원문(홈 하단 회사정보 + 이용안내·공지 등 게시판 + 상품페이지) 기반으로 AI가 요약한 리포트.
    *  ANTHROPIC_API_KEY 미설정이거나 원문을 하나도 못 모았으면 null. */
@@ -1716,27 +1728,37 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
 
   // 아직 페이지 이동 전(현재 page가 startUrl) — 카테고리 메뉴/후보 링크 스캔은 반드시 여기서 먼저 한다.
   // 아래(랜딩 페이지 재시도)가 실제로 페이지를 이동시키므로, 이동 후로 미루면 이 몰의 헤더가 안 보일 수 있다.
-  const categoryLinkCandidates = await findCategoryLinkCandidates(page)
-  const { links: scannedCategoryLinks, textlessHrefs } = await scanCategoryMenuRobust(page)
-  let categoryLinks = scannedCategoryLinks
-  // 메뉴가 텍스트로 못 읽는 형태(이미지 스프라이트 등, 실사용 확인: 진짜양말)면, 후보 링크로 실제 들어가
-  // 그 목록 페이지 자신의 카테고리 라벨을 대신 읽는다(discoverCategoriesByVisitingLinks 참고). 페이지를
-  // 여러 번 더 열어야 해 무거운 작업이라 deep("몰 구조분석" 버튼)에서만 한다.
-  // textlessHrefs(scanCategoryMenu가 이미 cat/lnb/gnb 등 실제 메뉴 영역 안에서 찾은 이미지뿐인 후보)가
-  // 있으면 그걸 우선 쓴다 — categoryLinkCandidates(findCategoryLinkCandidates, 메뉴 영역 안의 모든 링크를
-  // 무조건 15개까지만 담는 훨씬 거친 폴백)는 textlessHrefs가 아예 없을 때만 최후수단으로 쓴다. 예전엔
-  // scannedCategoryLinks가 0개인 경우 항상 categoryLinkCandidates부터 썼는데, 그 15개 제한에 걸려 정작
-  // 필요한 카테고리가 잘려나갔다(진짜양말 실사용 확인, 2026-08-13 — "신발"이 16번째 링크라 제외됨).
-  const zeroScanCandidates = textlessHrefs.length ? textlessHrefs : categoryLinkCandidates
-  if (deep && !categoryLinks.length && zeroScanCandidates.length) {
-    categoryLinks = await discoverCategoriesByVisitingLinks(page, zeroScanCandidates)
-    await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
-  } else if (deep && categoryLinks.length && textlessHrefs.length) {
-    // 위와 같은 이유지만 다른 케이스 — 텍스트 메뉴가 이미 몇 개는 찾았어도(그래서 위 분기는 안 탐),
-    // 같은 페이지의 다른 메뉴 영역이 통째로 이미지뿐이면 그 카테고리들만 조용히 빠진다. 남은 이미지
-    // 전용 후보만 추가로 방문해 채운다.
-    const extra = await discoverCategoriesByVisitingLinks(page, textlessHrefs)
-    categoryLinks = [...categoryLinks, ...extra]
+  // discoverTopLevelCategoryLinks가 AI를 먼저 시도하고 실패하면 기존 히스틱으로 폴백한다(discoverCategoryLinks
+  // 와 공용, 2026-08-19 — 예전엔 여기만 AI 없이 히스틱만 썼다가 도매토피아에서 상품 링크가 카테고리로
+  // 잘못 섞여 들어오는 문제를 겪었다). deep=false(구조 변화 감지)면 무거운 방문 폴백은 건너뛴다.
+  const { links: categoryLinks } = await discoverTopLevelCategoryLinks(page, mallName, deep)
+
+  // "카테고리별 정렬기준 설정" 기능용 — 정렬 위젯은 보통 홈페이지가 아니라 카테고리 목록 페이지에만
+  // 있어서(등록된 몰 URL이 홈페이지인 경우가 흔함), 방금 찾은 카테고리 중 하나를 실제로 열어봐야 확인할
+  // 수 있다. 몰 전체가 같은 정렬 메커니즘을 쓴다고 가정한다(실사용상 카테고리마다 다른 경우는 못 봤음) —
+  // 대분류 하나만 확인하면 충분. 무거운 작업이라 deep("몰 구조분석")에서만 한다.
+  let sortOptions: MallProfileSignals['sortOptions'] = []
+  if (deep && categoryLinks.length) {
+    const sampleCategoryUrl = categoryLinks[0].href
+    const moved = await page.goto(sampleCategoryUrl, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
+    if (moved) {
+      let sortCandidates = await collectSortCandidates(page)
+      // <a href>/<select><option> 어느 쪽으로도 못 찾으면(버튼 onclick, 커스텀 JS 드롭다운 등) 클릭
+      // 기반 폴백으로 한 번 더 시도한다 — collectSortCandidates 자체가 이미 정적으로 못 찾은 상태라
+      // page.url()이 sampleCategoryUrl 그대로이므로 baseUrl 계산에 영향 없다.
+      if (!sortCandidates.length) sortCandidates = await detectSortOptionsByClicking(page).catch(() => [])
+      const baseUrl = page.url()
+      const detected = await detectSortOptionsWithAI(mallName, sortCandidates, baseUrl).catch(() => [])
+      sortOptions = detected
+        .map(c => ({ label: c.label, paramsToAdd: diffQueryParams(baseUrl, c.href) }))
+        .filter((o): o is { label: string; paramsToAdd: Record<string, string> } => !!o.paramsToAdd)
+    }
+  }
+
+  if (deep && page.url() !== startUrl) {
+    // discoverTopLevelCategoryLinks의 방문 폴백(discoverCategoriesByVisitingLinks), 또는 위 정렬 옵션
+    // 확인용 카테고리 방문이 페이지를 이동시켰을 수 있다 — 아래(gatherMallContextText 등)가 이 몰의
+    // 원래 시작 페이지를 보고 있다고 가정하므로 되돌린다.
     await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
   }
   const categoryMenuNames = categoryLinks.map(c => c.name)
@@ -1756,6 +1778,10 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
   if (!sampleUrls.length) {
     const urls: string[] = []
     const mergedByUrl = new Map<string, CategoryLabel>()
+    // findCategoryLinkCandidates는 카테고리 메뉴 판정과는 별개로(위 discoverTopLevelCategoryLinks가 AI로
+    // 대체한 부분), cat/lnb/gnb 영역의 링크를 "상품 샘플을 찾아 들어가볼 후보"로만 넓게 쓴다 — 여기선
+    // 정확한 카테고리 여부가 중요하지 않고 그냥 실제 상품이 있을 만한 페이지 몇 개면 충분하다.
+    const categoryLinkCandidates = await findCategoryLinkCandidates(page)
     for (const link of categoryLinkCandidates) {
       if (urls.length >= MALL_PROFILE_SAMPLE_SIZE) break
       try {
@@ -1780,7 +1806,7 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
     sampleCount: 0, platform, sampleProductUrl: sampleUrls[0], hasMainImages: false, hasDetailImages: false,
     optionUiTypes: [], hasCascadingOptions: false, hasStockQty: false, hasStockStatusText: false,
     hasStockByOption: false, hasDetailText: false, infoLabels: [], categoryPaths: [], categoryMaxDepth: 0,
-    categoryMenuNames, categoryLinks, hasPaginationWidget, report: null,
+    categoryMenuNames, categoryLinks, hasPaginationWidget, sortOptions, report: null,
   }
   const optionTypes = new Set<'select' | 'swatch' | 'none'>()
   const infoLabelSet = new Set<string>()
@@ -2016,7 +2042,12 @@ interface PlatformProfile {
 const PLATFORM_PROFILES: Record<MallPlatform, PlatformProfile> = {
   cafe24:   { productLinkSelector: '.xans-product-listmain a, ul.prdList li a, .prdList .thumbnail a', nextPageSelector: '.xans-product-listpagination a.next', detailUrlPattern: /\/product\/detail\.html/ },
   makeshop: { productLinkSelector: '.item_gallery_type a, .prd_list_wrap a', nextPageSelector: '.paging a.next', detailUrlPattern: /shopdetail\.html\?branduid=/ },
-  godomall: { productLinkSelector: '.item_cont a, .goods_list a', nextPageSelector: '.paginate a.next', detailUrlPattern: /goods_view\.php\?goodsno=/ },
+  // 고도몰5(신형) 스킨은 상품 상세 URL이 구형(goods_view.php?goodsno=)과 완전히 다르다(/goods/view?no=,
+  // 도매토피아 실사용 확인, 2026-08-19) — 클래스명도 .goodsDisplayItemWrap 등으로 바뀌어 구형 셀렉터가
+  // 아예 안 맞지만, detailUrlPattern만 맞으면 countProductsOnPage의 범용 폴백(플랫폼 셀렉터가 0개
+  // 찾으면 자동으로 넘어감)이 이 URL 패턴으로 정확히 걸러내므로 productLinkSelector에 신형 클래스도
+  // 같이 넣어두는 정도로 충분하다.
+  godomall: { productLinkSelector: '.item_cont a, .goods_list a, .goodsDisplayItemWrap a', nextPageSelector: '.paginate a.next', detailUrlPattern: /goods_view\.php\?goodsno=|\/goods\/view\?no=\d+/ },
   // 도매의신(domesin.com) — 실제 페이지로 확인: productLinkSelector 없이도 detailUrlPattern만 지정하면
   // 범용 폴백(img 감싼 <a> 전체)에 이 필터가 그대로 적용된다(scanCurrentPage 참고). 이게 없으면 홈페이지
   // 등에서 이벤트 배너/FAQ 링크(예: p=event_list.html, p=helpdesk/faq.html)까지 "상품"으로 잘못 인식했다
@@ -2042,7 +2073,8 @@ async function detectMallPlatform(page: Page): Promise<MallPlatform> {
 
     if (generator.includes('cafe24') || hasHost('cafe24.com') || /\/product\/(list|detail)\.html/.test(url) || anyLinkMatches(/\/product\/detail\.html/)) return 'cafe24'
     if (generator.includes('makeshop') || hasHost('makeshop.co.kr') || /shopdetail\.html\?branduid=/.test(url) || anyLinkMatches(/shopdetail\.html\?branduid=/)) return 'makeshop'
-    if (generator.includes('godo') || hasHost('godomall') || /goods_view\.php\?goodsno=/.test(url) || anyLinkMatches(/goods_view\.php\?goodsno=/)) return 'godomall'
+    const godoDetailRe = /goods_view\.php\?goodsno=|\/goods\/view\?no=\d+/
+    if (generator.includes('godo') || hasHost('godomall') || godoDetailRe.test(url) || anyLinkMatches(godoDetailRe)) return 'godomall'
     if (url.includes('domesin.com')) return 'domesin'
     return 'unknown'
   })
@@ -2419,6 +2451,93 @@ async function collectAllPageLinks(page: Page): Promise<{ text: string; href: st
   }).catch(() => [])
 }
 
+/** "카테고리별 정렬기준 설정" 후보 수집 — collectAllPageLinks와 같은 <a href> 수집에 더해 <select><option>도
+ *  포함한다. 2026-08-21 걸스굽 실사용 확인: 카페24 플랫폼은 정렬을 <a> 링크가 아니라
+ *  <select id="selArray" class="...xans-product-orderby">(옵션 value에 "?cate_no=...&sort_method=N" 같은
+ *  상대경로가 들어있음)로 구현해서, <a href>만 모으던 collectAllPageLinks로는 정렬 옵션이 하나도 안
+ *  잡혔다(항상 빈 배열 → 화면엔 "기본순"만 남음). 계좌이체 은행 선택처럼 값이 다른 출처의 전체 URL인
+ *  <select>는 origin 필터에서 자연히 걸러진다. */
+async function collectSortCandidates(page: Page): Promise<{ text: string; href: string }[]> {
+  return page.evaluate(() => {
+    const origin = location.origin
+    const current = location.href.replace(/\/+$/, '')
+    const seen = new Set<string>()
+    const result: { text: string; href: string }[] = []
+    for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+      if (result.length >= 400) break
+      const href = (a as HTMLAnchorElement).href
+      if (!href.startsWith(origin)) continue
+      const norm = href.replace(/\/+$/, '')
+      if (norm === current || norm === origin || seen.has(norm)) continue
+      const text = (a.textContent || '').trim() || (a.querySelector('img[alt]') as HTMLImageElement | null)?.alt.trim() || ''
+      if (!text) continue
+      seen.add(norm)
+      result.push({ text, href })
+    }
+    for (const opt of Array.from(document.querySelectorAll('select option')) as HTMLOptionElement[]) {
+      if (result.length >= 400) break
+      if (!opt.value) continue
+      let href: string
+      try { href = new URL(opt.value, location.href).href } catch { continue }
+      if (!href.startsWith(origin)) continue
+      const norm = href.replace(/\/+$/, '')
+      if (norm === current || norm === origin || seen.has(norm)) continue
+      const text = (opt.textContent || '').trim()
+      if (!text) continue
+      seen.add(norm)
+      result.push({ text, href })
+    }
+    return result
+  }).catch(() => [])
+}
+
+// 정렬 옵션 후보로 볼 만한 텍스트 — <a href>/<select><option> 어느 쪽도 아닌 버튼(onclick)이나 커스텀
+// JS 드롭다운(<li>/<span>/<div> 등)까지 태그 종류를 가리지 않고 잡기 위한 느슨한 키워드 매칭이다. 이
+// 자체는 오탐(예: 상품명에 "신상"이 들어감)이 있어도 되는데, detectSortOptionsByClicking이 실제로
+// 클릭해보고 diffQueryParams(같은 pathname, 쿼리파라미터만 다름)로 재확인하기 때문이다.
+const SORT_KEYWORD_PATTERN = '(신상|신규|최신|낮은\\s*가격|높은\\s*가격|인기|판매량|조회|클릭|리뷰|추천|할인|세일|낱개판매|기본순)'
+
+/** collectSortCandidates(정적 href/value 읽기)가 아무것도 못 찾았을 때의 폴백 — 버튼 onclick이나 커스텀
+ *  JS 드롭다운처럼 마크업만 봐서는 URL을 알 수 없는 정렬 UI까지 잡기 위해, 화면 텍스트가 정렬 키워드와
+ *  비슷한 요소를 태그 종류 상관없이 후보로 삼아 하나씩 실제로 클릭해본다. 클릭 후 diffQueryParams가
+ *  성공하면(같은 pathname, 쿼리파라미터만 다름) 진짜 정렬 옵션으로 인정한다 — 엉뚱한 걸 클릭해도(다른
+ *  카테고리로 이동, 상품 상세로 이동 등) pathname이 달라지면 자동으로 걸러지므로 후보를 넓게 잡아도
+ *  안전하다. 시도마다 baseUrl로 되돌아와 서로 간섭하지 않게 하고, 끝나면 반드시 baseUrl에 있는 채로
+ *  반환한다(호출부가 이 함수 리턴 직후의 page.url()을 diffQueryParams 기준으로 쓰기 때문). */
+async function detectSortOptionsByClicking(page: Page): Promise<{ text: string; href: string }[]> {
+  const baseUrl = page.url()
+  const candidateTexts = await page.evaluate((pattern) => {
+    const re = new RegExp(pattern)
+    const seen = new Set<string>()
+    const result: string[] = []
+    for (const el of Array.from(document.querySelectorAll('a, button, li, span, div, label'))) {
+      if (result.length >= 10) break
+      const text = (el.textContent || '').trim()
+      if (!text || text.length > 12 || !re.test(text) || seen.has(text)) continue
+      // 텍스트를 가진 자식이 이미 있으면(=이 요소는 더 큰 컨테이너일 뿐) 건너뛰고 안쪽 요소를 기다린다.
+      const hasTextChild = Array.from(el.children).some(c => (c.textContent || '').trim() === text)
+      if (hasTextChild) continue
+      seen.add(text)
+      result.push(text)
+    }
+    return result
+  }, SORT_KEYWORD_PATTERN).catch(() => [] as string[])
+
+  const confirmed: { text: string; href: string }[] = []
+  for (const text of candidateTexts) {
+    try {
+      const locator = page.getByText(text, { exact: true }).first()
+      if (await locator.count() === 0) continue
+      await locator.click({ timeout: 3_000 })
+      await page.waitForLoadState('load', { timeout: 5_000 }).catch(() => {})
+      const afterUrl = page.url()
+      if (afterUrl !== baseUrl && diffQueryParams(baseUrl, afterUrl)) confirmed.push({ text, href: afterUrl })
+    } catch { /* 이 후보가 안 되면 다음 후보로 */ }
+    if (page.url() !== baseUrl) await page.goto(baseUrl, { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+  }
+  return confirmed
+}
+
 /** scanCategoryMenu가 메뉴 텍스트를 못 읽을 때(이미지 스프라이트/아이콘 폰트 메뉴 등이라 <li> 안에 글자가
  *  전혀 없는 경우, 실사용 확인: 진짜양말 — alt 없는 메뉴 이미지라 이름이 마크업 어디에도 없음)의 대안이다.
  *  메뉴 자체는 못 읽어도 "링크"(href)는 findCategoryLinkCandidates로 얻을 수 있으니, 그 링크로 실제
@@ -2438,6 +2557,39 @@ async function discoverCategoriesByVisitingLinks(page: Page, links: string[]): P
     } catch { /* 이 링크가 안되면 다음 링크로 */ }
   }
   return result
+}
+
+/**
+ * "카테고리 메뉴/구조 탐지"의 공용 진입점 — discoverCategoryLinks("카테고리 불러오기")와
+ * sampleMallProfile("몰 구조분석"/구조 변화 감지)가 각자 따로 이 판단을 구현하고 있었는데, 후자만
+ * AI(detectCategoryLinksWithAI)를 안 타서 겪은 문제로 하나로 합쳤다(도매토피아 실사용 확인,
+ * 2026-08-19 — 사이드바의 "카테고리 목록"과 "베스트상품" 위젯이 같은 컨테이너 안에 나란히 있어,
+ * scanCategoryMenu가 두 `<ul>`을 구분 못 하고 상품 링크까지 카테고리로 잘못 묶어 왔다. "몰 구조분석"을
+ * 먼저 실행해 이 잘못된 결과가 sites.scrape_profile.categoryLinks에 캐시되면, "카테고리 불러오기"가
+ * discoverCategoryLinks/AI를 아예 타지 않고 그 캐시를 그대로 돌려줘 화면에도 그대로 나타났다).
+ * AI를 먼저 시도하고, 실패하면 기존 scanCategoryMenuRobust 히스틱으로 폴백한다. visitTextlessFallback이
+ * false면(가벼운 구조 변화 감지 전용) 페이지를 추가로 방문해야 하는 이미지전용 메뉴 폴백은 건너뛴다
+ * (sampleMallProfile의 deep=false와 동일한 이유 — 무거운 작업이라 "몰 구조분석" 버튼에서만 한다). */
+async function discoverTopLevelCategoryLinks(
+  page: Page, mallName: string, visitTextlessFallback: boolean,
+): Promise<{ links: CategoryMenuLink[]; textlessHrefs: string[]; aiUsed: boolean }> {
+  const aiCandidates = await collectAllPageLinks(page)
+  const aiLinks = await detectCategoryLinksWithAI(mallName, aiCandidates).catch(() => [])
+  if (aiLinks.length) return { links: aiLinks, textlessHrefs: [], aiUsed: true }
+
+  const scanned = await scanCategoryMenuRobust(page)
+  let links = scanned.links
+  const { textlessHrefs } = scanned
+  if (visitTextlessFallback) {
+    if (!links.length) {
+      const candidates = textlessHrefs.length ? textlessHrefs : await findCategoryLinkCandidates(page)
+      if (candidates.length) links = await discoverCategoriesByVisitingLinks(page, candidates)
+    } else if (textlessHrefs.length) {
+      const extra = await discoverCategoriesByVisitingLinks(page, textlessHrefs)
+      links = [...links, ...extra]
+    }
+  }
+  return { links, textlessHrefs, aiUsed: false }
 }
 
 interface CategoryLabel {
@@ -2579,6 +2731,26 @@ function withPageParam(url: string, pageNum: number): string {
   } catch { return url }
 }
 
+/** "카테고리별 정렬기준 설정" 기능용 — 같은 목록 페이지의 기본 URL과 정렬 링크 URL을 비교해, 정렬 링크
+ *  쪽에서 달라졌거나 새로 생긴 쿼리파라미터만 뽑아낸다(예: 기본 `?code=0049` vs 정렬 `?sort=newly&code=0049`
+ *  → `{sort: 'newly'}`). origin+pathname이 다르면(AI가 무관한 링크를 잘못 골랐을 가능성) null — 카테고리
+ *  이동 링크 등을 정렬 옵션으로 오인해 저장하는 걸 막는다. 차이가 없으면(자기 자신 링크 등) 역시 null. */
+export function diffQueryParams(baseUrl: string, variantUrl: string): Record<string, string> | null {
+  try {
+    const base = new URL(baseUrl)
+    const variant = new URL(variantUrl)
+    if (base.origin !== variant.origin || base.pathname !== variant.pathname) return null
+    const diff: Record<string, string> = {}
+    for (const [key, value] of variant.searchParams.entries()) {
+      if (key === 'page') continue // 페이지 번호는 정렬과 무관한 우연한 차이일 뿐 — 정렬 파라미터가 아니다.
+      if (base.searchParams.get(key) !== value) diff[key] = value
+    }
+    return Object.keys(diff).length ? diff : null
+  } catch {
+    return null
+  }
+}
+
 /** 목록 페이지(들)을 순회하며 제품 URL 후보를 모은다. 실제 상품 추출은 하지 않는다(테스트/실행 공용 로직).
  *  context를 넘기고 카테고리(listingUrls)가 여러 개면 탭을 나눠 동시에 훑는다 — 예전엔 카테고리 하나씩
  *  순서대로 방문해서, 카테고리 수만큼 페이지 로딩 시간이 그대로 누적됐다(실사용 확인: 카테고리 9개짜리
@@ -2684,7 +2856,15 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
     const categoryLabel = await detectCategoryLabel(workerPage)
     let prevHrefs: Set<string> | null = null
 
-    for (let p = 0; p < maxPages; p++) {
+    // "카테고리별 정렬기준 설정" 기능용 상한 — 이 카테고리(listingUrl)에만 지정된 값이 있으면 전역
+    // maxPages 대신(더 크게는 못 늘림) 쓰고, 개수 상한이면 이 카테고리에서 실제로 담은 개수를 별도로
+    // 세어 도달하면 멈춘다. listingCount는 함수 지역 변수라 다른 카테고리를 동시에 도는 워커와 무관하게
+    // 안전하다.
+    const limit = opts.categoryLimits?.[listingUrl]
+    const effectiveMaxPages = limit?.mode === 'pages' ? Math.max(1, Math.min(maxPages, limit.value)) : maxPages
+    let listingCount = 0
+
+    for (let p = 0; p < effectiveMaxPages; p++) {
       if (shouldStop()) { collectionStopped = true; break }
       let matched = await scanForProducts(workerPage)
       let hrefsThisPage = new Set(matched.map(m => m.href))
@@ -2701,16 +2881,22 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
           hrefsThisPage = new Set(matched.map(m => m.href))
         }
       }
+      // dead-end(페이지네이션 끝) 판정은 이 페이지에서 실제로 찾은 전체 목록(matched/hrefsThisPage)
+      // 기준으로 그대로 한다 — 개수 상한 때문에 일부만 담기로 했다고 해서 "새 상품이 없다"로 오판하면
+      // 안 된다(아래 담는 부분만 상한을 적용한다).
       if (isDeadEnd(hrefsThisPage)) break
       prevHrefs = hrefsThisPage
 
-      matched.forEach(item => {
+      const itemsToAdd = limit?.mode === 'count' ? matched.slice(0, Math.max(0, limit.value - listingCount)) : matched
+      itemsToAdd.forEach(item => {
         productUrlSet.add(item.href)
         if (categoryLabel.category && !categoryByUrl.has(item.href)) categoryByUrl.set(item.href, categoryLabel)
         if (!linkInfo.has(item.href) && (item.name || item.thumbnail)) linkInfo.set(item.href, { name: item.name, thumbnail: item.thumbnail })
       })
+      listingCount += itemsToAdd.length
+      if (limit?.mode === 'count' && listingCount >= limit.value) break
 
-      if (p >= maxPages - 1) break
+      if (p >= effectiveMaxPages - 1) break
       // 스킨마다 다른 "다음" 버튼 클래스에 기대는 대신, page 쿼리파라미터를 다음 번호로 바꿔 직접 이동한다 —
       // cafe24 등 대부분의 몰이 페이지 번호 링크 없이도(숫자가 안 보여도) 이 파라미터로 페이지를 넘겨준다.
       // 이 이동이 타임아웃 등으로 실패하면(예전엔 catch로 조용히 무시) 페이지가 이전 페이지에 그대로
@@ -2724,7 +2910,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
   }
 
   if (context && listingUrls.length > 1) {
-    const LISTING_CONCURRENCY = Math.min(resolveConcurrency(opts, 4), listingUrls.length)
+    const LISTING_CONCURRENCY = Math.min(resolveConcurrency(opts, 8), listingUrls.length)
     let cursor = 0
     async function worker(workerPage: Page) {
       while (true) {
@@ -3537,7 +3723,9 @@ async function countCategoryProductsOnce(
   let hitCap = true
   for (let pageNum = 2; pageNum <= AUTO_PAGINATION_CAP; pageNum++) {
     if (stop()) { hitCap = false; break }
-    let { count, isLoginPage, hrefs } = await probeCategoryPage(workerPage, context, firstPageUrl, pageNum, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
+    const probed = await probeCategoryPage(workerPage, context, firstPageUrl, pageNum, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
+    const { isLoginPage } = probed
+    let { count, hrefs } = probed
     if (isLoginPage) return { url: categoryUrl, label, count: seenHrefs.size, needsLogin: true }
     let newCount = hrefs.filter(h => !seenHrefs.has(h)).length
     // findRealLastPage의 confirmedEnd와 같은 이유(렌더링이 느린 몰은 빠른 대기로 매번 같은 빈 페이지로
@@ -3681,7 +3869,7 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
         // 카테고리별 개수만 여러 탭으로 동시에 집계한다. 로그인 창을 재사용하는 siteId라도 그 공유 탭은
         // 절대 쓰지 않고 항상 새 탭만 연다(discoverCategoryLinks에서 같은 이유로 겪은 "다른 네비게이션에
         // 의해 중단됨" 충돌 방지).
-        const COUNT_CONCURRENCY = resolveConcurrency(opts, 4)
+        const COUNT_CONCURRENCY = resolveConcurrency(opts, 8)
         const categoryCounts = new Array<CategoryCount | undefined>(listingUrls.length)
         let cursor = 0
         async function worker() {
@@ -4056,39 +4244,14 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
       }
 
       const platform = await detectMallPlatform(scanPage)
-      // "카테고리 메뉴/구조 탐지"를 우선 AI(Gemini)에게 맡긴다 — 컨테이너 셀렉터를 안 고르고 페이지의
-      // 모든 링크를 그대로 보여주는 방식이라 scanCategoryMenu가 몰마다 새 패턴을 추가해와야 했던 문제
-      // (2겹 이상 wrapper, slick.js 캐러셀, 탭 위젯 등)를 애초에 피한다. 몰당 1회뿐이라 Gemini 무료
-      // tier로도 비용/요청량 부담이 없다(2026-08-18 검토). GEMINI_API_KEY가 없거나 판단 실패/빈 결과면
-      // 기존 셀렉터 히스틱 체인(scanCategoryMenuRobust → findCategoryLinkCandidates)으로 그대로
-      // 폴백한다 — AI 문제로 "카테고리 불러오기" 자체가 막히면 안 된다.
+      // "카테고리 메뉴/구조 탐지"는 sampleMallProfile("몰 구조분석")과 공용 함수(discoverTopLevelCategoryLinks)를
+      // 쓴다 — AI(Gemini)를 우선 시도하고 실패하면 기존 셀렉터 히스틱 체인으로 폴백한다(2026-08-18/19).
       const mallName = opts.siteId ? (await siteInfo(opts.siteId)).name : new URL(url).hostname
-      const aiTopLevelCandidates = await collectAllPageLinks(scanPage)
-      let categoryLinks: CategoryMenuLink[] = await detectCategoryLinksWithAI(mallName, aiTopLevelCandidates).catch(() => [])
+      const { links: topLevelLinks, aiUsed: topLevelAiUsed } = await discoverTopLevelCategoryLinks(scanPage, mallName, true)
+      let categoryLinks = topLevelLinks
       // 화면에 "AI가 실제로 이번 결과에 기여했는지"를 작게 표시해주기 위한 신호(사용자 요청, 2026-08-18) —
       // 최상위 탐지든 아래 허브 하위메뉴 탐지든 AI 결과를 하나라도 그대로 채택했으면 true.
-      let aiUsed = categoryLinks.length > 0
-      let textlessHrefs: string[] = []
-      if (!categoryLinks.length) {
-        const scanned = await scanCategoryMenuRobust(scanPage)
-        categoryLinks = scanned.links
-        textlessHrefs = scanned.textlessHrefs
-        if (!categoryLinks.length) {
-          // textlessHrefs(scanCategoryMenu가 이미 cat/lnb/gnb 등 실제 메뉴 영역 안에서 찾은 이미지뿐인
-          // 후보)를 우선 쓴다 — findCategoryLinkCandidates(메뉴 영역 안의 모든 링크를 무조건 15개까지만
-          // 담는 훨씬 거친 폴백)는 textlessHrefs가 아예 없을 때만 최후수단으로 쓴다. 예전엔
-          // scannedCategoryLinks가 0개면 항상 findCategoryLinkCandidates부터 썼는데, 그 15개 제한에 걸려
-          // 정작 필요한 카테고리가 잘려나갔다(진짜양말 실사용 확인, 2026-08-13 — "신발"이 16번째 링크라 제외됨).
-          const candidates = textlessHrefs.length ? textlessHrefs : await findCategoryLinkCandidates(scanPage)
-          if (candidates.length) categoryLinks = await discoverCategoriesByVisitingLinks(scanPage, candidates)
-        } else if (textlessHrefs.length) {
-          // 텍스트 메뉴가 이미 몇 개는 찾았어도, 같은 페이지의 다른 메뉴 영역이 통째로 이미지뿐이면 그
-          // 카테고리들만 조용히 빠진다(진짜양말 실사용 확인, 2026-08-13 — "신발"/"업데이트") — 남은 이미지
-          // 전용 후보만 추가로 방문해 채운다.
-          const extra = await discoverCategoriesByVisitingLinks(scanPage, textlessHrefs)
-          categoryLinks = [...categoryLinks, ...extra]
-        }
-      }
+      let aiUsed = topLevelAiUsed
 
       // 대분류=상품목록인 카테고리와 대분류=중분류허브(그 자체엔 상품이 없고 하위 메뉴로만 이어짐)인
       // 카테고리가 섞여 있는 몰이 있다(모자사러 실사용 확인, 2026-08-17 — "캡모자"는 볼캡/캠프캡/군모
@@ -4109,7 +4272,7 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
       const detailPatternSrc = profile.detailUrlPattern?.source
       const baseUrl = new URL(url).origin
       const expandedByIndex: CategoryMenuLink[][] = new Array(categoryLinks.length)
-      const EXPAND_CONCURRENCY = Math.min(resolveConcurrency(opts, 4), categoryLinks.length || 1)
+      const EXPAND_CONCURRENCY = Math.min(resolveConcurrency(opts, 8), categoryLinks.length || 1)
       // 대분류 자기 자신의 href 목록 — 어느 카테고리 상세 페이지를 열어도 사이트 전체 대분류 메뉴(GNB)가
       // 항상 그대로 떠 있어, scanCategoryMenuRobust를 그 페이지에서 다시 돌리면 "하위 메뉴"가 아니라 이
       // GNB를 그대로 다시 찾아버릴 수 있다(모자사러 실사용 확인, 2026-08-17 — "캡모자"의 하위로 신발/가방

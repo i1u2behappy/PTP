@@ -226,6 +226,11 @@ export function StagingItemsGrid({ sessionId }: {
   const [items, setItems] = useState<StagingRow[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [merging, setMerging] = useState(false)
+  // "확정" 진행률/경과시간 표시용 — total 0이면 아직 폴링 시작 전(또는 서버가 이 batchId를 아직 못 받음).
+  const [mergeProgress, setMergeProgress] = useState<{ total: number; done: number; elapsedSec: number } | null>(null)
+  const mergeProgressPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const mergeStartedAtRef = useRef(0)
+  useEffect(() => () => { if (mergeProgressPollRef.current) clearInterval(mergeProgressPollRef.current) }, [])
   const [unmerging, setUnmerging] = useState(false)
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [sortKeys, setSortKeys] = useState<SortKey[]>([])
@@ -415,7 +420,11 @@ export function StagingItemsGrid({ sessionId }: {
   }
 
   function toggleSelect(id: number) {
-    setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+    setSelected(s => {
+      const n = new Set(s)
+      if (n.has(id)) n.delete(id); else n.add(id)
+      return n
+    })
   }
   // 확정(merged)/미확정(pending) 각각 따로 일괄선택할 수 있어야 한다는 요청 — 하나의 selected Set을
   // 공유하되, 그룹별로 "이 그룹 전체가 이미 선택돼 있는지"만 따로 판정해 체크박스 두 개로 나눈다.
@@ -475,6 +484,21 @@ export function StagingItemsGrid({ sessionId }: {
   async function handleMerge() {
     if (!selectedPendingIds.length) return
     setMerging(true)
+    // 경과시간 표시용 타이머 — setInterval로 주기적으로 다시 계산해 state에 반영하는 것 자체는 React가
+    // 공식적으로 안내하는 시계/타이머 패턴이지만, react-hooks/purity가 Date.now() 값이 결국 state로
+    // 흘러간다는 이유만으로 오탐한다.
+    /* eslint-disable-next-line react-hooks/purity */
+    mergeStartedAtRef.current = Date.now()
+    const idsParam = selectedPendingIds.join(',')
+    setMergeProgress({ total: selectedPendingIds.length, done: 0, elapsedSec: 0 })
+    mergeProgressPollRef.current = setInterval(async () => {
+      const res = await fetch(`/api/scrape-staging/merge/progress?ids=${idsParam}`).catch(() => null)
+      const d = await res?.json().catch(() => null) as { total: number; done: number } | null
+      const elapsedSec = Math.floor((Date.now() - mergeStartedAtRef.current) / 1000)
+      setMergeProgress(d
+        ? { total: d.total, done: d.done, elapsedSec }
+        : prev => prev && { ...prev, elapsedSec })
+    }, 800)
     try {
       // force: true — 이 화면은 스크랩 건(세션) 단위로 확정하는 화면이라, 예전에 이미 상품마스터로
       // 확정된 적 있는 상품(is_already_migrated)이라도 이번에 새로 스크랩한 값 기준으로 다시 확정한다.
@@ -492,7 +516,9 @@ export function StagingItemsGrid({ sessionId }: {
       bumpRefresh('staging')
       loadItems()
     } finally {
+      if (mergeProgressPollRef.current) { clearInterval(mergeProgressPollRef.current); mergeProgressPollRef.current = null }
       setMerging(false)
+      setMergeProgress(null)
     }
   }
 
@@ -548,7 +574,7 @@ export function StagingItemsGrid({ sessionId }: {
   }
 
   return (
-    <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-0 flex flex-col">
+    <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-[160px] flex flex-col resize-y">
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 shrink-0 flex-wrap gap-2">
         <div className="flex items-center gap-4 text-xs text-gray-600 flex-wrap">
           {/* 체크박스 두 개를 하나의 <label>에 같이 넣지 않는다 — 라벨 텍스트를 클릭하면 그 라벨 안의
@@ -588,6 +614,13 @@ export function StagingItemsGrid({ sessionId }: {
               className="px-4 py-1.5 bg-gray-100 text-gray-600 text-xs font-semibold rounded-full hover:bg-gray-200 disabled:opacity-40 transition-colors">
               {unmerging ? '되돌리는 중...' : `↩️ 미확정으로 되돌리기 (${selectedMergedIds.length})`}
             </button>
+          )}
+          {merging && mergeProgress && (
+            <span className="flex items-center px-3 py-1 bg-teal-50 text-teal-700 text-xs font-semibold rounded-full whitespace-nowrap">
+              {mergeProgress.total > 0
+                ? `${Math.round(mergeProgress.done / mergeProgress.total * 100)}% (${mergeProgress.done}/${mergeProgress.total}) · ${mergeProgress.elapsedSec}초`
+                : `준비 중... · ${mergeProgress.elapsedSec}초`}
+            </span>
           )}
           <button onClick={handleMerge} disabled={!selectedPendingIds.length || merging}
             title="확정 시: 이미지 다운로드 + 원본 데이터(mall_products) 반영 + (거래처 연결된 몰이면) 상품마스터 자동 변환까지 처리됩니다."

@@ -26,10 +26,15 @@ async function run(action, busyText) {
     if (!tab?.id || !tab.url) { setStatus('✗ 활성 탭을 찾을 수 없습니다', 'error'); return }
     const res = await chrome.runtime.sendMessage({ action, tabId: tab.id, tabUrl: tab.url })
     if (res?.ok) {
+      // "몰 구조분석"은 카테고리 하위구조 자동확인/정렬 옵션 감지까지 한 번에 처리한다(2026-08-22,
+      // 세 버튼을 하나로 합침) — 셋 중 일부만 실패했으면(partialErrors) 성공 메시지 뒤에 같이 적어준다.
+      const profileNote = res.partialErrors?.length
+        ? ` (일부 실패: ${res.partialErrors.join(', ')})`
+        : ` — 카테고리 하위구조 ${res.expandCount ?? '-'}개, 정렬 옵션 ${res.sortCount ?? '-'}개 확인 완료`
       setStatus(action === 'start' ? '✓ 시작했습니다 — PTP 화면에서 진행상황을 확인하세요.'
         : action === 'picker' ? '✓ 몰 탭에 직접지정 패널이 열렸습니다 — 그 패널에서 값을 클릭해 지정하세요.'
-        : action === 'expand-categories' ? `✓ 카테고리 ${res.count}개 확인 완료 — PTP에서 "카테고리 불러오기"를 다시 눌러 확인하세요.`
-        : '✓ 완료했습니다 — PTP 화면에서 결과를 확인하세요.', 'ok')
+        : action === 'profile' ? `✓ 몰 구조분석 완료${profileNote} — PTP에서 다시 확인하세요.`
+        : '✓ 완료했습니다 — PTP 화면에서 결과를 확인하세요.', res.partialErrors?.length ? 'error' : 'ok')
     } else {
       setStatus(`✗ ${res?.error || '알 수 없는 오류'}`, 'error')
     }
@@ -40,12 +45,13 @@ async function run(action, busyText) {
   }
 }
 
-// 몰 구조분석은 지금 탭이 아니라 서버가 별도로 여는 헤드리스 브라우저로 하므로(background.js의 runProfile
-// 참고) chrome.debugger가 필요 없다 — 그냥 트리거만 하고 결과는 PTP 화면에서 확인한다.
-document.getElementById('btn-profile').addEventListener('click', () => run('profile', '몰 구조를 분석하는 중...'))
-// 대분류 개수만큼 페이지를 하나씩 순서대로 열어봐야 해서(카테고리 사이 1.2~2.4초 대기 포함) 몰 규모에
-// 따라 몇 분 걸릴 수 있다 — PTP의 "카테고리 불러오기"를 먼저 한 번 실행해 대분류 목록을 만들어둬야 한다.
-document.getElementById('btn-expand-categories').addEventListener('click', () => run('expand-categories', '카테고리마다 하위구조를 확인하는 중... (몰 규모에 따라 몇 분 걸릴 수 있습니다)'))
+// "몰 구조분석"은 예전엔 이 버튼 하나였는데, 카테고리 하위구조 자동확인/정렬 옵션 감지 버튼 2개를
+// 따로 눌러야 하는 게 번거롭다는 지적으로 셋을 하나로 합쳤다(2026-08-22, background.js의
+// runFullMallProfile 참고) — 몰 구조분석 자체는 서버가 별도로 여는 헤드리스 브라우저(개인 크롬 프로필
+// 사본)로 하고, 나머지 둘은 지금 이 탭(chrome.debugger)에서 순서대로 진행한다. 대분류 개수만큼 페이지를
+// 하나씩 열어봐야 해서(카테고리 사이 1.2~2.4초 대기 포함) 몰 규모에 따라 몇 분 걸릴 수 있다 — PTP의
+// "카테고리 불러오기"를 먼저 한 번 실행해 대분류 목록을 만들어둬야 한다.
+document.getElementById('btn-profile').addEventListener('click', () => run('profile', '몰 구조를 분석하는 중... (카테고리 하위구조/정렬 옵션까지 함께 확인 — 몰 규모에 따라 몇 분 걸릴 수 있습니다)'))
 document.getElementById('btn-preview').addEventListener('click', () => run('preview', '지금 페이지를 캡처하는 중...'))
 document.getElementById('btn-start').addEventListener('click', () => run('start', '스크랩을 시작합니다...'))
 document.getElementById('btn-picker').addEventListener('click', () => run('picker', '직접지정 패널을 여는 중...'))

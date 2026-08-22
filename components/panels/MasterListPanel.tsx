@@ -127,7 +127,11 @@ export function MasterListPanel() {
   const readyCount = rows.filter(r => missing(r).length === 0).length
 
   function toggleSelect(id: number) {
-    setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+    setSelected(s => {
+      const n = new Set(s)
+      if (n.has(id)) n.delete(id); else n.add(id)
+      return n
+    })
   }
   function selectAll() {
     setSelected(selected.size === visibleRows.length ? new Set() : new Set(visibleRows.map(r => r.id)))

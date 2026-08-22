@@ -1,5 +1,5 @@
 @echo off
-cd /d "c:\Users\seyi_MOVE\Project\scrape"
+cd /d "c:\Users\seyi-DESK\Project\scrape"
 (
   echo waiting for postgres container...
   set DBREADY=

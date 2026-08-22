@@ -41,6 +41,7 @@ async function resolveSite(hostname) {
   return {
     id: data.id, extractionRules: data.extractionRules || {}, aiPreviewMode: !!data.aiPreviewMode,
     categoryUrls: data.categoryUrls || [], categoryLinks: data.categoryLinks || [],
+    categorySettings: data.categorySettings || {}, sortOptions: data.sortOptions || [],
     masterLabels: data.masterLabels || {}, masterOrder: data.masterOrder || [], previewProduct: data.previewProduct || null,
   }
 }
@@ -156,6 +157,21 @@ function withPageParam(url, pageNum) {
   }
 }
 
+// 카테고리별 정렬 설정을 실제 스크랩 시작 순간에만 URL에 반영한다 — site.categorySettings(원본, href
+// 기준)에 정렬을 미리 구워 저장하면 다음 몰 재선택 시 체크박스/그리드 매칭이 깨지므로(ScraperPanel.tsx의
+// buildCategoryUrlsAndLimits와 같은 이유), 굽는 시점을 여기 하나로 좁혀둔다.
+function bakeSortUrl(url, setting, sortOptions) {
+  const chosen = setting?.sortLabel && sortOptions.find(o => o.label === setting.sortLabel)
+  if (!chosen) return url
+  try {
+    const u = new URL(url)
+    Object.entries(chosen.paramsToAdd).forEach(([k, v]) => u.searchParams.set(k, v))
+    return u.toString()
+  } catch {
+    return url
+  }
+}
+
 // 상품 링크/다음페이지 링크 수집 — 페이지 이동 없이 현재 문서만 읽는다. 몰마다 플랫폼이 달라(카페24
 // SEO형, 카페24 고전형, 신우 같은 구형 자체 솔루션, 고도몰 등) 여러 패턴을 다 시도한다(lib/scraper.ts의
 // PLATFORM_PROFILES와 같은 패턴을 씀 — 두 구현이 갈라지지 않도록 플랫폼이 추가되면 항상 같이 반영):
@@ -233,6 +249,109 @@ const COLLECT_LINKS_EXPR = `(() => {
 
   return { links: uniqueLinks, linkInfo: Object.fromEntries(linkInfo), nextUrl, category, brandFromCategory }
 })()`
+
+// "🧭 정렬 옵션 감지"(runDetectSortOptions)가 카테고리 페이지의 모든 같은 출처 링크를 서버로 보내 AI 판정을
+// 맡기기 위해 모으는 용도 — lib/scraper.ts의 collectSortCandidates(page.evaluate 안)와 완전히 같은 로직
+// (같은 출처, 400개 상한, 지금 페이지/origin 자체 제외, 텍스트 또는 img alt)을 그대로 옮겼다. 상품
+// 링크인지 여부는 가리지 않는다 — 정렬 링크는 카테고리 링크와 똑같은 모양(같은 pathname, 쿼리파라미터만
+// 다름)이라 COLLECT_LINKS_EXPR의 상품 링크 필터로는 걸러지지 않는다.
+// 2026-08-21 걸스굽 실사용 확인: 카페24 플랫폼은 정렬을 <a> 링크가 아니라 <select id="selArray"
+// class="...xans-product-orderby">(옵션 value에 "?cate_no=...&sort_method=N" 같은 상대경로가 들어있음)로
+// 구현해서, <a href>만 모으던 기존 방식으로는 정렬 옵션이 하나도 안 잡혔다(항상 "기본순"만 남음) — 모든
+// <select>의 <option>도 같은 방식으로 후보에 포함시킨다(계좌이체 은행 선택처럼 값이 다른 출처의 전체
+// URL인 것들은 origin 필터에서 자연히 걸러진다).
+const COLLECT_ALL_LINKS_EXPR = `(() => {
+  const origin = location.origin
+  const current = location.href.replace(/\\/+$/, '')
+  const seen = new Set()
+  const result = []
+  for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+    if (result.length >= 400) break
+    const href = a.href
+    if (!href.startsWith(origin)) continue
+    const norm = href.replace(/\\/+$/, '')
+    if (norm === current || norm === origin || seen.has(norm)) continue
+    const text = (a.textContent || '').trim() || (a.querySelector('img[alt]')?.alt || '').trim()
+    if (!text) continue
+    seen.add(norm)
+    result.push({ text, href })
+  }
+  for (const opt of Array.from(document.querySelectorAll('select option'))) {
+    if (result.length >= 400) break
+    if (!opt.value) continue
+    let href
+    try { href = new URL(opt.value, location.href).href } catch { continue }
+    if (!href.startsWith(origin)) continue
+    const norm = href.replace(/\\/+$/, '')
+    if (norm === current || norm === origin || seen.has(norm)) continue
+    const text = (opt.textContent || '').trim()
+    if (!text) continue
+    seen.add(norm)
+    result.push({ text, href })
+  }
+  return { links: result, baseUrl: location.href }
+})()`
+
+// COLLECT_ALL_LINKS_EXPR이 아무것도 못 찾았을 때(버튼 onclick, 커스텀 JS 드롭다운 등 href/select-value로
+// 정적으로 읽을 수 없는 정렬 UI)의 폴백 — lib/scraper.ts의 detectSortOptionsByClicking과 완전히 같은
+// 아이디어(태그 종류 상관없이 정렬 키워드와 비슷한 텍스트를 후보로 삼아 실제로 클릭해보고, 클릭 전후
+// URL이 달라지면 진짜 정렬 옵션으로 인정 — 엉뚱한 걸 클릭해도 서버의 diffQueryParams가 같은 pathname인지
+// 다시 확인하므로 후보를 넓게 잡아도 안전하다). 여기서는 후보 텍스트만 모으고, 실제 클릭은
+// runDetectSortOptions가 evalInTab을 반복 호출해 하나씩 수행한다(클릭마다 원래 페이지로 복귀해야 해서
+// 이 evaluate 하나로 전부 끝낼 수 없다).
+const SORT_KEYWORD_PATTERN = '(신상|신규|최신|낮은\\s*가격|높은\\s*가격|인기|판매량|조회|클릭|리뷰|추천|할인|세일|낱개판매|기본순)'
+const COLLECT_SORT_KEYWORD_TEXTS_EXPR = `(() => {
+  const re = new RegExp(${JSON.stringify(SORT_KEYWORD_PATTERN)})
+  const seen = new Set()
+  const result = []
+  for (const el of Array.from(document.querySelectorAll('a, button, li, span, div, label'))) {
+    if (result.length >= 10) break
+    const text = (el.textContent || '').trim()
+    if (!text || text.length > 12 || !re.test(text) || seen.has(text)) continue
+    const hasTextChild = Array.from(el.children).some(c => (c.textContent || '').trim() === text)
+    if (hasTextChild) continue
+    seen.add(text)
+    result.push(text)
+  }
+  return result
+})()`
+
+// 위에서 모은 후보 텍스트 하나를 실제로 클릭한다 — 정확히 그 텍스트를 직접 담은(자식이 아닌) 요소만
+// 찾아 클릭하고, 성공 여부만 boolean으로 돌려준다(클릭 이후 페이지 이동 여부는 호출부가
+// chrome.tabs.onUpdated로 별도 확인).
+function buildClickTextExpr(text) {
+  return `(() => {
+    const target = ${JSON.stringify(text)}
+    for (const el of Array.from(document.querySelectorAll('a, button, li, span, div, label'))) {
+      const t = (el.textContent || '').trim()
+      if (t !== target) continue
+      const hasTextChild = Array.from(el.children).some(c => (c.textContent || '').trim() === t)
+      if (hasTextChild) continue
+      el.click()
+      return true
+    }
+    return false
+  })()`
+}
+
+// 클릭이 실제 페이지 이동으로 이어지는지 잠깐 기다린다 — navigate()와 같은 원리(chrome.tabs.onUpdated의
+// "complete" 대기, 영원히 안 올 수 있어 상한 시간 뒤엔 그 시점 그대로 진행)지만, 여기선 우리가 직접
+// chrome.tabs.update를 호출하지 않고 페이지 자신의 JS(클릭 핸들러)가 이동을 트리거하므로 별도로 둔다.
+function waitForTabSettled(tabId, timeoutMs) {
+  return new Promise(resolve => {
+    let done = false
+    function finish() {
+      if (done) return
+      done = true
+      chrome.tabs.onUpdated.removeListener(onUpdated)
+      clearTimeout(timer)
+      resolve()
+    }
+    function onUpdated(id, info) { if (id === tabId && info.status === 'complete') finish() }
+    chrome.tabs.onUpdated.addListener(onUpdated)
+    const timer = setTimeout(finish, timeoutMs)
+  })
+}
 
 // 카테고리를 여러 개 선택했을 때(collectCategoryLinks의 fastCountOk) 개수만 필요하면, 페이지를 하나씩
 // 순회하지 않고 이 신호로 몇 번만 열어봐서 정확한 개수를 바로 얻는다 — lib/scraper.ts의
@@ -570,7 +689,7 @@ async function reportDone(stopped) {
  * 사이를 옮겨 다닐 때도 여전히 같은 실제 탭(chrome.debugger)만 쓴다 — 새 브라우저 컨텍스트를 띄우지
  * 않으므로 개발자모드가 원래 존재하는 이유(자동화 감지 회피)와 충돌하지 않는다.
  */
-async function run(tabId, startUrl, categoryUrls) {
+async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions) {
   running = true
   let processed = 0
   let stoppedByUser = false
@@ -578,8 +697,14 @@ async function run(tabId, startUrl, categoryUrls) {
   try {
     outer:
     for (const listingStart of listingStarts) {
+      // 카테고리별 정렬/상한 설정 — href 원본 그대로 저장돼 있으므로(devmode_category_settings, ScraperPanel.tsx
+      // buildCategoryUrlsAndLimits와 같은 이유) 여기서 키로 그대로 조회한다. categoryProcessed/pageNum은
+      // 카테고리마다 새로 시작하는 지역 카운터다(상한이 "이 카테고리 안에서 몇 개/몇 페이지"이기 때문).
+      const setting = listingStart ? categorySettings?.[listingStart] : null
+      let categoryProcessed = 0
+      let pageNum = 1
       if (listingStart) {
-        await navigate(tabId, listingStart)
+        await navigate(tabId, bakeSortUrl(listingStart, setting, sortOptions || []))
         await throttle()
       }
       while (processed < MAX_PRODUCTS) {
@@ -601,7 +726,12 @@ async function run(tabId, startUrl, categoryUrls) {
           })`)
           console.log('[PTP] 진단 정보:', JSON.stringify(diag, null, 2))
         }
-        for (const link of links) {
+        // 개수 상한(count 모드)이면 이 페이지에서 남은 만큼만 처리한다 — "다음 페이지 존재 여부"(nextUrl)
+        // 판정 자체는 건드리지 않는다(lib/scraper.ts의 collectFromListing과 같은 원칙: dead-end 감지는
+        // 항상 전체 목록 기준).
+        const countLimit = setting?.limitMode === 'count' ? setting.limitValue : null
+        const pageLinks = countLimit ? links.slice(0, Math.max(0, countLimit - categoryProcessed)) : links
+        for (const link of pageLinks) {
           if (processed >= MAX_PRODUCTS) break
           // PTP의 "스크래핑 중지" 버튼이 눌렸는지 상품마다 확인한다 — 다음 상품으로 넘어가기 전에 반영된다.
           if (await checkStopRequested(sessionId)) {
@@ -623,10 +753,14 @@ async function run(tabId, startUrl, categoryUrls) {
             await reportFailure(link, e.message).catch(() => {})
           }
           processed++
+          categoryProcessed++
           await throttle()
         }
 
-        if (!nextUrl) break
+        const reachedCountLimit = countLimit != null && categoryProcessed >= countLimit
+        const reachedPageLimit = setting?.limitMode === 'pages' && setting.limitValue && pageNum >= setting.limitValue
+        if (!nextUrl || reachedCountLimit || reachedPageLimit) break
+        pageNum++
         await navigate(tabId, nextUrl)
         await throttle()
       }
@@ -658,7 +792,7 @@ async function startScrape(tab, site) {
   // run()은 상품 여러 개를 순회하며 오래 걸릴 수 있어(수 분) 완료를 기다리지 않고 백그라운드로 흘려보낸다
   // — 팝업은 "시작했다"는 응답만 받고, 진행상황은 PTP 화면의 기존 5초 폴링이 이어받는다. site.categoryUrls가
   // 있으면(PTP에서 카테고리를 체크해뒀으면) 그 목록을 전부 순회하고, 없으면 기존처럼 지금 탭 위치만 처리한다.
-  run(tab.id, tab.url, site.categoryUrls).finally(() => safeDetach(tab.id))
+  run(tab.id, tab.url, site.categoryUrls, site.categorySettings, site.sortOptions).finally(() => safeDetach(tab.id))
   return { ok: true }
 }
 
@@ -912,6 +1046,57 @@ async function runExpandCategories(tab, site) {
     const data = await res.json().catch(() => ({}))
     if (!res.ok) return { ok: false, error: data.error || String(res.status) }
     return { ok: true, count: deduped.length }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  } finally {
+    await navigate(tab.id, startUrl).catch(() => {})
+    await safeDetach(tab.id)
+  }
+}
+
+/** "🧭 정렬 옵션 감지" — site.categoryLinks[0](PTP "카테고리 불러오기"가 찾아둔 대분류 중 첫 번째)를
+ *  실제 로그인된 탭에서 열어 그 페이지의 모든 같은 출처 링크를 모아 서버(/api/sites/{id}/sort-options)로
+ *  보낸다. 정렬 옵션이 뭔지 AI로 판정하는 것 자체(detectSortOptionsWithAI)는 로그인이 필요 없으므로
+ *  서버가 맡고, 이 함수는 runExpandCategories와 같은 이유(로그인 필요 몰은 서버 Playwright가 이 페이지를
+ *  볼 수 없음)로 "링크를 모아 보내는 것"만 대신한다.
+ *  2026-08-21: <a href>/<select><option> 어느 쪽으로도 못 찾으면(버튼 onclick, 커스텀 JS 드롭다운 등)
+ *  클릭 기반 폴백으로 한 번 더 시도한다 — 정렬 키워드와 비슷한 텍스트를 태그 상관없이 후보로 삼아
+ *  하나씩 실제로 클릭해보고, 클릭 전후 URL이 달라지면 후보로 채택한다(진짜 정렬인지는 서버의
+ *  diffQueryParams가 같은 pathname인지 다시 확인하므로 여기서는 넓게 잡아도 안전하다). */
+async function runDetectSortOptions(tab, site) {
+  if (!site.categoryLinks || !site.categoryLinks.length) {
+    return { ok: false, error: 'PTP 화면에서 "카테고리 불러오기"를 먼저 한 번 실행해주세요(대분류 목록이 아직 없습니다).' }
+  }
+  try {
+    await attachDebugger(tab.id)
+  } catch (e) {
+    return { ok: false, error: `디버거 연결 실패: ${e.message}` }
+  }
+  const startUrl = tab.url
+  try {
+    await navigate(tab.id, site.categoryLinks[0].href)
+    let { links, baseUrl } = await evalInTab(tab.id, COLLECT_ALL_LINKS_EXPR)
+    if (!links.length) {
+      const candidateTexts = await evalInTab(tab.id, COLLECT_SORT_KEYWORD_TEXTS_EXPR).catch(() => [])
+      for (const text of candidateTexts) {
+        const clicked = await evalInTab(tab.id, buildClickTextExpr(text)).catch(() => false)
+        if (clicked) {
+          await waitForTabSettled(tab.id, 5_000)
+          const afterUrl = await evalInTab(tab.id, 'location.href').catch(() => null)
+          if (afterUrl && afterUrl !== baseUrl) links.push({ text, href: afterUrl })
+        }
+        if ((await evalInTab(tab.id, 'location.href').catch(() => null)) !== baseUrl) {
+          await navigate(tab.id, baseUrl).catch(() => {})
+        }
+      }
+    }
+    const res = await fetch(`${SITE_API_BASE}/${site.id}/sort-options`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ links, baseUrl }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) return { ok: false, error: data.error || String(res.status) }
+    return { ok: true, count: data.count || 0 }
   } catch (e) {
     return { ok: false, error: e.message }
   } finally {
@@ -1469,6 +1654,33 @@ async function runProfile(site) {
   }
 }
 
+/** "몰 구조분석" 버튼 하나로 셋을 같이 돌린다 — 예전엔 "몰 구조분석"/"카테고리 하위구조 자동확인"/
+ *  "정렬 옵션 감지"가 따로 눌러야 하는 버튼 3개였는데, 사용자 입장에서 몰 하나를 처음 붙일 때 결국
+ *  셋 다 순서대로 눌러야 해서 번거롭다는 지적으로 하나로 합쳤다(2026-08-22). runProfile은 서버가 알아서
+ *  띄우는 별도의 헤드리스 브라우저(개인 크롬 프로필 사본)를 쓰므로 이 탭과 무관해 병렬로 같이 돌리고,
+ *  카테고리 하위구조 확인과 정렬 옵션 감지는 둘 다 이 탭의 chrome.debugger를 붙였다 떼야 해서(동시에
+ *  붙이면 충돌) 순서대로 실행한다. */
+async function runFullMallProfile(tab, site) {
+  const profilePromise = runProfile(site)
+  const expandRes = await runExpandCategories(tab, site)
+  const sortRes = await runDetectSortOptions(tab, site)
+  const profileRes = await profilePromise
+
+  const failures = []
+  if (!profileRes.ok) failures.push(`몰 구조분석: ${profileRes.error}`)
+  if (!expandRes.ok) failures.push(`카테고리 하위구조: ${expandRes.error}`)
+  if (!sortRes.ok) failures.push(`정렬 옵션: ${sortRes.error}`)
+  if (failures.length === 3) return { ok: false, error: failures.join(' / ') }
+  return {
+    ok: true,
+    expandCount: expandRes.ok ? expandRes.count : null,
+    sortCount: sortRes.ok ? sortRes.count : null,
+    // 셋 중 일부만 실패했으면(예: 카테고리 목록이 아직 없어 나머지 둘만 실패) 그래도 성공으로 보고하되
+    // 어떤 게 빠졌는지는 같이 알려준다.
+    partialErrors: failures.length ? failures : undefined,
+  }
+}
+
 /** 팝업(popup.js)이 보내는 메시지 — 우클릭이 막힌 몰에서도 기능을 쓸 수 있는 기본 경로.
  *  탭 조회는 popup.js가 이미 자신이 매인 창 기준으로 끝내고 tabId/tabUrl로 넘겨준다 — 이 서비스 워커
  *  자신은 "현재 창"이라는 개념이 없어(특정 창에 매인 UI가 아니다) 여기서 다시 chrome.tabs.query를
@@ -1485,8 +1697,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.action === 'start') sendResponse(await startScrape(tab, site))
     else if (msg.action === 'preview') sendResponse(await runPreview(tab, site, site.aiPreviewMode))
     else if (msg.action === 'picker') sendResponse(await runPicker(tab, site))
-    else if (msg.action === 'profile') sendResponse(await runProfile(site))
-    else if (msg.action === 'expand-categories') sendResponse(await runExpandCategories(tab, site))
+    else if (msg.action === 'profile') sendResponse(await runFullMallProfile(tab, site))
     else sendResponse({ ok: false, error: `알 수 없는 action: ${msg.action}` })
   })()
   return true // 비동기 sendResponse를 쓰겠다는 표시

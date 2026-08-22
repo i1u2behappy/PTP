@@ -108,12 +108,64 @@ export async function getProductMasterRows(ids: number[]): Promise<RawMasterRow[
   }))
 }
 
-export async function initDb() {
+// initDb()가 가드 없이 매번 호출부(로그인/사이트 목록 등 여러 라우트)에서 그대로 불려, 요청마다 아래
+// 600줄짜리 마이그레이션 전체(ALTER TABLE 수십~수백 개)를 매번 새 트랜잭션으로 다시 실행하고 있었다 —
+// 이 트랜잭션이 여러 테이블을 고정된 순서로 잠그는데, 동시에 들어온 다른 요청(예: getCategoryScrapeHistory
+// 의 product_master/supply_clients 조회)이 그 반대 순서로 같은 테이블을 잠그면 데드락이 난다(2026-08-21
+// 실사용 확인: `/api/sites/1`이 "deadlock detected" 500으로 반복 실패). 프로세스당 한 번만 실제로
+// 실행되게 캐시된 Promise로 감싼다 — 매 요청 재검증이 원래도 불필요했다(스키마는 배포 중에만 바뀜).
+let initPromise: Promise<void> | null = null
+export function initDb(): Promise<void> {
+  if (!initPromise) {
+    // 실패하면(일시적 DB 연결 문제 등) 캐시를 비워 다음 호출이 처음부터 다시 시도하게 한다 — 그러지
+    // 않으면 한 번 실패한 뒤로 이 프로세스가 살아있는 내내 영영 실패한 채로 굳어버린다.
+    initPromise = runMigrations().catch(err => { initPromise = null; throw err })
+  }
+  return initPromise
+}
+
+/** 세미콜론으로 구분된 대량 DDL을 문장 단위로 쪼개 각각 별도 쿼리(자동 커밋)로 실행한다 — initDb()의
+ *  마이그레이션 전체를 원래처럼 하나의 거대한 트랜잭션(pool.query에 여러 문장을 통째로 넘기면 암묵적
+ *  트랜잭션이 됨)으로 실행하면, 그 안에서 여러 테이블을 고정된 순서로 잠근 채 전부 끝날 때까지 놓지
+ *  않는다 — 반대 순서로 같은 테이블들을 건드리는 동시 요청(예: getCategoryScrapeHistory의
+ *  product_master → supply_clients 조회)과 데드락이 났다(2026-08-21 `/api/sites/{id}`가 "deadlock
+ *  detected" 500으로 반복 실패해 실사용 확인 — initDb()를 프로세스당 1회로 캐싱한 뒤에도 재현됨, 즉
+ *  근본 원인은 호출 빈도가 아니라 이 트랜잭션 자체의 잠금 범위였다). 문장마다 즉시 커밋되면 한 문장이
+ *  잡는 잠금은 그 문장이 끝나는 즉시 풀리므로, 서로 다른 순서로 잠그더라도 겹치는 순간 자체가 극히
+ *  짧아져 데드락이 실질적으로 불가능해진다. `$tag$...$tag$` 달러 인용 블록(DO 블록) 안의 세미콜론은
+ *  문장 구분자로 보지 않는다 — 문자열 리터럴 안의 세미콜론까지는 다루지 않는데, 이 마이그레이션
+ *  SQL에는 없기 때문(있었다면 문장이 잘려 SQL 문법 오류로 즉시 드러난다). */
+async function runStatements(sql: string) {
+  const statements: string[] = []
+  let tag: string | null = null
+  let start = 0
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i]
+    if (tag === null) {
+      if (ch === '$') {
+        const m = /^\$[A-Za-z_]*\$/.exec(sql.slice(i))
+        if (m) { tag = m[0]; i += m[0].length - 1; continue }
+      }
+      if (ch === ';') { statements.push(sql.slice(start, i)); start = i + 1 }
+    } else if (ch === '$' && sql.startsWith(tag, i)) {
+      i += tag.length - 1
+      tag = null
+    }
+  }
+  const last = sql.slice(start).trim()
+  if (last) statements.push(last)
+  for (const stmt of statements) {
+    const trimmed = stmt.trim()
+    if (trimmed) await pool.query(trimmed)
+  }
+}
+
+async function runMigrations() {
   // 동적 import로 지연 로드 — scheduler.ts가 이 파일의 pool/decryptSecret을 정적으로 import하므로
   // 최상단에서 바로 import하면 순환참조가 된다. startScheduler()는 자체적으로 1회만 실행되도록 가드한다.
   import('./scheduler').then(m => m.startScheduler()).catch(() => {})
 
-  await pool.query(`
+  await runStatements(`
     -- PTP 앱 자체 로그인 계정. 몰 스크래핑 로그인 정보(sites 테이블)와는 별개.
     -- 원래 admin_accounts(단일 관리자 계정)이었다가 권한관리 기능 추가로 다중 사용자 테이블로 확장 —
     -- 기존 DB는 테이블명을 그대로 옮기고, role 컬럼만 새로 얹는다(기존 유일 행은 아래에서 admin으로 지정).
@@ -191,6 +243,12 @@ export async function initDb() {
     -- /api/sites/resolve로 같이 받아가게 한다(devmode_ai_preview와 같은 이유). 비어있으면(기본값) 기존
     -- 동작 그대로 "지금 탭 위치"만 처리한다.
     ALTER TABLE sites ADD COLUMN IF NOT EXISTS devmode_category_urls JSONB NOT NULL DEFAULT '[]';
+    -- 카테고리별 정렬/상한 그리드 설정(개발자모드) — 프론트 categorySettings 상태와 같은 모양(href →
+    -- {sortLabel?, limitMode?, limitValue?})을 가공 없이 그대로 저장한다. devmode_category_urls(순수
+    -- href)와 분리해두는 이유: href에 정렬 파라미터를 미리 구워 넣으면 다음 재선택 시 체크박스/그리드
+    -- 매칭이 href 문자열 비교로 깨진다 — 정렬은 확장의 run()이 스크랩 시작 순간에만 URL에 반영한다
+    -- (사용자 요청, 2026-08-19).
+    ALTER TABLE sites ADD COLUMN IF NOT EXISTS devmode_category_settings JSONB NOT NULL DEFAULT '{}';
 
     -- 카테고리 목록의 "이미 스크랩함" 표시가 이 시각 이후의 완료 세션만 기준으로 삼는다(app/api/scrape/
     -- categories) — 로그인을 다시 하면 이전 로그인 때 완료한 카테고리는 더 이상 참고 대상이 아니라는
@@ -649,7 +707,7 @@ export async function initDb() {
     );
   `)
 
-  await pool.query(`
+  await runStatements(`
     INSERT INTO supply_clients (name)
     SELECT '기본 거래처' WHERE NOT EXISTS (SELECT 1 FROM supply_clients);
 

@@ -52,6 +52,7 @@ export function PricingManagementPanel({ params }: { params?: Record<string, unk
     fetch(`/api/master?sessionId=${scope.sessionId}`).then(r => r.json()).then((d: MasterRow[]) => setRows(Array.isArray(d) ? d : [])).catch(() => {})
   }, [scope.sessionId])
 
+  /* eslint-disable-next-line react-hooks/set-state-in-effect */
   useEffect(() => { load() }, [load])
 
   function startEdit(id: number, key: NumberKey | 'target_margin_rate', current: number | null) {

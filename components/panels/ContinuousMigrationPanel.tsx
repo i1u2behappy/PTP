@@ -93,7 +93,11 @@ export function ContinuousMigrationPanel() {
   }
 
   function toggleRecheckField(key: RecheckField) {
-    setRecheckFields(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n })
+    setRecheckFields(s => {
+      const n = new Set(s)
+      if (n.has(key)) n.delete(key); else n.add(key)
+      return n
+    })
   }
 
   async function runRecheck() {
@@ -141,7 +145,11 @@ export function ContinuousMigrationPanel() {
   }
 
   function toggleSelect(id: number) {
-    setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+    setSelected(s => {
+      const n = new Set(s)
+      if (n.has(id)) n.delete(id); else n.add(id)
+      return n
+    })
   }
 
   function toggleSelectAll() {

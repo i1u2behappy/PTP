@@ -13,6 +13,7 @@ interface Session {
   staged_count: number
   pending_count: number
   created_at: string
+  merged_at: string | null
 }
 
 export interface ScrapeScope { clientId: number | ''; siteId: number | ''; sessionId: number | '' }
@@ -54,7 +55,6 @@ export function ScrapeScopePicker({ initialSiteId, initialSessionId, onScopeChan
         setSelectedSessionId(wantedMatch.id)
       }
     }).catch(() => {})
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 마운트 시 1회만
   }, [])
 
   useEffect(() => {
@@ -72,7 +72,11 @@ export function ScrapeScopePicker({ initialSiteId, initialSessionId, onScopeChan
     if (querySiteId === '' && queryClientId !== '' && siteClientMap.get(s.site_id) !== queryClientId) return false
     const q = sessionSearch.trim().toLowerCase()
     if (!q) return true
+    // 그리드(ScrapeSessionGrid)가 항상 보여주는 "병합 일시"(merged_at)가 검색에서 빠져있었다(사용자
+    // 지적, 2026-08-17 — 다른 메뉴의 검색도 그리드에 보이는 컬럼 전부를 대상으로 해달라는 요청). 이
+    // 화면은 showClientMall을 안 켜서 거래처/몰 컬럼 자체가 안 보이므로 그 둘은 검색 대상에서 뺀다.
     return s.url.toLowerCase().includes(q) || s.status.toLowerCase().includes(q) || new Date(s.created_at).toLocaleString().toLowerCase().includes(q)
+      || (s.merged_at ? new Date(s.merged_at).toLocaleString() : '').toLowerCase().includes(q)
   })
 
   const selectedSession = sessions.find(s => s.id === selectedSessionId)

@@ -50,7 +50,11 @@ export function ExportPanel() {
   const readyRows = rows.filter(r => r.status === 'ready')
 
   function toggleSelect(id: number) {
-    setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+    setSelected(s => {
+      const n = new Set(s)
+      if (n.has(id)) n.delete(id); else n.add(id)
+      return n
+    })
   }
   function selectAll() {
     setSelected(selected.size === readyRows.length ? new Set() : new Set(readyRows.map(r => r.id)))

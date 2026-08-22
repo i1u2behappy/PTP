@@ -19,6 +19,7 @@ export function ChromeWarning() {
   const [show, setShow] = useState(false)
 
   useEffect(() => {
+    /* eslint-disable-next-line react-hooks/set-state-in-effect */
     if (isChromeBrowser()) setShow(true)
   }, [])
 

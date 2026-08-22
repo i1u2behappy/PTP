@@ -105,18 +105,18 @@ const LAST_SESSION_KEY = 'scrape.scraper.lastSession'
 // 사라져 있다는 지적으로(재조회하려면 다시 몰 페이지에 접속해야 해 느리다) 폼 값과 함께 그대로 남겨둔다.
 // LAST_SESSION_KEY와 같은 이유로 sessionStorage를 쓴다(탭 간 공유 방지).
 const FORM_STATE_KEY = 'scrape.scraper.formState'
-// 몰(site)과 무관하게 항상 같은 값을 쓰는 전역 선호값이라 FORM_STATE_KEY(몰별 작업 상태)와 분리한다 —
-// 메모리/CPU 이슈 진단 중 "수동/2개"로 낮춰두면 몰을 바꿔도 그 설정이 그대로 유지되길 원할 것이라는 판단.
-// 기본값을 자동/4 → 수동/2로 바꾸면서 키 이름도 바꿨다(.v2) — 안 바꾸면 예전에 이미 저장된 자동/4 값이
-// 그대로 읽혀 새 기본값이 적용되지 않는다(로컬 도구라 기존 저장값을 서버에서 강제로 덮어쓸 방법이 없음).
-const CONCURRENCY_PREF_KEY = 'scrape.scraper.concurrencyPref.v2'
+// 몰(site)과 무관하게 항상 같은 값을 쓰는 전역 선호값이라 FORM_STATE_KEY(몰별 작업 상태)와 분리한다.
+// 2026-08-20 PC 업그레이드(8코어16스레드/28GB)로 저사양 대응용 수동/2 기본값을 원래의 자동/8로
+// 되돌리면서 키 이름도 바꿨다(.v3) — 안 바꾸면 예전에 이미 저장된 수동/2 값이 그대로 읽혀 새 기본값이
+// 적용되지 않는다(로컬 도구라 기존 저장값을 서버에서 강제로 덮어쓸 방법이 없음).
+const CONCURRENCY_PREF_KEY = 'scrape.scraper.concurrencyPref.v3'
 function readConcurrencyPref(): { mode: 'auto' | 'manual'; value: number } {
-  if (typeof window === 'undefined') return { mode: 'manual', value: 2 }
+  if (typeof window === 'undefined') return { mode: 'auto', value: 8 }
   try {
     const saved = JSON.parse(localStorage.getItem(CONCURRENCY_PREF_KEY) || '{}') as { mode?: 'auto' | 'manual'; value?: number }
-    return { mode: saved.mode === 'auto' ? 'auto' : 'manual', value: saved.value ? Math.max(1, Math.min(8, saved.value)) : 2 }
+    return { mode: saved.mode === 'manual' ? 'manual' : 'auto', value: saved.value ? Math.max(1, Math.min(8, saved.value)) : 8 }
   } catch {
-    return { mode: 'manual', value: 2 }
+    return { mode: 'auto', value: 8 }
   }
 }
 
@@ -283,6 +283,9 @@ interface MallProfileSignals {
   categoryLinks?: { name: string; href: string }[]
   /** categoryLinks를 찾을 때 AI가 실제로 기여했는지 — 사용자 요청으로 체크리스트에 작게 표시(2026-08-18). */
   categoryLinksAiUsed?: boolean
+  /** "카테고리별 정렬기준 설정" 기능용 — 이 몰의 목록 페이지가 지원하는 정렬 옵션(표준 라벨)과, 그
+   *  정렬을 적용하려면 카테고리 URL에 추가해야 하는 쿼리파라미터(사용자 요청, 2026-08-19). */
+  sortOptions?: { label: string; paramsToAdd: Record<string, string> }[]
   excludedCategoryHrefs?: string[]
   hasPaginationWidget: boolean
   report: MallStructureReport | null
@@ -544,6 +547,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 표시한다(2026-08-18). GEMINI_API_KEY가 없거나 AI가 매번 빈 결과를 줘 기존 셀렉터 히스틱으로만
   // 채워졌으면 false.
   const [categoryAiUsed, setCategoryAiUsed] = useState(false)
+  // "카테고리별 정렬기준 설정" 기능(사용자 요청, 2026-08-19) — 카테고리 href를 키로, 사용자가 그리드에서
+  // 고른 정렬 라벨/상한을 담는다. categoryUrlsText(선택 상태)와 같은 이유로 서버에 영구 저장하지 않고
+  // 세션(sessionStorage) 로컬 상태로만 둔다 — 매번 다시 고르는 게 맞는 값이라 DB 스키마 없이 간단하게.
+  const [categorySettings, setCategorySettings] = useState<Record<string, { sortLabel?: string; limitMode?: 'count' | 'pages'; limitValue?: number }>>({})
   const [detectedPlatform, setDetectedPlatform] = useState<string | null>(null)
   // 카테고리를 나눠서(오늘 일부, 나중에 나머지) 스크랩하는 경우가 있어, 이 몰의 과거 완료 세션들을 훑어
   // "이미 스크랩해본 카테고리"를 체크박스 목록에 표시한다(app/api/scrape/categories가 계산해 내려줌).
@@ -668,6 +675,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     scrapedCategoryHrefs?: string[]
     allCategoriesScraped?: boolean
     excludedCategoryHrefs?: string[]
+    categorySettings?: Record<string, { sortLabel?: string; limitMode?: 'count' | 'pages'; limitValue?: number }>
   }
 
   function applyFormState(saved: ScraperFormSavedState) {
@@ -689,6 +697,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (saved.scrapedCategoryHrefs?.length) setScrapedCategoryHrefs(saved.scrapedCategoryHrefs)
     if (saved.allCategoriesScraped) setAllCategoriesScraped(true)
     if (saved.excludedCategoryHrefs?.length) setExcludedCategoryHrefs(saved.excludedCategoryHrefs)
+    if (saved.categorySettings) setCategorySettings(saved.categorySettings)
   }
 
   useEffect(() => {
@@ -770,9 +779,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       siteId: selectedSite.id, targetUrl, categoryUrlsText,
       previewResult, previewTotal, previewItems, categoryCounts, detectedPlatform,
       loginStep, categories, categoriesCached, profileResult, scrapedCategoryHrefs, allCategoriesScraped, excludedCategoryHrefs,
+      categorySettings,
     }))
   }, [selectedSite, targetUrl, categoryUrlsText, previewResult, previewTotal, previewItems, categoryCounts, detectedPlatform,
-    loginStep, categories, categoriesCached, profileResult, scrapedCategoryHrefs, allCategoriesScraped, excludedCategoryHrefs])
+    loginStep, categories, categoriesCached, profileResult, scrapedCategoryHrefs, allCategoriesScraped, excludedCategoryHrefs,
+    categorySettings])
 
   const filteredSites = useMemo(() => {
     const q = siteQuery.trim().toLowerCase()
@@ -945,11 +956,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const timer = setTimeout(() => {
       fetch(`/api/sites/${siteId}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ devmodeCategoryUrls: urls }),
+        // categorySettings는 href 원본 그대로(정렬을 URL에 굽지 않고) 저장한다 — 확장의 run()이 스크랩
+        // 시작 순간에만 정렬을 반영한다(devmode_category_urls와 분리해둔 이유는 lib/db.ts 컬럼 주석 참고).
+        body: JSON.stringify({ devmodeCategoryUrls: urls, devmodeCategorySettings: categorySettings }),
       }).catch(() => {})
     }, 500)
     return () => clearTimeout(timer)
-  }, [mallMode, selectedSite, categoryUrlsText])
+  }, [mallMode, selectedSite, categoryUrlsText, categorySettings])
 
   /** 로그인확인 이후 단계(몰구조파악/추출규칙/스크랩)의 안내 문구를 정하는 데 쓰는 서버 판정 —
    *  undefined=조회 전, null=이 화면에서 더 안내할 게 없음(스크랩까지 이미 끝남), 그 외엔
@@ -1051,6 +1064,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       extraction_rules?: Record<string, { type: string; value: string }>
       devmode_ai_preview?: boolean
       devmode_category_urls?: string[]
+      devmode_category_settings?: Record<string, { sortLabel?: string; limitMode?: 'count' | 'pages'; limitValue?: number }>
       scrape_profile?: MallProfileSignals | null
       mall_report_updated_at?: string | null
       category_scrape_history?: Record<string, { lastScrapedAt: string | null; clientName: string | null }>
@@ -1078,6 +1092,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setCategoriesCached(null)
     setLoginBlockedExpansion(false)
     setCategoryAiUsed(false)
+    // 개발자모드는 카테고리별 정렬/상한 그리드 설정도 서버에 저장돼 있다(위 devmode_category_urls와 같은
+    // 이유) — 그대로 복원한다. 일반모드는 이전 몰의 설정이 남지 않도록 비운다.
+    setCategorySettings(full.manual_login_required === true ? (full.devmode_category_settings || {}) : {})
     setDetectedPlatform(null)
     setProfileResult(null)
     setProfileError('')
@@ -1356,6 +1373,40 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const manual = lines.filter(h => next.has(h) && !categories.some(c => c.href === h))
     setCategoryUrlsText([...known, ...manual].join('\n'))
   }
+  /** "카테고리별 정렬기준 설정" 그리드 컬럼(정렬/제한)이 값을 바꿀 때마다 얕은 병합으로 저장한다. */
+  function updateCategorySetting(href: string, patch: Partial<{ sortLabel?: string; limitMode?: 'count' | 'pages'; limitValue?: number }>) {
+    setCategorySettings(prev => ({ ...prev, [href]: { ...prev[href], ...patch } }))
+  }
+  /** categoryUrlsText(선택된 href, 순수 원본)는 체크박스/카테고리목록 매칭에 그대로 쓰이므로 절대 손대지
+   *  않는다 — 대신 미리보기/정확한개수/스크랩시작 요청을 만드는 이 시점에만, 사용자가 그리드에서 고른
+   *  정렬을 카테고리 URL에 쿼리파라미터로 구워 넣고(같은 사이트 어느 카테고리든 base 쿼리파라미터가
+   *  달라도 diffQueryParams로 뽑아둔 "차이"만 얹으므로 그대로 적용된다), 개수/페이지 상한은 그 최종
+   *  URL을 키로 하는 별도 맵(categoryLimits)에 담는다(lib/scraper.ts의 ScrapeOptions.categoryLimits와
+   *  같은 모양 — collectFromListing이 이 맵으로만 상한을 적용). 서버 전용 모듈(lib/scraper.ts)은 여기서
+   *  import할 수 없어(Playwright 등 서버 전용 의존성 포함) 브라우저 내장 URL/URLSearchParams만 쓴다. */
+  function buildCategoryUrlsAndLimits(): {
+    categoryUrls: string[]
+    categoryLimits: Record<string, { mode: 'count' | 'pages'; value: number }>
+  } {
+    const hrefs = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
+    const sortOptions = profileResult?.signals.sortOptions || []
+    const categoryLimits: Record<string, { mode: 'count' | 'pages'; value: number }> = {}
+    const categoryUrls = hrefs.map(href => {
+      const setting = categorySettings[href]
+      let url = href
+      const chosen = setting?.sortLabel && sortOptions.find(o => o.label === setting.sortLabel)
+      if (chosen) {
+        try {
+          const u = new URL(url)
+          Object.entries(chosen.paramsToAdd).forEach(([k, v]) => u.searchParams.set(k, v))
+          url = u.toString()
+        } catch { /* 잘못된 URL이면 원본 그대로 둔다 */ }
+      }
+      if (setting?.limitMode && setting.limitValue) categoryLimits[url] = { mode: setting.limitMode, value: setting.limitValue }
+      return url
+    })
+    return { categoryUrls, categoryLimits }
+  }
   // "제외"로 표시해둔 카테고리(상품이 없는 안내/게시판 페이지 등)는 전체선택 대상에서 뺀다 — 안 그러면
   // 전체선택을 누를 때마다 방금 제외해둔 카테고리까지 다시 스크랩 대상으로 딸려 들어간다(실사용 확인,
   // 2026-08-13).
@@ -1542,7 +1593,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       if (d.total > 0) setPreviewProgress(d)
     }, 1000)
     try {
-      const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
+      // 정렬은 URL에 이미 구워 넣어 그대로 반영되지만, 상한(categoryLimits)은 안 보낸다 — 미리보기의
+      // 총개수는 실제 수집이 아니라 별도의 지수+이분 탐색 추정이라 상한을 봐도 반영되지 않는다("정확한
+      // 총 개수 확인"/실제 스크랩 시작에만 의미가 있음).
+      const { categoryUrls } = buildCategoryUrlsAndLimits()
       const res = await fetch('/api/scrape/preview-catalog', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1596,7 +1650,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const controller = new AbortController()
     exactTotalAbortRef.current = controller
     try {
-      const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
+      const { categoryUrls, categoryLimits } = buildCategoryUrlsAndLimits()
       const res = await fetch('/api/scrape/exact-total', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1604,6 +1658,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         body: JSON.stringify({
           url: categoryUrls.length ? undefined : (targetUrl || undefined),
           categoryUrls: categoryUrls.length ? categoryUrls : undefined,
+          categoryLimits: Object.keys(categoryLimits).length ? categoryLimits : undefined,
           loginId: loginId || undefined, loginPw: loginPw || undefined,
           siteId: selectedSite.id, concurrencyMode, concurrency,
         }),
@@ -1637,7 +1692,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   async function handleStart() {
     if (!selectedSite || !canStart) return
     myLockClickAtRef.current = Date.now()
-    const categoryUrls = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
+    const { categoryUrls, categoryLimits } = buildCategoryUrlsAndLimits()
     setStatus('running')
     setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
     setItemLog([]); setElapsedMinutes(null)
@@ -1650,6 +1705,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       body: JSON.stringify({
         url: categoryUrls.length ? undefined : (targetUrl || undefined),
         categoryUrls: categoryUrls.length ? categoryUrls : undefined,
+        categoryLimits: Object.keys(categoryLimits).length ? categoryLimits : undefined,
         // 페이지당 지연은 몰 차단 방지를 위한 안전값을 그대로 유지한다(사용자가 조절할 필요가 없어 UI에서
         // 제거) — 다음페이지 셀렉터/최대 페이지 수는 플랫폼별 자동 감지(cafe24 등)로 대체된다. 동시 처리
         // 개수는 기본적으로 scrapeCatalogPage가 몰의 반응을 보며 스스로 조절한다(적응형 동시성) — 아래
@@ -1712,6 +1768,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   const statusColor = { idle: 'text-gray-500', running: 'text-teal-500', done: 'text-emerald-600', error: 'text-rose-600', stopped: 'text-amber-600' }
   const statusLabel = { idle: '대기 중', running: '스크래핑 중...', done: '완료', error: '오류 발생', stopped: '중지됨' }
+
+  // "카테고리별 정렬기준 설정" 그리드 컬럼용(사용자 요청, 2026-08-19). 정렬 옵션은 몰 단위로 몰 구조분석이
+  // (일반모드) 또는 확장의 "🧭 정렬 옵션 감지"(개발자모드, runDetectSortOptions)가 찾아둔 값을 그대로 쓴다
+  // (카테고리마다 다시 탐지하지 않음 — 실사용상 몰 전체가 같은 정렬 메커니즘을 씀). 두 경로 모두 같은
+  // 자리(scrape_profile.sortOptions)에 저장되므로 profileResult 하나로 충분하다.
+  const gridSortOptions = profileResult?.signals.sortOptions || []
 
   // 카테고리 불러오기 결과(캐시 안내/감지된 플랫폼/체크리스트) — 일반모드의 "스크랩 대상" 카드와
   // 개발자모드 안내 카드가 그대로 같이 쓴다(2026-08-15, 개발자모드도 카테고리를 선택해 그것만 스크랩할
@@ -1798,6 +1860,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                         ref={el => { if (el) el.indeterminate = selectableCategories.some(c => isCategorySelected(c.href)) && !selectableCategories.every(c => isCategorySelected(c.href)) }}
                         onChange={toggleAllCategories} />
                     </th>
+                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="이 카테고리를 스크랩할 때 적용할 정렬 순서">정렬</th>
+                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="이 카테고리에서 몇 개/몇 페이지까지만 스크랩할지 상한을 둡니다(비워두면 무제한)">스크랩 상한</th>
                     <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap">카테고리</th>
                     <th className="px-3 py-1.5 text-gray-500 font-normal text-right whitespace-nowrap" title="스크랩 미리보기로 확인된 상품 개수">상품개수</th>
                     <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="상품개수를 마지막으로 확인한 시각">확인일시</th>
@@ -1820,11 +1884,41 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                     const live = categoryCountByHref.get(c.href)
                     const count = live ?? (info?.count != null ? { count: info.count, truncated: info.truncated } : undefined)
                     const truncatedTitle = '확인 상한에 도달할 때까지도 새 상품이 계속 나와 멈췄습니다 — 실제로는 더 많을 수 있습니다.'
+                    const setting = categorySettings[c.href]
                     return (
                     <tr key={c.href} onClick={() => toggleCategory(c.href)}
                       className={`group border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer ${isCategoryExcluded(c.href) ? 'opacity-50' : ''}`}>
                       <td className="px-3 py-1.5 w-6 sticky left-0 z-[1] bg-white group-hover:bg-gray-50">
                         <input type="checkbox" checked={isCategorySelected(c.href)} onChange={() => toggleCategory(c.href)} onClick={e => e.stopPropagation()} />
+                      </td>
+                      <td className="px-3 py-1.5" onClick={e => e.stopPropagation()}>
+                        <select
+                          className="border border-gray-200 rounded px-1 py-0.5 text-[11px] bg-white disabled:bg-gray-100 disabled:text-gray-400"
+                          value={setting?.sortLabel ?? ''}
+                          onChange={e => updateCategorySetting(c.href, { sortLabel: e.target.value || undefined })}
+                          disabled={!gridSortOptions.length}
+                          title={!gridSortOptions.length ? '몰 구조분석(또는 개발자모드 확장의 "정렬 옵션 감지")에서 정렬 옵션을 찾지 못했습니다' : undefined}>
+                          <option value="">기본순</option>
+                          {gridSortOptions.map(o => <option key={o.label} value={o.label}>{o.label}</option>)}
+                        </select>
+                      </td>
+                      <td className="px-3 py-1.5" onClick={e => e.stopPropagation()}>
+                        <div className="flex items-center gap-1">
+                          <select
+                            className="border border-gray-200 rounded px-1 py-0.5 text-[11px] bg-white disabled:bg-gray-100 disabled:text-gray-400"
+                            value={setting?.limitMode ?? ''}
+                            onChange={e => updateCategorySetting(c.href, { limitMode: (e.target.value || undefined) as 'count' | 'pages' | undefined })}>
+                            <option value="">무제한</option>
+                            <option value="count">개까지</option>
+                            <option value="pages">페이지까지</option>
+                          </select>
+                          {setting?.limitMode && (
+                            <input type="number" min={1} placeholder="숫자"
+                              className="w-14 border border-gray-200 rounded px-1 py-0.5 text-[11px] disabled:bg-gray-100"
+                              value={setting.limitValue ?? ''}
+                              onChange={e => updateCategorySetting(c.href, { limitValue: e.target.value ? Number(e.target.value) : undefined })} />
+                          )}
+                        </div>
                       </td>
                       <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
                         <span className={isCategoryExcluded(c.href) ? 'line-through' : ''}>{c.text}</span>
@@ -2289,6 +2383,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             <ul className="list-disc list-inside mt-2 space-y-1.5">
               <li><DevModeLocationBadge where="mall" />(선택, 로그인 전에도 가능) 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🧭 보조 - 몰 구조분석&quot;</b> — 결과는 PTP 화면에 나타납니다.</li>
               <li>아래 &quot;카테고리 불러오기&quot;에서 일부 카테고리가 하위구조 없이 그대로만 나온다면(로그인이 필요한 몰) → <DevModeLocationBadge where="mall" />로그인한 상태에서 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🧭 보조 - 카테고리 하위구조 자동확인&quot;</b> 실행 → <DevModeLocationBadge where="ptp" />완료 후 &quot;다시 확인&quot;을 누르면 반영됩니다.</li>
+              <li>아래 카테고리별 &quot;정렬&quot; 칸이 비어있다면 → <DevModeLocationBadge where="mall" />로그인한 상태에서 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🧭 보조 - 정렬 옵션 감지&quot;</b> 실행 → <DevModeLocationBadge where="ptp" />완료 후 이 몰을 목록에서 다시 선택하면 정렬 옵션이 나타납니다.</li>
               <li><DevModeLocationBadge where="mall" />상품 1건만 먼저 확인하려면 → 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🔍 스크랩 미리보기 - (카테선택)&quot;</b> (PTP의 &quot;스크랩 미리보기&quot;는 안 눌러도 자동 반영됩니다)</li>
               <li>컬럼을 직접 지정하려면 → 먼저 <DevModeLocationBadge where="ptp" />에서 &quot;스크랩 대상 직접지정&quot; 클릭 → <DevModeLocationBadge where="mall" />팝업의 <b className="text-gray-700">&quot;🎯 보조 - 스크랩 대상 직접지정&quot;</b></li>
               <li>확장 아이콘이 안 보이면 퍼즐조각(🧩) 아이콘을 먼저 눌러 목록에서 찾으세요(자주 쓰면 그 옆 핀으로 고정).</li>
@@ -2520,7 +2615,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               {detectedPlatform && ` — 감지된 몰 유형: ${PLATFORM_LABELS[detectedPlatform] || detectedPlatform}`}
               {previewTotal === 0 && <span className="text-rose-500"> (매칭되는 상품 링크가 없습니다. 셀렉터나 시작 URL을 확인해주세요.)</span>}
               {categoryCounts.some(c => c.truncated) && (
-                <span className="text-amber-600"> (일부 카테고리는 확인 상한에 도달해 최소치만 확인됨 — 아래 개수별 "이상" 표시 참고)</span>
+                <span className="text-amber-600"> (일부 카테고리는 확인 상한에 도달해 최소치만 확인됨 — 아래 개수별 &quot;이상&quot; 표시 참고)</span>
               )}
             </p>
           )}

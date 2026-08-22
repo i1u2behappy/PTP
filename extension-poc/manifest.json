@@ -1,13 +1,25 @@
 {
   "manifest_version": 3,
   "name": "PTP 개발자모드 몰 자동 스크랩",
-  "version": "1.42",
+  "version": "1.43",
   "description": "chrome.debugger로 이미 로그인된 탭에서 상품을 자동 순회하며 스크랩해 PTP 서버로 전송한다. Mall 관리에서 '크롬익스텐션-개발자모드'로 등록된 몰이면 어디서든 그대로 동작한다.",
   "permissions": ["debugger", "tabs", "contextMenus"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "action": {
     "default_title": "PTP 개발자모드 스크랩 — 클릭해서 메뉴 열기",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   }
 }

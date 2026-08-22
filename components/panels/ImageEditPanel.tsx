@@ -36,6 +36,7 @@ export function ImageEditPanel({ params }: { params?: Record<string, unknown> })
     fetch(`/api/master/images?sessionId=${scope.sessionId}`).then(r => r.json()).then((d: MasterWithImages[]) => { if (Array.isArray(d)) setProducts(d) }).catch(() => {})
   }, [scope.sessionId])
 
+  /* eslint-disable-next-line react-hooks/set-state-in-effect */
   useEffect(() => { load() }, [load, refreshSignals.master])
   // 다른 세션/몰로 범위를 바꾸면 이전 선택은 무효화한다 — 안 그러면 화면엔 안 보이는 이전 세션의
   // 이미지 id가 선택된 채로 남아있다가 "선택 삭제"를 누르면 지금 보이지도 않는 이미지가 삭제된다.
@@ -43,7 +44,11 @@ export function ImageEditPanel({ params }: { params?: Record<string, unknown> })
   useEffect(() => { setSelectedIds(new Set()) }, [scope.sessionId])
 
   function toggleSelect(id: number) {
-    setSelectedIds(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+    setSelectedIds(s => {
+      const n = new Set(s)
+      if (n.has(id)) n.delete(id); else n.add(id)
+      return n
+    })
   }
 
   async function deleteSelected() {

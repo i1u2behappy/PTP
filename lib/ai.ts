@@ -18,6 +18,59 @@ function getGeminiClient() {
 // 항상 최신 flash 모델을 가리키는 별칭을 쓴다 — 특정 버전이 나중에 또 폐기돼도 코드를 안 고쳐도 된다.
 const GEMINI_MODEL = 'gemini-flash-latest'
 
+
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:8b'
+
+/** detectCategoryLinksWithAI/detectSortOptionsWithAI 전용 — Gemini 무료 티어 일일 한도(20회/일)에
+ *  너무 쉽게 걸려서(2026-08-22 실사용 확인: 모자사러 정렬 감지가 하루 한도 초과로 계속 조용히
+ *  실패했는데, 그 전까지는 매번 다른 원인으로 착각하고 고쳤었다) 이 둘만 로컬 Ollama로 옮긴다 — 사용자가
+ *  "어떤 외부 서비스의 사업 지속성/요금 정책에도 의존하지 않겠다"고 명시적으로 선택함(Groq/GitHub
+ *  Models 등 다른 무료 API 대신 로컬 모델). 이 파일의 나머지 Gemini 사용처(추출규칙 생성 등 4곳)는
+ *  이번 이관 대상이 아니다. 두 함수 다 "후보 목록에서 조건에 맞는 인덱스만 고르기"라는 같은 패턴이라
+ *  이 헬퍼 하나를 공유한다. Ollama가 꺼져 있거나 응답 형식이 다르면 조용히 빈 배열 — 호출부가 기존
+ *  히스틱/미검출로 그대로 폴백한다(원래 Gemini 실패 시 폴백과 같은 동작). qwen3는 Ollama 공식 문서가
+ *  도구 호출(함수 호출) 신뢰성 예시로 쓰는 모델이라 골랐다.
+ *  think:false 필수 — qwen3는 기본이 "추론 모델"이라 답하기 전에 긴 내부 사고 과정을 토큰으로 전부
+ *  생성한다(2026-08-22 실측: 4항목짜리 아주 작은 목록에서도 thinking 켠 채로 258초, 꺼서 8초 —
+ *  32배 차이). 이 작업은 "목록에서 인덱스 고르기"라는 단순 분류라 추론 과정이 필요 없다. */
+async function pickIndicesWithOllama(prompt: string, toolName: string, toolDescription: string): Promise<number[]> {
+  try {
+    const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        stream: false,
+        think: false,
+        messages: [{ role: 'user', content: prompt }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: toolName,
+            description: toolDescription,
+            parameters: {
+              type: 'object',
+              required: ['indices'],
+              properties: { indices: { type: 'array', items: { type: 'integer' }, description: '고른 항목들의 0-based 인덱스 목록' } },
+            },
+          },
+        }],
+      }),
+    })
+    if (!res.ok) return []
+    const data = await res.json() as { message?: { tool_calls?: { function: { name: string; arguments: unknown } }[] } }
+    const call = data.message?.tool_calls?.[0]
+    if (!call) return []
+    // Ollama는 arguments를 이미 파싱된 객체로 주지만, 혹시 문자열로 오는 경우까지 방어적으로 처리한다.
+    const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments
+    const indices = (args as { indices?: unknown } | null)?.indices
+    return Array.isArray(indices) ? indices.filter((i): i is number => Number.isInteger(i)) : []
+  } catch {
+    return []
+  }
+}
+
 export interface ExtractedProduct {
   name: string
   price: number | null
@@ -416,10 +469,8 @@ export interface CategoryLinkCandidate { name: string; href: string }
  * 후보 링크는 DOM 위치/중첩 깊이와 무관하게 "페이지의 모든 링크를 그대로 나열"하는 것으로 충분해
  * 컨테이너 셀렉터 튜닝 자체가 필요 없어진다.
  * 링크 목록 대신 "인덱스"만 반환하게 해서 href를 AI가 잘못 옮겨 적을(할루시네이션) 위험을 없앤다.
- * 몰당 1회(카테고리 불러오기 시)만 호출되고 결과가 캐시되므로, Gemini 무료 tier(분당 5회 제한)로도
- * 충분하다(2026-08-18 검토 — 상품마다 호출하는 filterRealProductOptions와 달리 몰 단위라 비용/요청량
- * 부담이 사실상 없음). GEMINI_API_KEY가 없거나 판단 실패/빈 결과면 빈 배열 반환 — 호출부가 기존
- * scanCategoryMenu 히스틱 체인으로 그대로 폴백한다.
+ * 로컬 Ollama(pickIndicesWithOllama)를 쓴다 — 판단 실패/빈 결과/Ollama 미실행이면 빈 배열 반환,
+ * 호출부가 기존 scanCategoryMenu 히스틱 체인으로 그대로 폴백한다.
  */
 export async function detectCategoryLinksWithAI(
   mallName: string,
@@ -428,7 +479,7 @@ export async function detectCategoryLinksWithAI(
    *  대분류 허브 확장과 같은 용도) — 생략하면 몰 전체의 최상위 카테고리 탐지 모드. */
   parentCategoryName?: string,
 ): Promise<CategoryLinkCandidate[]> {
-  if (!process.env.GEMINI_API_KEY || !linkCandidates.length) return []
+  if (!linkCandidates.length) return []
 
   const scopeInstruction = parentCategoryName
     ? `이 링크들은 '${mallName}' 몰의 '${parentCategoryName}' 카테고리 페이지 안에 있던 것이다 — 이
@@ -445,35 +496,64 @@ export async function detectCategoryLinksWithAI(
 [링크 목록 (인덱스. "링크텍스트" → URL)]
 ${linkCandidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
 
-  try {
-    const response = await getGeminiClient().models.generateContent({
-      model: GEMINI_MODEL,
-      contents: prompt,
-      config: {
-        tools: [{ functionDeclarations: [{
-          name: 'set_category_link_indices',
-          description: '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
-          parameters: {
-            type: Type.OBJECT,
-            properties: { indices: { type: Type.ARRAY, items: { type: Type.INTEGER }, description: '카테고리 링크인 항목의 0-based 인덱스 목록' } },
-            required: ['indices'],
-          },
-        }] }],
-        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_category_link_indices'] } },
-      },
-    })
-    const call = response.functionCalls?.[0]
-    if (!call) return []
-    const { indices } = call.args as { indices?: number[] }
-    const seen = new Set<number>()
-    return (indices || [])
-      .filter(i => Number.isInteger(i) && i >= 0 && i < linkCandidates.length && !seen.has(i) && seen.add(i))
-      .map(i => ({ name: linkCandidates[i].text, href: linkCandidates[i].href }))
-  } catch {
-    // filterRealProductOptions와 같은 이유로 조용히 빈 배열 — 호출부가 기존 히스틱으로 폴백하므로
-    // "카테고리 불러오기" 자체가 막히면 안 된다(AI모드 스크래핑/스크랩 조정과 달리 이건 항상-보조 기능).
-    return []
-  }
+  const indices = await pickIndicesWithOllama(
+    prompt, 'set_category_link_indices',
+    '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
+  )
+  const seen = new Set<number>()
+  return indices
+    .filter(i => i >= 0 && i < linkCandidates.length && !seen.has(i) && seen.add(i))
+    .map(i => ({ name: linkCandidates[i].text, href: linkCandidates[i].href }))
+}
+
+export interface SortOptionCandidate { label: string; href: string }
+
+/**
+ * "카테고리별 정렬기준 설정" 기능용 — 목록 페이지에서 발견한 모든 같은 출처 링크 중, 상품 정렬 방식을
+ * 바꾸는 링크만 AI가 골라낸다. 표준 라벨로 정규화하지 않고 몰이 실제로 쓰는 문구(예: "신상품",
+ * "제조사", "사용후기")를 그대로 label로 쓴다 — 표준 라벨(기본순/최신순/낮은가격순 등) 목록에 없는
+ * 정렬 기준(상품명순, 제조사순, 리뷰순 등)은 AI가 억지로 끼워맞추지도, 통째로 빼지도 않고 그냥 원문
+ * 그대로 노출해야 한다는 사용자 판단(2026-08-22) — 몰마다 표현이 정말 제각각이라(예: 어떤 몰은
+ * "인기순", 어떤 몰은 "사용후기") 하나의 고정된 라벨 집합으로는 다 담을 수 없다는 게 실사용으로
+ * 확인됨. detectCategoryLinksWithAI와 완전히 같은 이유·같은 패턴(href를 AI가 다시 타이핑하지 않고
+ * 인덱스로만 반환 — 할루시네이션 방지)으로 로컬 Ollama(pickIndicesWithOllama)를 쓴다. 실패하면 조용히
+ * 빈 배열 — 호출부가 "정렬 옵션 없음"으로 처리한다.
+ *
+ * baseUrl(지금 보고 있던 목록 페이지 URL)을 프롬프트에 같이 준다 — 2026-08-22 모자사러 실사용 확인:
+ * 같은 텍스트("신상품")를 쓰는 링크가 두 개(진짜 정렬 링크 하나, 완전히 다른 카테고리로 가는 메뉴
+ * 링크 하나) 있을 때, Gemini는 구분했지만 로컬 qwen3는 헷갈려서 엉뚱한 쪽(카테고리 이동)을 정렬로
+ * 잘못 골랐다 — baseUrl을 명시하고 "정렬은 지금 이 목록을 유지한 채 순서만 바꾼다"는 판단 기준을
+ * 프롬프트에 직접 적어줘서 로컬 모델도 같은 구분을 하도록 보강했다. */
+export async function detectSortOptionsWithAI(
+  mallName: string,
+  linkCandidates: { text: string; href: string }[],
+  baseUrl: string,
+): Promise<SortOptionCandidate[]> {
+  if (!linkCandidates.length) return []
+
+  const prompt = `이 링크들은 '${mallName}' 몰의 상품 목록(카테고리) 페이지(${baseUrl})에 있던 것이다.
+이 중 상품 정렬/정렬순서를 바꾸는 링크(신상품순, 낮은가격순, 높은가격순, 인기순, 판매량순, 조회순,
+상품명순, 제조사순, 리뷰(사용후기)순 등 — 목록에 없는 기준이라도 정렬 링크면 포함)만 골라라.
+
+중요: 정렬 링크는 지금 보고 있는 이 목록/카테고리를 그대로 유지한 채 상품이 나열되는 "순서"만 바꾼다.
+텍스트가 정렬 기준처럼 보여도(예: "신상품") URL이 완전히 다른 카테고리나 목록으로 이동시킨다면(예:
+카테고리 번호 자체가 바뀜) 그건 정렬이 아니라 카테고리 이동 메뉴이니 절대 포함하지 마라 — 같은
+텍스트를 쓰는 링크가 여러 개면 그중 baseUrl과 같은 목록을 유지하는(정렬 파라미터만 다른) 것만 골라라.
+
+카테고리 이동, 로그인, 검색, 필터(브랜드/가격대 등)처럼 정렬과 무관한 링크는 절대 포함하지 마라.
+확실하지 않으면 빼라.
+
+[링크 목록 (인덱스. "링크텍스트" → URL)]
+${linkCandidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
+
+  const indices = await pickIndicesWithOllama(
+    prompt, 'set_sort_option_indices',
+    '정렬 기준 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
+  )
+  const seen = new Set<number>()
+  return indices
+    .filter(i => i >= 0 && i < linkCandidates.length && !seen.has(i) && seen.add(i))
+    .map(i => ({ label: linkCandidates[i].text, href: linkCandidates[i].href }))
 }
 
 export interface MallStructureReport {

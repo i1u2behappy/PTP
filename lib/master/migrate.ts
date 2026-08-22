@@ -38,6 +38,13 @@ async function findReferenceFallback(siteId: number, mallProductCode: string, no
   return res.rows[0] as { brand: string; manufacturer: string; origin: string; category: string; description: string } | undefined
 }
 
+// 상품마다 DB 왕복 5회 안팎인데(mall_products 조회, reference_products 조회, upsert, 사내코드 발급,
+// mall_products/product_images 갱신) 서로 다른 상품은 완전히 독립적이라(각자 자기 행만 건드림) 순차
+// 대신 몇 건씩 묶어 동시에 처리한다 — lib/scrape/staging.ts의 MERGE_CONCURRENCY와 같은 이유
+// (2026-08-22, 사용자 요청). nextInternalCode의 UPDATE...RETURNING은 원자적이라 동시 호출에도 사내
+// 관리코드 번호가 겹치지 않는다.
+const MIGRATE_CONCURRENCY = 6
+
 /**
  * 원천 스크랩 데이터(mall_products)를 영속 '상품마스터'(product_master)로 옮긴다.
  * 비어있는 필드만 reference_products(이전 완료 데이터)로 채우고, 이미 사용자가 편집한 마스터 값은 덮어쓰지 않는다.
@@ -47,13 +54,13 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
   const clientRow = await pool.query<{ auto_internal_code: boolean }>('SELECT auto_internal_code FROM supply_clients WHERE id=$1', [clientId])
   const autoInternalCode = clientRow.rows[0]?.auto_internal_code ?? true
 
-  for (const mallProductId of mallProductIds) {
+  async function migrateOne(mallProductId: number) {
     const mpRes = await pool.query(
       `SELECT * FROM mall_products WHERE id=$1`,
       [mallProductId],
     )
     const mp = mpRes.rows[0]
-    if (!mp) continue
+    if (!mp) return
 
     const ref = await findReferenceFallback(mp.site_id, mp.mall_product_code, normalizeName(mp.name_original))
 
@@ -115,6 +122,10 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
 
     await pool.query(`UPDATE mall_products SET master_product_id=$1 WHERE id=$2`, [masterId, mallProductId])
     await pool.query(`UPDATE product_images SET product_master_id=$1 WHERE mall_product_id=$2`, [masterId, mallProductId])
+  }
+
+  for (let i = 0; i < mallProductIds.length; i += MIGRATE_CONCURRENCY) {
+    await Promise.all(mallProductIds.slice(i, i + MIGRATE_CONCURRENCY).map(migrateOne))
   }
 
   return { migrated: masterIds.length, masterIds }

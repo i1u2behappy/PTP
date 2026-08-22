@@ -127,7 +127,12 @@ export async function generateForProducts(siteId: number, mallProductIds: number
   const lookupMapByRuleId = new Map(lookupEntries)
 
   const results: GenerateResult[] = []
-  for (const mallProductId of mallProductIds) {
+  // 상품마다 DB 조회 1회 + (AI 규칙이 있으면) AI 호출 1회 + upsert 1회인데, 서로 다른 상품은 완전히
+  // 독립적이라 순차 대신 몇 건씩 묶어 처리한다 — migrateToMaster의 MIGRATE_CONCURRENCY와 같은 이유
+  // (2026-08-22, 사용자 요청). AI 호출이 껴 있어 상품 수가 많으면 이 병렬화의 체감 효과가 특히 크다 —
+  // 다만 AI 제공자(Gemini 등) 쪽 분당 호출 한도에 걸리면 이 숫자를 낮춰야 할 수 있다.
+  const GENERATE_CONCURRENCY = 6
+  async function generateOne(mallProductId: number) {
     const mpRes = await pool.query<MallProductRow>(
       `SELECT id, name_original, price, sale_price, brand, manufacturer, origin, description,
               mall_category, stock_status, stock_qty, options
@@ -135,7 +140,7 @@ export async function generateForProducts(siteId: number, mallProductIds: number
       [mallProductId],
     )
     const mp = mpRes.rows[0]
-    if (!mp) continue
+    if (!mp) return
     const source = buildSourceFields(mp)
     const values: Record<string, string> = {}
 
@@ -169,6 +174,10 @@ export async function generateForProducts(siteId: number, mallProductIds: number
     )
 
     results.push({ mallProductId, values })
+  }
+
+  for (let i = 0; i < mallProductIds.length; i += GENERATE_CONCURRENCY) {
+    await Promise.all(mallProductIds.slice(i, i + GENERATE_CONCURRENCY).map(generateOne))
   }
 
   return results
@@ -223,17 +232,25 @@ export async function commitGeneratedRow(generatedRowId: number, clientId: numbe
   return masterId
 }
 
+// 행마다 독립적인 확정 작업이라(각자 다른 mall_product_id) 순차 대신 몇 건씩 묶어 처리한다 —
+// MIGRATE_CONCURRENCY와 같은 이유(2026-08-22, 사용자 요청). 개별 실패는 그대로 격리해야 하므로
+// try/catch는 항목마다 유지한다.
+const COMMIT_CONCURRENCY = 6
+
 /** 여러 draft 행을 한 번에 확정한다 — 하나가 실패해도 나머지는 계속 진행. */
 export async function commitGeneratedRows(ids: number[], clientId: number): Promise<{ committed: number[]; failed: { id: number; error: string }[] }> {
   const committed: number[] = []
   const failed: { id: number; error: string }[] = []
-  for (const id of ids) {
+  async function commitOne(id: number) {
     try {
       await commitGeneratedRow(id, clientId)
       committed.push(id)
     } catch (e) {
       failed.push({ id, error: e instanceof Error ? e.message : String(e) })
     }
+  }
+  for (let i = 0; i < ids.length; i += COMMIT_CONCURRENCY) {
+    await Promise.all(ids.slice(i, i + COMMIT_CONCURRENCY).map(commitOne))
   }
   return { committed, failed }
 }

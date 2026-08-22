@@ -802,3 +802,43 @@ links)`(신규, `lib/scraper.ts`) — 메뉴 자체가 이미지/아이콘이라
 ### 관련 파일
 
 **수정**: `lib/scraper.ts`, `lib/scrape/mallProfile.ts`, `components/panels/ScraperPanel.tsx`
+
+## 성능 개선 (2026-08-22) — 샘플 상품/정보페이지 방문 병렬화
+
+모자사러(카테고리 17개, 페이지 로딩이 느린 도매몰)에서 "몰 구조분석"이 몇 분씩 걸리는 걸 실제 로그로
+분석하는 과정에서, 확장(`runExpandCategories`)뿐 아니라 서버 쪽 `sampleMallProfile`도 병목이 있음을
+확인했다 — 샘플 상품(최대 `MALL_PROFILE_SAMPLE_SIZE`=6건)과 정보페이지(`gatherMallContextText`,
+최대 4개)를 전부 **하나의 `page`로 순서대로** 방문하고 있었다. 각 방문은 서로 완전히 독립적인 페이지라
+(상품 A를 보는 것과 상품 B를 보는 것 사이에 의존관계 없음), `discoverCategoryLinks`의
+`expandWorker`(서버 쪽 카테고리 하위구조 확인)가 이미 쓰는 것과 같은 커서 기반 워커풀로 병렬화했다.
+사용자 지시: "병렬화 해줘."
+
+- **`mapWithPageWorkers`**(신규, `lib/scraper.ts`) — `context.newPage()`로 워커 페이지를 추가로 열어
+  (첫 워커는 기존 `page` 재사용) 항목 목록을 동시에 처리하는 범용 헬퍼. `MALL_PROFILE_CONCURRENCY = 4`
+  로 탭 개수를 제한(확장의 `EXPAND_TAB_CONCURRENCY`와 같은 이유 — 항목 자체가 최대 6개뿐이라 그 이상
+  열어봐야 낭비).
+- **`sampleMallProfile`의 샘플 상품 루프**: 순차 `for`를 `mapWithPageWorkers` 호출로 교체. Set/카운터
+  갱신(`optionTypes`, `infoLabelSet`, `categoryPathSet`, `signals.sampleCount` 등)은 각 워커 콜백의
+  await 없는 동기 구간에서만 일어나 경쟁 조건이 없다(JS 싱글스레드 특성). "첫 성공 샘플의 원문만
+  모은다"(`productContextText`, deep 전용) 로직은 두 워커가 동시에 `!productContextText`를 보고 둘 다
+  무거운 `evaluate`를 수행한 뒤 나중 것이 덮어쓰는 경합을 막기 위해, 체크 직후 **await 없이 동기로**
+  `contextClaimed = true`를 세워 진짜로 먼저 도착한 워커 하나만 통과하게 했다.
+- **`gatherMallContextText`의 정보페이지(배송/반품/공지 등) 루프**: 같은 방식으로 병렬화. 결과 순서는
+  참고용 텍스트라 상관없지만, 위치 보존을 위해 `infoSections[i]`에 인덱스로 채운 뒤 마지막에 합친다.
+- **하지 않은 것**: `sampleMallProfile` 안의 "카테고리 후보 링크를 따라 들어가 상품을 재시도로 찾는"
+  폴백 루프(홈페이지 자체엔 상품이 0개인 몰 전용, 드문 경로)는 그대로 순차로 남겼다 — `MALL_PROFILE_
+  SAMPLE_SIZE`에 도달하면 즉시 멈추는 조기 종료 로직이 있어 병렬화하면 불필요한 방문이 늘어날 수 있고,
+  애초에 드물게만 타는 경로라 우선순위가 낮다고 판단했다.
+- `withContext`가 이미 `(page, context)`를 콜백에 넘겨주므로, `profileMallStructure`/
+  `profileMallStructureForScrape` 두 진입점 모두 콜백 시그니처에 `context`를 추가해 `sampleMallProfile`
+  까지 그대로 전달하도록 고쳤다.
+
+검증: `tsc --noEmit`/`eslint` 클린. 최종적으로 `page`(워커 0)는 어느 샘플을 마지막으로 방문했든 함수
+끝에서 무조건 `startUrl`로 되돌리므로(기존에도 있던 동작) 병렬화로 인한 페이지 상태 불일치는 없다.
+실제 모자사러로 처리 시간이 줄었는지는 사용자 실사용 확인 필요.
+
+### 관련 파일 (병렬화)
+
+**수정**: `lib/scraper.ts` — `mapWithPageWorkers`(신규), `MALL_PROFILE_CONCURRENCY`(신규 상수),
+`sampleMallProfile`/`gatherMallContextText`(시그니처에 `context` 추가 + 병렬화), `profileMallStructure`/
+`profileMallStructureForScrape`(콜백에서 `context`도 넘기도록 수정).

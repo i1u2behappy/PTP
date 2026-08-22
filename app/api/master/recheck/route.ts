@@ -70,9 +70,15 @@ export async function POST(req: NextRequest) {
       allowStaleManualLoginProfile: true,
     }, targets)
 
-    for (const r of recheckResults) {
+    // recheckMallProducts 자체는 이미 병렬 워커풀(lib/scraper.ts의 recheckOne)이라 실제 재방문은 여기
+    // 이전에 이미 동시에 끝났다 — 이 아래는 그 결과를 DB에 반영(upsertMallProduct)하고 이전값과 비교만
+    // 하는 후처리인데, 이것도 상품마다 독립적인 DB 왕복이라 순차 대신 몇 건씩 묶어 처리한다
+    // (migrateToMaster의 MIGRATE_CONCURRENCY와 같은 이유, 2026-08-22). results.push 순서는 recheckResults
+    // 자체가 이미(워커풀이라) 요청 순서를 보장하지 않으므로 여기서 더 나빠질 게 없다.
+    const RECHECK_CONCURRENCY = 6
+    async function processOne(r: (typeof recheckResults)[number]) {
       const prev = before.get(r.mallProductId)
-      if (!prev) continue
+      if (!prev) return
       const reasons: string[] = []
 
       if (!r.product) {
@@ -83,7 +89,7 @@ export async function POST(req: NextRequest) {
           reasons.push(`단종 (상품코드: ${r.mallProductCode})`)
         }
         if (reasons.length) results.push({ mallProductId: r.mallProductId, mallProductCode: r.mallProductCode, reasons })
-        continue
+        return
       }
 
       const product = r.product
@@ -114,6 +120,9 @@ export async function POST(req: NextRequest) {
       }
 
       if (reasons.length) results.push({ mallProductId: r.mallProductId, mallProductCode: r.mallProductCode, reasons })
+    }
+    for (let i = 0; i < recheckResults.length; i += RECHECK_CONCURRENCY) {
+      await Promise.all(recheckResults.slice(i, i + RECHECK_CONCURRENCY).map(processOne))
     }
 
     await pool.query(`UPDATE scrape_sessions SET status='done', product_count=$1 WHERE id=$2`, [targets.length, sessionId])

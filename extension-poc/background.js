@@ -689,11 +689,50 @@ async function reportDone(stopped) {
  * 사이를 옮겨 다닐 때도 여전히 같은 실제 탭(chrome.debugger)만 쓴다 — 새 브라우저 컨텍스트를 띄우지
  * 않으므로 개발자모드가 원래 존재하는 이유(자동화 감지 회피)와 충돌하지 않는다.
  */
+// 목록 페이지 탐색(다음 페이지 링크 찾기)은 원래 탭 하나로 순서대로 해야 하지만(다음 페이지 URL은
+// 현재 페이지를 봐야 안다), 그렇게 찾은 상품 링크들을 실제로 방문해 추출하는 부분은 서로 완전히
+// 독립적이라 병렬화 대상이다 — runExpandCategories와 같은 이유(2026-08-22, 사용자 요청). 이 스크랩은
+// 몇 분에서 수십 분 걸릴 수 있는 긴 작업이라, 탭을 추가로 열지 못하면(브라우저 제한 등) 원래 탭
+// 하나만으로 조용히 낮은 동시 개수로 이어가고(안 그러면 몇 분 진행된 스크랩이 통째로 실패로 끝난다),
+// runExpandCategories처럼 실패를 그대로 던지지 않는다.
+const SCRAPE_TAB_CONCURRENCY = 4
+
 async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions) {
   running = true
   let processed = 0
   let stoppedByUser = false
   const listingStarts = categoryUrls && categoryUrls.length ? categoryUrls : [null]
+
+  const extraTabIds = []
+  for (let i = 1; i < SCRAPE_TAB_CONCURRENCY; i++) {
+    try {
+      const t = await chrome.tabs.create({ url: 'about:blank', active: false })
+      await attachDebugger(t.id)
+      extraTabIds.push(t.id)
+    } catch (e) {
+      console.log(`[PTP] 병렬 처리용 탭을 여는 데 실패해 동시 ${extraTabIds.length + 1}개로 진행합니다:`, e.message)
+      break
+    }
+  }
+  const workerTabIds = [tabId, ...extraTabIds]
+
+  /** 상품 1건 방문·추출·보고 — 성공/실패 모두 여기서 끝낸다(호출부는 카운터만 올리면 됨). */
+  async function processProduct(workerTabId, link, category, brandFromCategory) {
+    await navigate(workerTabId, link)
+    try {
+      const product = await evalInTab(workerTabId, buildExtractExpr(extractionRules))
+      // 카테고리는 상품 상세페이지가 아니라 방금 있던 목록(카테고리) 페이지에서만 알 수 있으므로,
+      // 상세페이지 추출 결과 위에 덮어씌운다.
+      if (category) product.category = category
+      if (brandFromCategory) product.brand = brandFromCategory
+      const result = await report(link, product)
+      console.log('[PTP] 저장:', product.name, result)
+    } catch (e) {
+      console.log('[PTP] 추출 실패:', link, e.message)
+      await reportFailure(link, e.message).catch(() => {})
+    }
+  }
+
   try {
     outer:
     for (const listingStart of listingStarts) {
@@ -731,31 +770,47 @@ async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions)
         // 항상 전체 목록 기준).
         const countLimit = setting?.limitMode === 'count' ? setting.limitValue : null
         const pageLinks = countLimit ? links.slice(0, Math.max(0, countLimit - categoryProcessed)) : links
-        for (const link of pageLinks) {
-          if (processed >= MAX_PRODUCTS) break
-          // PTP의 "스크래핑 중지" 버튼이 눌렸는지 상품마다 확인한다 — 다음 상품으로 넘어가기 전에 반영된다.
-          if (await checkStopRequested(sessionId)) {
-            console.log('[PTP] 중지 요청을 확인해 스크래핑을 멈춥니다.')
-            stoppedByUser = true
-            break outer
-          }
-          await navigate(tabId, link)
-          try {
-            const product = await evalInTab(tabId, buildExtractExpr(extractionRules))
-            // 카테고리는 상품 상세페이지가 아니라 방금 있던 목록(카테고리) 페이지에서만 알 수 있으므로,
-            // 상세페이지 추출 결과 위에 덮어씌운다.
-            if (category) product.category = category
-            if (brandFromCategory) product.brand = brandFromCategory
-            const result = await report(link, product)
-            console.log(`[PTP] ${processed + 1}/${links.length} 저장:`, product.name, result)
-          } catch (e) {
-            console.log('[PTP] 추출 실패:', link, e.message)
-            await reportFailure(link, e.message).catch(() => {})
-          }
+
+        // report()는 sessionId가 아직 없으면(이 run() 전체에서 첫 상품) 서버가 새 세션을 만들어 응답으로
+        // 돌려준다 — 그 첫 1건만은 여러 워커가 동시에 sessionId:null로 보내 세션이 여러 개로 쪼개지지
+        // 않도록 혼자 먼저 처리해 sessionId를 확정한 뒤, 나머지부터 병렬로 넘긴다(2026-08-22).
+        let startIdx = 0
+        if (pageLinks.length && !sessionId) {
+          if (await checkStopRequested(sessionId)) { stoppedByUser = true; break outer }
+          await processProduct(tabId, pageLinks[0], category, brandFromCategory)
           processed++
           categoryProcessed++
+          startIdx = 1
           await throttle()
         }
+
+        const remaining = pageLinks.slice(startIdx)
+        if (remaining.length) {
+          let cursor = 0
+          await Promise.all(workerTabIds.map(async workerTabId => {
+            while (true) {
+              // processed/stoppedByUser는 워커들 사이의 동기 구간(await 없는 부분)에서만 읽고 써서
+              // 경쟁이 없다 — 다만 여러 워커가 "아직 상한 안 됨"을 동시에 확인한 뒤 각자 처리를 시작할
+              // 수 있어(그 시점엔 서로의 완료를 모름) MAX_PRODUCTS/countLimit을 최대 동시 개수(4)만큼
+              // 살짝 넘길 수 있다 — 둘 다 원래도 정확한 하드 리밋이 아니라 "이쯤에서 배치를 끊는다"는
+              // 안전장치라 여유로 둔다.
+              if (processed >= MAX_PRODUCTS || stoppedByUser) return
+              // PTP의 "스크래핑 중지" 버튼이 눌렸는지 상품마다 확인한다 — 다음 상품으로 넘어가기 전에 반영된다.
+              if (await checkStopRequested(sessionId)) {
+                console.log('[PTP] 중지 요청을 확인해 스크래핑을 멈춥니다.')
+                stoppedByUser = true
+                return
+              }
+              const i = cursor++
+              if (i >= remaining.length) return
+              await processProduct(workerTabId, remaining[i], category, brandFromCategory)
+              processed++
+              categoryProcessed++
+              await throttle()
+            }
+          }))
+        }
+        if (stoppedByUser) break outer
 
         const reachedCountLimit = countLimit != null && categoryProcessed >= countLimit
         const reachedPageLimit = setting?.limitMode === 'pages' && setting.limitValue && pageNum >= setting.limitValue
@@ -770,6 +825,10 @@ async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions)
     await reportDone(stoppedByUser)
     // 목록 페이지로 되돌려놔야 다음 클릭 때 다시 상품 페이지로 오인하지 않는다.
     if (startUrl) await navigate(tabId, startUrl).catch(() => {})
+    for (const id of extraTabIds) {
+      await safeDetach(id)
+      await chrome.tabs.remove(id).catch(() => {})
+    }
     running = false
   }
 }
@@ -1011,31 +1070,69 @@ function buildScanSubmenuExpr(topLevelHrefs) {
  *  대신 펼친다 — discoverCategoryLinks가 로그인 필요 몰에서 하지 못하는 일을 실제 로그인된 브라우저로
  *  대신 해준다. 결과는 새 href 기준으로 합쳐(중복 제거) sites.scrape_profile.categoryLinks에 그대로
  *  덮어써, PTP에서 "카테고리 불러오기"를 다시 누르면 캐시로 바로 반영된다. */
+// 대분류 개수만큼 실제 로그인 탭에서 하나씩 순서대로 열어보던 게(카테고리 사이 1.2~2.4초 대기까지
+// 포함) 카테고리가 많은 몰(모자사러 17개 등)에서 몇 분씩 걸린다는 지적(2026-08-22)으로, 원래 탭 1개
+// (사용자가 보고 있던 탭)에 추가로 백그라운드 탭을 더 열어 여러 카테고리를 동시에 확인하도록 바꿨다 —
+// lib/scraper.ts의 discoverCategoryLinks가 서버 쪽에서 이미 쓰는 EXPAND_CONCURRENCY(여러 Playwright
+// 탭 동시 확인)와 같은 발상이다. 새 탭도 같은 브라우저 프로필이라 쿠키/로그인 세션을 그대로 공유하므로
+// 별도 로그인 처리가 필요 없다. 너무 많은 탭을 한꺼번에 열면 몰 서버에 부담을 주거나(작은 도매몰이
+// 대상) 사용자 탭 목록이 어수선해지므로 4개로 제한한다.
+const EXPAND_TAB_CONCURRENCY = 4
+
 async function runExpandCategories(tab, site) {
   if (!site.categoryLinks || !site.categoryLinks.length) {
     return { ok: false, error: 'PTP 화면에서 "카테고리 불러오기"를 먼저 한 번 실행해주세요(대분류 목록이 아직 없습니다).' }
   }
+  const categoryLinks = site.categoryLinks
+  const topLevelHrefs = categoryLinks.map(c => c.href)
+  const startUrl = tab.url
+  const concurrency = Math.min(EXPAND_TAB_CONCURRENCY, categoryLinks.length)
+
+  // 워커 0은 사용자가 보고 있던 원래 탭을 그대로 재사용(새 탭을 하나라도 덜 띄움), 나머지 concurrency-1개만
+  // 백그라운드(active:false)로 새로 연다 — about:blank로 열어 바로 아래 워커 루프의 첫 navigate()가
+  // 실제 카테고리 페이지 로딩을 맡게 한다(이중 로딩 방지).
+  const extraTabIds = []
   try {
     await attachDebugger(tab.id)
   } catch (e) {
     return { ok: false, error: `디버거 연결 실패: ${e.message}` }
   }
-  const startUrl = tab.url
   try {
-    const topLevelHrefs = site.categoryLinks.map(c => c.href)
-    const expanded = []
-    for (const c of site.categoryLinks) {
-      await navigate(tab.id, c.href)
-      const probe = await evalInTab(tab.id, COLLECT_LINKS_EXPR).catch(() => ({ links: [] }))
-      if (probe.links.length > 0) {
-        expanded.push(c)
-      } else {
-        const sub = await evalInTab(tab.id, buildScanSubmenuExpr(topLevelHrefs)).catch(() => ({ links: [] }))
-        if (sub.links.length) sub.links.forEach(s => expanded.push({ name: `${c.name} > ${s.name}`, href: s.href }))
-        else expanded.push(c) // 하위 메뉴도 못 찾으면(진짜로 빈 카테고리일 수도 있음) 원래 항목을 그대로 남긴다.
-      }
-      await throttle()
+    for (let i = 1; i < concurrency; i++) {
+      const t = await chrome.tabs.create({ url: 'about:blank', active: false })
+      extraTabIds.push(t.id)
+      await attachDebugger(t.id)
     }
+
+    const workerTabIds = [tab.id, ...extraTabIds]
+    const expandedByIndex = new Array(categoryLinks.length)
+    let cursor = 0
+    async function worker(workerTabId) {
+      while (true) {
+        const i = cursor++
+        if (i >= categoryLinks.length) return
+        const c = categoryLinks[i]
+        try {
+          await navigate(workerTabId, c.href)
+          const probe = await evalInTab(workerTabId, COLLECT_LINKS_EXPR).catch(() => ({ links: [] }))
+          if (probe.links.length > 0) {
+            expandedByIndex[i] = [c]
+          } else {
+            const sub = await evalInTab(workerTabId, buildScanSubmenuExpr(topLevelHrefs)).catch(() => ({ links: [] }))
+            // 하위 메뉴도 못 찾으면(진짜로 빈 카테고리일 수도 있음) 원래 항목을 그대로 남긴다.
+            expandedByIndex[i] = sub.links.length
+              ? sub.links.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
+              : [c]
+          }
+        } catch {
+          expandedByIndex[i] = [c] // 이 워커 탭에서 일시적으로 실패해도 그 카테고리 하나만 미확장으로 남기고 계속 진행
+        }
+        await throttle()
+      }
+    }
+    await Promise.all(workerTabIds.map(worker))
+
+    const expanded = expandedByIndex.flat()
     const seenHrefs = new Set()
     const deduped = expanded.filter(c => (seenHrefs.has(c.href) ? false : (seenHrefs.add(c.href), true)))
 
@@ -1051,6 +1148,10 @@ async function runExpandCategories(tab, site) {
   } finally {
     await navigate(tab.id, startUrl).catch(() => {})
     await safeDetach(tab.id)
+    for (const id of extraTabIds) {
+      await safeDetach(id)
+      await chrome.tabs.remove(id).catch(() => {})
+    }
   }
 }
 

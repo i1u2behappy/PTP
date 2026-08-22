@@ -1066,6 +1066,36 @@ export interface MallProfileSignals {
 }
 
 const MALL_PROFILE_SAMPLE_SIZE = 6
+// 몰 구조분석(sampleMallProfile)이 훑는 샘플 상품/정보페이지 개수가 원래 적어(6개/최대 4개) 새 탭을
+// 그만큼 다 여는 건 낭비다 — EXPAND_TAB_CONCURRENCY(확장)와 같은 이유로 4개로 제한한다.
+const MALL_PROFILE_CONCURRENCY = 4
+
+/** context.newPage()로 워커 페이지 여러 개를 열어 items를 동시에 처리한다 — 몰 구조분석의 샘플 상품
+ *  방문/정보페이지 수집처럼 서로 독립적인 소수 항목을 순차 방문하던 걸 병렬화하는 데 공용으로 쓴다
+ *  (discoverCategoryLinks의 expandWorker와 같은 커서 기반 워커풀 패턴, 2026-08-22). 첫 워커는 새 탭을
+ *  열지 않고 넘겨받은 page를 그대로 재사용한다. worker 콜백 안에서 개별 항목 실패는 알아서 처리해야
+ *  한다(여기서 예외를 삼키지 않음 — 한 항목의 실패로 전체가 죽으면 안 되는 호출부가 각자 try/catch). */
+async function mapWithPageWorkers<T>(
+  context: BrowserContext, page: Page, items: T[], concurrency: number,
+  worker: (item: T, index: number, page: Page) => Promise<void>,
+): Promise<void> {
+  if (!items.length) return
+  const n = Math.min(concurrency, items.length)
+  const extraPages = await Promise.all(Array.from({ length: n - 1 }, () => context.newPage()))
+  const pages = [page, ...extraPages]
+  let cursor = 0
+  try {
+    await Promise.all(pages.map(async workerPage => {
+      while (true) {
+        const i = cursor++
+        if (i >= items.length) return
+        await worker(items[i], i, workerPage)
+      }
+    }))
+  } finally {
+    await Promise.all(extraPages.map(p => p.close().catch(() => {})))
+  }
+}
 
 /**
  * 로그인 확인 시점에 몰 내 여러 상품을 훑어 이 몰의 상품페이지 구조적 특성을 파악한다 — 대표/상세이미지
@@ -1095,11 +1125,11 @@ export async function profileMallStructure(siteId: number, deep = false): Promis
   // allowStaleManualLoginProfile: 개발자모드는 사용자가 실제 크롬을 켜둔 채로 쓰는 게 정상 상태라, 그
   // 크롬의 쿠키/세션 파일이 잠긴 채로 복사돼도(robocopy 일부 실패) 이 가벼운 확인은 그냥 진행한다 — 매번
   // "크롬을 꺼주세요"로 막으면 개발자모드에서는 사실상 이 버튼이 항상 실패한다(2026-08-15 실사용 확인).
-  return withContext({ siteId, url: site.url, allowStaleManualLoginProfile: true }, async page => {
+  return withContext({ siteId, url: site.url, allowStaleManualLoginProfile: true }, async (page, context) => {
     await page.goto(site.url, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
     const startUrl = page.url()
     if (!startUrl || startUrl === 'about:blank') return null
-    return sampleMallProfile(page, startUrl, site.name, deep)
+    return sampleMallProfile(page, context, startUrl, site.name, deep)
   }, deep ? '몰 구조분석' : '구조 변화 감지')
 }
 
@@ -1700,10 +1730,10 @@ export async function profileMallStructureForScrape(opts: ScrapeOptions): Promis
   if (!startUrlHint) return null
   const site = await siteInfo(opts.siteId)
   // 스크랩 시작 시점의 자동 체크도 로그인 확인과 같은 용도(구조 변화 감지)라 항상 가벼운(deep=false) 쪽만 쓴다.
-  return withContext(opts, page => sampleMallProfile(page, startUrlHint, site.name, false), '구조 변화 감지')
+  return withContext(opts, (page, context) => sampleMallProfile(page, context, startUrlHint, site.name, false), '구조 변화 감지')
 }
 
-async function sampleMallProfile(page: Page, startUrl: string, mallName: string, deep: boolean): Promise<MallProfileSignals | null> {
+async function sampleMallProfile(page: Page, context: BrowserContext, startUrl: string, mallName: string, deep: boolean): Promise<MallProfileSignals | null> {
   let sampleUrls: string[] = []
   let platform: MallPlatform = 'unknown'
   let categoryByUrl = new Map<string, CategoryLabel>()
@@ -1767,7 +1797,7 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
   // 페이지에 있다(실사용 몰 확인됨). deep(=="몰 구조분석" 버튼)에서만 하는 무거운 작업이라 로그인
   // 확인/스크랩 시작마다 도는 가벼운 체크에서는 건너뛴다. 페이지 이동이 있어 시간이 들 수 있어 실패해도
   // 나머지 흐름은 계속한다.
-  const contextText = deep ? await gatherMallContextText(page).catch(() => '') : ''
+  const contextText = deep ? await gatherMallContextText(page, context).catch(() => '') : ''
 
   // 등록된 몰 URL이 배너/메뉴만 있는 랜딩 페이지라 상품 링크가 0개인 몰도 있다(실사용 확인: 진짜양말 —
   // 홈페이지엔 이미지 스프라이트 메뉴만 있고 상품은 그 메뉴를 눌러 들어간 카테고리 목록에만 있음). 그대로
@@ -1812,22 +1842,30 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
   const infoLabelSet = new Set<string>()
   const categoryPathSet = new Set<string>()
   let productContextText = ''
+  // 여러 워커가 동시에 "내가 첫 성공 샘플이다"로 착각해 둘 다 무거운 evaluate까지 하고 나중 것이 앞선
+  // 결과를 덮어쓰는 걸 막는 락 — await 없이 동기로 바로 세워야(claim) 두 워커가 같은 틈에 함께 통과하지
+  // 않는다(JS는 싱글스레드라 await 지점 사이엔 이 대입이 원자적이다).
+  let contextClaimed = false
 
-  for (const url of sampleUrls) {
+  // 샘플 상품 방문(최대 MALL_PROFILE_SAMPLE_SIZE=6건)은 서로 완전히 독립적인 페이지라 순차 대신 여러
+  // 탭으로 동시에 처리한다 — 모자사러처럼 카테고리/상품 페이지 로딩이 느린 몰에서 "몰 구조분석" 소요
+  // 시간의 상당 부분이 이 순차 방문이었다(2026-08-22, 사용자 요청으로 병렬화). Set/카운터 갱신은 각
+  // 워커의 await 없는 동기 구간에서만 일어나 경쟁 조건이 없다.
+  await mapWithPageWorkers(context, page, sampleUrls, MALL_PROFILE_CONCURRENCY, async (url, _i, workerPage) => {
     const category = categoryByUrl.get(url)?.category
     if (category) categoryPathSet.add(category)
     try {
-      await page.goto(url, { waitUntil: 'load', timeout: 20_000 })
-      await waitForExtractableContent(page)
-      const product = await extractProductRuleBased(page, url)
-      const selectOptions = await scanSelectOptions(page)
-      const swatchOptions = selectOptions.length ? [] : await scanSwatchOptions(page)
+      await workerPage.goto(url, { waitUntil: 'load', timeout: 20_000 })
+      await waitForExtractableContent(workerPage)
+      const product = await extractProductRuleBased(workerPage, url)
+      const selectOptions = await scanSelectOptions(workerPage)
+      const swatchOptions = selectOptions.length ? [] : await scanSwatchOptions(workerPage)
       optionTypes.add(selectOptions.length ? 'select' : swatchOptions.length ? 'swatch' : 'none')
 
-      const domOptions = await extractOptionsFromDom(page)
+      const domOptions = await extractOptionsFromDom(workerPage)
       if (domOptions.options.length) product.options = domOptions.options
       if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
-      await applyStockByOption(page, product)
+      await applyStockByOption(workerPage, product)
 
       signals.sampleCount++
       if (product.thumbnail_urls.length > 0) signals.hasMainImages = true
@@ -1838,16 +1876,17 @@ async function sampleMallProfile(page: Page, startUrl: string, mallName: string,
       if (product.stock_by_option.length > 0) signals.hasStockByOption = true
       if (product.options.length > 1) signals.hasCascadingOptions = true
       product.extra_info.forEach(({ label }) => infoLabelSet.add(label))
-      // AI 리포트용 원문은 상품 1건만 있으면 충분해(토큰 절약) 첫 성공 샘플에서만 모은다. deep 전용.
-      if (deep && !productContextText) {
-        const bodyText = await page.evaluate(() => document.body.innerText).catch(() => '')
-        const imageHints = await page.evaluate(collectImageHintsScript, null).catch(() => [] as string[])
+      // AI 리포트용 원문은 상품 1건만 있으면 충분해(토큰 절약) 가장 먼저 도착한 성공 샘플에서만 모은다. deep 전용.
+      if (deep && !contextClaimed) {
+        contextClaimed = true
+        const bodyText = await workerPage.evaluate(() => document.body.innerText).catch(() => '')
+        const imageHints = await workerPage.evaluate(collectImageHintsScript, null).catch(() => [] as string[])
         productContextText = `[샘플 상품페이지: ${url}]\n${bodyText.replace(/\s+/g, ' ').trim().slice(0, 4_000)}`
           + (imageHints.length ? `\n\n[샘플 상품페이지 이미지 설명/파일명]\n${imageHints.join(', ')}` : '')
         signals.sampleProductPageText = bodyText
       }
     } catch { /* 개별 샘플 실패는 건너뛰고 다음 샘플로 */ }
-  }
+  })
   signals.optionUiTypes = [...optionTypes]
   signals.infoLabels = [...infoLabelSet].sort()
   signals.categoryPaths = [...categoryPathSet].sort()
@@ -1890,7 +1929,7 @@ function collectImageHintsScript(rootSelector: string | null): string[] {
   return [...new Set(hints)].slice(0, 30)
 }
 
-async function gatherMallContextText(page: Page): Promise<string> {
+async function gatherMallContextText(page: Page, context: BrowserContext): Promise<string> {
   const sections: string[] = []
   const footerSelector = 'footer, #footer, .footer, .company_info, .footer_info'
   const footerText = await page.evaluate(sel => {
@@ -1912,16 +1951,23 @@ async function gatherMallContextText(page: Page): Promise<string> {
 
   const baseUrl = new URL(page.url()).origin
   const links = await findInfoPageLinks(page)
-  for (const link of links) {
-    if (!link.href.startsWith(baseUrl)) continue
+  const validLinks = links.filter(link => link.href.startsWith(baseUrl))
+  // 최대 4개(findInfoPageLinks 참고)뿐이지만 하나하나가 실제 페이지 이동(최대 15초)이라 순차로는 최악의
+  // 경우 1분 가까이 걸린다 — 위 샘플 상품 병렬화와 같은 이유로 여러 탭에 나눠 동시에 방문한다
+  // (2026-08-22). 링크 순서와 무관하게 섞여도 되는 참고용 텍스트라 index로 위치만 맞춰 합친다.
+  const infoSections: string[] = new Array(validLinks.length)
+  await mapWithPageWorkers(context, page, validLinks, MALL_PROFILE_CONCURRENCY, async (link, i, workerPage) => {
     try {
-      await page.goto(link.href, { waitUntil: 'load', timeout: 15_000 })
-      const text = await page.evaluate(() => document.body.innerText).catch(() => '')
-      if (text.trim()) sections.push(`[${link.text}]\n${text.replace(/\s+/g, ' ').trim().slice(0, 2_500)}`)
-      const imageHints = await page.evaluate(collectImageHintsScript, null).catch(() => [] as string[])
-      if (imageHints.length) sections.push(`[${link.text} 페이지 이미지 설명/파일명]\n${imageHints.join(', ')}`)
+      await workerPage.goto(link.href, { waitUntil: 'load', timeout: 15_000 })
+      const text = await workerPage.evaluate(() => document.body.innerText).catch(() => '')
+      const parts: string[] = []
+      if (text.trim()) parts.push(`[${link.text}]\n${text.replace(/\s+/g, ' ').trim().slice(0, 2_500)}`)
+      const imageHints = await workerPage.evaluate(collectImageHintsScript, null).catch(() => [] as string[])
+      if (imageHints.length) parts.push(`[${link.text} 페이지 이미지 설명/파일명]\n${imageHints.join(', ')}`)
+      infoSections[i] = parts.join('\n\n')
     } catch { /* 게시판 접근 실패(로그인 필요 등)는 건너뛰고 다음 링크로 */ }
-  }
+  })
+  sections.push(...infoSections.filter(Boolean))
   return sections.join('\n\n')
 }
 

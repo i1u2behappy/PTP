@@ -50,9 +50,11 @@ async function run(action, busyText) {
 // 따로 눌러야 하는 게 번거롭다는 지적으로 셋을 하나로 합쳤다(2026-08-22, background.js의
 // runFullMallProfile 참고) — 몰 구조분석 자체는 서버가 별도로 여는 헤드리스 브라우저(개인 크롬 프로필
 // 사본)로 하고, 나머지 둘은 지금 이 탭(chrome.debugger)에서 순서대로 진행한다. 대분류 개수만큼 페이지를
-// 하나씩 열어봐야 해서(카테고리 사이 1.2~2.4초 대기 포함) 몰 규모에 따라 몇 분 걸릴 수 있다 — PTP의
-// "카테고리 불러오기"를 먼저 한 번 실행해 대분류 목록을 만들어둬야 한다.
-document.getElementById('btn-profile').addEventListener('click', () => run('profile', '몰 구조를 분석하는 중... (카테고리 하위구조/정렬 옵션까지 함께 확인 — 몰 규모에 따라 몇 분 걸릴 수 있습니다)'))
+// 열어봐야 해서 몰 규모에 따라 몇 분 걸릴 수 있다 — 카테고리가 많으면 background.js의
+// runExpandCategories가 백그라운드 탭을 최대 3개 더 열어(EXPAND_TAB_CONCURRENCY) 병렬로 처리하니
+// 새 탭이 잠깐 뜨는 게 보일 수 있다(2026-08-22). PTP의 "카테고리 불러오기"를 먼저 한 번 실행해 대분류
+// 목록을 만들어둬야 한다.
+document.getElementById('btn-profile').addEventListener('click', () => run('profile', '몰 구조를 분석하는 중... (카테고리 하위구조/정렬 옵션까지 함께 확인 — 카테고리가 많으면 백그라운드 탭이 몇 개 더 뜰 수 있습니다)'))
 document.getElementById('btn-current-category').addEventListener('click', () => run('current-category', '현재 페이지를 카테고리 목록에 추가하는 중...'))
 document.getElementById('btn-preview').addEventListener('click', () => run('preview', '지금 페이지를 캡처하는 중...'))
 document.getElementById('btn-start').addEventListener('click', () => run('start', '스크랩을 시작합니다...'))

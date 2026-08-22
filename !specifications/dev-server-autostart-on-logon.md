@@ -124,3 +124,37 @@ DB가 이미 정상 연결돼 있었다는 뜻) 같은 대기 로직이 필요 �
 
 ## 관련 파일
 - `scripts/start-dev-server.cmd`: Postgres 준비 대기 루프 추가.
+
+## 재컴파일 경합으로 인한 500/스타일 깨짐 (2026-08-22)
+
+Claude Code가 한 세션 안에서 수십 개 파일을 짧은 시간에 잇달아 저장하자, webpack dev 서버가 그때마다
+재컴파일을 시작하면서 여러 재컴파일이 겹쳐 도는 상황이 생겼다. 그 도중 들어온 요청이 아직 다 쓰이지
+않은 webpack 빌드 매니페스트를 읽어버려 두 가지 증상이 실사용으로 확인됐다:
+
+- 서버 로그에 `SyntaxError: Unexpected end of JSON input`과 함께 `GET /api/sites/3 500 in 5.6s` — 빈
+  파일을 파싱해 생기는 에러.
+- 브라우저에는 CSS가 하나도 안 먹은 화면(사이드바 로고가 원본 크기 그대로, 레이아웃 없이 쌓인 버튼들)
+  이 순간적으로 노출됨 — CSS 청크가 아직 준비 안 된 상태로 응답됨.
+
+Next.js 공식 문서(`node_modules/next/dist/docs`)에는 이 dev 서버 내부 매니페스트 read/write 경합
+자체를 끌 수 있는 옵션이 없다 — 100% 원천 차단하는 공식 스위치는 없다. Turbopack이면 다를 수 있지만,
+바로 위 "Turbopack → webpack 전환" 항목대로 알약(백신) 충돌로 이미 의도적으로 꺼둔 상태라 되돌리지
+않는다.
+
+**완화책**: `next.config.ts`에 dev 전용 `webpack.watchOptions.aggregateTimeout`을 늘려, 짧은 시간에
+몰린 파일 저장을 재컴파일 1번으로 묶는다 — 재컴파일이 겹쳐 도는 구간 자체를 줄여 경합 확률을 낮춘다
+(100% 보장은 아님, 완화책).
+
+```ts
+webpack: (config, { dev }) => {
+  if (dev) config.watchOptions = { ...config.watchOptions, aggregateTimeout: 1000 }
+  return config
+},
+```
+
+이 현상은 사람이 파일 하나씩 저장하는 평소 개발 흐름에서는 거의 안 보이고, AI 에이전트가 한 번에
+파일을 몰아서 고칠 때 노출 확률이 높아지는 구조다 — 재현되면 `scripts/restart-dev-server.ps1`로 dev
+서버를 한 번 깨끗하게 재시작하면 즉시 해소된다.
+
+### 관련 파일
+- `next.config.ts`: `webpack()` 훅에 `aggregateTimeout` 추가.

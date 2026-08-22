@@ -34,6 +34,7 @@ async function run(action, busyText) {
       setStatus(action === 'start' ? '✓ 시작했습니다 — PTP 화면에서 진행상황을 확인하세요.'
         : action === 'picker' ? '✓ 몰 탭에 직접지정 패널이 열렸습니다 — 그 패널에서 값을 클릭해 지정하세요.'
         : action === 'profile' ? `✓ 몰 구조분석 완료${profileNote} — PTP에서 다시 확인하세요.`
+        : action === 'current-category' ? '✓ 카테고리 URL 목록에 추가했습니다 — 잠시 후 PTP 화면에 반영됩니다.'
         : '✓ 완료했습니다 — PTP 화면에서 결과를 확인하세요.', res.partialErrors?.length ? 'error' : 'ok')
     } else {
       setStatus(`✗ ${res?.error || '알 수 없는 오류'}`, 'error')
@@ -52,6 +53,7 @@ async function run(action, busyText) {
 // 하나씩 열어봐야 해서(카테고리 사이 1.2~2.4초 대기 포함) 몰 규모에 따라 몇 분 걸릴 수 있다 — PTP의
 // "카테고리 불러오기"를 먼저 한 번 실행해 대분류 목록을 만들어둬야 한다.
 document.getElementById('btn-profile').addEventListener('click', () => run('profile', '몰 구조를 분석하는 중... (카테고리 하위구조/정렬 옵션까지 함께 확인 — 몰 규모에 따라 몇 분 걸릴 수 있습니다)'))
+document.getElementById('btn-current-category').addEventListener('click', () => run('current-category', '현재 페이지를 카테고리 목록에 추가하는 중...'))
 document.getElementById('btn-preview').addEventListener('click', () => run('preview', '지금 페이지를 캡처하는 중...'))
 document.getElementById('btn-start').addEventListener('click', () => run('start', '스크랩을 시작합니다...'))
 document.getElementById('btn-picker').addEventListener('click', () => run('picker', '직접지정 패널을 여는 중...'))

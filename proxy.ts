@@ -18,10 +18,13 @@ const PUBLIC_API_PREFIXES = [
 // 크롬 확장이 세션 쿠키 없이 호출하는 엔드포인트들. preview-capture(스크래핑 전 단건 미리보기),
 // picker/rule(스크랩 대상 직접지정, Runtime.addBinding 경유 저장), profile(팝업의 "몰 구조분석" 버튼 —
 // 빠뜨렸다가 확장에서 매번 401 unauthorized로 실패하는 게 실사용 중 확인됨, 2026-08-15),
-// categories/expand(팝업의 "카테고리 하위구조 자동확인" 결과 저장, 2026-08-18).
+// categories/expand(팝업의 "카테고리 하위구조 자동확인" 결과 저장, 2026-08-18). current-category(팝업의
+// "현재 카테고리 가져오기" 결과 저장 — GET도 같은 경로라 여기 포함되면 같이 공개되는데, PTP 자체 화면도
+// 인증된 세션으로 이 GET을 부르니 문제없다, 2026-08-22).
 const PUBLIC_API_PATTERNS = [
   /^\/api\/sites\/\d+\/preview-capture$/, /^\/api\/sites\/\d+\/picker\/rule$/, /^\/api\/sites\/\d+\/profile$/,
   /^\/api\/sites\/\d+\/categories\/expand$/, /^\/api\/sites\/\d+\/sort-options$/,
+  /^\/api\/sites\/\d+\/current-category$/,
 ]
 
 export function proxy(request: NextRequest) {

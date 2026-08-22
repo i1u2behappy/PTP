@@ -1592,6 +1592,25 @@ function buildPickerScript(seed) {
  *  클릭식 피커를 주입한다. 사용자가 패널을 닫을 때까지(ptpPickerClose) 디버거를 계속 붙여둔다 —
  *  addBinding이 살아있으려면 CDP 세션이 유지돼야 하기 때문이다(일반모드는 로그인 창이 열려있는 동안
  *  page.exposeFunction이 계속 살아있는 것과 같은 이치). */
+/** "📍 보조 - 현재 카테고리 가져오기" — 지금 이 탭 URL을 그대로 PTP의 "카테고리 URL 목록"에 추가한다.
+ *  일반모드의 "현재 카테고리 가져오기"(서버가 로그인 창의 현재 URL을 직접 읽음)와 같은 목적이지만,
+ *  개발자모드는 서버가 이 탭에 직접 접근할 수 없다 — 다만 필요한 정보가 tab.url 하나뿐이라
+ *  chrome.debugger를 붙일 필요 없이(DOM 접근 불필요) 곧바로 서버에 넘긴다(2026-08-22). PTP 화면이
+ *  몇 초마다 폴링해서 목록에 반영한다. */
+async function runCaptureCurrentCategory(tab, site) {
+  try {
+    const res = await fetch(`${SITE_API_BASE}/${site.id}/current-category`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: tab.url }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) return { ok: false, error: data.error || String(res.status) }
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+}
+
 async function runPicker(tab, site) {
   // attach와 addBinding은 매번 다시 한다 — "이미 세션이 잡혀있으니 건너뛴다"는 최적화를 시도했다가
   // pickerSessions(메모리)에만 남은 낡은 기록을 보고 실제로는 없는 바인딩을 "있다"고 오판해
@@ -1698,6 +1717,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     else if (msg.action === 'preview') sendResponse(await runPreview(tab, site, site.aiPreviewMode))
     else if (msg.action === 'picker') sendResponse(await runPicker(tab, site))
     else if (msg.action === 'profile') sendResponse(await runFullMallProfile(tab, site))
+    else if (msg.action === 'current-category') sendResponse(await runCaptureCurrentCategory(tab, site))
     else sendResponse({ ok: false, error: `알 수 없는 action: ${msg.action}` })
   })()
   return true // 비동기 sendResponse를 쓰겠다는 표시

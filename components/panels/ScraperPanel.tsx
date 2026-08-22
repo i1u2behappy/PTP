@@ -520,6 +520,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [profileError, setProfileError] = useState('')
 
   const [pickerActive, setPickerActive] = useState(false)
+  // 개발자모드 버튼을 눌렀을 때 "몰 탭/확장에서 이어서 하세요" 안내 — alert()는 사용자가 직접 확인을
+  // 눌러야만 닫혀 흐름을 막는다는 지적(2026-08-22)으로, 5초 후 저절로 사라지는 토스트로 바꿨다.
+  const [devHint, setDevHint] = useState<string | null>(null)
+  const devHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  function showDevHint(text: string) {
+    setDevHint(text)
+    if (devHintTimerRef.current) clearTimeout(devHintTimerRef.current)
+    devHintTimerRef.current = setTimeout(() => setDevHint(null), 5_000)
+  }
+  useEffect(() => () => { if (devHintTimerRef.current) clearTimeout(devHintTimerRef.current) }, [])
   const [pickerBusy, setPickerBusy] = useState(false)
   const [pickerRules, setPickerRules] = useState<Record<string, { type: string; value: string }>>({})
 
@@ -1262,13 +1272,22 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refreshPickerRules는 selectedSite를 클로저로 참조, 매번 새로 만들어도 되는 인터벌 콜백이라 의존성 경고는 무시
   }, [pickerActive, selectedSite])
 
+  /** 로그인 창의 "지금 보고 있는 페이지" URL을 카테고리 URL 목록에 한 줄 추가한다 — 예전엔 targetUrl
+   *  (단일 URL)을 덮어썼는데, 카테고리를 하나씩 옮겨다니며 여러 개 모아야 하는 경우가 많다는 지적
+   *  (2026-08-22)으로 반복해서 눌러 계속 쌓이도록 바꿨다. 이미 목록에 있는 URL이면 중복 추가하지 않는다. */
   async function handleRefreshCurrentUrl() {
     if (!selectedSite) return
     setCurrentUrlLoading(true)
     try {
       const res = await fetch(`/api/scrape/current-url?siteId=${selectedSite.id}`)
       const d = await res.json() as { url: string | null }
-      if (d.url) { setTargetUrl(d.url); setCategoryUrlsText(''); setCurrentUrlFetched(true) }
+      if (d.url) {
+        setCategoryUrlsText(prev => {
+          const lines = prev.split('\n').map(s => s.trim()).filter(Boolean)
+          return lines.includes(d.url!) ? prev : [...lines, d.url].join('\n')
+        })
+        setCurrentUrlFetched(true)
+      }
     } finally {
       setCurrentUrlLoading(false)
     }
@@ -1469,6 +1488,32 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- selectedSite 객체 자체가 갱신마다 새로 생성돼도 siteId만 같으면 재구독할 필요 없음
   }, [mallMode, selectedSite?.id])
 
+  /** 개발자모드의 "현재 카테고리 가져오기" — 일반모드(로그인 창의 현재 URL을 서버가 직접 읽음)와 달리
+   *  개발자모드는 서버가 몰 탭에 직접 접근할 수 없어, 확장이 지금 탭 URL을 sites.scrape_profile.
+   *  categoryQueue에 대신 쌓아두면(app/api/sites/[id]/current-category POST) 여기서 몇 초마다
+   *  가져오면서(GET이 가져가는 즉시 서버 쪽 큐를 비움) categoryUrlsText에 이어붙인다 — 여러 번 눌러도
+   *  중복 없이 계속 쌓이도록 이미 목록에 있는 URL은 건너뛴다(2026-08-22). */
+  useEffect(() => {
+    if (mallMode !== 'devmode' || !selectedSite) return
+    const siteId = selectedSite.id
+    const id = setInterval(async () => {
+      const res = await fetch(`/api/sites/${siteId}/current-category`).catch(() => null)
+      if (!res?.ok) return
+      const d = await res.json() as { urls?: string[] }
+      if (!d.urls?.length) return
+      setCategoryUrlsText(prev => {
+        const lines = prev.split('\n').map(s => s.trim()).filter(Boolean)
+        const seen = new Set(lines)
+        let added = 0
+        for (const url of d.urls!) { if (!seen.has(url)) { lines.push(url); seen.add(url); added++ } }
+        if (added) showDevHint(`카테고리 URL ${added}개를 목록에 추가했습니다.`)
+        return lines.join('\n')
+      })
+    }, 3000)
+    return () => clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- selectedSite 객체 자체가 갱신마다 새로 생성돼도 siteId만 같으면 재구독할 필요 없음
+  }, [mallMode, selectedSite?.id])
+
   /** "스크랩 미리보기" 버튼 — 이전 결과를 비우고 "대기 중" 표시를 켠다. 실제 결과 반영은 위 폴링이
    *  전담한다(이 버튼을 누르지 않고 몰 탭에서 확장만 실행해도 동일하게 반영됨) — 여기서는 예전 결과를
    *  지워 헷갈리지 않게 하고, 2분 안에 응답이 없으면 "대기 중" 표시만 스스로 풀어준다. */
@@ -1481,9 +1526,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     // 한다는 안내는 그대로 남긴다(2026-08-15 도입).
     if (loginStep === 'none') {
       await handleOpenMallUrlDirect(selectedSite.login_url || selectedSite.url)
-      alert('몰 탭을 열었습니다 — 로그인 후 확장 아이콘 → 팝업의 "🔍 스크랩 미리보기 - (카테선택)"을 클릭하세요.')
+      showDevHint('몰 탭을 열었습니다 — 로그인 후 확장 아이콘 → 팝업의 "🔍 스크랩 미리보기 - (카테선택)"을 클릭하세요.')
     } else {
-      alert('몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🔍 스크랩 미리보기 - (카테선택)"을 클릭하세요.')
+      showDevHint('몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🔍 스크랩 미리보기 - (카테선택)"을 클릭하세요.')
     }
     setPreviewResult(null)
     setPreviewTotal(null)
@@ -1969,6 +2014,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   return (
     <div>
+      {devHint && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[70] max-w-md bg-teal-600 text-white text-sm rounded-xl shadow-lg px-4 py-3 flex items-start gap-3">
+          <p className="flex-1">{devHint}</p>
+          <button onClick={() => setDevHint(null)} aria-label="닫기" className="text-teal-200 hover:text-white shrink-0">✕</button>
+        </div>
+      )}
       <h1 className="text-2xl font-bold text-gray-800 mb-6">🔍 스크래핑 설정</h1>
 
       {/* Mall 선택 */}
@@ -2248,39 +2299,38 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </button>
           </div>
           {!scrapeTargetCollapsed && <>
-          {/* 이 URL 자체를 그대로 스크랩할지, 이 URL에서 카테고리 여러 개를 찾아 그중 골라 스크랩할지는
-              서로 대체 관계인 선택지다(하나를 채우면 다른 하나는 무시됨, 아래 경고문 참고) — 그래서
-              입력칸부터 그 아래 버튼까지 통째로 좌우로 나란히 두고 가운데에 "또는"을 넣어, 위→아래로
-              밟아야 하는 단계가 아니라 대등한 두 선택지로 보이게 한다. */}
-          <p className="text-xs text-gray-400 mb-2">아래 둘 중 하나를 고르세요 — 이 URL 하나만 그대로 쓰거나, 카테고리를 자동으로 찾아 여러 개를 한 번에 지정할 수 있습니다.</p>
+          {/* 이 URL 자체를 그대로 스크랩할지, 카테고리 URL 목록을 만들어 그중 골라 스크랩할지는 서로
+              대체 관계인 선택지다(하나를 채우면 다른 하나는 무시됨, 아래 경고문 참고) — 그래서 좌우로
+              나란히 두고 가운데에 "또는"을 넣어, 위→아래로 밟아야 하는 단계가 아니라 대등한 두 선택지로
+              보이게 한다. 예전엔 왼쪽 "현재 페이지 가져오기"가 단일 URL(targetUrl)만 채웠는데, 카테고리를
+              여러 개 반복해서 모아야 하는 경우가 많다는 지적(2026-08-22)으로 그 버튼을 카테고리 목록 쪽
+              (오른쪽)으로 옮기고 "여러 번 눌러 계속 추가"되게 바꿨다 — 그래서 왼쪽엔 이제 순수 수동
+              입력칸만 남는다. */}
+          <p className="text-xs text-gray-400 mb-2">아래 둘 중 하나를 고르세요 — URL 하나만 그대로 쓰거나, 카테고리 URL 목록을 만들어 여러 개를 한 번에 지정할 수 있습니다(자동으로 전체를 불러오거나, 로그인 창에서 이동한 페이지를 하나씩 추가하거나, 직접 입력할 수 있습니다).</p>
           <div className="flex flex-col sm:flex-row items-stretch gap-2 mb-2">
             <div className="flex-1 flex flex-col gap-1">
-              <ScrapeStepBox
-                description="💡 로그인 창에서 원하는 페이지로 이동했다면, 그 페이지를 현재 페이지 URL로 바로 가져와 그대로 스크랩할 수 있습니다."
-                primary={{
-                  label: '현재 페이지 가져오기', doneLabel: '현재 페이지 가져옴', icon: '↻',
-                  loading: currentUrlLoading, loadingLabel: '가져오는 중...',
-                  done: currentUrlFetched, colorDone: !!previewResult, disabled: loginStep === 'none',
-                  onClick: handleRefreshCurrentUrl,
-                }} />
-              {/* '모든 카테고리 불러오기'와 같은 레벨로 항상 같은 틀(ScrapeStepBox)을 보여준다 — 로그인
-                  확인 전에는 아직 열린 창이 없어 disabled로만 막아둔다("카테고리 불러오기"가
-                  targetUrl 없을 때 disabled인 것과 같은 패턴). */}
-              {/* 버튼으로 가져온(또는 직접 입력한) 실제 URL 값은 결과로서 버튼 아래에 보여준다. */}
               <label className="block">
-                <span className="block text-xs text-gray-500 mb-1">현재 페이지 URL</span>
-                <input value={targetUrl} onChange={e => { setTargetUrl(e.target.value); setCurrentUrlFetched(false) }}
+                <span className="block text-xs text-gray-500 mb-1">URL 하나만 그대로 쓰기</span>
+                <input value={targetUrl} onChange={e => setTargetUrl(e.target.value)}
                   placeholder="https://shop.example.com/products/123"
                   disabled={categoryUrlsText.trim().length > 0}
                   className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 disabled:bg-gray-100 disabled:text-gray-400" />
               </label>
               <p className="text-xs text-amber-600 min-h-[1em]">
                 {categoryUrlsText.trim().length > 0 &&
-                  '오른쪽 카테고리 URL 목록이 입력되어 있어 이 현재 페이지 URL은 무시되고 카테고리 목록만 스크랩됩니다.'}
+                  '오른쪽 카테고리 URL 목록이 입력되어 있어 이 URL은 무시되고 카테고리 목록만 스크랩됩니다.'}
               </p>
             </div>
             <div className="flex items-center justify-center text-xs text-gray-400 font-semibold px-1">또는</div>
             <div className="flex-1 flex flex-col gap-1">
+              <ScrapeStepBox
+                description="💡 로그인 창에서 원하는 카테고리 페이지로 이동했다면, 그 페이지를 목록에 하나씩 추가합니다 — 여러 번 눌러 여러 개를 모을 수 있습니다."
+                primary={{
+                  label: '현재 카테고리 가져오기', doneLabel: '현재 카테고리 가져옴', icon: '↻',
+                  loading: currentUrlLoading, loadingLabel: '가져오는 중...',
+                  done: currentUrlFetched, colorDone: !!previewResult, disabled: loginStep === 'none',
+                  onClick: handleRefreshCurrentUrl,
+                }} />
               <ScrapeStepBox
                 description="💡 몰에 있는 카테고리들을 자동으로 찾아옵니다 — 시작 URL을 하나하나 알아낼 필요 없이 원하는 카테고리를 바로 불러올 수 있습니다."
                 primary={{
@@ -2293,7 +2343,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   label: '↻ 다시 확인', title: '몰 메뉴가 바뀌었을 수 있으면 직접 다시 훑어서 최신 목록으로 갱신합니다',
                   disabled: categoriesLoading || !targetUrl, onClick: () => handleLoadCategories(true),
                 } : undefined} />
-              {/* 불러온(또는 직접 입력한) 카테고리 URL 목록도 마찬가지로 버튼 아래에 결과로 보여준다. */}
+              {/* 자동 불러오기/직접 입력/위 "현재 카테고리 가져오기" 모두 결과가 여기 한 목록에 같이 쌓인다. */}
               <label htmlFor="category-urls" className="block">
                 <span className="block text-xs text-gray-500 mb-1">선택 - 카테고리 URL 목록</span>
                 <textarea id="category-urls" value={categoryUrlsText} onChange={e => setCategoryUrlsText(e.target.value)} rows={3}
@@ -2385,6 +2435,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               <li>아래 &quot;카테고리 불러오기&quot;에서 일부 카테고리가 하위구조 없이 그대로만 나온다면(로그인이 필요한 몰) → <DevModeLocationBadge where="mall" />로그인한 상태에서 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🧭 보조 - 카테고리 하위구조 자동확인&quot;</b> 실행 → <DevModeLocationBadge where="ptp" />완료 후 &quot;다시 확인&quot;을 누르면 반영됩니다.</li>
               <li>아래 카테고리별 &quot;정렬&quot; 칸이 비어있다면 → <DevModeLocationBadge where="mall" />로그인한 상태에서 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🧭 보조 - 정렬 옵션 감지&quot;</b> 실행 → <DevModeLocationBadge where="ptp" />완료 후 이 몰을 목록에서 다시 선택하면 정렬 옵션이 나타납니다.</li>
               <li><DevModeLocationBadge where="mall" />상품 1건만 먼저 확인하려면 → 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;🔍 스크랩 미리보기 - (카테선택)&quot;</b> (PTP의 &quot;스크랩 미리보기&quot;는 안 눌러도 자동 반영됩니다)</li>
+              <li>원하는 카테고리를 직접 돌아다니며 하나씩 모으려면 → <DevModeLocationBadge where="mall" />로그인한 상태에서 원하는 카테고리로 이동한 뒤 확장 아이콘 → 팝업의 <b className="text-gray-700">&quot;📍 보조 - 현재 카테고리 가져오기&quot;</b> — 여러 번 눌러 계속 추가할 수 있고, <DevModeLocationBadge where="ptp" />몇 초 안에 아래 카테고리 목록에 자동 반영됩니다.</li>
               <li>컬럼을 직접 지정하려면 → 먼저 <DevModeLocationBadge where="ptp" />에서 &quot;스크랩 대상 직접지정&quot; 클릭 → <DevModeLocationBadge where="mall" />팝업의 <b className="text-gray-700">&quot;🎯 보조 - 스크랩 대상 직접지정&quot;</b></li>
               <li>확장 아이콘이 안 보이면 퍼즐조각(🧩) 아이콘을 먼저 눌러 목록에서 찾으세요(자주 쓰면 그 옆 핀으로 고정).</li>
             </ul>
@@ -2482,6 +2533,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 {previewLoading
                   ? (mallMode === 'devmode' ? '대기 중...' : previewProgress ? `카테고리 확인 중... (${previewProgress.done}/${previewProgress.total})` : aiMode ? 'AI 분석 중...' : '확인 중...')
                   : previewResult ? '✓ 스크랩 미리보기' : '🔍 스크랩 미리보기'}
+                {/* 몰 탭에서 찾아야 할 확장 아이콘이 빨간 배경에 흰 글자로 "PTP"라 — 같은 색으로 작게
+                    표시해 "이 버튼 = 저 아이콘"이라는 걸 시각적으로 바로 연결시킨다(2026-08-22). */}
+                {mallMode === 'devmode' && !previewLoading && (
+                  <span className="ml-1 text-red-600 text-[10px] font-extrabold align-super">PTP</span>
+                )}
               </button>
               {/* 개발자모드는 서버가 아니라 사용자 브라우저의 확장이 도는 것이라 이 fetch로 중지시킬
                   작업이 없다(위 devPreviewTimeoutRef의 2분 자동 해제만 있음) — 일반모드 전용. 진행
@@ -2509,13 +2565,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       setPickerActive(true)
                       if (loginStep === 'none' && selectedSite) {
                         await handleOpenMallUrlDirect(selectedSite.login_url || selectedSite.url)
-                        alert('몰 탭을 열었습니다 — 로그인 후 확장 아이콘 → 팝업의 "🎯 보조 - 스크랩 대상 직접지정"을 클릭하세요.')
+                        showDevHint('몰 탭을 열었습니다 — 로그인 후 확장 아이콘 → 팝업의 "🎯 보조 - 스크랩 대상 직접지정"을 클릭하세요.')
                       } else {
-                        alert('몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🎯 보조 - 스크랩 대상 직접지정"을 클릭하세요.')
+                        showDevHint('몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🎯 보조 - 스크랩 대상 직접지정"을 클릭하세요.')
                       }
                     }} disabled={pickerBusy}
                       className="px-4 py-2 bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
                       🎯 스크랩 대상 직접지정
+                      <span className="ml-1 text-red-600 text-[10px] font-extrabold align-super">PTP</span>
                     </button>
                   )
                 ) : (
@@ -2543,10 +2600,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
           {!previewCardCollapsed && <>
           {mallMode === 'devmode' && (
+            // 예전엔 "이 버튼들이 결과를 바로 가져오지 않는다"고 4개 버튼을 뭉뚱그려 경고했는데, 실제로는
+            // 동시 처리/AI모드는 진짜 설정값이라 이 화면에서 누르는 즉시 저장·적용된다 — 몰 탭 확장이
+            // 필요한 건 미리보기/직접지정 결과를 "채우는" 것뿐이다. 뭉뚱그린 경고가 설정 버튼까지 "여기선
+            // 안 되는 것"처럼 보이게 해 헷갈린다는 지적(2026-08-22)으로, 그 둘만 콕 집어 경고하게 좁혔다.
             <p className="text-xs text-amber-600 bg-amber-50 rounded-lg px-3 py-2 mb-3">
-              ⚠ 개발자모드에서는 이 버튼들이 결과를 바로 가져오지 않습니다 — 아래 버튼은 준비만 하고,{' '}
-              실제 실행은 &quot;브라우저에서 바로 열기&quot;로 연 몰 탭의 확장 프로그램에서 해야 합니다(위 &quot;🧩 개발자모드
-              스크랩 방법&quot; 참고).
+              ⚠ <DevModeLocationBadge where="mall" />&quot;🔍 스크랩 미리보기&quot;와 &quot;🎯 스크랩 대상 직접지정&quot;은 여기서
+              눌러도 결과가 바로 채워지지 않습니다 — 누르면 몰 창이 열리니, 그 몰 창에서 PTP 확장프로그램으로
+              진행해야 합니다(확장 아이콘 클릭 → 실제 실행 버튼, 위 &quot;🧩 개발자모드 스크랩 방법&quot; 참고).
             </p>
           )}
 
@@ -2591,7 +2652,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 <span className="text-sm leading-none animate-spin">🔄</span>
                 <span className="text-xs font-semibold text-gray-500">
                   {mallMode === 'devmode'
-                    ? '몰 탭에서 확장을 실행하면 결과가 여기 나타납니다...'
+                    ? '몰 창에서 PTP 확장프로그램을 실행하면 결과가 여기 나타납니다...'
                     : previewProgress ? `카테고리 확인 중입니다... (${previewProgress.done}/${previewProgress.total})` : '상품 페이지를 확인하는 중입니다...'}
                 </span>
               </div>
@@ -2977,9 +3038,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         <button onClick={async () => {
           if (loginStep === 'none' && selectedSite) {
             await handleOpenMallUrlDirect(selectedSite.login_url || selectedSite.url)
-            alert('몰 탭을 열었습니다 — 로그인 후 확장 아이콘 → 팝업의 "🔄 스크랩 시작"을 클릭하세요.')
+            showDevHint('몰 탭을 열었습니다 — 로그인 후 확장 아이콘 → 팝업의 "🔄 스크랩 시작"을 클릭하세요.')
           } else {
-            alert('몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🔄 스크랩 시작"을 클릭하세요.')
+            showDevHint('몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🔄 스크랩 시작"을 클릭하세요.')
           }
         }} className="w-full py-3 rounded-2xl font-semibold text-sm bg-teal-500 text-white hover:bg-teal-600 transition-colors">
           스크래핑 시작

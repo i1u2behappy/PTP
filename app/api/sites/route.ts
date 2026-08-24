@@ -19,7 +19,11 @@ export async function GET(req: NextRequest) {
      LEFT JOIN LATERAL (
        SELECT status, error FROM scrape_sessions WHERE site_id = s.id ORDER BY created_at DESC LIMIT 1
      ) latest ON true
+     -- 그리드가 보여주는 컬럼 중 메인 품목/메모가 검색에서 빠져있었다(사용자 지적, 2026-08-17). 몰
+     -- 유형/상태(차단)는 화면에서 원문 값을 번역·가공해 보여줘 여기서 그대로 ILIKE로 맞히기 어렵고,
+     -- 이미 그리드 자체의 컬럼별 필터(🔍 필터)가 가공된 값 그대로 걸러주고 있어 그쪽에 맡긴다.
      WHERE s.name ILIKE $1 OR s.url ILIKE $1 OR s.login_id ILIKE $1 OR c.name ILIKE $1
+        OR s.main_items ILIKE $1 OR s.memo ILIKE $1
      ORDER BY s.created_at DESC`,
     [`%${q}%`],
   )

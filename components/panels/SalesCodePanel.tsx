@@ -200,10 +200,15 @@ export function SalesCodePanel({ params }: { params?: Record<string, unknown> })
   }
 
   const q = search.trim().toLowerCase()
+  // 그리드가 SOURCE_FIELD_OPTIONS 컬럼(상품명/브랜드/제조사/원산지/카테고리/재고상태) 전부를 보여주는데
+  // 검색은 상품명·몰상품코드·판매관리코드만 봐서, 다른 컬럼에 보이는 값으로는 검색이 안 됐다(가격·할인가는
+  // 숫자라 텍스트 검색 대상에서 제외, 사용자 지적 2026-08-17).
   const visibleRows = q
     ? stagingRows.filter(r => {
         const master = masterByMallProductId.get(r.matched_mall_product_id!)
         return (r.mp_name_original || '').toLowerCase().includes(q) || (r.mall_product_code || '').toLowerCase().includes(q) || (master?.sales_code || '').toLowerCase().includes(q)
+          || (r.mp_brand || '').toLowerCase().includes(q) || (r.mp_manufacturer || '').toLowerCase().includes(q) || (r.mp_origin || '').toLowerCase().includes(q)
+          || (r.mp_mall_category || '').toLowerCase().includes(q) || (r.mp_stock_status || '').toLowerCase().includes(q)
       })
     : stagingRows
   const missingCount = stagingRows.filter(r => {

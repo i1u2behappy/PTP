@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { requestStop, getSiteLockStatus } from '@/lib/scraper'
+import { requestStop, getSiteLockStatus } from '@/lib/workerClient'
 import pool from '@/lib/db'
 
 export async function POST(req: NextRequest) {
   const { sessionId } = await req.json() as { sessionId: number }
   if (!sessionId) return NextResponse.json({ error: 'sessionId required' }, { status: 400 })
 
-  requestStop(sessionId)
+  await requestStop(sessionId)
   // 개발자모드는 실제 수집 루프가 사용자 브라우저(확장)에서 돌고 있어, 이 요청은 "멈춰달라"는 신호일
   // 뿐 즉시 멈추는 게 아니다 — 확장은 상품 하나를 처리할 때마다(보통 몇 초~10여 초 주기) 이 신호를
   // 확인하고서야 실제로 멈춘다. 여기서 DB 상태를 곧바로 'stopped'로 확정해버리면 PTP 화면은 "중지됨"을
@@ -25,8 +25,10 @@ export async function POST(req: NextRequest) {
   const site = await pool.query<{ site_id: number }>(`SELECT site_id FROM scrape_sessions WHERE id=$1`, [sessionId])
   const siteId = site.rows[0]?.site_id
   setTimeout(() => {
-    if (siteId != null && getSiteLockStatus(siteId)) return
-    pool.query(`UPDATE scrape_sessions SET status='stopped' WHERE id=$1 AND status='running'`, [sessionId]).catch(() => {})
+    (async () => {
+      if (siteId != null && await getSiteLockStatus(siteId)) return
+      await pool.query(`UPDATE scrape_sessions SET status='stopped' WHERE id=$1 AND status='running'`, [sessionId]).catch(() => {})
+    })().catch(() => {})
   }, 20_000)
   return NextResponse.json({ ok: true })
 }

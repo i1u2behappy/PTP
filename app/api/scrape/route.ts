@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool, { initDb } from '@/lib/db'
-import { getOpenPageUrl } from '@/lib/scraper'
-import { runScraping } from '@/lib/scrape/run'
+import { getOpenPageUrl, runScraping } from '@/lib/workerClient'
 import { clearStalePendingIfConfigChanged } from '@/lib/scrape/staging'
 import type { ExtractionRule } from '@/lib/ai'
 
@@ -15,6 +14,16 @@ interface ScrapeRequestBody {
   productUrls?: string[]
   nextPageSelector?: string
   maxPages?: number
+  /** "카테고리별 정렬기준 설정" 기능용 — categoryUrls 각 URL에 대한 개별 상한(lib/scraper.ts의
+   *  ScrapeOptions.categoryLimits와 동일한 모양). */
+  categoryLimits?: Record<string, { mode: 'count' | 'pages'; value: number }>
+  /** AJAX(클릭) 방식 정렬용 — lib/scraper.ts의 ScrapeOptions.categorySortClicks와 동일한 모양. */
+  categorySortClicks?: Record<string, string>
+  /** "스크래핑 시작"의 대상은 항상 위에서 선택한 카테고리(전체든 일부든) 전부다 — 그중 mall_products에
+   *  source_url로 이미 있는 상품까지 다시 스크랩할지를 이 값이 결정한다. 기본 true(포함) — 예전에는
+   *  runScraping이 조용히 이미 있는 상품을 건너뛰어서(scrapeMode!=='incremental'이면 항상 그랬음), 몰
+   *  전체를 다시 받고 싶어도 신상품만 받아지는 게 "버그"처럼 보였다(사용자 지시, 2026-08-23). */
+  includeAlreadyScraped?: boolean
   delayMs?: number
   loginId?: string
   loginPw?: string
@@ -33,7 +42,7 @@ export async function POST(req: NextRequest) {
 
   if (!body.siteId) return NextResponse.json({ error: 'siteId required' }, { status: 400 })
 
-  const resolvedUrl = body.url || body.categoryUrls?.[0] || body.productUrls?.[0] || getOpenPageUrl(body.siteId)
+  const resolvedUrl = body.url || body.categoryUrls?.[0] || body.productUrls?.[0] || await getOpenPageUrl(body.siteId)
   if (!resolvedUrl) return NextResponse.json({ error: 'url required' }, { status: 400 })
 
   // 이 몰에 이미 진행 중인 세션이 있으면 새로 만들지 않는다 — 버튼 두 번 클릭, 여러 탭, 예약 스크랩과
@@ -92,8 +101,8 @@ export async function POST(req: NextRequest) {
       JSON.stringify({
         mode: body.mode, url: body.url, categoryUrls: body.categoryUrls,
         productLinkSelector: body.productLinkSelector, nextPageSelector: body.nextPageSelector,
-        maxPages: body.maxPages, delayMs: body.delayMs,
-        concurrencyMode: body.concurrencyMode, concurrency: body.concurrency,
+        maxPages: body.maxPages, categoryLimits: body.categoryLimits, categorySortClicks: body.categorySortClicks, delayMs: body.delayMs,
+        concurrencyMode: body.concurrencyMode, concurrency: body.concurrency, includeAlreadyScraped: body.includeAlreadyScraped,
       }),
       body.siteId,
     ])

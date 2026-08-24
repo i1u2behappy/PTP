@@ -33,6 +33,37 @@ input[type='checkbox'], input[type='radio'] {
   animation: pulse-glow 1.2s ease-in-out infinite;
 }
 
+/* 깜빡임 간격이 점점 좁아지다가(느림→빠름) 한 사이클 끝에서 다시 느리게 리셋되는 강조 효과 */
+@keyframes blink-accelerate {
+  0%, 9% { opacity: 1; }
+  12% { opacity: 0.15; }
+  22%, 24% { opacity: 1; }
+  27% { opacity: 0.15; }
+  35%, 37% { opacity: 1; }
+  40% { opacity: 0.15; }
+  46%, 48% { opacity: 1; }
+  50% { opacity: 0.15; }
+  55%, 56.5% { opacity: 1; }
+  58% { opacity: 0.15; }
+  62%, 63.2% { opacity: 1; }
+  64.4% { opacity: 0.15; }
+  67.6%, 68.6% { opacity: 1; }
+  69.6% { opacity: 0.15; }
+  72%, 72.8% { opacity: 1; }
+  73.6% { opacity: 0.15; }
+  75.6%, 76.2% { opacity: 1; }
+  76.8% { opacity: 0.15; }
+  78.4%, 78.9% { opacity: 1; }
+  79.4% { opacity: 0.15; }
+  80.6%, 81% { opacity: 1; }
+  81.4% { opacity: 0.15; }
+  100% { opacity: 1; }
+}
+
+.animate-blink-accelerate {
+  animation: blink-accelerate 4s linear infinite;
+}
+
 /* 클릭이 실제로 먹혔는지 안 보여 답답하다는 피드백 — 앱 전체 버튼에 눌림 피드백을 한 번에 적용 */
 button:not(:disabled) {
   transition: transform .08s ease, opacity .08s ease;

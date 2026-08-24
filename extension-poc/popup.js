@@ -31,7 +31,10 @@ async function run(action, busyText) {
       const profileNote = res.partialErrors?.length
         ? ` (일부 실패: ${res.partialErrors.join(', ')})`
         : ` — 카테고리 하위구조 ${res.expandCount ?? '-'}개, 정렬 옵션 ${res.sortCount ?? '-'}개 확인 완료`
-      setStatus(action === 'start' ? '✓ 시작했습니다 — PTP 화면에서 진행상황을 확인하세요.'
+      setStatus(action === 'start'
+        ? (res.skipCount > 0
+          ? `✓ 이어서 받는 중입니다 — 이미 받은 ${res.skipCount}개는 건너뛰고 나머지만 받습니다. PTP 화면에서 확인하세요.`
+          : '✓ 처음부터 새로 시작했습니다 — PTP 화면에서 진행상황을 확인하세요.')
         : action === 'picker' ? '✓ 몰 탭에 직접지정 패널이 열렸습니다 — 그 패널에서 값을 클릭해 지정하세요.'
         : action === 'profile' ? `✓ 몰 구조분석 완료${profileNote} — PTP에서 다시 확인하세요.`
         : action === 'current-category' ? '✓ 카테고리 URL 목록에 추가했습니다 — 잠시 후 PTP 화면에 반영됩니다.'

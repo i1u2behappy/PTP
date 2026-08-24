@@ -47,7 +47,7 @@ function describeDiff(prev: MallProfileSignals, next: MallProfileSignals): strin
   return diffs
 }
 
-interface ProfileCheckResult {
+export interface ProfileCheckResult {
   signals: MallProfileSignals
   /** 기준정보가 이미 있었는데 이번에 달라진 점 — 최초 프로파일링이면 항상 빈 배열. */
   diffs: string[]
@@ -72,6 +72,20 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
   // 덮어써버리면 안 된다 — "몰 구조분석"을 다시 눌렀는데 그 사이 AI 호출이 실패했다면 기존 AI 리포트를
   // 그대로 유지한다(사용자가 화면에서 이유도 모른 채 리포트 품질이 나빠지는 것을 방지).
   else if (next.report?.generatedBy === 'heuristic' && prev?.report?.generatedBy === 'ai') next.report = prev.report
+
+  // sortOptions는 deep=false거나 로그인 필요 몰이면 항상 []이다(성공적으로 "더 적게" 나올 일이 없음) —
+  // 개발자모드 확장(runDetectSortOptions)이 채워둔 값을 이 얕은/실패 경로가 조용히 지우지 못하게 한다
+  // (사용자 요청, 2026-08-19 — 위 report 가드와 같은 이유).
+  if (!next.sortOptions?.length && prev?.sortOptions?.length) next.sortOptions = prev.sortOptions
+
+  // categoryLinks는 deep=false("구조 변화 감지", 로그인 확인/스크랩 시작마다 자동으로 돎)에서도 매번
+  // 다시(얕게) 계산된다 — 개발자모드 확장의 "카테고리 하위구조 자동확인"(runExpandCategories)이 펼쳐둔
+  // 하위 카테고리 목록의 권위 있는 갱신 창구가 아니므로, 그 결과가 이전보다 얕아졌으면(개수가 줄었으면)
+  // 덮어쓰지 않는다. deep=true(사용자가 명시적으로 누른 "몰 구조분석")는 실제 카테고리 구조 축소를
+  // 반영할 수 있어야 하므로 건드리지 않는다.
+  if (!deep && prev?.categoryLinks?.length && next.categoryLinks.length < prev.categoryLinks.length) {
+    next.categoryLinks = prev.categoryLinks
+  }
 
   // sampleProductPageText는 아래(runMallStructureReport)에서 추출규칙 자동생성에만 쓰는 임시 값 —
   // 원문 그대로라 용량이 커 기준정보로 영구 저장하지 않는다.

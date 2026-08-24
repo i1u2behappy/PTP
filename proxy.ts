@@ -13,6 +13,10 @@ const PUBLIC_PATHS = ['/login', '/logo.jpg', '/icon.jpg']
 const PUBLIC_API_PREFIXES = [
   '/api/auth/', '/api/scrape/extension-ingest', '/api/sites/resolve', '/api/scrape/stop-requested',
   '/api/health/db', '/api/system/restart-docker', '/api/system/restart-server',
+  // extension-progress: 개발자모드 스크랩 진행률("카테고리 N/M") 보고 — 위와 같은 이유로 세션 쿠키 없이
+  // 확장이 부른다. 여기 빠뜨렸다가 조용히 401로 매번 실패해, "진행 상황이 안 보인다"는 지적으로 뒤늦게
+  // 발견됐다(2026-08-22) — 위 profile 라우트 때와 똑같은 실수라 다시 반복하지 않도록 주석을 남긴다.
+  '/api/scrape/extension-progress',
 ]
 // 몰 id가 경로 중간에 끼어 있어(/api/sites/{id}/...) 단순 prefix로 못 걸러 정규식으로 따로 둔다 — 개발자모드
 // 크롬 확장이 세션 쿠키 없이 호출하는 엔드포인트들. preview-capture(스크래핑 전 단건 미리보기),
@@ -25,6 +29,9 @@ const PUBLIC_API_PATTERNS = [
   /^\/api\/sites\/\d+\/preview-capture$/, /^\/api\/sites\/\d+\/picker\/rule$/, /^\/api\/sites\/\d+\/profile$/,
   /^\/api\/sites\/\d+\/categories\/expand$/, /^\/api\/sites\/\d+\/sort-options$/,
   /^\/api\/sites\/\d+\/current-category$/,
+  // profile-progress: "몰 구조분석"의 확장 담당 단계(카테고리 하위구조/정렬 옵션) 진행률 보고 —
+  // extension-progress와 같은 이유로 빠뜨렸었다(2026-08-22).
+  /^\/api\/sites\/\d+\/profile-progress$/,
 ]
 
 export function proxy(request: NextRequest) {

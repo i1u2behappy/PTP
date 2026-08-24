@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool, { decryptSecret } from '@/lib/db'
-import { runMallProfileCheckForScrape } from '@/lib/scrape/mallProfile'
+import { runMallProfileCheckForScrape } from '@/lib/workerClient'
 
 interface SiteRow {
   url: string

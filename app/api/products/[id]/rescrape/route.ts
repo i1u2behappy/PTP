@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool, { decryptSecret } from '@/lib/db'
-import { scrapeSingleProduct } from '@/lib/scraper'
+import { scrapeSingleProduct } from '@/lib/workerClient'
 import { stageScrapedProduct } from '@/lib/scrape/staging'
 
 /** 개별 상품 상세 화면에서 "재스크랩" — 원본 URL을 다시 열어 결과를 스테이징에 쌓는다 (즉시 반영하지 않음). */

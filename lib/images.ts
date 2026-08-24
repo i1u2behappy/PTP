@@ -4,7 +4,7 @@ import axios from 'axios'
 import sharp from 'sharp'
 import pool from './db'
 import type { RawMasterImage } from './db'
-import { withContext } from './scraper'
+import { fetchImageViaBrowser } from './workerClient'
 
 const SAVE_ROOT = path.join(process.cwd(), 'public', 'scraped')
 const MAX_DIMENSION = 1200
@@ -75,23 +75,6 @@ async function fetchImageBytes(url: string): Promise<Buffer> {
   return Buffer.from(res.data)
 }
 
-/** 이미지 자체가 로그인 세션 없이는 안 열리는 몰(도매몰 등)을 위한 폴백 — 그 몰의 저장된 로그인 프로필로
- *  헤드리스 컨텍스트를 하나 띄워(로그인 창이 열려있으면 그걸 그대로 재사용) 실패한 URL들만 한 번에 다시
- *  받는다. 이미지마다 새로 띄우면 느려서, 배치 전체에 실패가 있을 때 딱 한 번만 띄운다. 브라우저 컨텍스트의
- *  request는 그 컨텍스트가 가진 쿠키를 자동으로 실어 보내므로, 로그인 창이 오래 전에 닫혔어도 프로필
- *  폴더에 남은 쿠키가 유효한 한 그대로 통과한다(withContext가 이미 하는 폴백 그대로 재사용). */
-async function fetchViaLoginSession(siteId: number, urls: string[]): Promise<Map<string, Buffer>> {
-  const result = new Map<string, Buffer>()
-  await withContext({ siteId }, async (_page, context) => {
-    for (const url of urls) {
-      try {
-        const res = await context.request.get(url, { headers: { Referer: url } })
-        if (res.ok()) result.set(url, await res.body())
-      } catch { /* 이 URL은 포기 */ }
-    }
-  }, '이미지 다운로드')
-  return result
-}
 
 async function saveNormalizedImage(
   buffer: Buffer, url: string, folderName: string, productCode: string, productName: string, type: 'thumb' | 'detail', idx: number | undefined,
@@ -151,11 +134,12 @@ export async function downloadProductImages(
   }))
 
   if (failed.length && siteId) {
-    const recovered = await fetchViaLoginSession(siteId, failed.map(f => f.url)).catch(() => new Map<string, Buffer>())
+    // 워커 프로세스(lib/imagesBrowser.ts)에 RPC로 위임 — base64로 돌아오므로 Buffer로 되돌린다.
+    const recovered = await fetchImageViaBrowser(siteId, failed.map(f => f.url)).catch(() => ({}) as Record<string, string>)
     for (const f of failed) {
-      const buffer = recovered.get(f.url)
-      if (!buffer) continue
-      try { f.slot[f.idx - 1] = await saveNormalizedImage(buffer, f.url, folderName, productCode, productName, f.type, f.idx) } catch { /* 그래도 실패 — 포기 */ }
+      const encoded = recovered[f.url]
+      if (!encoded) continue
+      try { f.slot[f.idx - 1] = await saveNormalizedImage(Buffer.from(encoded, 'base64'), f.url, folderName, productCode, productName, f.type, f.idx) } catch { /* 그래도 실패 — 포기 */ }
     }
   }
 

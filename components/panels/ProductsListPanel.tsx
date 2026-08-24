@@ -53,8 +53,11 @@ export function ProductsListPanel() {
     if (siteFilter === '' && clientFilter !== '' && s.client_name !== clientFilter) return false
     const q = sessionSearch.trim().toLowerCase()
     if (!q) return true
+    // 그리드(ScrapeSessionGrid)가 실제로 보여주는 컬럼 중 "병합 일시"(merged_at)가 검색에서 빠져있었다
+    // (사용자 지적, 2026-08-17 — 다른 메뉴의 검색도 그리드에 보이는 컬럼 전부를 대상으로 해달라는 요청).
     return s.url.toLowerCase().includes(q) || s.status.toLowerCase().includes(q) || new Date(s.created_at).toLocaleString().toLowerCase().includes(q)
       || (s.client_name || '').toLowerCase().includes(q) || (s.site_name || '').toLowerCase().includes(q)
+      || (s.merged_at ? new Date(s.merged_at).toLocaleString() : '').toLowerCase().includes(q)
   })
 
   const selectedSession = sessions.find(s => s.id === selectedSessionId)
@@ -189,7 +192,8 @@ export function ProductsListPanel() {
                 onChange={f => { setClientFilter(f.clientName); setSiteFilter(f.siteId); setSessionSearch(f.search) }} />
               <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mb-4 shrink-0">
                 <ScrapeSessionGrid sessions={filteredSessions} selectedId={selectedSessionId} onSelect={setSelectedSessionId}
-                  onDelete={isAdmin ? handleDeleteSession : undefined} maxHeightClassName="max-h-48" showClientMall
+                  onDelete={isAdmin ? handleDeleteSession : undefined}
+                  maxHeightClassName="h-48 min-h-[80px] max-h-[70vh] resize-y" showClientMall
                   checkedIds={checkedSessionIds} onToggleCheck={toggleCheckSession} isRowCheckable={isConfirmed}
                   extraActions={<>
                     {checkedSessionIds.size >= 2 && (

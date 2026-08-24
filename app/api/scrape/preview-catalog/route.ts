@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { previewCatalog, getOpenPageUrl } from '@/lib/scraper'
+import { persistCategoryCounts } from '@/lib/scraper'
+import { previewCatalog, getOpenPageUrl } from '@/lib/workerClient'
 import pool from '@/lib/db'
 import type { ExtractionRule } from '@/lib/ai'
 
@@ -9,9 +10,11 @@ export async function POST(req: NextRequest) {
     url?: string; categoryUrls?: string[]; nextPageSelector?: string; maxPages?: number
     productLinkSelector?: string; loginId?: string; loginPw?: string; siteId?: number; aiMode?: boolean
     concurrencyMode?: 'auto' | 'manual'; concurrency?: number
+    /** AJAX(클릭) 방식 정렬용 — ScrapeOptions.categorySortClicks 참고 */
+    categorySortClicks?: Record<string, string>
   }
 
-  const resolvedUrl = body.url || body.categoryUrls?.[0] || (body.siteId ? getOpenPageUrl(body.siteId) : null)
+  const resolvedUrl = body.url || body.categoryUrls?.[0] || (body.siteId ? await getOpenPageUrl(body.siteId) : null)
   if (!resolvedUrl) return NextResponse.json({ error: 'url required' }, { status: 400 })
 
   try {
@@ -31,6 +34,11 @@ export async function POST(req: NextRequest) {
     // 사용자가 미리보기 도중 "중지"를 누르면 클라이언트가 이 요청 자체를 abort한다 — 그 신호를 그대로
     // previewCatalog에 넘겨 카테고리 개수 집계 루프가 다음 페이지를 열기 전에 스스로 멈추게 한다.
     const result = await previewCatalog({ ...body, extractionRules, knownNoPaginationWidget, stopSignal: req.signal })
+    // 체크리스트가 카테고리별 개수/확인일시를 보여줄 수 있게 저장해둔다 — 실패해도 미리보기 결과 자체는
+    // 그대로 보여줘야 하니 응답을 막지 않는다.
+    if (body.siteId && result.categoryCounts?.length) {
+      await persistCategoryCounts(body.siteId, result.categoryCounts).catch(() => {})
+    }
     return NextResponse.json(result)
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 })

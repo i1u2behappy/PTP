@@ -548,6 +548,156 @@ Playwright 탭을 동시에 열어 워커 풀로 처리)과 같은 발상을 확
 **수정**: `extension-poc/background.js` — `SCRAPE_TAB_CONCURRENCY`(신규 상수), `run()`(탭 워커풀 +
 세션 프라이밍 로직으로 재작성), `processProduct`(신규, 상품 1건 방문·추출·보고를 묶은 내부 함수).
 
+### 후속 — `runFullMallProfile`이 로컬 AI(Ollama)와 CPU를 두고 경합하던 문제 (2026-08-22, 같은 날)
+
+위 병렬화들을 실사용(모자사러)으로 확인하던 중, "몰 구조분석"이 6분 넘게 걸리는데 카테고리가 하나도
+안 펼쳐지는 걸 발견했다. `Get-Process`/`ollama ps`로 직접 확인한 원인: `runFullMallProfile`이
+`runProfile`(서버 쪽, 카테고리 분류에 로컬 AI Ollama `qwen3:8b` 사용 — `ollama ps`로 `size_vram: 0`
+확인, 즉 GPU 없이 순수 CPU 추론)과 `runExpandCategories`(확장 쪽, 이제 탭 4개 병렬)를 **동시에** 돌리고
+있었다. 둘 다 결국 같은 PC 한 대의 CPU(16스레드)를 쓰는데, CPU 연산 자체인 AI 추론은 다른 프로세스와
+CPU를 나눠 쓰면 배로 느려지는 반면(이 세션에서 이미 확인한 "think 모드 킴/끔 32배 차이"와 같은 종류의
+민감성), 브라우저 탭이 하는 일(페이지 로딩)은 대부분 네트워크 응답을 기다리는 시간이라 CPU 경합에
+상대적으로 덜 취약하다 — 즉 "느려지는 비대칭성"이 커서, 동시 실행이 오히려 총 시간을 늘렸다.
+
+사용자 지시: "AI가 우선이어야 하는 거 아니냐, 먼저 끝내도 되는 걸 먼저 처리하는 방법도 있지 않냐."
+→ `runFullMallProfile`을 완전 순차(`runProfile` 먼저 끝낸 뒤 `runExpandCategories` → `runDetectSortOptions`)
+로 바꿨다. 최선의 경우(경합이 아예 없었을 경우) 총 시간이 약간 늘 수 있지만, 지금처럼 서로 발목을
+잡아 어느 한쪽(특히 AI)이 몇 배로 느려지는 최악의 경우를 막는 게 낫다고 판단했다. 카테고리 하위구조
+확인/정렬 옵션 감지는 애초에도 같은 탭의 chrome.debugger를 두고 서로 순차 실행이어야 했으므로, 이
+변경으로 셋 다 완전 순차가 됐다.
+
+**관련 파일**: `extension-poc/background.js` — `runFullMallProfile`(동시 실행 → 순차 실행).
+
+### 후속 — PTP 페이지가 확장을 직접 실행시킴(externally_connectable) (2026-08-22, 같은 날)
+
+지금까지 개발자모드의 "스크랩 미리보기"/"스크랩 대상 직접지정"/"스크랩 시작"/"현재 카테고리 가져오기"는
+PTP 화면에서 눌러도 몰 탭을 열어주고 안내 토스트만 띄울 뿐, 실제 실행은 사용자가 몰 탭으로 옮겨가
+확장 아이콘 → 팝업 버튼을 직접 눌러야 했다. 사용자 지시: "PTP에서 스크랩 미리보기를 누르면 몰에
+자동으로 확장기능이 실행되게 해달라." Chrome 확장의 `externally_connectable`(웹페이지가 지정된
+origin에서 확장으로 직접 메시지를 보낼 수 있게 허용하는 매니페스트 옵션)로 구현했다.
+
+- **확장 ID 고정**(`extension-poc/manifest.json`의 `"key"`): 언패킹 설치는 원래 로드 경로에 따라 ID가
+  달라질 수 있어(같은 경로에서 새로고침만 하면 보통 유지되지만 보장은 아님), PTP가 `chrome.runtime.
+  sendMessage(extensionId, ...)`로 메시지를 보내려면 그 ID를 미리 알아야 한다 — RSA 공개키를 매니페스트에
+  박아 넣으면 Chrome이 그 키로부터 ID를 결정적으로 계산해, 재설치/새로고침/경로 이동과 무관하게 항상
+  같은 ID(`maefnmlmeaimbljckpadjfhglphbfncf`)가 된다. 개인키는 저장할 필요 없다(ID 계산에만 공개키가
+  쓰이고, 배포 서명에는 안 씀).
+- **`externally_connectable`**(`manifest.json`): `http://localhost:3000/*`, `http://127.0.0.1:3000/*`
+  (PTP origin)만 이 확장에 메시지를 보낼 수 있도록 제한.
+- **`dispatchAction(action, tab, site)`**(신규, `background.js`): 팝업(`chrome.runtime.onMessage`)과
+  PTP 페이지(`chrome.runtime.onMessageExternal`) 양쪽 메시지가 공유하는 실행 분기 — 기존에 팝업
+  메시지 리스너 안에 있던 `if (msg.action === ...)` 체인을 그대로 뽑아냈다.
+- **`findMallTab(hostname)`**(신규): 팝업은 "지금 활성 탭"을 이미 알고 보내주지만, PTP 페이지는 활성
+  탭이라는 개념이 없어(PTP 페이지 자체가 능동 탭) hostname으로 열려있는 몰 탭을 직접 찾는다
+  (`chrome.tabs.query({url:[...]})`, 여러 개면 최근 포커스 순).
+- **`chrome.runtime.onMessageExternal`**(신규): `{action, hostname}`을 받아 `findMallTab` → `resolveSite`
+  → `dispatchAction` 순으로 처리. 몰 탭이 없거나 미등록 몰이면 실패를 그대로 응답해, 호출부가 기존
+  수동 안내로 폴백할 수 있게 한다.
+- **`sendExtensionAction(action, hostname)`**(신규, `ScraperPanel.tsx`): `window.chrome.runtime.
+  sendMessage(PTP_EXTENSION_ID, ...)`를 콜백 기반 API를 Promise로 감싼 헬퍼. 확장 미설치
+  (`chrome.runtime` 자체가 없음)/응답 없음/에러 등 모든 실패 경로에서 `null`을 돌려주고, 호출부
+  (`handleDevPreview`, 스크랩 대상 직접지정 버튼, 스크래핑 시작 버튼, 현재 카테고리 가져오기 버튼)는
+  `result?.ok`가 아니면 항상 기존 수동 안내(몰 탭 열기 + `showDevHint`)로 폴백한다 — 이 기능은 "되면
+  좋은" 지름길이지 유일한 경로가 아니다.
+- 위 경고 문구도 "항상 몰 창에서 직접 진행해야 한다"에서 "몰 탭이 열려 로그인돼 있으면 자동 실행되고,
+  안 되면 안내가 뜬다"로 완화했다.
+
+검증: `node --check`/`tsc --noEmit`/`eslint` 클린, `manifest.json` JSON 유효성 확인. 실제 크롬에서
+`externally_connectable` 권한 프롬프트/자동 실행 성공 여부는 사용자 실사용 확인 필요 — 확장을
+`chrome://extensions`에서 새로고침해야 반영된다(매니페스트 변경 포함이라 반드시 새로고침 필요).
+
+**관련 파일**: `extension-poc/manifest.json`(`key`, `externally_connectable`, 버전 1.44),
+`extension-poc/background.js`(`dispatchAction`, `findMallTab`, `onMessageExternal` 리스너 신규),
+`components/panels/ScraperPanel.tsx`(`PTP_EXTENSION_ID`, `sendExtensionAction` 신규, 4개 버튼 핸들러
+수정).
+
+### 후속 — 언패킹 확장의 "자동 업데이트" 흉내내기 (2026-08-22, 같은 날)
+
+사용자 지시: "서버에서 PTP 확장기능의 버전이 업데이트된 경우, 개발자모드 몰을 로그인할 때 자동으로
+버전을 체크해서 최신 버전이면 자동 업데이트되게 해달라." 크롬 스토어 확장과 달리 "압축해제된 확장
+로드"(언패킹 설치)는 크롬 자체의 자동업데이트 대상이 아니다 — 파일이 디스크에서 바뀌어도 사용자가
+`chrome://extensions`에서 새로고침을 직접 눌러야 반영된다. 이 프로젝트는 확장 코드가 저장소
+(`extension-poc/`) 안에 있어 항상 "서버 쪽 최신 코드 = 디스크의 최신 코드"이므로, "새로고침을 대신
+눌러주는" 방식으로 자동 업데이트를 흉내냈다.
+
+- **`GET /api/extension/version`**(신규): `extension-poc/manifest.json`의 `version`을 그대로 읽어
+  응답 — 이 저장소가 곧 배포본이라 별도 버전 관리 파일 없이 매니페스트 자체를 기준으로 삼는다.
+- **`background.js`의 `onMessageExternal`에 `'ping'`/`'reload'` 액션 추가**: `hostname`/몰 탭이 필요
+  없는, 확장 자체를 다루는 액션이라 기존 hostname 분기보다 앞에서 처리한다. `'ping'`은
+  `chrome.runtime.getManifest().version`(설치된 버전)을 돌려주고, `'reload'`는 `chrome.runtime.
+  reload()`로 확장 스스로를 재시작시킨다(같은 폴더에서 다시 읽어들이므로 파일이 이미 최신이면 그걸로
+  충분) — 단, 스크랩이 진행 중이면(`running` 플래그) 재시작하지 않고 실패를 응답한다(진행 중인 작업이
+  갑자기 끊기지 않도록).
+- **`ScraperPanel.tsx`의 `checkAndUpdateExtension(hostname)`**(신규): 개발자모드 몰을 선택할 때마다
+  한 번(몰이 바뀔 때만 다시 시도, `extUpdateAttemptedRef`로 중복 방지) `'ping'`으로 설치된 버전을
+  확인하고, `/api/extension/version`의 서버 버전과 `isExtensionVersionNewer`로 비교해 서버가 더
+  새로우면 `'reload'`를 요청한다. 성공/실패 모두 `showDevHint` 토스트로 알린다. 확장 미설치/응답
+  없음이면 조용히 넘어간다(devmode 화면 자체는 확장 없이도 켜지므로 에러로 취급하지 않음).
+- 트리거 시점은 정확히 "로그인 확인" 이벤트가 아니라 "개발자모드 몰을 선택하는 시점"이다 — devmode는
+  PTP가 로그인 완료를 직접 감지할 방법이 없어(로그인 창 자체가 사용자의 진짜 크롬이라 서버가 못 봄)
+  "몰 선택"이 그나마 "이 몰 작업을 시작한다"에 가장 가까운, 이미 있는 훅이다.
+- **닭과 달걀 문제**: 이 기능 자체가 확장에 새로 추가된 코드(`onMessageExternal`의 `ping`/`reload`
+  분기)라, 지금 이 버전(1.45)을 적용하려면 사용자가 최소 한 번은 `chrome://extensions`에서 수동으로
+  새로고침해야 한다 — 그 이후 버전(1.46 이상)부터는 이 메커니즘으로 자동 반영된다.
+
+검증: `tsc --noEmit`/`eslint`/`node --check` 클린, `manifest.json` JSON 유효성 확인(버전 1.45). 실제
+버전 업/자동 reload 성공 여부, 스크랩 중 reload 차단 여부는 사용자 실사용 확인 필요.
+
+**관련 파일**: `app/api/extension/version/route.ts`(신규), `extension-poc/background.js`
+(`onMessageExternal`에 `ping`/`reload` 추가, 버전 1.45), `components/panels/ScraperPanel.tsx`
+(`ExtensionActionResult`, `isExtensionVersionNewer`, `checkAndUpdateExtension`, `extUpdateAttemptedRef`,
+트리거용 `useEffect` 신규).
+
+### 후속 — "몰 구조분석 중지" (2026-08-22, 같은 날)
+
+사용자 지시: "몰구조분석의 중지 기능을 만들어줘. 중지를 클릭하면, 진행 중인 llama-server도 멈추고
+관련 작업을 멈추는 것으로 해." "몰 구조분석"은 서버 쪽(로컬 AI로 카테고리/정렬 분류 + 여러 탭으로
+샘플 상품·정보페이지 방문)과, 개발자모드에서는 몰 탭의 확장 작업(카테고리 하위구조 확인/정렬 옵션
+감지)까지 걸쳐 있어 두 군데 다 멈춰야 한다.
+
+- **서버 쪽 — AbortController 레지스트리**(`lib/scraper.ts`): `profileAbortControllers`(siteId →
+  AbortController, globalThis 저장)를 `profileMallStructure`가 실행 시작 시 등록하고 `finally`에서
+  정리한다. `stopProfileAnalysis(siteId)`(신규, export)가 그 컨트롤러를 찾아 `abort()`한다.
+  `withSiteLock`이 이미 siteId당 분석 하나만 동시에 돌게 보장하므로 슬롯 하나로 충분하다.
+- **신호를 실제로 쓸모 있게 전달**: `sampleMallProfile`/`discoverTopLevelCategoryLinks`/
+  `gatherMallContextText`/`mapWithPageWorkers`에 전부 `signal?: AbortSignal`을 추가로 받게 해서
+  주요 단계 경계마다 `signal?.aborted`면 즉시 `null`/return으로 빠지고, **가장 중요하게는**
+  `pickIndicesWithOllama`(`lib/ai.ts`)의 `fetch`에 `signal`을 그대로 실어 보낸다 — 클라이언트가
+  fetch를 abort하면 Ollama(`llama-server`)도 그 요청의 컨텍스트 취소를 감지해 생성 자체를 멈추는
+  표준 동작이라, 이걸로 "llama-server도 멈추고" 요구를 그대로 만족한다. `detectCategoryLinksWithAI`/
+  `detectSortOptionsWithAI`도 같은 이유로 `signal` 파라미터를 추가로 받는다(모두 선택 인자라 기존
+  호출부는 그대로 컴파일됨 — `discoverCategoryLinks`의 카테고리 불러오기 쪽은 이번 범위가 아니라
+  `signal`을 안 넘겨 그대로 예전처럼 동작).
+- **`POST /api/sites/[id]/profile/stop`**(신규): PTP 화면이 직접 부른다(확장이 아니라 이 화면 자체의
+  요청이라 CORS 불필요). `stopProfileAnalysis`를 호출할 뿐인 얇은 라우트.
+- **개발자모드 확장 쪽**(`background.js`): `profileStopRequested` 플래그(모듈 전역) 추가 —
+  `onMessageExternal`의 `'stop-profile'` 액션이 세우고, `runExpandCategories`의 워커 루프/
+  `runDetectSortOptions`의 클릭 폴백 루프가 다음 항목을 집기 전에 확인해 스스로 멈춘다.
+  `runFullMallProfile` 시작 시 매번 `false`로 초기화(이전 실행의 중지 신호가 새 실행까지 이어지면
+  안 됨).
+- **PTP UI**(`ScraperPanel.tsx`): "🔍 몰 구조분석" 버튼 옆에 진행 중일 때만 "⏹ 중지" 버튼이 뜬다.
+  `handleStopProfileMall`이 `/profile/stop`을 부르고(서버 쪽), 개발자모드면 `sendExtensionAction(
+  'stop-profile', hostname)`도 같이 보낸다(확장 쪽). **표시 조건이 중요한 지점**: 개발자모드는 몰
+  구조분석이 PTP의 `handleProfileMall`이 아니라 확장 팝업의 "🧭 보조 - 몰 구조분석"(`runFullMallProfile`)
+  으로 트리거될 수도 있어 `profileLoading`(로컬 상태)만으로는 그 경우를 못 잡는다 — 이미 폴링 중이던
+  `siteLockStatus`(`withSiteLock`이 어느 경로든 `label:'몰 구조분석'`으로 잠금)를 같이 봐서
+  (`mallProfileRunning = profileLoading || (siteLockStatus?.busy && siteLockStatus.label === '몰
+  구조분석')`) 두 트리거 경로 모두에서 중지 버튼이 뜨게 했다.
+- 중지되면 `profileMallStructure`가 조용히 `null`을 반환하는데, 이게 "실패"와 구분이 안 될 수 있어
+  `app/api/sites/[id]/profile/route.ts`의 에러 메시지에 "(중지를 눌렀다면 정상입니다)"를 덧붙였다.
+
+검증: `tsc --noEmit`/`eslint`/`node --check` 클린, `manifest.json` JSON 유효성 확인(버전 1.46). 실제로
+중지 클릭 시 `llama-server` CPU 사용량이 즉시 떨어지는지, 개발자모드 확장 쪽 탭 작업도 같이 멈추는지는
+사용자 실사용 확인 필요.
+
+**관련 파일**: `lib/scraper.ts`(`profileAbortControllers`, `stopProfileAnalysis` 신규,
+`sampleMallProfile`/`discoverTopLevelCategoryLinks`/`gatherMallContextText`/`mapWithPageWorkers`에
+`signal` 추가), `lib/ai.ts`(`pickIndicesWithOllama`/`detectCategoryLinksWithAI`/
+`detectSortOptionsWithAI`에 `signal` 추가), `app/api/sites/[id]/profile/stop/route.ts`(신규),
+`app/api/sites/[id]/profile/route.ts`(에러 메시지 보강), `extension-poc/background.js`
+(`profileStopRequested`, `'stop-profile'` 액션, 버전 1.46), `components/panels/ScraperPanel.tsx`
+(`handleStopProfileMall`, `mallProfileRunning`, 중지 버튼 2곳).
+
 ## 상태
 
 **구현 완료 (2026-07-18, 크롬 확장 방식으로 전환).** 이전 개인 프로필 방식 커밋: `a74832f`, `3e517e9`,
@@ -567,3 +717,49 @@ Playwright 탭을 동시에 열어 워커 풀로 처리)과 같은 발상을 확
 섹션 참고. `chrome.debugger.detach` 타임아웃 통일은 pettory.com(site 18) 실사용 중 재현·수정, 나머지는
 관련 라우트 감사 중 함께 발견. tsc 클린. 확장 변경분(safeDetach)은 실제 크롬 확장 재로드 후 사용자
 재테스트 필요.
+
+**후속 (2026-08-22) — "PTP 확장이 크롬 재시작마다 목록에서 사라진다" 원인 규명.**
+사용자 실사용 중 발견: 개발자모드 몰(`manual_login_required`)의 "로그인 창 열기"는 `openManualLoginWindow`
+(사용자의 실제 개인 크롬을 `child_process.spawn`으로 그대로 띄움)를 쓰는데, 이 PC에 크롬 프로필이 두 개
+있어(`Default`=ilda, `Profile 1`=상은) `--profile-directory`를 지정하지 않으면 그때그때 마지막 활성
+프로필로 제멋대로 열려 PTP가 매번 다른 프로필에 로드되는 것처럼 보이는 문제가 먼저 발견돼
+`PTP_MANUAL_LOGIN_CHROME_PROFILE`(`lib/scraper.ts`, 사용자가 확인해준 실제 로그인 신뢰가 쌓인
+프로필로 고정)과 `--load-extension` 자동 로드를 추가했다. 그런데도 여전히 재현돼 계속 추적한 결과,
+진짜 원인은 확장 자체의 "자동 업데이트" 기능이었다: 버전 1.44~1.46에서 추가한 기능이 PTP 화면(개발자
+모드)이 열릴 때마다 서버 `manifest.json` 버전과 설치된 확장 버전을 비교해, 서버가 더 새로우면 확장이
+`chrome.runtime.reload()`로 스스로를 재시작시켰다. 이 세션 내내 `manifest.json` 버전을 수시로
+올리는 동안 사용자가 PTP 화면을 열어두고 있으면, 확장이 사용자 모르게 반복적으로 자기 자신을
+재시작한 셈이라, 크롬의 압축해제 확장 상태 관리가 불안정해져 원인 불명으로 목록에서 사라진 것으로
+추정. 검증: 확장을 이 self-reload 로직이 없는 버전(1.43)으로 되돌리고 크롬을 완전히 삭제 후 재설치해
+새로 로드했더니 정상적으로 껐다 켜도 유지됨을 사용자가 직접 확인(2026-08-22). 이후 `chrome.runtime.
+reload()` 자동 호출은 완전히 제거하고, 새 버전이 있으면 `showDevHint`로 수동 새로고침 안내만 하도록
+바꿔 나머지 기능(고정 ID, `externally_connectable`, `stop-profile`/`stop-preview`, PTP→확장 자동
+트리거)을 버전 1.47로 다시 도입했다. 같은 조사 과정에서 카테고리 목록 관련 버그도 하나 더 발견: "몰
+카테고리 선택 가져오기(반복)" 전용 상태(`manualCategoryUrlsText`)가 세션 복원/몰 재선택 시 예전에
+이미 합쳐졌던 내용을 "새로 추가된 줄"로 오인해 실제 스크랩 대상(`categoryUrlsText`)에서 사용자가 이미
+지운 카테고리를 되살리는 문제가 있어, "마지막으로 병합 처리한 시점" 기준선(`manualMergeBaselineRef`)을
+둬 진짜 신규 줄만 합치도록 고쳤다.
+
+**관련 파일**: `lib/scraper.ts`(`PTP_EXTENSION_DIR`/`PTP_MANUAL_LOGIN_CHROME_PROFILE` 상수,
+`launchVisibleWindow`/`openManualLoginWindow`에 `--load-extension`/`--profile-directory` 추가),
+`extension-poc/manifest.json`(버전 1.47, `key`/`externally_connectable` 재도입),
+(주의: 아래 "실제 최종 원인" 참고 — 이 문단의 self-reload 가설은 완전한 답이 아니었다.)
+`extension-poc/background.js`(`dispatchAction`/`findMallTab`/`onMessageExternal` 재도입 —
+`'reload'` 액션은 의도적으로 제외, `previewStopRequested`/`stop-preview` 신규),
+`components/panels/ScraperPanel.tsx`(`checkAndUpdateExtension`이 자동 재시작 대신 알림만 띄우도록 변경,
+`handleStopDevPreview` 신규, `manualMergeBaselineRef`로 카테고리 병합 버그 수정).
+
+**후속 (2026-08-22) — 실제 최종 원인: 크롬 프로필의 손상된 확장 기록.** 위 self-reload 제거판(1.47)을
+다시 로드했더니 "새로고침" 직후 확장 카드의 "사용" 토글 자체가 회색으로 눌리지 않는 새 증상이
+나타났고, 곧이어 창을 닫았다 열자 다시 목록에서 사라지는 기존 증상이 재현됐다 — 1.43으로 다시
+되돌려도(사용자 표현: "롤백을 해도") 사라짐이 그대로였다. 이 패턴("코드를 어떤 버전으로 되돌려도 크롬을
+재설치해야만 낫는다")은 원인이 코드가 아니라 **그 크롬 프로필이 이 확장 ID에 대해 이미 저장해둔 손상된
+기록** 쪽에 있다는 뜻이었다. `%LOCALAPPDATA%\Google\Chrome\User Data\Default\Secure Preferences`의
+`extensions.settings["maefnmlmeaimbljckpadjfhglphbfncf"]` 항목을 직접 삭제(원본은 `Secure
+Preferences.ptpbak`로 백업)한 뒤 크롬을 새로 열어 다시 로드하자, 토글이 정상적으로 눌렸고 완전히
+껐다 켜도 그대로 유지됨을 확인 — **크롬 재설치 없이 해결**. 이 손상 기록이 애초에 왜 생겼는지(1.44~1.46의
+반복적인 self-reload 때문이었을 가능성이 여전히 유력하지만 확정은 아님)는 미확정이지만, 앞으로 같은
+증상("압축해제 확장이 재시작 사이에 사라짐" 또는 "사용 토글이 안 눌림")이 재현되면 크롬을 통째로
+재설치하지 않고 이 방법(Secure Preferences에서 해당 확장 ID 항목만 삭제)부터 시도하면 된다 — 단,
+이건 사용자의 실제 개인 브라우저 프로필 파일을 직접 편집하는 것이라 반드시 사용자에게 명시적으로
+허락을 구한 뒤에만 시도한다(2026-08-22, 실제로 이렇게 진행함).

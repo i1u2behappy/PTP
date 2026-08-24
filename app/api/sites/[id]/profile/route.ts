@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { runMallStructureReport } from '@/lib/scrape/mallProfile'
+import { runMallStructureReport } from '@/lib/workerClient'
 
 // 개발자모드 확장(extension-poc/background.js의 runProfile)도 chrome-extension:// 출처에서 이 라우트를
 // 그대로 호출한다 — CORS 프리플라이트(OPTIONS) 응답과 Private Network Access 헤더가 필요하다(다른
@@ -32,7 +32,9 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ id
 
   const result = await runMallStructureReport(siteId)
   if (!result) {
-    return NextResponse.json({ error: '이 몰에 등록된 URL이 없거나, 몰 구조를 파악하지 못했습니다' }, { status: 400, headers: corsHeaders() })
+    // "중지" 버튼(stopProfileAnalysis)이 눌려도 profileMallStructure가 조용히 null을 반환하므로
+    // (2026-08-22) 이 메시지가 "실패"만이 아니라 "중지됨"일 수도 있다는 걸 같이 알려준다.
+    return NextResponse.json({ error: '이 몰에 등록된 URL이 없거나, 몰 구조를 파악하지 못했습니다(중지를 눌렀다면 정상입니다)' }, { status: 400, headers: corsHeaders() })
   }
   return NextResponse.json(result, { headers: corsHeaders() })
 }

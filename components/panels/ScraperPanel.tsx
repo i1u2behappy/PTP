@@ -5,6 +5,7 @@ import { useTabs } from '../shell/TabsContext'
 import { PRODUCTS_LIST_TAB } from '../shell/menuTabs'
 import { FIXED_FIELD_INFO } from '../../lib/master/schema'
 import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
+import RemoteScreenViewer from './RemoteScreenViewer'
 
 // lib/extract.ts의 CLAIMED_INFO_LABEL_RE와 같은 목록 — 이 파일은 Playwright 등 서버 전용 코드를 담고
 // 있어 클라이언트 컴포넌트에서 직접 import하지 않고 그대로 복제해 둔다(둘 중 하나를 고치면 같이 맞출 것).
@@ -21,6 +22,45 @@ const DEFAULT_FIELD_LABEL = new Map(FIXED_FIELD_INFO.map(f => [f.key, f.label]))
 // 원본 인코딩 문자열을 그대로 쓰고, 화면 표시에만 디코딩한다. 디코딩 실패(잘못된 %-시퀀스)는 원본 그대로.
 function decodeUrlForDisplay(url: string): string {
   try { return decodeURIComponent(url) } catch { return url }
+}
+
+// 개발자모드 확장(extension-poc)의 고정 ID — extension-poc/manifest.json의 "key"(공개키)로 재설치/
+// 새로고침해도 이 값이 안 바뀌게 고정해뒀다. 둘 중 하나를 바꾸면 반드시 같이 맞출 것.
+const PTP_EXTENSION_ID = 'maefnmlmeaimbljckpadjfhglphbfncf'
+
+/** PTP 페이지가 개발자모드 확장에 직접 메시지를 보내 몰 탭의 기능(미리보기/피커/스크랩 시작 등)을
+ *  바로 실행시킨다 — 사용자가 몰 탭으로 옮겨가 확장 아이콘을 눌러야 했던 수동 과정을 건너뛴다
+ *  (2026-08-22, 사용자 요청). extension-poc/manifest.json의 externally_connectable로 이 origin만
+ *  허용해뒀다. 확장이 설치 안 돼 있거나(chrome.runtime 자체가 없음), 몰 탭이 아직 안 열려있거나,
+ *  이 브라우저가 크롬이 아니면(예: 엣지 유도 케이스) 실패하므로, 호출부는 이 함수가 null/ok:false를
+ *  주면 항상 기존 수동 안내(몰 탭 열기 + showDevHint)로 폴백해야 한다 — 이 기능은 "되면 좋은" 지름길일
+ *  뿐, 유일한 경로가 아니다. */
+interface ExtensionActionResult { ok: boolean; error?: string; version?: string; skipCount?: number }
+function sendExtensionAction(action: string, hostname?: string): Promise<ExtensionActionResult | null> {
+  return new Promise(resolve => {
+    const runtime = (window as unknown as {
+      chrome?: { runtime?: { sendMessage?: (extId: string, msg: unknown, cb: (res: unknown) => void) => void, lastError?: unknown } }
+    }).chrome?.runtime
+    if (!runtime?.sendMessage) { resolve(null); return }
+    try {
+      runtime.sendMessage(PTP_EXTENSION_ID, { action, hostname }, (response: unknown) => {
+        if (runtime.lastError || !response) { resolve(null); return }
+        resolve(response as ExtensionActionResult)
+      })
+    } catch {
+      resolve(null)
+    }
+  })
+}
+
+function isExtensionVersionNewer(server: string, installed: string): boolean {
+  const a = server.split('.').map(Number)
+  const b = installed.split('.').map(Number)
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const na = a[i] || 0, nb = b[i] || 0
+    if (na !== nb) return na > nb
+  }
+  return false
 }
 
 type Status = 'idle' | 'running' | 'done' | 'error' | 'stopped'
@@ -114,7 +154,7 @@ function readConcurrencyPref(): { mode: 'auto' | 'manual'; value: number } {
   if (typeof window === 'undefined') return { mode: 'auto', value: 8 }
   try {
     const saved = JSON.parse(localStorage.getItem(CONCURRENCY_PREF_KEY) || '{}') as { mode?: 'auto' | 'manual'; value?: number }
-    return { mode: saved.mode === 'manual' ? 'manual' : 'auto', value: saved.value ? Math.max(1, Math.min(8, saved.value)) : 8 }
+    return { mode: saved.mode === 'manual' ? 'manual' : 'auto', value: saved.value ? Math.max(1, Math.min(16, saved.value)) : 8 }
   } catch {
     return { mode: 'auto', value: 8 }
   }
@@ -182,6 +222,15 @@ interface CategoryInfoEntry {
 
 function elapsedMinutesBetween(createdAt: string, finishedAt: string): number {
   return Math.round((new Date(finishedAt).getTime() - new Date(createdAt).getTime()) / 60_000)
+}
+
+/** "몰 구조분석"은 몇 초~몇 분까지 편차가 커서(펫투비는 10분 넘게 걸린 적도 있음), elapsedMinutesBetween처럼
+ *  분 단위로만 보여주면 짧게 끝난 경우 전부 "0분"으로 뭉개진다 — 초 단위까지 보여준다. */
+function formatElapsedSeconds(sec: number): string {
+  if (sec < 60) return `${sec}초`
+  const min = Math.floor(sec / 60)
+  const rest = sec % 60
+  return rest ? `${min}분 ${rest}초` : `${min}분`
 }
 
 /** discoverCategoryLinks의 중분류 허브 펼치기(lib/scraper.ts, 2026-08-17)가 고쳐지기 전에 이미
@@ -283,9 +332,15 @@ interface MallProfileSignals {
   categoryLinks?: { name: string; href: string }[]
   /** categoryLinks를 찾을 때 AI가 실제로 기여했는지 — 사용자 요청으로 체크리스트에 작게 표시(2026-08-18). */
   categoryLinksAiUsed?: boolean
-  /** "카테고리별 정렬기준 설정" 기능용 — 이 몰의 목록 페이지가 지원하는 정렬 옵션(표준 라벨)과, 그
-   *  정렬을 적용하려면 카테고리 URL에 추가해야 하는 쿼리파라미터(사용자 요청, 2026-08-19). */
-  sortOptions?: { label: string; paramsToAdd: Record<string, string> }[]
+  /** "카테고리별 정렬기준 설정" 기능용 — 이 몰의 목록 페이지가 지원하는 정렬 옵션(표준 라벨)과, 그 정렬을
+   *  실제로 적용하는 방법(사용자 요청, 2026-08-19). 대부분은 `paramsToAdd`(카테고리 URL에 추가할
+   *  쿼리파라미터)로 충분하지만, 정렬이 URL에 전혀 반영되지 않는 AJAX 방식 몰(펫투비 등)은 `kind:'click'`
+   *  + `clickText`(목록 페이지에서 실제로 클릭할 텍스트)로 표현한다 — lib/scraper.ts의 MallSortOption과
+   *  같은 모양(서버 전용 모듈이라 여기서 import 불가, 타입만 그대로 옮겨 적음). */
+  sortOptions?: (
+    | { label: string; kind?: 'query'; paramsToAdd: Record<string, string> }
+    | { label: string; kind: 'click'; clickText: string }
+  )[]
   excludedCategoryHrefs?: string[]
   hasPaginationWidget: boolean
   report: MallStructureReport | null
@@ -363,7 +418,7 @@ function DevModeLocationBadge({ where }: { where: 'ptp' | 'mall' }) {
 
 /** "몰 구조분석" 결과 표시 — 일반모드(로그인 카드)/개발자모드(개발자모드 안내 카드) 둘 다에서 공유한다
  *  (2026-08-15, 개발자모드도 몰 구조분석을 쓸 수 있게 되며 중복을 피하려고 추출). */
-function MallProfileResultDisplay({ error, result, loading }: { error: string; result: ProfileCheckResult | null; loading?: boolean }) {
+function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec }: { error: string; result: ProfileCheckResult | null; loading?: boolean; detail?: string; elapsedSec?: number | null }) {
   if (!error && !result && !loading) return null
   // 로딩 중엔 결과가 나올 자리에 같은 모양(그리드)의 스켈레톤을 먼저 보여주고, 도착하면 그 자리에 실제
   // 값이 그대로 채워지는 형태로 바꿨다 — 예전엔 버튼 글자만 "분석 중..."으로 바뀌고 화면엔 아무것도 안
@@ -374,7 +429,12 @@ function MallProfileResultDisplay({ error, result, loading }: { error: string; r
       <div className="mt-4 bg-white border border-gray-200 rounded-xl p-4">
         <div className="flex items-center gap-2 mb-3">
           <span className="text-base leading-none animate-spin">🔄</span>
-          <span className="text-xs font-semibold text-gray-500">몰 구조를 분석하는 중입니다 — 몰 상태에 따라 몇 분 정도 걸릴 수 있습니다.</span>
+          <span className="text-xs font-semibold text-gray-500">
+            {/* 항상 오래 걸리는데 지금 뭘 하는지 알 방법이 없다는 지적(2026-08-22)으로, 서버/확장이
+                lib/scraper.ts의 setSiteLockDetail에 남긴 세부 단계를 그대로 보여준다 — 아직 안 왔으면
+                (락이 아직 안 잡혔거나 단계 전환 사이의 짧은 틈) 기존 문구로 대체한다. */}
+            {detail || '몰 구조를 분석하는 중입니다 — 몰 상태에 따라 몇 분 정도 걸릴 수 있습니다.'}
+          </span>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           {Array.from({ length: 11 }).map((_, i) => (
@@ -401,6 +461,7 @@ function MallProfileResultDisplay({ error, result, loading }: { error: string; r
               {result.isFirstTime ? '🔍 몰 구조분석 완료' : result.diffs.length ? '⚠ 이전과 구조가 달라짐' : '✓ 이전과 구조 동일'}
             </span>
             <span className="text-xs text-gray-400">상품 {result.signals.sampleCount}건 샘플 기준</span>
+            {elapsedSec != null && <span className="text-xs text-gray-400">· 소요시간 {formatElapsedSeconds(elapsedSec)}</span>}
             {result.signals.report && (
               result.signals.report.generatedBy === 'heuristic' ? (
                 <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-100 text-amber-700"
@@ -505,6 +566,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 더 잘 보이게 한다(Mall 선택/개발자모드 안내와 같은 패턴) — 순차 작업 중 스크롤을 덜 하게 하려는 것.
   const [loginCardCollapsed, setLoginCardCollapsed] = useState(false)
   const [scrapeTargetCollapsed, setScrapeTargetCollapsed] = useState(false)
+  // 개발자모드 "카테고리 URL 목록 만들기" — 수동(로그인 창에서 하나씩)/자동(전체 한 번에) 두 방법은
+  // 서로 대체 관계인 선택이라 결과 화면(텍스트박스 vs 체크리스트)까지 완전히 다르다 — 둘을 나란히
+  // 동시에 보여주면 "지금 어느 방법을 쓰고 있는지" 헷갈린다는 지적(2026-08-22)으로, 명시적인 모드
+  // 전환(탭)으로 바꿔 한 번에 한 흐름만 보이게 한다.
+  const [categorySourceMode, setCategorySourceMode] = useState<'auto' | 'manual'>('auto')
   const [previewCardCollapsed, setPreviewCardCollapsed] = useState(false)
   const [siteColWidths, setSiteColWidths] = useState<Record<string, number>>({})
   const [siteColOrder, setSiteColOrder] = useState<string[]>([])
@@ -518,23 +584,61 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [profileResult, setProfileResult] = useState<ProfileCheckResult | null>(null)
   const [profileLoading, setProfileLoading] = useState(false)
   const [profileError, setProfileError] = useState('')
+  // "몰 구조분석"이 완료됐을 때 걸린 시간(초) — 항상 오래 걸리는 작업인데 정확히 몇 분/초 걸렸는지
+  // 화면에서 알 방법이 없었다(사용자 요청, 2026-08-23). handleProfileMall(PTP 버튼으로 직접 시작한
+  // 경우)만 측정한다 — 개발자모드 확장 팝업에서 트리거된 실행은 PTP가 시작 시각을 모르므로 잴 수 없다.
+  const [profileElapsedSec, setProfileElapsedSec] = useState<number | null>(null)
 
   const [pickerActive, setPickerActive] = useState(false)
   // 개발자모드 버튼을 눌렀을 때 "몰 탭/확장에서 이어서 하세요" 안내 — alert()는 사용자가 직접 확인을
-  // 눌러야만 닫혀 흐름을 막는다는 지적(2026-08-22)으로, 5초 후 저절로 사라지는 토스트로 바꿨다.
+  // 눌러야만 닫혀 흐름을 막는다는 지적(2026-08-22)으로, 저절로 사라지는 토스트로 바꿨다. 처음엔 5초로
+  // 뒀는데, 몰 탭으로 직접 가서 확장을 실행해야 한다는(자동 실행이 안 되는 지금 상태에서는 매번 필요한)
+  // 안내를 5초 안에 못 보고 놓쳤다는 지적(2026-08-22)으로 8초로 늘렸다.
   const [devHint, setDevHint] = useState<string | null>(null)
   const devHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   function showDevHint(text: string) {
     setDevHint(text)
     if (devHintTimerRef.current) clearTimeout(devHintTimerRef.current)
-    devHintTimerRef.current = setTimeout(() => setDevHint(null), 5_000)
+    devHintTimerRef.current = setTimeout(() => setDevHint(null), 8_000)
   }
   useEffect(() => () => { if (devHintTimerRef.current) clearTimeout(devHintTimerRef.current) }, [])
+  // 언패킹 설치한 확장은 크롬 스토어 확장과 달리 자동 업데이트가 없다 — 이 몰이 개발자모드로 뜬 동안
+  // (=사용자가 이 몰 작업을 시작한 시점) PTP가 서버 쪽 extension-poc 버전과 설치된 확장 버전을 비교해,
+  // 서버가 더 새로우면 알림만 띄운다. 처음엔 확장이 스스로 chrome.runtime.reload()를 호출하게 했었는데
+  // (2026-08-22), 개발 중 서버 버전을 자주 올리는 동안 사용자가 화면을 열어둘 때마다 확장이 자기
+  // 자신을 반복적으로 재시작해 크롬의 압축해제 확장 상태가 불안정해지는(원인불명 채로 목록에서
+  // 사라지는) 문제와 시점이 정확히 겹쳤다 — 새 크롬으로 재설치해 이 self-reload 로직이 없는 버전만
+  // 썼을 때는 재현되지 않아 원인으로 특정, 자동 재시작은 제거하고 알림만 남긴다(2026-08-22). 한 번
+  // 알리면 몰을 바꾸기 전까지는 다시 알리지 않는다 — 매번 재알림하면 화면을 새로고침할 때마다 뜬다.
+  const extUpdateAttemptedRef = useRef(false)
+  async function checkAndUpdateExtension(hostname: string) {
+    if (extUpdateAttemptedRef.current) return
+    const ping = await sendExtensionAction('ping', hostname)
+    if (!ping?.ok || !ping.version) return // 확장 미설치/응답 없음 — 조용히 넘어감(devmode 자체가 안 되는 상태일 수도 있음)
+    const res = await fetch('/api/extension/version').catch(() => null)
+    const d = await res?.json().catch(() => null) as { version?: string } | null
+    if (!d?.version || !isExtensionVersionNewer(d.version, ping.version)) return
+    extUpdateAttemptedRef.current = true
+    showDevHint(`확장 프로그램에 새 버전(${ping.version} → ${d.version})이 있습니다 — chrome://extensions에서 새로고침해주세요.`)
+  }
   const [pickerBusy, setPickerBusy] = useState(false)
   const [pickerRules, setPickerRules] = useState<Record<string, { type: string; value: string }>>({})
 
   const [targetUrl, setTargetUrl]           = useState('')
   const [categoryUrlsText, setCategoryUrlsText] = useState('')
+  // "몰 카테고리 선택 가져오기(반복)" 탭 전용 — categoryUrlsText(실제 스크랩 대상, "전체 가져오기" 탭의
+  // 체크리스트도 같이 씀)와 공유하면 그쪽에서 이미 체크해둔 것까지 이 탭에 섞여 보여 "내가 여기서
+  // 가져온 것"이라는 감이 없어진다는 지적(2026-08-22)으로 분리했다 — 이 상태는 항상 빈 값에서
+  // 시작하고, "현재 카테고리 가져오기"로 쌓거나 직접 타이핑한 것만 담는다. 아래 useEffect가 이 값이
+  // 바뀔 때마다 실제 스크랩 대상(categoryUrlsText)에 자동으로 합쳐준다(한쪽 방향 — 여기서 지운다고
+  // categoryUrlsText에서도 지워지진 않는다, 체크리스트 쪽 항목까지 건드리면 안 되므로).
+  const [manualCategoryUrlsText, setManualCategoryUrlsText] = useState('')
+  // manualCategoryUrlsText가 세션 복원(applyFormState)/몰 전환(selectSite)으로 "이미 예전에 합쳐진 값
+  // 그대로" 다시 세팅될 때, 아래 병합 useEffect가 이걸 "새로 추가된 줄"로 오인해 체크리스트에서 이미
+  // 지운 항목까지 되살리는 문제가 있었다(2026-08-22, 사용자 보고: "지정한 카테고리 리스트가 아니라
+  // 이상한 리스트가 뜬다"). 이 값을 "마지막으로 병합을 처리한 시점의 manualCategoryUrlsText"로 삼아,
+  // 그 이후로 실제 늘어난 줄만 새로 합친다 — 복원/전환 직후에는 늘어난 줄이 없어 병합이 조용히 스킵된다.
+  const manualMergeBaselineRef = useRef('')
   const [currentUrlLoading, setCurrentUrlLoading] = useState(false)
   // "URL 불러오기"를 한 번이라도 성공하면 true — "카테고리 불러오기"와 같은 레벨의 액션이라 완료
   // 여부를 같은 방식(✓ + 옅은 테두리)으로 보여준다. 시작 URL을 직접 고치면(로그인/카테고리와 같은
@@ -614,7 +718,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 있으면, 여기서 누르는 버튼도 그게 끝날 때까지 순서를 기다린다(lib/scraper.ts의 withSiteLock 참고) —
   // 예전엔 이걸 알 방법이 없어 "왜 이렇게 오래 걸리냐"는 질문으로 매번 서버 로그를 뒤져야 했다. 몰을
   // 선택해두는 동안 짧은 주기로 폴링해, 대기 중이면 화면에 바로 보여준다.
-  const [siteLockStatus, setSiteLockStatus] = useState<{ busy: boolean; label?: string; sinceMs?: number } | null>(null)
+  const [siteLockStatus, setSiteLockStatus] = useState<{ busy: boolean; label?: string; sinceMs?: number; detail?: string } | null>(null)
   // "스크래핑 시작"/"미리보기"를 누른 시각 — 그 뒤 이 몰의 락이 그 시각 이후에 잡혔으면 그건 방금 내가
   // 시작한 그 작업 자신이 쥔 락이다(아래 배너가 "다른 작업이 진행 중"이라고 스스로를 가리키며 혼란을
   // 주지 않게 구분하는 용도, 2026-08-11 실사용 확인 — 내 작업이 실제로 잘 돌고 있는데도 계속 "다른
@@ -636,16 +740,36 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const categoryResultRef = useRef<HTMLDivElement>(null)
 
   const [aiMode, setAiMode]       = useState(true)
-  // 카테고리/상품 목록을 동시에 몇 개까지 열지 — 'auto'는 기존 동작(스크래핑은 1~8 적응형, 미리보기/카테고리
-  // 목록 수집은 4 고정), 'manual'이면 concurrency 값으로 항상 고정한다. 열린 탭이 많을수록(이미지까지
-  // 로드) 메모리를 더 쓰므로, 메모리 이슈를 진단/완화할 때 1로 낮춰볼 수 있게 한다.
+  // 카테고리/상품 목록을 동시에 몇 개까지 열지 — 'auto'는 기존 동작(스크래핑은 1~16 적응형, 미리보기/카테고리
+  // 목록 수집은 16 고정 — 8이던 상한을 2026-08-24에 리소스 실측 후 올림, lib/scraper.ts의
+  // resolveConcurrency 주석 참고), 'manual'이면 concurrency 값으로 항상 고정한다. 열린 탭이 많을수록
+  // (이미지까지 로드) 메모리를 더 쓰므로, 메모리 이슈를 진단/완화할 때 1로 낮춰볼 수 있게 한다.
   const [concurrencyMode, setConcurrencyMode] = useState<'auto' | 'manual'>(() => readConcurrencyPref().mode)
   const [concurrency, setConcurrency] = useState<number>(() => readConcurrencyPref().value)
+  // "로컬 창"(서버 PC 화면에 실제로 뜨는 크롬 창, 기존 방식) / "원격으로 보기"(CDP 화면중계, 신규) —
+  // 개인 UI 습관이라 몰 DB 값이 아니라 localStorage에만 저장한다. 백엔드는 이 값과 무관하게 항상 같은
+  // headless:false 창을 띄운다(handleOpenLogin 등 기존 로직 그대로) — 이 토글은 "그 창을 어떻게
+  // 보여줄지"만 바꾼다(2026-08-24, 원격 다중 사용자 지원의 1단계).
+  const [viewMode, setViewMode] = useState<'local' | 'remote'>(() => {
+    if (typeof window === 'undefined') return 'local'
+    return localStorage.getItem('scrape.scraper.viewMode') === 'remote' ? 'remote' : 'local'
+  })
+  useEffect(() => { localStorage.setItem('scrape.scraper.viewMode', viewMode) }, [viewMode])
+  // "스크래핑 시작"이 위에서 선택한 카테고리 전체를 대상으로 하되, mall_products에 source_url로 이미
+  // 있는 상품까지 다시 스크랩할지 — 기본값 true(포함)로 바꿈(사용자 지시, 2026-08-23: "전체 카테고리
+  // 기준이건 일부 선택한 카테고리 기준이건... '이미 스크랩한 상품 포함' 옵션을 디폴트로"). 예전엔 항상
+  // 이미 있는 상품을 조용히 건너뛰어서(runScraping의 excludeUrls), 몰 전체를 다시 받고 싶어도 신상품만
+  // 받아지는 게 "버그"처럼 보였다 — 끄면 예전 동작(건너뛰기)으로 되돌릴 수 있다.
+  const [includeAlreadyScraped, setIncludeAlreadyScraped] = useState(true)
   const [status, setStatus]       = useState<Status>('idle')
   const [sessionId, setSessionId] = useState<number | null>(null)
   const [progress, setProgress]   = useState<{ saved: number; total: number; error?: string; successCount: number; failedCount: number }>({ saved: 0, total: 0, successCount: 0, failedCount: 0 })
   // 완료(status='done')까지 걸린 시간(분) — scrape_sessions.created_at~finished_at 차이. 진행 중/중지/오류일 땐 안 보여준다.
   const [elapsedMinutes, setElapsedMinutes] = useState<number | null>(null)
+  // 진행 중일 때도 "지금까지 얼마나 걸리고 있는지" 보여달라는 요청(2026-08-22, "소요시간 등을 표시해
+  // 줘야지") — created_at만 기억해두면 나머지는 렌더링 시점에 계산한다(2초 폴링이 어차피 계속 리렌더를
+  // 일으키므로 별도 타이머 없이도 저절로 갱신된다).
+  const [sessionCreatedAt, setSessionCreatedAt] = useState<string | null>(null)
   // 상품 URL 수집(카테고리 목록 순회) 단계는 progress.total이 아직 0이라 위 progress만으로는 "카테고리 몇 개
   // 중 몇 번째"를 보여줄 수 없다 — 미리보기의 previewProgress와 같은 이유·같은 해법(2026-08-11).
   const [collectProgress, setCollectProgress] = useState<{ done: number; total: number } | null>(null)
@@ -664,6 +788,25 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     fetch('/api/clients').then(r => r.json()).then((d: Client[]) => { if (Array.isArray(d)) setClients(d) }).catch(() => {})
   }, [])
 
+  // manualCategoryUrlsText("선택 가져오기" 탭 전용 목록)가 바뀔 때마다 실제 스크랩 대상(categoryUrlsText)
+  // 에 중복 없이 자동으로 반영한다 — 사용자가 신경 쓰지 않아도 여기서 모은 카테고리가 실제 스크랩에
+  // 포함된다(2026-08-22). 한쪽 방향으로만 합친다 — categoryUrlsText 쪽(체크리스트)에서 이미 관리 중인
+  // 항목을 이 effect가 되돌리거나 지우면 안 되므로, 여기서 지운 건 반영하지 않는다(추가만 함).
+  useEffect(() => {
+    const baselineLines = new Set(manualMergeBaselineRef.current.split('\n').map(s => s.trim()).filter(Boolean))
+    const manualLines = manualCategoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
+    const newLines = manualLines.filter(url => !baselineLines.has(url))
+    manualMergeBaselineRef.current = manualCategoryUrlsText
+    if (!newLines.length) return
+    setCategoryUrlsText(prev => {
+      const lines = prev.split('\n').map(s => s.trim()).filter(Boolean)
+      const seen = new Set(lines)
+      let added = false
+      for (const url of newLines) { if (!seen.has(url)) { lines.push(url); seen.add(url); added = true } }
+      return added ? lines.join('\n') : prev
+    })
+  }, [manualCategoryUrlsText])
+
   // 동시 처리 자동/수동 선호값 — 몰별 상태(FORM_STATE_KEY)와 무관하게 하나만 저장해 몰을 바꿔도 유지한다.
   useEffect(() => {
     localStorage.setItem(CONCURRENCY_PREF_KEY, JSON.stringify({ mode: concurrencyMode, value: concurrency }))
@@ -672,7 +815,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // LAST_SESSION_KEY(스크랩 진행/완료 상태)와 FORM_STATE_KEY(몰 선택/카테고리 목록 등)는 서로 독립적으로
   // 복원돼야 한다 — 아래 마운트 effect에서 둘 다 적용한다.
   interface ScraperFormSavedState {
-    siteId: number; targetUrl: string; categoryUrlsText: string
+    siteId: number; targetUrl: string; categoryUrlsText: string; manualCategoryUrlsText?: string
     previewResult?: { sourceUrl: string; product: PreviewProduct } | null
     previewTotal?: number | null
     previewItems?: PreviewItem[]
@@ -691,6 +834,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   function applyFormState(saved: ScraperFormSavedState) {
     setTargetUrl(saved.targetUrl)
     setCategoryUrlsText(saved.categoryUrlsText)
+    if (saved.manualCategoryUrlsText) {
+      // 복원되는 이 값 자체를 "이미 병합 처리된 기준선"으로 삼는다 — 안 그러면 위 setCategoryUrlsText로
+      // 방금 막 복원한(사용자가 그사이 지웠을 수도 있는) 값 위에, 병합 useEffect가 이 줄들을 "새로
+      // 추가된 것"으로 오인해 다시 얹어버린다.
+      manualMergeBaselineRef.current = saved.manualCategoryUrlsText
+      setManualCategoryUrlsText(saved.manualCategoryUrlsText)
+    }
     if (saved.previewResult) setPreviewResult(saved.previewResult)
     if (saved.previewTotal != null) setPreviewTotal(saved.previewTotal)
     if (saved.previewItems?.length) setPreviewItems(saved.previewItems)
@@ -735,15 +885,20 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
     if (savedSession) {
       const saved = savedSession
-      fetch(`/api/scrape/status?sessionId=${saved.sessionId}`).then(r => r.json()).then((d: { status: string; product_count: number; saved_count: number; success_count: number; failed_count: number; error?: string; created_at: string; finished_at: string | null }) => {
+      fetch(`/api/scrape/status?sessionId=${saved.sessionId}`).then(async r => ({ ok: r.ok, d: await r.json() as { status: string; product_count: number; saved_count: number; success_count: number; failed_count: number; error?: string; created_at: string; finished_at: string | null } })).then(({ ok, d }) => {
         setSelectedSite(saved.site)
-        setSessionId(saved.sessionId)
-        setStatus(d.status as Status)
+        // 이 몰의 "스크랩 Raw 확인" 화면에서 세션을 삭제(처음부터 다시 스크랩하려고)한 뒤 이 화면을
+        // 새로고침하면, 저장해둔 sessionId가 더 이상 존재하지 않아 404가 온다 — 죽은 sessionId를 그대로
+        // 붙들지 않고 대기 상태로 되돌린다(2026-08-22, 위 status 폴링 effect의 같은 처리와 동일한 이유).
+        setSessionId(ok ? saved.sessionId : null)
+        setStatus(ok ? (d.status as Status) : 'idle')
         setProgress({
-          saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error,
-          successCount: Number(d.success_count) || 0, failedCount: Number(d.failed_count) || 0,
+          saved: ok ? (Number(d.saved_count) || 0) : 0, total: ok ? (Number(d.product_count) || 0) : 0, error: ok ? d.error : undefined,
+          successCount: ok ? (Number(d.success_count) || 0) : 0, failedCount: ok ? (Number(d.failed_count) || 0) : 0,
         })
-        setElapsedMinutes(d.status === 'done' && d.finished_at ? elapsedMinutesBetween(d.created_at, d.finished_at) : null)
+        if (!ok) sessionStorage.removeItem(LAST_SESSION_KEY)
+        setElapsedMinutes(ok && d.status === 'done' && d.finished_at ? elapsedMinutesBetween(d.created_at, d.finished_at) : null)
+        setSessionCreatedAt(ok ? d.created_at : null)
         // 세션 복원과 별개로, 같은 몰의 카테고리 목록 등 폼 상태도 함께 복원한다 — 예전엔 여기서 그대로
         // return해버려 "스크랩 완료" 상태는 보이는데 그 위 카테고리 선택 목록은 사라져 보이는 문제가
         // 있었다(2026-08-10 실사용 확인). selectSite()는 카테고리/진행상황을 전부 초기화하는 함수라
@@ -786,12 +941,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   useEffect(() => {
     if (!selectedSite) return
     sessionStorage.setItem(FORM_STATE_KEY, JSON.stringify({
-      siteId: selectedSite.id, targetUrl, categoryUrlsText,
+      siteId: selectedSite.id, targetUrl, categoryUrlsText, manualCategoryUrlsText,
       previewResult, previewTotal, previewItems, categoryCounts, detectedPlatform,
       loginStep, categories, categoriesCached, profileResult, scrapedCategoryHrefs, allCategoriesScraped, excludedCategoryHrefs,
       categorySettings,
     }))
-  }, [selectedSite, targetUrl, categoryUrlsText, previewResult, previewTotal, previewItems, categoryCounts, detectedPlatform,
+  }, [selectedSite, targetUrl, categoryUrlsText, manualCategoryUrlsText, previewResult, previewTotal, previewItems, categoryCounts, detectedPlatform,
     loginStep, categories, categoriesCached, profileResult, scrapedCategoryHrefs, allCategoriesScraped, excludedCategoryHrefs,
     categorySettings])
 
@@ -880,12 +1035,28 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (!sessionId || status !== 'running') return
     pollRef.current = setInterval(async () => {
       const r = await fetch(`/api/scrape/status?sessionId=${sessionId}`)
+      // "스크랩 Raw 확인" 화면에서 이 세션을 삭제(처음부터 다시 스크랩하려고)하면, 여기(스크래핑 화면)는
+      // 그 사실을 모른 채 이미 없어진 sessionId를 계속 2초마다 물어본다 — 404 응답엔 status 필드 자체가
+      // 없어 위 "done/error/stopped 확정" 분기를 절대 못 타므로, 진행 상황 카드가 어중간한 상태로 남아
+      // "보였다 사라졌다"처럼 보였다(2026-08-22, 사용자가 직접 데이터를 지운 뒤 재현 확인). 404를 곧바로
+      // "이 세션은 더 이상 없다"로 확정해 화면을 대기 상태로 깨끗이 되돌린다.
+      if (r.status === 404) {
+        setStatus('idle')
+        setSessionId(null)
+        setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 })
+        setItemLog([]); setConcurrencyLog([]); setCollectProgress(null)
+        setSessionCreatedAt(null)
+        sessionStorage.removeItem(LAST_SESSION_KEY)
+        if (pollRef.current) clearInterval(pollRef.current)
+        return
+      }
       const d = await r.json() as { status: string; product_count: number; saved_count: number; success_count: number; failed_count: number; error?: string; created_at: string; finished_at: string | null; concurrency_log?: { at: string; level: number; reason: 'ramp_up' | 'block_detected' }[]; collect_progress?: { done: number; total: number } | null }
       setProgress({
         saved: Number(d.saved_count) || 0, total: Number(d.product_count) || 0, error: d.error,
         successCount: Number(d.success_count) || 0, failedCount: Number(d.failed_count) || 0,
       })
       setCollectProgress(d.collect_progress ?? null)
+      setSessionCreatedAt(d.created_at)
       if (Array.isArray(d.concurrency_log)) setConcurrencyLog(d.concurrency_log)
       fetch(`/api/scrape/log?sessionId=${sessionId}`).then(r => r.json()).then((rows: ItemLogRow[]) => {
         if (Array.isArray(rows)) setItemLog(rows)
@@ -918,6 +1089,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         setSessionId(latest.id)
         setStatus('running')
         setProgress({ saved: Number(latest.staged_count) || 0, total: Number(latest.found_count) || 0, successCount: 0, failedCount: 0 })
+        setSessionCreatedAt(latest.created_at)
         sessionStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ site, sessionId: latest.id }))
       }).catch(() => {})
     }
@@ -936,7 +1108,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const siteId = selectedSite.id
     function poll() {
       fetch(`/api/scrape/site-lock-status?siteId=${siteId}`).then(r => r.json())
-        .then((d: { busy: boolean; label?: string; sinceMs?: number }) => setSiteLockStatus(d))
+        .then((d: { busy: boolean; label?: string; sinceMs?: number; detail?: string }) => setSiteLockStatus(d))
         .catch(() => {})
     }
     poll()
@@ -1095,6 +1267,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     // 개발자모드는 카테고리 선택이 서버에 저장돼 있다(확장이 "스크랩 시작" 시 읽어가야 하므로) — 그 값을
     // 그대로 복원한다. 일반모드는 이전 사이트의 카테고리 목록이 남아 시작 URL을 무시하는 걸 막기 위해 비운다.
     setCategoryUrlsText(full.manual_login_required === true ? (full.devmode_category_urls || []).join('\n') : '')
+    manualMergeBaselineRef.current = ''
+    setManualCategoryUrlsText('')
     // 이전 몰의 몰구조분석/카테고리 결과가 화면에 그대로 남아있으면 안 된다 — 다른 몰을 선택했는데 방금
     // 전 몰의 분석 결과·완료/제외 표시가 계속 보이는 문제가 있었다(사용자 지적, 2026-08-16: "몰을
     // 변경하면 기존 작업내역은 없어져야 하는게 맞지").
@@ -1108,6 +1282,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setDetectedPlatform(null)
     setProfileResult(null)
     setProfileError('')
+    setProfileElapsedSec(null)
     setScrapedCategoryHrefs([])
     setAllCategoriesScraped(false)
     setExcludedCategoryHrefs([])
@@ -1148,6 +1323,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setStatus('idle')
     setSessionId(null)
     setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
+    setSessionCreatedAt(null)
     setItemLog([])
     setStopping(false)
     setRetrying(false)
@@ -1190,7 +1366,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         body: JSON.stringify({ siteId: selectedSite.id }),
       })
       const d = await res.json() as { ok: boolean; currentUrl: string | null }
-      if (d.currentUrl) { setTargetUrl(d.currentUrl); setCategoryUrlsText('') }
+      if (d.currentUrl) { setTargetUrl(d.currentUrl); setCategoryUrlsText(''); setManualCategoryUrlsText('') }
       setLoginStep('confirmed')
       // 이번 세션 안에서 로그인 창을 다시 열었다가 또 "확인 대기 중"이 될 수 있는데, 그때 PC인증 힌트가
       // (방금 이 몰의 로그인이 실제로 성공했음에도) 다시 뜨지 않도록 로컬 상태도 같이 갱신해둔다 — 서버
@@ -1216,6 +1392,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (!selectedSite) return
     setProfileLoading(true)
     setProfileError('')
+    setProfileElapsedSec(null)
+    const startedAt = Date.now()
     // handlePreview와 같은 이유로, 결과(또는 로딩 스켈레톤)가 나올 자리로 화면을 스크롤한다(사용자 요청, 2026-08-17).
     requestAnimationFrame(() => profileResultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
     try {
@@ -1223,12 +1401,28 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       const d = await res.json()
       if (!res.ok) { setProfileError(d.error || '몰 구조분석에 실패했습니다'); return }
       setProfileResult(d as ProfileCheckResult)
+      setProfileElapsedSec(Math.round((Date.now() - startedAt) / 1000))
       bumpRefresh('sites')
     } catch {
       setProfileError('몰 구조분석에 실패했습니다')
     } finally {
       setProfileLoading(false)
     }
+  }
+
+  /** "몰 구조분석 중지" — 서버 쪽(카테고리/정렬 분류에 쓰는 로컬 AI 호출 포함)은 /profile/stop이 직접
+   *  끊고, 개발자모드는 몰 탭에서 도는 카테고리 하위구조 확인/정렬 옵션 감지도 확장에 'stop-profile'을
+   *  보내 같이 멈춘다(2026-08-22, 사용자 요청: "중지를 누르면 llama-server 작업도 멈추게"). 위
+   *  handleProfileMall의 await fetch(...)는 서버가 끊긴 걸 알아서 감지해 곧 정리되므로, 여기서는 신호만
+   *  보내고 그 결과를 기다리지 않는다. */
+  async function handleStopProfileMall() {
+    if (!selectedSite) return
+    await fetch(`/api/sites/${selectedSite.id}/profile/stop`, { method: 'POST' }).catch(() => {})
+    if (mallMode === 'devmode') {
+      const hostname = new URL(selectedSite.login_url || selectedSite.url).hostname
+      await sendExtensionAction('stop-profile', hostname)
+    }
+    showDevHint('몰 구조분석을 중지했습니다.')
   }
 
   /** "스크랩 대상 직접지정" — 로그인 창에 클릭식 엘리먼트 피커를 주입한다. 사용자가 실제 몰 페이지에서 값을 클릭하고
@@ -1282,7 +1476,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       const res = await fetch(`/api/scrape/current-url?siteId=${selectedSite.id}`)
       const d = await res.json() as { url: string | null }
       if (d.url) {
-        setCategoryUrlsText(prev => {
+        setManualCategoryUrlsText(prev => {
           const lines = prev.split('\n').map(s => s.trim()).filter(Boolean)
           return lines.includes(d.url!) ? prev : [...lines, d.url].join('\n')
         })
@@ -1318,6 +1512,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   async function handleLoadCategories(force = false) {
     if (!selectedSite || !targetUrl) return
+    // 카테고리를 새로 불러오면(또는 "다시 확인") 그 아래 "스크랩 미리보기" 결과는 방금 전 카테고리
+    // 선택 기준으로 나온 낡은 값이다 — selectSite(몰 변경 시)와 같은 원칙("몰을 변경하면 기존 작업내역은
+    // 없어져야 하는게 맞지", 2026-08-16 사용자 요청)을 카테고리 재조회에도 그대로 적용한다(사용자 지적,
+    // 2026-08-23: "새로 카테고리를 위에서 결정하고... 새로 하는 것이기에 아래의 스크래핑 미리보기
+    // 내용은 없어야 된다"). previewLoading 중이면 그 fetch까지 취소한다(handleStopPreview와 같은 방식).
+    if (previewAbortRef.current) { previewAbortRef.current.abort(); previewAbortRef.current = null }
+    setPreviewLoading(false)
+    setPreviewResult(null)
+    setPreviewTotal(null)
+    setPreviewItems([]); setCategoryCounts([])
+    exactTotalAbortRef.current?.abort(); setExactTotal(null); setExactTotalLoading(false)
     setCategoriesLoading(true)
     // handlePreview와 같은 이유로, 결과(또는 로딩 스켈레톤)가 나올 자리로 화면을 스크롤한다(사용자 요청, 2026-08-17).
     requestAnimationFrame(() => categoryResultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
@@ -1398,23 +1603,41 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   }
   /** categoryUrlsText(선택된 href, 순수 원본)는 체크박스/카테고리목록 매칭에 그대로 쓰이므로 절대 손대지
    *  않는다 — 대신 미리보기/정확한개수/스크랩시작 요청을 만드는 이 시점에만, 사용자가 그리드에서 고른
-   *  정렬을 카테고리 URL에 쿼리파라미터로 구워 넣고(같은 사이트 어느 카테고리든 base 쿼리파라미터가
-   *  달라도 diffQueryParams로 뽑아둔 "차이"만 얹으므로 그대로 적용된다), 개수/페이지 상한은 그 최종
-   *  URL을 키로 하는 별도 맵(categoryLimits)에 담는다(lib/scraper.ts의 ScrapeOptions.categoryLimits와
-   *  같은 모양 — collectFromListing이 이 맵으로만 상한을 적용). 서버 전용 모듈(lib/scraper.ts)은 여기서
-   *  import할 수 없어(Playwright 등 서버 전용 의존성 포함) 브라우저 내장 URL/URLSearchParams만 쓴다. */
+   *  정렬을 적용한다. 두 가지 방식이 있다(kind:'click' 추가, 2026-08-23 — 펫투비처럼 정렬이 URL에 전혀
+   *  반영되지 않는 AJAX 몰 대응):
+   *  - kind:'query'(기본): 카테고리 URL에 쿼리파라미터로 구워 넣는다(같은 사이트 어느 카테고리든 base
+   *    쿼리파라미터가 달라도 diffQueryParams로 뽑아둔 "차이"만 얹으므로 그대로 적용된다).
+   *  - kind:'click': URL은 그대로 두고, 그 최종 URL을 키로 "클릭할 텍스트"를 별도 맵(categorySortClicks)에
+   *    담는다 — 서버(collectFromListing)가 그 목록 페이지에 들어간 직후 실제로 한 번 클릭해 정렬을 적용한다.
+   *  개수/페이지 상한도 그 최종 URL을 키로 하는 별도 맵(categoryLimits)에 담는다(lib/scraper.ts의
+   *  ScrapeOptions.categoryLimits/categorySortClicks와 같은 모양 — collectFromListing이 이 맵들로만
+   *  적용한다). 서버 전용 모듈(lib/scraper.ts)은 여기서 import할 수 없어(Playwright 등 서버 전용
+   *  의존성 포함) 브라우저 내장 URL/URLSearchParams만 쓴다. */
   function buildCategoryUrlsAndLimits(): {
     categoryUrls: string[]
     categoryLimits: Record<string, { mode: 'count' | 'pages'; value: number }>
+    categorySortClicks: Record<string, string>
   } {
-    const hrefs = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
+    // categoryUrlsText는 "전체 가져오기" 탭의 체크리스트가 누적해서 채우는 진짜 선택 상태이고,
+    // manualCategoryUrlsText가 새로 추가하는 줄은 위 useEffect(784줄)로 한쪽 방향으로만 거기에 합쳐진다
+    // (지운다고 다시 빠지진 않음) — 그래서 예전에 "전체 가져오기"에서 여러 개를 체크해둔 뒤 탭을
+    // "선택 가져오기"로 바꿔 몇 개만 새로 모으면, categoryUrlsText에는 예전 체크 항목이 화면엔 안 보인
+    // 채로 그대로 남아있어 미리보기/스크랩이 지금 탭에서 고른 것보다 훨씬 많은 카테고리를 대상으로
+    // 돌았다(실사용 확인, 2026-08-24 — "선택 가져오기 3개만 골랐는데 20개를 확인하고 있다"). 지금
+    // 활성 탭이 "선택 가져오기"면 그 탭에 실제로 보이는 목록(manualCategoryUrlsText)만 대상으로 쓴다 —
+    // "전체 가져오기" 탭에서 골라둔 것은 그 탭으로 돌아가야만 다시 대상이 된다.
+    const hrefs = (categorySourceMode === 'manual' ? manualCategoryUrlsText : categoryUrlsText)
+      .split('\n').map(s => s.trim()).filter(Boolean)
     const sortOptions = profileResult?.signals.sortOptions || []
     const categoryLimits: Record<string, { mode: 'count' | 'pages'; value: number }> = {}
+    const categorySortClicks: Record<string, string> = {}
     const categoryUrls = hrefs.map(href => {
       const setting = categorySettings[href]
       let url = href
-      const chosen = setting?.sortLabel && sortOptions.find(o => o.label === setting.sortLabel)
-      if (chosen) {
+      const chosen = setting?.sortLabel ? sortOptions.find(o => o.label === setting.sortLabel) : undefined
+      if (chosen?.kind === 'click') {
+        categorySortClicks[url] = chosen.clickText
+      } else if (chosen) {
         try {
           const u = new URL(url)
           Object.entries(chosen.paramsToAdd).forEach(([k, v]) => u.searchParams.set(k, v))
@@ -1424,7 +1647,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       if (setting?.limitMode && setting.limitValue) categoryLimits[url] = { mode: setting.limitMode, value: setting.limitValue }
       return url
     })
-    return { categoryUrls, categoryLimits }
+    return { categoryUrls, categoryLimits, categorySortClicks }
   }
   // "제외"로 표시해둔 카테고리(상품이 없는 안내/게시판 페이지 등)는 전체선택 대상에서 뺀다 — 안 그러면
   // 전체선택을 누를 때마다 방금 제외해둔 카테고리까지 다시 스크랩 대상으로 딸려 들어간다(실사용 확인,
@@ -1488,11 +1711,23 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- selectedSite 객체 자체가 갱신마다 새로 생성돼도 siteId만 같으면 재구독할 필요 없음
   }, [mallMode, selectedSite?.id])
 
+  // 개발자모드 몰을 선택할 때마다 한 번 확장 버전을 확인한다 — "몰을 로그인해서 작업을 시작하는 시점"과
+  // 가장 가까운, 이미 있는 훅(몰 선택)을 그대로 쓴다. 몰이 바뀌면 다시 시도할 수 있게 플래그를 초기화한다.
+  useEffect(() => {
+    if (mallMode !== 'devmode' || !selectedSite) return
+    extUpdateAttemptedRef.current = false
+    const hostname = new URL(selectedSite.login_url || selectedSite.url).hostname
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 브라우저 확장(외부 시스템)에 메시지를 보내는 의도된 부수효과
+    checkAndUpdateExtension(hostname)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- checkAndUpdateExtension은 선택된 몰이 바뀔 때만 다시 부르면 되는 1회성 체크라 의존성 경고는 무시
+  }, [mallMode, selectedSite?.id])
+
   /** 개발자모드의 "현재 카테고리 가져오기" — 일반모드(로그인 창의 현재 URL을 서버가 직접 읽음)와 달리
    *  개발자모드는 서버가 몰 탭에 직접 접근할 수 없어, 확장이 지금 탭 URL을 sites.scrape_profile.
    *  categoryQueue에 대신 쌓아두면(app/api/sites/[id]/current-category POST) 여기서 몇 초마다
-   *  가져오면서(GET이 가져가는 즉시 서버 쪽 큐를 비움) categoryUrlsText에 이어붙인다 — 여러 번 눌러도
-   *  중복 없이 계속 쌓이도록 이미 목록에 있는 URL은 건너뛴다(2026-08-22). */
+   *  가져오면서(GET이 가져가는 즉시 서버 쪽 큐를 비움) manualCategoryUrlsText("선택 가져오기" 탭 전용
+   *  목록)에 이어붙인다 — 여러 번 눌러도 중복 없이 계속 쌓이도록 이미 목록에 있는 URL은 건너뛴다
+   *  (2026-08-22). 실제 스크랩 대상(categoryUrlsText)에는 별도 useEffect가 자동으로 반영한다. */
   useEffect(() => {
     if (mallMode !== 'devmode' || !selectedSite) return
     const siteId = selectedSite.id
@@ -1501,7 +1736,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       if (!res?.ok) return
       const d = await res.json() as { urls?: string[] }
       if (!d.urls?.length) return
-      setCategoryUrlsText(prev => {
+      setManualCategoryUrlsText(prev => {
         const lines = prev.split('\n').map(s => s.trim()).filter(Boolean)
         const seen = new Set(lines)
         let added = 0
@@ -1522,13 +1757,22 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     // "브라우저에서 바로 열기"를 따로 먼저 누르지 않고, 몰구조분석/카테고리가 이미 캐시로 보이는 상태에서
     // 바로 카테고리를 고르고 이 버튼을 눌러도 되도록 — 몰 탭을 아직 안 열었으면 이 버튼이 대신 열어준다
     // (사용자 요청, 2026-08-16). 이미 열어둔 뒤(loginStep!=='none')라면 매번 새 창을 또 띄우지 않는다.
-    // 실제 캡처는 몰 탭의 확장이 해야 하므로(로그인까지는 자동화할 수 없음), 로그인 후 확장에서 눌러야
-    // 한다는 안내는 그대로 남긴다(2026-08-15 도입).
+    // 실제 캡처는 몰 탭의 확장이 해야 하므로(로그인까지는 자동화할 수 없음) — 로그인 전이면 여전히
+    // 사용자가 확장에서 직접 눌러야 하지만, 로그인 후에는 sendExtensionAction으로 몰 탭의 확장을 PTP가
+    // 직접 실행시켜본다(2026-08-22, 사용자 요청: "PTP에서 누르면 몰에 자동으로 확장기능이 실행되게").
+    // 실패하면(확장 미설치, 몰 탭 안 열림 등) 기존 수동 안내로 폴백한다.
     if (loginStep === 'none') {
       await handleOpenMallUrlDirect(selectedSite.login_url || selectedSite.url)
       showDevHint('몰 탭을 열었습니다 — 로그인 후 확장 아이콘 → 팝업의 "🔍 스크랩 미리보기 - (카테선택)"을 클릭하세요.')
     } else {
-      showDevHint('몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🔍 스크랩 미리보기 - (카테선택)"을 클릭하세요.')
+      const hostname = new URL(selectedSite.login_url || selectedSite.url).hostname
+      const result = await sendExtensionAction('preview', hostname)
+      if (result?.ok) {
+        showDevHint('몰 탭에서 자동으로 스크랩 미리보기를 실행했습니다.')
+      } else {
+        showDevHint(result?.error ? `자동 실행 실패: ${result.error} — 몰 탭에서 확장 아이콘 → 팝업의 "🔍 스크랩 미리보기 - (카테선택)"을 클릭하세요.`
+          : '몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🔍 스크랩 미리보기 - (카테선택)"을 클릭하세요.')
+      }
     }
     setPreviewResult(null)
     setPreviewTotal(null)
@@ -1638,10 +1882,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       if (d.total > 0) setPreviewProgress(d)
     }, 1000)
     try {
-      // 정렬은 URL에 이미 구워 넣어 그대로 반영되지만, 상한(categoryLimits)은 안 보낸다 — 미리보기의
-      // 총개수는 실제 수집이 아니라 별도의 지수+이분 탐색 추정이라 상한을 봐도 반영되지 않는다("정확한
-      // 총 개수 확인"/실제 스크랩 시작에만 의미가 있음).
-      const { categoryUrls } = buildCategoryUrlsAndLimits()
+      // 정렬(query 방식)은 URL에 이미 구워 넣어 그대로 반영되지만, 상한(categoryLimits)은 안 보낸다 —
+      // 미리보기의 총개수는 실제 수집이 아니라 별도의 지수+이분 탐색 추정이라 상한을 봐도 반영되지
+      // 않는다("정확한 총 개수 확인"/실제 스크랩 시작에만 의미가 있음). AJAX(click) 방식 정렬은 URL에
+      // 반영할 수 없어 categorySortClicks를 그대로 같이 보낸다.
+      const { categoryUrls, categorySortClicks } = buildCategoryUrlsAndLimits()
       const res = await fetch('/api/scrape/preview-catalog', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1649,6 +1894,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         body: JSON.stringify({
           url: categoryUrls.length ? undefined : (targetUrl || undefined),
           categoryUrls: categoryUrls.length ? categoryUrls : undefined,
+          categorySortClicks: Object.keys(categorySortClicks).length ? categorySortClicks : undefined,
           loginId: loginId || undefined, loginPw: loginPw || undefined,
           siteId: selectedSite.id, aiMode, concurrencyMode, concurrency,
         }),
@@ -1684,6 +1930,20 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPreviewProgress(null)
   }
 
+  /** "🔍 스크랩 미리보기"가 도는 동안(개발자모드) 누르면 몰 탭에서 도는 확장에 'stop-preview'를 보내
+   *  카테고리 순회를 멈추게 하고(handleStopProfileMall과 같은 패턴), 화면은 그 응답을 기다리지 않고
+   *  바로 초기 상태로 되돌린다 — 개발자모드는 서버가 아니라 사용자 브라우저에서 도는 것이라 이 화면이
+   *  직접 중단시킬 방법이 없고, 확장이 실제로 멈추기까지의 지연 때문에 사용자를 기다리게 할 이유도
+   *  없다(2026-08-22, 사용자 요청). */
+  function handleStopDevPreview() {
+    if (devPreviewTimeoutRef.current) { clearTimeout(devPreviewTimeoutRef.current); devPreviewTimeoutRef.current = null }
+    setPreviewLoading(false)
+    if (selectedSite) {
+      const hostname = new URL(selectedSite.login_url || selectedSite.url).hostname
+      sendExtensionAction('stop-preview', hostname).catch(() => {})
+    }
+  }
+
   /** "정확한 총 개수 확인" — previewTotal(카테고리별 빠른 합계)이 카테고리 간 중복을 포함할 수 있어,
    *  실제로 스크랩될 상품이 몇 개인지 궁금할 때만 누르는 버튼. 실제 스크랩(collectProductUrls)과 같은
    *  방식으로 선택된 카테고리 전체의 상품 URL을 모아 중복 제거한 개수를 구하므로, 카테고리별 집계보다
@@ -1695,7 +1955,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const controller = new AbortController()
     exactTotalAbortRef.current = controller
     try {
-      const { categoryUrls, categoryLimits } = buildCategoryUrlsAndLimits()
+      const { categoryUrls, categoryLimits, categorySortClicks } = buildCategoryUrlsAndLimits()
       const res = await fetch('/api/scrape/exact-total', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1704,6 +1964,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           url: categoryUrls.length ? undefined : (targetUrl || undefined),
           categoryUrls: categoryUrls.length ? categoryUrls : undefined,
           categoryLimits: Object.keys(categoryLimits).length ? categoryLimits : undefined,
+          categorySortClicks: Object.keys(categorySortClicks).length ? categorySortClicks : undefined,
           loginId: loginId || undefined, loginPw: loginPw || undefined,
           siteId: selectedSite.id, concurrencyMode, concurrency,
         }),
@@ -1737,9 +1998,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   async function handleStart() {
     if (!selectedSite || !canStart) return
     myLockClickAtRef.current = Date.now()
-    const { categoryUrls, categoryLimits } = buildCategoryUrlsAndLimits()
+    const { categoryUrls, categoryLimits, categorySortClicks } = buildCategoryUrlsAndLimits()
     setStatus('running')
     setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
+    setSessionCreatedAt(null)
     setItemLog([]); setElapsedMinutes(null)
     // 시작 버튼을 누르면 그 아래 "진행 상황" 섹션으로 자동 스크롤해, 화면을 따로 내리지 않아도 바로 보이게 한다.
     // 이 시점엔 아직 리렌더 전이라 섹션이 DOM에 없을 수 있어(status는 방금 막 바뀜) 다음 페인트 이후로 미룬다.
@@ -1751,6 +2013,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         url: categoryUrls.length ? undefined : (targetUrl || undefined),
         categoryUrls: categoryUrls.length ? categoryUrls : undefined,
         categoryLimits: Object.keys(categoryLimits).length ? categoryLimits : undefined,
+        categorySortClicks: Object.keys(categorySortClicks).length ? categorySortClicks : undefined,
         // 페이지당 지연은 몰 차단 방지를 위한 안전값을 그대로 유지한다(사용자가 조절할 필요가 없어 UI에서
         // 제거) — 다음페이지 셀렉터/최대 페이지 수는 플랫폼별 자동 감지(cafe24 등)로 대체된다. 동시 처리
         // 개수는 기본적으로 scrapeCatalogPage가 몰의 반응을 보며 스스로 조절한다(적응형 동시성) — 아래
@@ -1758,6 +2021,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         delayMs: 1000,
         loginId: loginId || undefined, loginPw: loginPw || undefined,
         mode: 'catalog', siteId: selectedSite.id, concurrencyMode, concurrency,
+        includeAlreadyScraped,
       }),
     })
     // 이 몰에 이미 진행 중인 세션이 있으면(app/api/scrape/route.ts) 새로 시작하는 대신 그 세션에
@@ -1784,6 +2048,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setRetrying(true)
     setStatus('running')
     setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
+    setSessionCreatedAt(null)
     setItemLog([]); setElapsedMinutes(null)
     try {
       const res = await fetch('/api/scrape', {
@@ -1842,10 +2107,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     </div>
   ) : (categoriesCached?.cached || detectedPlatform || categories.length > 0) && (
     <div className="bg-teal-50 border border-teal-100 rounded-xl px-4 py-2.5 mb-3">
-      {/* "몰 구조분석"이 이미 찾아둔 목록을 재사용했으면 즉시 뜨고 그 사실을 알려준다. */}
+      {/* "몰 구조분석"이 이미 찾아둔 목록을 재사용했으면 즉시 뜨고 그 사실을 알려준다 — 지금 실제로 몰에
+          접속해서 확인한 게 아니라 예전 결과라는 걸 놓치기 쉽다는 지적(2026-08-22: "실지 작업이 되고
+          있는지를 사용자에게 알려줘야지")으로, 작은 회색 각주 대신 눈에 띄는 배지로 키웠다. */}
       {categoriesCached?.cached && (
-        <p className="text-[11px] text-teal-600" title={categoriesCached.updatedAt ? new Date(categoriesCached.updatedAt).toLocaleString() : undefined}>
-          📋 저장된 몰 구조 기준으로 즉시 불러왔습니다 — 몰 메뉴가 바뀐 것 같으면 &quot;다시 확인&quot;을 눌러주세요.
+        <p className="text-xs font-semibold text-teal-700 bg-teal-100 rounded-lg px-3 py-1.5 mb-2"
+          title={categoriesCached.updatedAt ? new Date(categoriesCached.updatedAt).toLocaleString() : undefined}>
+          📋 지금 몰에 접속하지 않고, {categoriesCached.updatedAt ? `${new Date(categoriesCached.updatedAt).toLocaleString()}에` : '예전에'} 저장해둔 몰 구조 결과를 그대로 불러왔습니다 —
+          몰 메뉴가 바뀐 것 같으면 &quot;다시 확인&quot;을 눌러주세요.
         </p>
       )}
 
@@ -2011,6 +2280,118 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       )}
     </div>
   )
+
+  // "몰 카테고리 선택 가져오기(반복)" 탭용 — "전체 가져오기"의 체크리스트(categoryChecklistBox)와 똑같이
+  // 카테고리별 정렬/스크랩 상한을 설정할 수 있게 해달라는 요청(2026-08-23, "선택 가져오기 한 url을
+  // 가져오고, 그 카테고리 기준 정렬/스크랩상한을 설정한 다음에 스크래핑 시작을 할 수 있게 해줘"). 백엔드
+  // (categorySettings/buildCategoryUrlsAndLimits)는 href를 키로 쓰는 이미 범용적인 구조라 손댈 필요가
+  // 없다 — manualCategoryUrlsText의 각 줄도 이미 useEffect(784줄)로 categoryUrlsText에 합쳐지므로,
+  // 여기서 categorySettings만 채워주면 "스크랩 시작"이 그대로 반영한다. 상품개수/확인일시/최근 스크랩/
+  // 업체/제외 컬럼은 "전체 가져오기"가 discoverCategoryLinks로 몰 전체를 훑어야만 알 수 있는 정보라
+  // 이 탭(사용자가 직접 골라온 URL 하나씩)에는 해당 데이터 자체가 없어 넣지 않는다.
+  const manualCategoryUrls = manualCategoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
+  /** 잘못 가져왔거나 더는 필요 없는 카테고리를 목록에서 뺀다(사용자 요청, 2026-08-24) — 지금까지는
+   *  텍스트박스를 직접 고쳐써야 했다. manualCategoryUrlsText에서만 지우면 되고 categoryUrlsText는
+   *  건드리지 않는다 — 건드려도 안전하지만(그 값은 원래 지워지지 않는 누적 상태), 지금 활성 탭(선택
+   *  가져오기)의 스크랩 대상은 buildCategoryUrlsAndLimits가 이미 manualCategoryUrlsText만 보므로
+   *  이거 하나만 지우면 대상에서도 바로 빠진다. 그 카테고리에 설정해둔 정렬/상한도 같이 지운다 —
+   *  안 지우면 같은 URL을 나중에 다시 가져왔을 때 예전 설정이 뜻하지 않게 되살아난다. */
+  function removeManualCategoryUrl(href: string) {
+    setManualCategoryUrlsText(prev => prev.split('\n').map(s => s.trim()).filter(Boolean).filter(u => u !== href).join('\n'))
+    setCategorySettings(prev => {
+      if (!(href in prev)) return prev
+      const next = { ...prev }
+      delete next[href]
+      return next
+    })
+  }
+  const manualCategoryTableBox = (
+    <div className="mt-2 border border-teal-200 bg-white rounded-xl overflow-hidden">
+      <p className="text-xs text-teal-700 px-3 pt-2">
+        💡 카테고리마다 정렬 순서/스크랩 상한을 다르게 설정할 수 있습니다.
+      </p>
+      {manualCategoryUrls.length === 0 ? (
+        <p className="text-xs text-gray-400 px-3 py-3">위 &quot;현재 카테고리 가져오기&quot;로 모으면 여기에 나타납니다.</p>
+      ) : (
+      <div className="mt-1 h-40 min-h-[80px] max-h-[70vh] resize-y overflow-auto">
+        <table className="w-full text-xs border-collapse">
+          <thead>
+            <tr className="sticky top-0 z-[2] bg-teal-50 border-b border-teal-100">
+              <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="이 카테고리를 스크랩할 때 적용할 정렬 순서">정렬</th>
+              <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="이 카테고리에서 몇 개/몇 페이지까지만 스크랩할지 상한을 둡니다(비워두면 무제한)">스크랩 상한</th>
+              <th className="px-3 py-1.5 text-gray-500 font-normal text-left">URL</th>
+              <th className="px-3 py-1.5 w-12 sticky right-0 bg-teal-50" />
+            </tr>
+          </thead>
+          <tbody>
+            {manualCategoryUrls.map(href => {
+              const setting = categorySettings[href]
+              return (
+                <tr key={href} className="group border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                  <td className="px-3 py-1.5">
+                    <select
+                      className="border border-gray-200 rounded px-1 py-0.5 text-[11px] bg-white disabled:bg-gray-100 disabled:text-gray-400"
+                      value={setting?.sortLabel ?? ''}
+                      onChange={e => updateCategorySetting(href, { sortLabel: e.target.value || undefined })}
+                      disabled={!gridSortOptions.length}
+                      title={!gridSortOptions.length ? '몰 구조분석(또는 개발자모드 확장의 "정렬 옵션 감지")에서 정렬 옵션을 찾지 못했습니다' : undefined}>
+                      <option value="">기본순</option>
+                      {gridSortOptions.map(o => <option key={o.label} value={o.label}>{o.label}</option>)}
+                    </select>
+                  </td>
+                  <td className="px-3 py-1.5">
+                    <div className="flex items-center gap-1">
+                      <select
+                        className="border border-gray-200 rounded px-1 py-0.5 text-[11px] bg-white disabled:bg-gray-100 disabled:text-gray-400"
+                        value={setting?.limitMode ?? ''}
+                        onChange={e => updateCategorySetting(href, { limitMode: (e.target.value || undefined) as 'count' | 'pages' | undefined })}>
+                        <option value="">무제한</option>
+                        <option value="count">개까지</option>
+                        <option value="pages">페이지까지</option>
+                      </select>
+                      {setting?.limitMode && (
+                        <input type="number" min={1} placeholder="숫자"
+                          className="w-14 border border-gray-200 rounded px-1 py-0.5 text-[11px] disabled:bg-gray-100"
+                          value={setting.limitValue ?? ''}
+                          onChange={e => updateCategorySetting(href, { limitValue: e.target.value ? Number(e.target.value) : undefined })} />
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-3 py-1.5 max-w-[320px] truncate">
+                    <button type="button" onClick={() => handleOpenItem(href)}
+                      title={`${href} — 클릭하면 이 카테고리 페이지를 엽니다`}
+                      className="text-gray-400 hover:text-teal-600 hover:underline truncate max-w-full">
+                      {href}
+                    </button>
+                  </td>
+                  <td className="px-3 py-1.5 w-12 text-right sticky right-0 bg-white group-hover:bg-gray-50">
+                    <button type="button" onClick={() => removeManualCategoryUrl(href)}
+                      title="이 카테고리를 목록에서 뺍니다"
+                      className="text-[10px] text-gray-400 hover:text-rose-500 hover:underline whitespace-nowrap">
+                      제거
+                    </button>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      )}
+    </div>
+  )
+
+  // "몰 구조분석 중지" 버튼을 언제 보여줄지 — profileLoading만 보면 개발자모드에서 확장 팝업의 "🧭 보조 -
+  // 몰 구조분석"으로 트리거된 경우(PTP의 handleProfileMall을 거치지 않음)를 못 잡는다. withSiteLock이
+  // 어느 경로든 이 몰의 profileMallStructure(deep) 실행 중엔 항상 label='몰 구조분석'으로 잠기므로,
+  // 이미 폴링 중인 siteLockStatus를 같이 봐서 두 경로 모두 커버한다(2026-08-22).
+  const mallProfileRunning = profileLoading || (siteLockStatus?.busy && siteLockStatus.label === '몰 구조분석')
+
+  // 진행 중(running)일 때의 실시간 경과 시간 — sessionCreatedAt만 있으면 되고, 2초 폴링이 어차피 계속
+  // 리렌더를 일으켜 저절로 갱신된다(2026-08-22, "지금 진행 중인... 소요시간 등을 표시해 줘야지" 요청).
+  const liveElapsedMinutes = status === 'running' && sessionCreatedAt
+    ? Math.max(0, Math.round((Date.now() - new Date(sessionCreatedAt).getTime()) / 60_000))
+    : null
 
   return (
     <div>
@@ -2196,12 +2577,18 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           <div className="grid grid-cols-2 gap-3 mb-4">
             <label className="block">
               <span className="block text-xs text-gray-500 mb-1">아이디 / 이메일</span>
+              {/* 이 몰의 로그인 아이디이지 PTP 자체 로그인 계정과 무관하다 — SiteDetailPanel과 같은 이유로
+                  autoComplete를 꺼서, 크롬이 저장해둔 무관한 아이디를 자동으로 채워 넣지 못하게 한다
+                  (실사용 확인, 2026-08-23: 이 속성이 빠져있어 Mall 상세관리엔 없는 "admin"이 여기만
+                  자동으로 채워짐). */}
               <input type="text" value={loginId} onChange={e => { setLoginId(e.target.value); setLoginStep('none') }}
+                autoComplete="off"
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
             </label>
             <label className="block">
               <span className="block text-xs text-gray-500 mb-1">비밀번호</span>
               <input type="password" value={loginPw} onChange={e => { setLoginPw(e.target.value); setLoginStep('none') }}
+                autoComplete="new-password"
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
             </label>
           </div>
@@ -2226,10 +2613,31 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   : 'bg-emerald-600 hover:bg-emerald-700 text-white'}`}>
               {loginStep === 'confirmed' ? '✓ 확인됨' : needsLogin ? '로그인 확인' : '확인'}
             </button>
+            {/* "로컬 창"(서버 PC 화면에 실제로 뜨는 창)과 "원격으로 보기"(이 화면 안에서 실시간으로
+                보고 조작) 둘 다 유지하고 고르게 한다(사용자 요청, 2026-08-24) — 백엔드는 이 값과 무관하게
+                항상 같은 창을 띄우므로, 여기서 눌러도 handleOpenLogin 등 기존 로직은 그대로다. */}
+            {(loginStep === 'opened' || loginStep === 'confirmed') && (
+              <div className="flex border border-gray-300 rounded-full overflow-hidden text-xs font-semibold">
+                <button type="button" onClick={() => setViewMode('local')}
+                  className={`px-3 py-1.5 transition-colors ${viewMode === 'local' ? 'bg-gray-700 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`}>
+                  로컬 창
+                </button>
+                <button type="button" onClick={() => setViewMode('remote')}
+                  className={`px-3 py-1.5 transition-colors ${viewMode === 'remote' ? 'bg-gray-700 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`}>
+                  🖥 원격으로 보기
+                </button>
+              </div>
+            )}
             {loginStep === 'confirmed' && (
               <button onClick={handleProfileMall} disabled={profileLoading}
                 className="px-4 py-2 bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
                 {profileLoading ? '몰 구조분석 중...' : '🔍 몰 구조분석'}
+              </button>
+            )}
+            {loginStep === 'confirmed' && mallProfileRunning && (
+              <button onClick={handleStopProfileMall}
+                className="px-4 py-2 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-sm font-semibold rounded-full transition-colors">
+                ⏹ 중지
               </button>
             )}
             {loginStep === 'confirmed' && (
@@ -2270,12 +2678,20 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               </p>
             )}
           </div>
+          {viewMode === 'remote' && (loginStep === 'opened' || loginStep === 'confirmed') && (
+            <div className="mt-3">
+              <RemoteScreenViewer siteId={selectedSite.id} />
+            </div>
+          )}
           {!needsLogin && (
             <p className="text-xs text-gray-400 mt-2">아이디를 입력하지 않으면 로그인 없이 바로 스크래핑을 시작할 수 있습니다. 몰 구조분석을 쓰려면 위에서 몰 페이지를 먼저 열고 확인을 눌러주세요.</p>
           )}
 
           <div ref={profileResultRef}>
-            <MallProfileResultDisplay error={profileError} result={profileResult} loading={profileLoading} />
+            {/* loading은 profileLoading(PTP 버튼으로 직접 시작한 경우)만이 아니라 mallProfileRunning
+                (확장 팝업에서 시작해 siteLockStatus로만 감지되는 경우까지)을 써야 두 경로 모두에서
+                이 스켈레톤/진행 문구가 보인다 — "중지" 버튼 표시와 같은 이유(2026-08-22). */}
+            <MallProfileResultDisplay error={profileError} result={profileResult} loading={mallProfileRunning} detail={siteLockStatus?.detail} elapsedSec={profileElapsedSec} />
           </div>
           </>}
         </div>
@@ -2299,40 +2715,38 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </button>
           </div>
           {!scrapeTargetCollapsed && <>
-          {/* 이 URL 자체를 그대로 스크랩할지, 카테고리 URL 목록을 만들어 그중 골라 스크랩할지는 서로
-              대체 관계인 선택지다(하나를 채우면 다른 하나는 무시됨, 아래 경고문 참고) — 그래서 좌우로
-              나란히 두고 가운데에 "또는"을 넣어, 위→아래로 밟아야 하는 단계가 아니라 대등한 두 선택지로
-              보이게 한다. 예전엔 왼쪽 "현재 페이지 가져오기"가 단일 URL(targetUrl)만 채웠는데, 카테고리를
-              여러 개 반복해서 모아야 하는 경우가 많다는 지적(2026-08-22)으로 그 버튼을 카테고리 목록 쪽
-              (오른쪽)으로 옮기고 "여러 번 눌러 계속 추가"되게 바꿨다 — 그래서 왼쪽엔 이제 순수 수동
-              입력칸만 남는다. */}
-          <p className="text-xs text-gray-400 mb-2">아래 둘 중 하나를 고르세요 — URL 하나만 그대로 쓰거나, 카테고리 URL 목록을 만들어 여러 개를 한 번에 지정할 수 있습니다(자동으로 전체를 불러오거나, 로그인 창에서 이동한 페이지를 하나씩 추가하거나, 직접 입력할 수 있습니다).</p>
-          <div className="flex flex-col sm:flex-row items-stretch gap-2 mb-2">
-            <div className="flex-1 flex flex-col gap-1">
-              <label className="block">
-                <span className="block text-xs text-gray-500 mb-1">URL 하나만 그대로 쓰기</span>
-                <input value={targetUrl} onChange={e => setTargetUrl(e.target.value)}
-                  placeholder="https://shop.example.com/products/123"
-                  disabled={categoryUrlsText.trim().length > 0}
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400 disabled:bg-gray-100 disabled:text-gray-400" />
-              </label>
-              <p className="text-xs text-amber-600 min-h-[1em]">
-                {categoryUrlsText.trim().length > 0 &&
-                  '오른쪽 카테고리 URL 목록이 입력되어 있어 이 URL은 무시되고 카테고리 목록만 스크랩됩니다.'}
-              </p>
-            </div>
-            <div className="flex items-center justify-center text-xs text-gray-400 font-semibold px-1">또는</div>
-            <div className="flex-1 flex flex-col gap-1">
+          {/* "자동으로 전체 불러오기"와 "로그인 창에서 하나씩 모으기"는 나란히 두고 같이 쓰는 보조 관계가
+              아니라, 그중 하나를 고르면 그 뒤로 보게 되는 화면 자체가 완전히 달라지는 대체 흐름이다
+              (자동=체크리스트로 골라내기, 수동=텍스트박스에 쌓인 걸 확인하기) — 둘을 동시에 나란히
+              보여주면 "지금 어느 쪽 결과를 보고 있는 건지" 헷갈린다는 지적(2026-08-22)으로, 탭으로 먼저
+              방법을 고르게 하고 그 방법의 화면만 보여주는 구조로 다시 짰다. categoryUrlsText 자체는
+              지금도 두 방법 다 같은 값을 채우지만(탭을 바꿔도 체크리스트에서 골라둔 건 안 지워짐),
+              실제로 미리보기/스크랩이 대상으로 삼는 목록은 지금 활성 탭 기준으로만 본다
+              (buildCategoryUrlsAndLimits 참고, 2026-08-24 — 예전엔 항상 categoryUrlsText 전체를
+              써서, "선택 가져오기" 탭에서 몇 개만 새로 모아도 화면엔 안 보이는 예전 체크리스트 선택까지
+              같이 대상이 돼버렸다). */}
+          {/* 실행 버튼(진한 teal 채움)과는 다르지만, 회색 세그먼트 컨트롤은 대비가 너무 약해 뭘 골랐는지
+              잘 안 보인다는 재지적(2026-08-22)으로 밑줄 탭 방식으로 바꿨다 — 흔히 쓰는 "탭 전환" 시각
+              언어라 그 자체로 "선택 기능"임이 직관적으로 읽히면서, 선택된 탭은 teal 밑줄+굵은 teal
+              글자로 대비를 확실히 준다(채움이 아니라 밑줄이라 실행 버튼과는 형태로 구분됨). */}
+          <p className="text-xs text-gray-400 mb-2">카테고리 URL 목록을 만드는 방법을 고르세요.</p>
+          <div className="flex border-b-2 border-gray-200 mb-3">
+            <button type="button" onClick={() => setCategorySourceMode('auto')}
+              className={`flex-1 px-3 py-2.5 -mb-0.5 text-sm font-semibold border-b-2 rounded-t-lg transition-colors ${
+                categorySourceMode === 'auto' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
+              ⚡ 몰 카테고리 전체 가져오기
+            </button>
+            <button type="button" onClick={() => setCategorySourceMode('manual')}
+              className={`flex-1 px-3 py-2.5 -mb-0.5 text-sm font-semibold border-b-2 rounded-t-lg transition-colors ${
+                categorySourceMode === 'manual' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
+              🖱 몰 카테고리 선택 가져오기(반복)
+            </button>
+          </div>
+
+          {categorySourceMode === 'auto' ? (
+            <>
               <ScrapeStepBox
-                description="💡 로그인 창에서 원하는 카테고리 페이지로 이동했다면, 그 페이지를 목록에 하나씩 추가합니다 — 여러 번 눌러 여러 개를 모을 수 있습니다."
-                primary={{
-                  label: '현재 카테고리 가져오기', doneLabel: '현재 카테고리 가져옴', icon: '↻',
-                  loading: currentUrlLoading, loadingLabel: '가져오는 중...',
-                  done: currentUrlFetched, colorDone: !!previewResult, disabled: loginStep === 'none',
-                  onClick: handleRefreshCurrentUrl,
-                }} />
-              <ScrapeStepBox
-                description="💡 몰에 있는 카테고리들을 자동으로 찾아옵니다 — 시작 URL을 하나하나 알아낼 필요 없이 원하는 카테고리를 바로 불러올 수 있습니다."
+                description="💡 몰에 있는 카테고리들을 자동으로 찾아옵니다 — 시작 URL을 하나하나 알아낼 필요 없이 원하는 카테고리를 바로 불러올 수 있습니다. 결과는 아래 체크리스트에 나타납니다."
                 primary={{
                   label: '모든 카테고리 불러오기', doneLabel: '카테고리 불러옴', icon: '↻',
                   loading: categoriesLoading, loadingLabel: '불러오는 중...',
@@ -2343,19 +2757,22 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   label: '↻ 다시 확인', title: '몰 메뉴가 바뀌었을 수 있으면 직접 다시 훑어서 최신 목록으로 갱신합니다',
                   disabled: categoriesLoading || !targetUrl, onClick: () => handleLoadCategories(true),
                 } : undefined} />
-              {/* 자동 불러오기/직접 입력/위 "현재 카테고리 가져오기" 모두 결과가 여기 한 목록에 같이 쌓인다. */}
-              <label htmlFor="category-urls" className="block">
-                <span className="block text-xs text-gray-500 mb-1">선택 - 카테고리 URL 목록</span>
-                <textarea id="category-urls" value={categoryUrlsText} onChange={e => setCategoryUrlsText(e.target.value)} rows={3}
-                  placeholder={'https://shop.example.com/category/food\nhttps://shop.example.com/category/beauty'}
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-              </label>
-            </div>
-          </div>
-
-          {/* 카테고리 불러오기 결과(캐시 안내/감지된 플랫폼/체크리스트)는 위 선택 카드와 달리 폭이 넓게
-              필요해 2단 배치 밖에, 전체 너비로 따로 보여준다. */}
-          <div ref={categoryResultRef}>{categoryChecklistBox}</div>
+              {/* 카테고리 불러오기 결과(캐시 안내/감지된 플랫폼/체크리스트) */}
+              <div ref={categoryResultRef}>{categoryChecklistBox}</div>
+            </>
+          ) : (
+            <>
+              <ScrapeStepBox
+                description="💡 로그인 창에서 원하는 카테고리 페이지로 이동했다면, 그 페이지를 아래 목록에 하나씩 추가합니다 — 여러 번 눌러 여러 개를 모을 수 있습니다."
+                primary={{
+                  label: '현재 카테고리 가져오기', doneLabel: '현재 카테고리 가져옴', icon: '↻',
+                  loading: currentUrlLoading, loadingLabel: '가져오는 중...',
+                  done: currentUrlFetched, colorDone: !!previewResult, disabled: loginStep === 'none',
+                  onClick: handleRefreshCurrentUrl,
+                }} />
+              {manualCategoryTableBox}
+            </>
+          )}
           </>}
         </div>
       )}
@@ -2390,6 +2807,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   className="px-4 py-2 bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors shrink-0">
                   {profileLoading ? '몰 구조분석 중...' : '🔍 몰 구조분석'}
                 </button>
+                {mallProfileRunning && (
+                  <button onClick={handleStopProfileMall}
+                    className="px-4 py-2 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-sm font-semibold rounded-full transition-colors shrink-0">
+                    ⏹ 중지
+                  </button>
+                )}
               </div>
               {(loginId || loginPw) && (
                 <div className="flex items-center gap-3 text-xs text-gray-500">
@@ -2456,26 +2879,72 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               완전히 분리했다(사용자 지적, 2026-08-16: "몰구조분석 결과물 아래에 카테고리가져오기가 있어야
               자연스러움" / "줄로 구분하지 말고 완전히 분리시켜줘" — 구분선 한 줄로는 부족하다고 재지적). */}
           <div ref={profileResultRef}>
-            <MallProfileResultDisplay error={profileError} result={profileResult} loading={profileLoading} />
+            {/* loading은 profileLoading(PTP 버튼으로 직접 시작한 경우)만이 아니라 mallProfileRunning
+                (확장 팝업에서 시작해 siteLockStatus로만 감지되는 경우까지)을 써야 두 경로 모두에서
+                이 스켈레톤/진행 문구가 보인다 — "중지" 버튼 표시와 같은 이유(2026-08-22). */}
+            <MallProfileResultDisplay error={profileError} result={profileResult} loading={mallProfileRunning} detail={siteLockStatus?.detail} elapsedSec={profileElapsedSec} />
           </div>
           {/* 일반모드의 "모든 카테고리 불러오기"와 같은 ScrapeStepBox를 그대로 써서 버튼 두 개(주 버튼의
               완료 표시 + "다시 확인")가 항상 같이 보이게 맞췄다 — 예전엔 버튼 하나가 라벨만 바꿔가며
               "다시 확인"으로 완전히 대체돼, 카테고리를 이미 불러온 뒤엔 "카테고리 불러오기"가 안 보이는
-              것처럼 보였다(사용자 지적, 2026-08-16: "다시 확인 버튼만 보이는데 일반모드 UI와 맞춰줘"). */}
+              것처럼 보였다(사용자 지적, 2026-08-16: "다시 확인 버튼만 보이는데 일반모드 UI와 맞춰줘").
+              탭(categorySourceMode)도 일반모드와 같은 상태를 공유한다 — "몰 카테고리 선택 가져오기(반복)"는
+              개발자모드에선 PTP가 직접 못 하고 몰 탭의 확장이 대신 하므로, 버튼을 누르면 다른 devmode
+              버튼들과 같은 패턴(몰 탭 열기 + showDevHint 안내)으로 동작한다 — 실제 결과는 위쪽
+              "현재 카테고리 가져오기" 큐 폴링이 카테고리 URL 목록에 자동으로 채워준다(2026-08-22,
+              사용자 지적: "개발자모드에는 이 기능이 반영 안 돼 있다"). */}
           <div className="mt-4 bg-white border border-gray-200 rounded-xl p-4">
-            <ScrapeStepBox
-              description="💡 카테고리를 불러와 원하는 것만 체크하면, &quot;스크랩 시작&quot;이 그 카테고리들만 순서대로 처리합니다(선택사항)."
-              primary={{
-                label: '모든 카테고리 불러오기', doneLabel: '카테고리 불러옴', icon: '↻',
-                loading: categoriesLoading, loadingLabel: '불러오는 중...',
-                done: categories.length > 0, colorDone: !!previewResult, disabled: categoriesLoading || !targetUrl,
-                onClick: () => handleLoadCategories(false),
-              }}
-              secondary={categories.length > 0 ? {
-                label: '↻ 다시 확인', title: '몰 메뉴가 바뀌었을 수 있으면 직접 다시 훑어서 최신 목록으로 갱신합니다',
-                disabled: categoriesLoading || !targetUrl, onClick: () => handleLoadCategories(true),
-              } : undefined} />
-            <div ref={categoryResultRef}>{categoryChecklistBox}</div>
+            <div className="flex border-b-2 border-gray-200 mb-3">
+              <button type="button" onClick={() => setCategorySourceMode('auto')}
+                className={`flex-1 px-3 py-2.5 -mb-0.5 text-sm font-semibold border-b-2 rounded-t-lg transition-colors ${
+                  categorySourceMode === 'auto' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
+                ⚡ 몰 카테고리 전체 가져오기
+              </button>
+              <button type="button" onClick={() => setCategorySourceMode('manual')}
+                className={`flex-1 px-3 py-2.5 -mb-0.5 text-sm font-semibold border-b-2 rounded-t-lg transition-colors ${
+                  categorySourceMode === 'manual' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
+                🖱 몰 카테고리 선택 가져오기(반복)
+              </button>
+            </div>
+            {categorySourceMode === 'auto' ? (
+              <>
+                <ScrapeStepBox
+                  description="💡 카테고리를 불러와 원하는 것만 체크하면, &quot;스크랩 시작&quot;이 그 카테고리들만 순서대로 처리합니다(선택사항)."
+                  primary={{
+                    label: '모든 카테고리 불러오기', doneLabel: '카테고리 불러옴', icon: '↻',
+                    loading: categoriesLoading, loadingLabel: '불러오는 중...',
+                    done: categories.length > 0, colorDone: !!previewResult, disabled: categoriesLoading || !targetUrl,
+                    onClick: () => handleLoadCategories(false),
+                  }}
+                  secondary={categories.length > 0 ? {
+                    label: '↻ 다시 확인', title: '몰 메뉴가 바뀌었을 수 있으면 직접 다시 훑어서 최신 목록으로 갱신합니다',
+                    disabled: categoriesLoading || !targetUrl, onClick: () => handleLoadCategories(true),
+                  } : undefined} />
+                <div ref={categoryResultRef}>{categoryChecklistBox}</div>
+              </>
+            ) : (
+              <>
+                <ScrapeStepBox
+                  description="💡 몰 탭에서 원하는 카테고리 페이지로 이동했다면, 그 페이지를 아래 목록에 하나씩 추가합니다 — 여러 번 눌러 여러 개를 모을 수 있습니다."
+                  primary={{
+                    label: '현재 카테고리 가져오기', doneLabel: '현재 카테고리 가져옴', icon: '↻',
+                    loading: false, done: false,
+                    onClick: async () => {
+                      if (loginStep === 'none' && selectedSite) {
+                        await handleOpenMallUrlDirect(selectedSite.login_url || selectedSite.url)
+                        showDevHint('몰 탭을 열었습니다 — 로그인 후 원하는 카테고리로 이동한 뒤 확장 아이콘 → 팝업의 "📍 보조 - 현재 카테고리 가져오기"를 클릭하세요.')
+                      } else if (selectedSite) {
+                        const hostname = new URL(selectedSite.login_url || selectedSite.url).hostname
+                        const result = await sendExtensionAction('current-category', hostname)
+                        showDevHint(result?.ok
+                          ? '지금 몰 탭이 보고 있는 카테고리를 목록에 추가했습니다.'
+                          : (result?.error ? `자동 실행 실패: ${result.error} — ` : '') + '몰 확장프로그램에서 실행하세요 — 몰 탭에서 원하는 카테고리로 이동한 뒤 확장 아이콘 → 팝업의 "📍 보조 - 현재 카테고리 가져오기"를 클릭하세요.')
+                      }
+                    },
+                  }} />
+                {manualCategoryTableBox}
+              </>
+            )}
           </div>
         </div>
       )}
@@ -2487,13 +2956,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       {selectedSite && (mallMode === 'normal' || mallMode === 'devmode') && (
         <div ref={previewSectionRef} className="bg-white rounded-2xl border border-gray-200 p-6 mb-4">
           <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
-            <label className="block text-sm font-semibold text-gray-700">상품 페이지 미리보기</label>
+            <label className="block text-sm font-semibold text-gray-700">스크래핑 미리보기</label>
             <div className="flex items-center gap-2 shrink-0">
               {/* 미리보기(카테고리별 개수 집계)와 아래 "스크래핑 시작" 둘 다 이 값을 그대로 쓴다(handlePreview/
                   handleStart) — 여기 한 곳에서만 조절하면 된다. 열린 탭 수가 메모리 사용량에 직결되므로
                   (각 탭이 이미지까지 로드) 메모리가 부족하면 수동으로 낮춰본다. */}
               <div className="flex items-center gap-1 shrink-0"
-                title="카테고리/상품 페이지를 동시에 몇 개까지 열지 정합니다. 자동은 몰 반응을 보며 스스로 조절하고(스크래핑 시작 시 1~8, 미리보기는 4), 수동은 지정한 개수로 항상 고정합니다 — 메모리가 부족하면 수동으로 1~2개까지 낮춰보세요.">
+                title="카테고리/상품 페이지를 동시에 몇 개까지 열지 정합니다. 자동은 몰 반응을 보며 스스로 조절하고(스크래핑 시작 시 1~16, 미리보기는 16), 수동은 지정한 개수로 항상 고정합니다 — 메모리가 부족하면 수동으로 1~2개까지 낮춰보세요.">
                 {/* 보조 기능(켜짐/꺼짐) 토글은 옆의 주 액션 버튼(rounded-full 알약 모양)과 모양부터 다르게
                     — rounded-md의 각진 "체크박스형 스위치"로 둬서 누르면 바로 실행되는 버튼이 아니라는 걸
                     형태만으로도 구분되게 한다. */}
@@ -2503,8 +2972,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   {concurrencyMode === 'manual' ? '☑ 동시 처리 수동' : '☐ 동시 처리 자동'}
                 </button>
                 {concurrencyMode === 'manual' && (
-                  <input type="number" min={1} max={8} value={concurrency}
-                    onChange={e => setConcurrency(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
+                  <input type="number" min={1} max={16} value={concurrency}
+                    onChange={e => setConcurrency(Math.max(1, Math.min(16, Number(e.target.value) || 1)))}
                     className="w-14 px-2 py-1 border border-gray-300 rounded-lg text-sm text-center" />
                 )}
               </div>
@@ -2539,12 +3008,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   <span className="ml-1 text-red-600 text-[10px] font-extrabold align-super">PTP</span>
                 )}
               </button>
-              {/* 개발자모드는 서버가 아니라 사용자 브라우저의 확장이 도는 것이라 이 fetch로 중지시킬
-                  작업이 없다(위 devPreviewTimeoutRef의 2분 자동 해제만 있음) — 일반모드 전용. 진행
-                  중이라는 걸 알 수 있게 서버가 세는 카테고리 개수 기준 진행률도 폴링해서 같이 보여준다
-                  (끝없이 도는 것처럼 보인다는 피드백 — lib/scraper.ts의 getPreviewProgress 참고). */}
-              {mallMode === 'normal' && previewLoading && (
-                <button type="button" onClick={handleStopPreview}
+              {/* 진행 중이라는 걸 알 수 있게(일반모드는) 서버가 세는 카테고리 개수 기준 진행률도 폴링해서
+                  같이 보여준다(끝없이 도는 것처럼 보인다는 피드백 — lib/scraper.ts의 getPreviewProgress
+                  참고). 개발자모드는 확장에 'stop-preview'를 보내 몰 탭의 순회를 멈춘다(2026-08-22). */}
+              {previewLoading && (
+                <button type="button" onClick={mallMode === 'devmode' ? handleStopDevPreview : handleStopPreview}
                   className="px-4 py-2 bg-rose-50 border border-rose-300 text-rose-600 hover:bg-rose-100 text-sm font-semibold rounded-full transition-colors">
                   ⏹ 중지
                 </button>
@@ -2566,8 +3034,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       if (loginStep === 'none' && selectedSite) {
                         await handleOpenMallUrlDirect(selectedSite.login_url || selectedSite.url)
                         showDevHint('몰 탭을 열었습니다 — 로그인 후 확장 아이콘 → 팝업의 "🎯 보조 - 스크랩 대상 직접지정"을 클릭하세요.')
-                      } else {
-                        showDevHint('몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🎯 보조 - 스크랩 대상 직접지정"을 클릭하세요.')
+                      } else if (selectedSite) {
+                        const hostname = new URL(selectedSite.login_url || selectedSite.url).hostname
+                        const result = await sendExtensionAction('picker', hostname)
+                        showDevHint(result?.ok
+                          ? '몰 탭에서 자동으로 스크랩 대상 직접지정 패널을 열었습니다.'
+                          : (result?.error ? `자동 실행 실패: ${result.error} — ` : '') + '몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🎯 보조 - 스크랩 대상 직접지정"을 클릭하세요.')
                       }
                     }} disabled={pickerBusy}
                       className="px-4 py-2 bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
@@ -2604,10 +3076,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             // 동시 처리/AI모드는 진짜 설정값이라 이 화면에서 누르는 즉시 저장·적용된다 — 몰 탭 확장이
             // 필요한 건 미리보기/직접지정 결과를 "채우는" 것뿐이다. 뭉뚱그린 경고가 설정 버튼까지 "여기선
             // 안 되는 것"처럼 보이게 해 헷갈린다는 지적(2026-08-22)으로, 그 둘만 콕 집어 경고하게 좁혔다.
+            // 한때 sendExtensionAction(externally_connectable)으로 몰 탭이 열려있으면 자동 실행되기도
+            // 했는데, 그 기능을 만든 버전이 크롬에서 확장이 원인 불명으로 사라지는 문제와 시점이 겹쳐
+            // 되돌렸다(!specifications/manual-login-required-malls.md 참고) — 지금은 자동 실행이 전혀
+            // 안 되므로, "될 수도 있다"는 문구 대신 항상 수동으로 진행해야 한다고 명확히 안내한다
+            // (2026-08-22, 자동 실행을 기대했다가 아무 반응이 없어 헷갈린다는 지적으로 재수정).
             <p className="text-xs text-amber-600 bg-amber-50 rounded-lg px-3 py-2 mb-3">
               ⚠ <DevModeLocationBadge where="mall" />&quot;🔍 스크랩 미리보기&quot;와 &quot;🎯 스크랩 대상 직접지정&quot;은 여기서
-              눌러도 결과가 바로 채워지지 않습니다 — 누르면 몰 창이 열리니, 그 몰 창에서 PTP 확장프로그램으로
-              진행해야 합니다(확장 아이콘 클릭 → 실제 실행 버튼, 위 &quot;🧩 개발자모드 스크랩 방법&quot; 참고).
+              눌러도 자동으로 실행되지 않습니다 — 몰 탭에서 PTP 확장프로그램을 직접 실행해야 합니다
+              (확장 아이콘 클릭 → 실제 실행 버튼, 위 &quot;🧩 개발자모드 스크랩 방법&quot; 참고). 여기 버튼은
+              몰 탭이 없으면 새로 열어주는 것과 진행 상태 표시만 맡습니다.
             </p>
           )}
 
@@ -2650,11 +3128,15 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
               <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 flex items-center gap-2">
                 <span className="text-sm leading-none animate-spin">🔄</span>
-                <span className="text-xs font-semibold text-gray-500">
-                  {mallMode === 'devmode'
-                    ? '몰 창에서 PTP 확장프로그램을 실행하면 결과가 여기 나타납니다...'
-                    : previewProgress ? `카테고리 확인 중입니다... (${previewProgress.done}/${previewProgress.total})` : '상품 페이지를 확인하는 중입니다...'}
-                </span>
+                {mallMode === 'devmode' ? (
+                  <span className="text-xs font-bold text-orange-600 animate-blink-accelerate">
+                    ⚠ 지금 몰 탭으로 이동해 PTP 확장에서 &quot;스크랩 미리보기&quot;를 클릭해주세요 — 실행하면 결과가 여기 나타납니다.
+                  </span>
+                ) : (
+                  <span className="text-xs font-semibold text-gray-500">
+                    {previewProgress ? `카테고리 확인 중입니다... (${previewProgress.done}/${previewProgress.total})` : '상품 페이지를 확인하는 중입니다...'}
+                  </span>
+                )}
               </div>
               <div className="p-3 flex gap-3 border-b border-gray-100 animate-pulse">
                 <div className="w-20 h-20 rounded-xl bg-gray-100 shrink-0" />
@@ -2889,15 +3371,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             const categoryTextByHref = new Map(categories.map(c => [c.href, c.text]))
             type Row = { url: string; label: string; count: number | null; truncated: boolean }
             const rows: Row[] = selectedHrefs.map(href => {
-              // 이번 세션에 방금 미리보기를 돌렸으면(categoryCountByHref) 그 값이 가장 최신이고, 아니면
-              // 저장된 값(categoryInfo)을 쓴다 — 체크리스트 컬럼과 같은 우선순위(사용자 요청, 2026-08-17).
+              // 개수/절단 여부는 이번 세션에 방금 미리보기를 돌린 값(categoryCountByHref)만 쓴다 — 서버에
+              // 저장된 예전 기록(categoryInfo)을 값으로 대신 채우면, 미리보기를 아직 안 돌렸는데도 마치
+              // 방금 돌린 결과처럼 보여 혼동을 준다는 지적(2026-08-22)으로 뺐다. 라벨(카테고리 이름)만은
+              // 예전 기록에서 가져와도 괜찮다 — 아직 미확인이어도 이름 정도는 미리 보여주는 게 유용하다.
               const live = categoryCountByHref.get(href)
               const info = categoryInfo[href]
               return {
                 url: href,
                 label: live?.label || info?.label || categoryTextByHref.get(href) || href,
-                count: live?.count ?? info?.count ?? null,
-                truncated: live?.truncated ?? info?.truncated ?? false,
+                count: live?.count ?? null,
+                truncated: live?.truncated ?? false,
               }
             })
             // label은 "최상위 > 하위" 형태(lib/scraper.ts가 path.join(' > ')로 만듦) — 최상위 기준으로
@@ -3017,13 +3501,21 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               ⚠ 로그인 확인이 필요합니다 — 위 &quot;로그인 창 열기&quot; → &quot;로그인 확인&quot;을 먼저 진행해주세요.
             </p>
           )}
+          <label className="flex items-center gap-2 mb-2 text-xs text-gray-500 cursor-pointer select-none"
+            title="꺼두면 예전 동작대로 이미 상품마스터에 있는 상품(source_url 기준)은 건너뛴다 — 신상품만 빠르게 받고 싶을 때 유용하다.">
+            <input type="checkbox" checked={includeAlreadyScraped} onChange={e => setIncludeAlreadyScraped(e.target.checked)}
+              className="w-3.5 h-3.5 accent-teal-500" />
+            이미 스크랩한 상품 포함 (위에서 선택한 카테고리 전체를 대상으로 다시 수집)
+          </label>
           <button onClick={handleStart} disabled={!canStart}
             title={!canStart && needsLogin ? '로그인 확인이 필요합니다' : undefined}
             className={`w-full py-3 rounded-2xl font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${
               status === 'done'
                 ? 'bg-white border-2 border-teal-500 text-teal-600 hover:bg-teal-50'
                 : 'bg-teal-500 text-white hover:bg-teal-600'}`}>
-            {status === 'stopped' || status === 'error' ? '이어서 스크랩하기 (기존 상품 제외)' : status === 'done' ? '✓ 스크래핑 완료 (다시 시작)' : '스크래핑 시작'}
+            {status === 'stopped' || status === 'error'
+              ? `이어서 스크랩하기${includeAlreadyScraped ? '' : ' (기존 상품 제외)'}`
+              : status === 'done' ? '✓ 스크래핑 완료 (다시 시작)' : '스크래핑 시작'}
           </button>
         </>
       ) : (
@@ -3039,11 +3531,18 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           if (loginStep === 'none' && selectedSite) {
             await handleOpenMallUrlDirect(selectedSite.login_url || selectedSite.url)
             showDevHint('몰 탭을 열었습니다 — 로그인 후 확장 아이콘 → 팝업의 "🔄 스크랩 시작"을 클릭하세요.')
-          } else {
-            showDevHint('몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🔄 스크랩 시작"을 클릭하세요.')
+          } else if (selectedSite) {
+            const hostname = new URL(selectedSite.login_url || selectedSite.url).hostname
+            const result = await sendExtensionAction('start', hostname)
+            showDevHint(result?.ok
+              ? (result.skipCount ? `몰 탭에서 이어서 받는 중입니다 — 이미 받은 ${result.skipCount}개는 건너뜁니다.` : '몰 탭에서 자동으로 스크래핑을 시작했습니다.')
+              : (result?.error ? `자동 실행 실패: ${result.error} — ` : '') + '몰 확장프로그램에서 실행하세요 — 몰 탭에서 확장 아이콘 → 팝업의 "🔄 스크랩 시작"을 클릭하세요.')
           }
         }} className="w-full py-3 rounded-2xl font-semibold text-sm bg-teal-500 text-white hover:bg-teal-600 transition-colors">
-          스크래핑 시작
+          {/* 확장이 resolveSite에서 받은 excludeUrls로 이미 성공한 상품은 알아서 건너뛰므로(2026-08-22),
+              이 라벨은 일반모드와 같은 문구로 그 사실을 알려준다 — 실제 "건너뛰기"는 클릭 하나로
+              동일하게 동작하고 문구만 상황에 맞게 바뀐다. */}
+          {status === 'stopped' || status === 'error' ? '이어서 스크랩하기 (기존 상품 제외)' : status === 'done' ? '✓ 스크래핑 완료 (다시 시작)' : '스크래핑 시작'}
         </button>
       )}
 
@@ -3057,7 +3556,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 {status === 'running' && <span className="animate-spin leading-none" aria-hidden="true">🔄</span>}
                 {statusLabel[status]}
               </span>
-              {status === 'done' && (
+              {/* 중지된 세션도 그때까지 수집한 상품은 이미 저장돼 있으니, "완료"와 마찬가지로 바로 Raw
+                  확인으로 넘어갈 수 있어야 한다 — 이어서 스크랩할지 여기서 끝낼지는 사용자 선택이라,
+                  중지 상태에서도 이 버튼을 숨길 이유가 없다(2026-08-22, 사용자 요청). */}
+              {(status === 'done' || status === 'stopped') && (
                 <button onClick={() => openTab(PRODUCTS_LIST_TAB)}
                   className="px-4 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full transition-colors">
                   → 스크랩 Raw 확인
@@ -3069,9 +3571,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             <div className="relative w-full bg-gray-100 rounded-full h-5 mb-3 overflow-hidden">
               <div className="bg-teal-500 h-5 rounded-full transition-all"
                 style={{ width: progress.total > 0 ? `${Math.round(progress.saved / progress.total * 100)}%` : '10%' }} />
-              {progress.total > 0 && (
+              {/* 개발자모드는 목록을 미리 다 세지 않고 그때그때 순회하며 저장하므로 progress.total(product_count)
+                  이 끝까지 0으로 남는다 — 그렇다고 이 자리를 비워두면 실시간으로 늘어나는 saved 개수 자체가
+                  화면 어디에도 안 보인다는 지적(2026-08-22: "PTP 상에서는 아무런 변화가 없는 상태야")으로,
+                  total을 모를 때도 지금까지 저장된 개수만이라도 보여준다. */}
+              {progress.total > 0 ? (
                 <span className="absolute inset-0 flex items-center justify-center text-[11px] font-semibold text-gray-700">
                   {progress.saved} / {progress.total}개
+                </span>
+              ) : progress.saved > 0 && (
+                <span className="absolute inset-0 flex items-center justify-center text-[11px] font-semibold text-gray-700">
+                  {progress.saved}개 수집됨
                 </span>
               )}
             </div>
@@ -3083,6 +3593,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           {status === 'running' && progress.total === 0 && collectProgress && collectProgress.total > 1 ? (
             <p className="text-sm text-gray-600">
               카테고리 목록 수집 중... <strong>{collectProgress.done}</strong> / {collectProgress.total}
+              {liveElapsedMinutes !== null && <span className="text-gray-400"> · 진행 {liveElapsedMinutes}분째</span>}
             </p>
           ) : status !== 'running' ? (
             <p className="text-sm text-gray-600">
@@ -3091,7 +3602,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               {status === 'done' && elapsedMinutes !== null && <span className="text-gray-400"> · 소요시간 {elapsedMinutes}분</span>}
             </p>
           ) : progress.failedCount > 0 ? (
-            <p className="text-sm text-rose-500">실패 {progress.failedCount}개</p>
+            <p className="text-sm text-rose-500">
+              실패 {progress.failedCount}개
+              {liveElapsedMinutes !== null && <span className="text-gray-400"> · 진행 {liveElapsedMinutes}분째</span>}
+            </p>
+          ) : liveElapsedMinutes !== null ? (
+            <p className="text-sm text-gray-400">진행 {liveElapsedMinutes}분째</p>
           ) : null}
 
           {/* 적응형 동시성이 실제로 조정된 적이 있을 때만 보여준다 — 계속 1로 순차 처리됐다면(가장 흔한 경우)
@@ -3154,7 +3670,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           {progress.successCount > 0 && (
             <div className="mt-3 border border-gray-100 rounded-xl overflow-hidden">
               <div className="px-3 py-2 text-xs font-semibold text-gray-500 border-b border-gray-100">
-                ✓ 수집 성공 ({progress.successCount}개{progress.successCount > successItems.length && `, 최근 ${successItems.length}건 표시`})
+                ✓ 수집 성공 ({progress.successCount}개{progress.successCount > successItems.length && `, 최근 스크래핑된 ${successItems.length}건만 아래에 표시함`})
               </div>
               <div className="max-h-40 overflow-y-auto divide-y divide-gray-100">
                 {successItems.map(row => (

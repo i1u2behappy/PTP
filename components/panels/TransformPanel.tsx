@@ -16,6 +16,7 @@ interface Session {
   merged_count: number
   skipped_count: number
   created_at: string
+  merged_at: string | null
 }
 type UploadKind = 'as_is' | 'to_be'
 interface UploadSummary { id: number; file_name: string; column_headers: string[]; code_column: string | null; row_count: number; matched_count: number }
@@ -226,7 +227,10 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
     if (querySiteId === '' && queryClientId !== '' && siteClientMap.get(s.site_id) !== queryClientId) return false
     const q = sessionSearch.trim().toLowerCase()
     if (!q) return true
+    // 그리드(ScrapeSessionGrid)가 항상 보여주는 "병합 일시"(merged_at)가 검색에서 빠져있었다(사용자
+    // 지적, 2026-08-17 — 다른 메뉴의 검색도 그리드에 보이는 컬럼 전부를 대상으로 해달라는 요청).
     return s.url.toLowerCase().includes(q) || s.status.toLowerCase().includes(q) || new Date(s.created_at).toLocaleString().toLowerCase().includes(q)
+      || (s.merged_at ? new Date(s.merged_at).toLocaleString() : '').toLowerCase().includes(q)
   })
 
   function selectClient(id: number | '') {

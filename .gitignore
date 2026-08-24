@@ -30,6 +30,7 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 .dev-server.log
+.worker.log
 
 # env files (can opt-in for committing if needed)
 .env*
@@ -50,6 +51,18 @@ yarn-error.log*
 /.vscode/
 /!참조_Raw-master/
 
+# Claude Code 개인별 로컬 설정(권한 허용 목록 등) — .claude/settings.json(공유 설정)과 달리 이건 이
+# 컴퓨터/세션 전용이라 커밋 대상이 아님
+/.claude/settings.local.json
+
+# Playwright MCP 도구가 디버깅용으로 남기는 콘솔 로그/페이지 스냅샷 — 소스 아님
+/.playwright-mcp/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Playwright Test(개발자용 UI 스모크 테스트) 실행 결과물 — 소스 아님
+/test-results/
+/playwright-report/
+/blob-report/

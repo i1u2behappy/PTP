@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { openLoginWindow, openManualLoginWindow } from '@/lib/scraper'
+import { openLoginWindow, openManualLoginWindow } from '@/lib/workerClient'
 
 export async function POST(req: NextRequest) {
   const { siteId, url, loginId, loginPw, manualLogin } = await req.json() as {

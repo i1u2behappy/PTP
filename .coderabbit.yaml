@@ -1,0 +1,44 @@
+# CodeRabbit 설정 — VS Code 확장(coderabbit.coderabbit-vscode)과 PR 리뷰가 공유하는 설정 파일.
+# 이 프로젝트(AGENTS.md/CLAUDE.md) 컨벤션을 그대로 반영해, 일반적인 스타일 가이드와 충돌하는 오탐을
+# 줄이는 목적이 크다.
+language: "ko-KR"
+tone_instructions: >
+  이 코드베이스의 주석/커밋 메시지는 전부 한국어다. 리뷰 코멘트도 한국어로 작성한다. 코드가 "무엇을"
+  하는지 설명하는 주석은 지적하지 않는다 — 이 프로젝트는 그런 주석을 의도적으로 안 쓰고, 남아있는 주석은
+  대부분 "왜"(숨은 제약, 실사용 중 발견한 버그, 특정 몰의 예외적 동작 등)를 설명하는 것들이다.
+
+reviews:
+  profile: "chill"
+  high_level_summary: true
+  poem: false
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!**/*.md"
+    - "!.playwright-mcp/**"
+    - "!.dev-server.log"
+  path_instructions:
+    - path: "lib/scraper.ts"
+      instructions: >
+        Playwright로 실제 쇼핑몰(카페24/고도몰 등 제각각인 스킨)을 스크래핑하는 코드다. try/catch로
+        조용히 다음 후보나 폴백으로 넘어가는 패턴, 여러 셀렉터/전략을 순서대로 시도하는 패턴은 버그가
+        아니라 몰마다 마크업이 다른 것에 대한 의도적 방어다 — "에러를 삼킨다"고만 지적하지 말고, 그
+        실패가 전체 흐름을 막아야 하는 진짜 오류인지(예: DB 저장 실패) 먼저 판단해달라. AI 호출(로컬
+        Ollama 등)은 느리거나 신뢰할 수 없을 수 있다는 전제로 짜여 있다 — 타임아웃/폴백이 없는 새 AI
+        호출을 추가하는 변경이 있으면 그 점을 짚어달라.
+    - path: "lib/ai.ts"
+      instructions: >
+        로컬 Ollama(qwen3:8b, CPU 전용) 호출은 응답이 느리거나(수십~수백 초) 도구 호출 대신 텍스트로
+        새는 등 신뢰할 수 없다는 게 실사용으로 확인돼 있다 — 새 Ollama 호출을 추가할 때 타임아웃/폴백이
+        없으면 지적해달라.
+    - path: "components/**/*.tsx"
+      instructions: >
+        기존 상태(useState)와 JSX를 최대한 재사용하는 스타일이다 — 이미 있는 상태/컴포넌트를 복제하는
+        새 상태 대신 기존 것을 확장하는 방향을 제안해달라. 사용자 확정 문구(예: 버튼 라벨, 안내 문구)는
+        임의로 바꾸지 않는다.
+  request_changes_workflow: false
+
+chat:
+  auto_reply: true

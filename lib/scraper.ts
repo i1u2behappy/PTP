@@ -12,12 +12,12 @@ import { promisify } from 'util'
 import { chromium, type BrowserContext, type Page } from 'playwright'
 import { load as loadHtml } from 'cheerio'
 import type { ExtractedProduct } from './ai'
-import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsWithAI, type MallStructureReport, type OptionCandidate } from './ai'
+import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, type MallStructureReport, type OptionCandidate } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
 import { runAutoAnalysis } from './scrape/adjustment'
-import pool from './db'
+import pool, { decryptSecret } from './db'
 
 const execFileAsync = promisify(execFile)
 
@@ -104,6 +104,11 @@ export interface ScrapeOptions {
    *  못 늘림), 'count'는 이 카테고리에서 실제로 담을 상품 개수 자체를 제한한다. 지정 안 한 카테고리는
    *  기존처럼 전역 maxPages/무제한 그대로 적용된다 — collectFromListing 참고. */
   categoryLimits?: Record<string, { mode: 'count' | 'pages'; value: number }>
+  /** "카테고리별 정렬기준 설정" 기능 중 AJAX(클릭) 방식 전용(MallSortOption의 kind:'click' 참고) —
+   *  categoryUrls의 각 URL을 키로, 그 목록 페이지에 들어간 직후 클릭해야 할 텍스트. URL에 쿼리파라미터로
+   *  구워 넣을 수 있는 kind:'query' 정렬은 categoryUrls 자체에 이미 반영돼 있어 이 맵이 필요 없다 —
+   *  collectFromListing이 listingUrl로 처음 진입한 순간에만 한 번 적용한다. */
+  categorySortClicks?: Record<string, string>
   /** 이미 스크랩된 상품 URL — 목록에서 발견해도 건너뛴다 */
   excludeUrls?: string[]
   /** 상품 페이지 방문 사이 최소 지연(ms). 실제 지연은 이 값~2배 사이 랜덤 (차단 방지) */
@@ -163,6 +168,15 @@ export function profileDir(siteId: number) {
   return path.join(process.cwd(), '.playwright-profiles', String(siteId))
 }
 
+/** 개발자모드 확장(extension-poc)이 항상 이 경로에서 최신 코드로 로드되도록 launchVisibleWindow에
+ *  --load-extension으로 직접 넘긴다 — chrome://extensions에서 사용자가 수동으로 "압축해제된 확장
+ *  프로그램을 로드"해두는 방식은, 이 창이 재실행될 때마다(코드 수정으로 인한 서버 핫리로드 등으로
+ *  openSessions가 끊겨 killOrphanedProfileProcess가 기존 크롬을 강제 종료하고 launchPersistentContext가
+ *  새로 뜰 때마다) Playwright의 기본 실행 인자(--disable-extensions)에 밀려 사라진다. 확장 목록에서 PTP가
+ *  "브라우저를 닫았다 켜면 없어진다"는 증상은 실제로는 사용자가 크롬을 끈 게 아니라, 이 서버 쪽 재실행이
+ *  원인이었다(2026-08-22).*/
+const PTP_EXTENSION_DIR = path.join(process.cwd(), 'extension-poc')
+
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -173,13 +187,15 @@ async function throttle(delayMs?: number) {
   await sleep(delayMs + Math.random() * delayMs)
 }
 
-/** concurrencyMode==='manual'이면 opts.concurrency를 1~8로 clamp해서 쓰고, 아니면(생략/'auto') autoDefault를
+/** concurrencyMode==='manual'이면 opts.concurrency를 1~16으로 clamp해서 쓰고, 아니면(생략/'auto') autoDefault를
  *  쓴다 — collectProductUrls/previewCatalog의 카테고리 동시 집계 개수에 쓴다(둘 다 자체 ramp 로직이 없어
  *  "auto"가 사실상 고정값 하나뿐이라 이 헬퍼로 충분하다). scrapeCatalogPage는 적응형 동시성(ramp-up)이
- *  있어 이 헬퍼 대신 MAX_CONCURRENCY/activeLimit 시작값을 직접 조정한다. */
+ *  있어 이 헬퍼 대신 MAX_CONCURRENCY/activeLimit 시작값을 직접 조정한다. 상한은 원래 8이었는데, 8코어
+ *  16스레드/28GB PC에서 8탭이 CPU 15%·메모리 4GB도 안 쓰는 걸 실측 확인해(2026-08-24) 16으로 올렸다 —
+ *  몰 쪽 차단/부하 위험은 이 상한과 별개 문제라 사용자가 직접 판단해서 골라 쓴다. */
 function resolveConcurrency(opts: ScrapeOptions, autoDefault: number): number {
   if (opts.concurrencyMode !== 'manual') return autoDefault
-  return Math.max(1, Math.min(opts.concurrency || 1, 8))
+  return Math.max(1, Math.min(opts.concurrency || 1, 16))
 }
 
 // 개별 상품 추출 실패 시 재시도 횟수 (일시적 네트워크/타임아웃 오류 대비). ponytail: 고정값, 설정 불가.
@@ -187,11 +203,14 @@ const RETRY_COUNT = 2
 
 declare global {
   var __scrapeOpenSessions: Map<number, BrowserContext> | undefined
+  var __scrapeOpenSessionMainPage: Map<number, Page> | undefined
   var __scrapeStopRequests: Set<number> | undefined
   var __previewRuns: Map<number, PreviewRunState> | undefined
   var __scrapeCollectProgress: Map<number, { done: number; total: number }> | undefined
   var __scrapeSiteLocks: Map<number | string, Promise<void>> | undefined
   var __scrapeSiteLockStatus: Map<number | string, { label: string; since: number }> | undefined
+  var __scrapeSiteLockDetail: Map<number | string, string> | undefined
+  var __scrapeProfileAbortControllers: Map<number, AbortController> | undefined
 }
 
 interface PreviewRunState {
@@ -219,7 +238,54 @@ interface PreviewRunState {
 // globalThis는 모듈이 재평가돼도 같은 Node 프로세스 안에서는 그대로 유지되므로(Prisma 클라이언트 등
 // Next.js 개발모드 싱글턴에 흔히 쓰이는 패턴과 동일), 여기 저장하면 코드를 수정해도 세션이 살아남는다.
 const openSessions = globalThis.__scrapeOpenSessions ?? (globalThis.__scrapeOpenSessions = new Map<number, BrowserContext>())
+// "로그인 창"에서 사용자가 보고 있는 그 탭을 명시적으로 기억해둔다 — openLoginWindow가 채우고,
+// getOpenPageUrl/navigateOpenPageTo/startElementPicker가 여기서 읽는다. context.pages() 배열의 "마지막
+// 탭"을 그 탭으로 가정하던 예전 방식은, 몰 구조분석처럼 같은 컨텍스트에서 잠깐 여러 탭을 병렬로 열었다가
+// 닫는 코드(mapWithPageWorkers)가 있는 한 근본적으로 불안정하다 — 안내 페이지 링크가 택배사 조회
+// 사이트로 리다이렉트되는 등, 그 임시 탭 중 하나가 어떤 이유로든(닫기 실패, 타이밍 등) 마지막으로
+// 남으면 그게 "사용자가 보는 탭"으로 잘못 인식됐다(실사용 확인, 2026-08-23 — 몰과 무관하게 재현됨).
+const openSessionMainPage = globalThis.__scrapeOpenSessionMainPage ?? (globalThis.__scrapeOpenSessionMainPage = new Map<number, Page>())
 const stopRequests = globalThis.__scrapeStopRequests ?? (globalThis.__scrapeStopRequests = new Set<number>())
+
+/** siteId의 "로그인 창 메인 탭"을 읽는다 — 추적해둔 페이지가 아직 살아있으면(닫히지 않았으면) 그걸,
+ *  없으면(추적 전에 만들어진 세션 등 예외적인 경우) 예전처럼 마지막 탭으로 폴백한다. */
+function resolveMainPage(context: BrowserContext, siteId: number): Page | null {
+  const tracked = openSessionMainPage.get(siteId)
+  const pages = context.pages()
+  if (tracked && pages.includes(tracked)) return tracked
+  return pages.length ? pages[pages.length - 1] : null
+}
+
+/** siteId의 "로그인 창 메인 탭"을 지정한다 — 이 탭이 닫히면 추적을 스스로 지운다(닫힌 뒤에도 남아있으면
+ *  resolveMainPage가 죽은 참조를 돌려줄 수 있다). */
+function setMainPage(siteId: number, page: Page) {
+  openSessionMainPage.set(siteId, page)
+  page.on('close', () => {
+    if (openSessionMainPage.get(siteId) === page) openSessionMainPage.delete(siteId)
+  })
+  notifyMainPageChange(siteId)
+}
+
+// 원격 화면공유(worker/screenRelay.ts)가 "이 몰의 메인 탭이 바뀌었다/창이 닫혔다"를 알아야 CDPSession을
+// 다시 붙이거나 뷰어 연결을 정리할 수 있다 — RPC 요청/응답으로는 이런 비동기 이벤트를 실어 보낼 방법이
+// 없어(워커 안에서 같은 프로세스로 도는 코드끼리의 구독), 아주 작은 pub/sub만 추가한다. siteId 기준
+// Map이라 기존 openSessions 등과 같은 스코프 원칙을 따른다.
+const mainPageChangeListeners = new Map<number, Set<() => void>>()
+export function onMainPageChange(siteId: number, cb: () => void): () => void {
+  const set = mainPageChangeListeners.get(siteId) ?? new Set()
+  set.add(cb)
+  mainPageChangeListeners.set(siteId, set)
+  return () => set.delete(cb)
+}
+function notifyMainPageChange(siteId: number) {
+  mainPageChangeListeners.get(siteId)?.forEach(cb => cb())
+}
+
+/** 원격 화면공유가 CDPSession을 붙일 대상 — openSessions/resolveMainPage를 그대로 재사용한다. */
+export function getOpenSessionPage(siteId: number): Page | null {
+  const context = openSessions.get(siteId)
+  return context ? resolveMainPage(context, siteId) : null
+}
 
 /** 실행 중인 스크래핑 세션에 중지를 요청한다 (다음 상품 처리 전에 반영됨) */
 export function requestStop(sessionId: number) {
@@ -241,6 +307,17 @@ const collectProgress = globalThis.__scrapeCollectProgress ?? (globalThis.__scra
  *  finally) 지워지므로, 이후 상품별 진행률과 겹쳐 보이지 않는다. */
 export function getCollectProgress(sessionId: number): { done: number; total: number } | null {
   return collectProgress.get(sessionId) ?? null
+}
+
+/** 개발자모드(크롬 확장)는 이 서버가 아니라 사용자 브라우저에서 카테고리 순회가 돌고 있어, 위 Map을
+ *  직접 못 건드린다 — app/api/scrape/extension-progress가 확장의 HTTP 요청을 대신 받아 이 함수로
+ *  전달한다(2026-08-22, 일반모드의 collectProductUrls가 직접 쓰는 것과 같은 자리를 공유). */
+export function setCollectProgress(sessionId: number, done: number, total: number) {
+  collectProgress.set(sessionId, { done, total })
+}
+
+export function clearCollectProgress(sessionId: number) {
+  collectProgress.delete(sessionId)
 }
 
 const siteLocks = globalThis.__scrapeSiteLocks ?? (globalThis.__scrapeSiteLocks = new Map<number | string, Promise<void>>())
@@ -280,6 +357,11 @@ const siteLocks = globalThis.__scrapeSiteLocks ?? (globalThis.__scrapeSiteLocks 
  *  끝나길 기다리는 중"을 보여주는 용도로만 쓴다(getSiteLockStatus 참고). 대기열 자체(순서 보장)는
  *  siteLocks가 담당하고, 이건 그 위에 얹은 순수 표시용 정보라 없어도 잠금 로직 자체는 정확하다. */
 const siteLockStatus = globalThis.__scrapeSiteLockStatus ?? (globalThis.__scrapeSiteLockStatus = new Map<number | string, { label: string; since: number }>())
+// "몰 구조분석"처럼 label 하나로는 몇 분씩 걸리는 이유를 알 수 없는 작업의 세부 단계(예: "카테고리
+// 하위구조 확인 중 (3/17)")를 담아둔다 — siteLockStatus와 별개 Map인 이유: 이건 몇몇 작업만 채우는
+// 순수 부가 정보라 없어도(값이 없으면 label만 보여줌) 락 로직 자체엔 전혀 영향이 없어야 한다
+// (2026-08-22, 사용자 요청: "여기도 진행현황을 모니터링 가능케 해줄 어떤 진행정보가 없을까").
+const siteLockDetail = globalThis.__scrapeSiteLockDetail ?? (globalThis.__scrapeSiteLockDetail = new Map<number | string, string>())
 
 export async function withSiteLock<T>(key: number | string | undefined, label: string, fn: () => Promise<T>): Promise<T> {
   if (key === undefined) return fn()
@@ -293,18 +375,29 @@ export async function withSiteLock<T>(key: number | string | undefined, label: s
     return await fn()
   } finally {
     siteLockStatus.delete(key)
+    siteLockDetail.delete(key)
     releaseTail()
     if (siteLocks.get(key) === myTail) siteLocks.delete(key)
   }
+}
+
+/** withSiteLock으로 잠긴 작업이 지금 어느 세부 단계인지 기록한다 — 그 작업(profileMallStructure 등)
+ *  본인이나, 개발자모드 확장의 진행 보고를 대신 받는 API 라우트가 부른다. 잠기지 않은 키에 불러도
+ *  (예: 락 해제 직후 뒤늦게 도착한 요청) 조용히 무시된다 — 어차피 다음 getSiteLockStatus가 label 없이
+ *  반환해 화면에 안 보인다. */
+export function setSiteLockDetail(key: number | string, detail: string) {
+  if (siteLockStatus.has(key)) siteLockDetail.set(key, detail)
 }
 
 /** 화면(ScraperPanel)이 폴링해서 "⏳ 다른 작업(${label}) 완료를 기다리는 중"을 보여주는 데 쓴다 —
  *  사용자가 버튼을 눌렀는데 응답이 안 오면 그게 이 함수 자체가 느린 건지, 같은 몰의 다른 작업이
  *  끝나길 줄서서 기다리는 중인지 구분할 방법이 없었다(실사용 중 "왜 이렇게 오래 걸리냐"는 질문으로
  *  발견). `sinceMs`가 아주 크면(예: 수 분) 대기가 아니라 그 작업 자체가 오래 걸리고 있다는 뜻이다. */
-export function getSiteLockStatus(siteId: number): { label: string; sinceMs: number } | null {
+export function getSiteLockStatus(siteId: number): { label: string; sinceMs: number; detail?: string } | null {
   const entry = siteLockStatus.get(siteId)
-  return entry ? { label: entry.label, sinceMs: Date.now() - entry.since } : null
+  if (!entry) return null
+  const detail = siteLockDetail.get(siteId)
+  return { label: entry.label, sinceMs: Date.now() - entry.since, ...(detail ? { detail } : {}) }
 }
 
 /** 지금 어떤 몰이든(siteId 무관) 브라우저 세션을 쓰는 작업이 하나라도 진행 중인지 — scrapeCatalogPage/
@@ -394,6 +487,21 @@ export function orphanedChromeCleanupScript(): string {
   return killChromeByPathScript(path.join(process.cwd(), '.playwright-profiles'))
 }
 
+/** 워커 프로세스(tsx/esbuild)가 이 파일을 변환할 때 keepNames 옵션이 항상 켜져 있어(2026-08-23,
+ *  워커 분리 후 발견 — Next.js가 webpack/SWC로 이 코드를 컴파일하던 예전엔 없던 문제), page.evaluate로
+ *  넘기는 함수 안에 이름 붙은 지역 함수/화살표 함수(`const isGood = (x) => ...`처럼)가 하나라도 있으면
+ *  그 함수 몸통 안에 `__name(isGood, "isGood")` 호출이 같이 끼워 들어간다. Playwright는 evaluate할
+ *  함수를 toString()으로 뽑아 브라우저에 그대로 보내는데, __name을 정의해두는 모듈 스코프는 안 따라가서
+ *  브라우저에서 "ReferenceError: __name is not defined"로 그 evaluate 전체가 조용히 실패한다(개별 샘플/
+ *  카테고리 후보 실패로 묻혀 있어 원인을 찾기 어려웠다 — "몰 구조분석"이 상품을 하나도 못 찾고
+ *  "샘플 상품 1건"(=몰 URL 자체로 폴백)으로 끝나는 증상으로 나타남). 진짜 이름 보존은 필요 없고 그냥
+ *  fn을 그대로 돌려주기만 하면 되므로, 모든 브라우저 컨텍스트에 이 최소 구현을 미리 심어둔다 — 이
+ *  함수 자신은 이름 붙은 지역 함수가 없어 같은 문제에 걸리지 않는다. */
+function polyfillEsbuildNameHelper() {
+  const g = globalThis as typeof globalThis & { __name?: (fn: unknown, name: string) => unknown }
+  if (typeof g.__name !== 'function') g.__name = fn => fn
+}
+
 /** 화면에 보이는(headed) 브라우저 창을 새로 띄우고 openSessions에 등록한다. 프로필 디렉터리가 그대로라
  * 예전에 로그인했던 쿠키가 남아있으면 자동으로 로그인된 상태로 뜬다. */
 async function launchVisibleWindow(siteId: number): Promise<BrowserContext> {
@@ -408,16 +516,21 @@ async function launchVisibleWindow(siteId: number): Promise<BrowserContext> {
   // "지원되지 않는 명령줄 플래그" 경고 배너가 뜨고 일반 크롬과 다르게 보인다.
   const context = await chromium.launchPersistentContext(profileDir(siteId), {
     headless: false, channel: 'chrome', chromiumSandbox: true,
+    args: [`--disable-extensions-except=${PTP_EXTENSION_DIR}`, `--load-extension=${PTP_EXTENSION_DIR}`],
+    ignoreDefaultArgs: ['--disable-extensions'],
   })
   // navigator.webdriver=true는 Playwright로 띄운 크롬임을 드러내는 가장 흔한 신호라, 로그인 시 본인인증
   // 단계를 건너뛰고 차단하는 몰(예: 카페24 PC인증 연동)에서 이 창만 로그인이 안 되는 원인이 될 수 있다.
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
+  await context.addInitScript(polyfillEsbuildNameHelper)
   openSessions.set(siteId, context)
   // 사용자가 창을 직접 닫거나 브라우저가 죽었을 때도 반영되도록 추적
   context.on('close', () => {
     if (openSessions.get(siteId) === context) openSessions.delete(siteId)
+    openSessionMainPage.delete(siteId)
+    notifyMainPageChange(siteId)
   })
   return context
 }
@@ -430,6 +543,7 @@ export async function openLoginWindow(siteId: number, opts: { url: string; login
   return withSiteLock(siteId, '로그인 창 열기', async () => {
     const context = await launchVisibleWindow(siteId)
     const page = context.pages()[0] || await context.newPage()
+    setMainPage(siteId, page)
     await page.goto(opts.url, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => {})
     // 아이디/비번만 채워두고 제출은 하지 않는다 — 사용자가 직접 로그인 버튼을 눌러야 이후 "로그인 확인" 흐름과 맞는다.
     await loginIfNeeded(page, { url: opts.url, loginId: opts.loginId, loginPw: opts.loginPw }, { autoSubmit: false })
@@ -446,7 +560,24 @@ const CHROME_EXE = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
  * PC인증을 통과해도 로그인 자체가 거부됐는데, 이미 신뢰가 쌓인 개인 프로필은 그대로 통과한다.
  * 주의: 사용자가 이미 크롬을 열어둔 상태면 같은 프로필을 동시에 쓸 수 없어 실패한다 — 먼저 직접 닫아야 한다.
  * (개인 브라우저이므로 여기서 기존 크롬 프로세스를 강제 종료하지 않는다.)
+ * --load-extension으로 PTP 개발자모드 확장을 매번 같이 띄운다 — 이 창은 사용자의 실제 개인 프로필이라
+ * launchVisibleWindow처럼 Playwright가 자동으로 --disable-extensions를 붙이는 문제는 없지만, 이 프로필에
+ * chrome://extensions로 수동으로 로드해둔 PTP는 이 세션 내내 extension-poc를 계속 고치는 동안(버전
+ * 1.43→1.46 등) 크롬이 재시작 사이에 그 항목을 통째로 목록에서 빠뜨리는 게 실사용 중 반복 확인됐다
+ * (2026-08-22) — --load-extension은 매번 그 자리에서 폴더를 다시 읽어 새로 등록하므로 이 문제와 무관하게
+ * 항상 최신 코드로 뜬다. --disable-extensions-except는 주지 않는다 — 그걸 주면 사용자가 평소 쓰는 다른
+ * 확장 프로그램(광고 차단, 비밀번호 관리 등)이 이 창에서 전부 비활성화돼버린다.
+ * --profile-directory를 반드시 명시한다 — 이 PC 크롬에 프로필이 두 개("Default"=ilda, "Profile 1"=상은)
+ * 있는데, 이 함수는 원래 프로필을 지정하지 않아 크롬이 그때그때 마지막으로 활성화됐던 프로필로 제멋대로
+ * 열렸다. 그래서 PTP가 매번 다른 프로필에 로드되는 경우가 섞여 있었고, 사용자 눈에는 "같은 크롬인데
+ * 확장이 사라진다"로 보였다(2026-08-22). syncManualLoginProfileCopy처럼 activeProfileDirName(last_used)
+ * 으로 동적으로 찾지 않고 값을 고정한다 — last_used 자체가 이 버그의 원인이라 다시 쓰면 똑같이 흔들린다.
+ * 이 함수는 "이 PC의 그 특정 개인 프로필 하나"를 가리키는 용도라 고정값이 더 안전하다. 이 몰(모자사러)의
+ * 로그인 신뢰(PC인증)가 실제로 쌓여있는 프로필이 "Default"(ilda)라 이 값으로 고정한다(사용자 지정,
+ * 2026-08-22).
  */
+const PTP_MANUAL_LOGIN_CHROME_PROFILE = 'Default'
+
 export async function openManualLoginWindow(siteId: number, url: string): Promise<void> {
   // closeLoginWindow가 openSessions를 만지므로 같은 락 키를 공유한다(withSiteLock 주석 참고) — 실제
   // 브라우저 자체는 추적 밖의 개인 크롬이라 락이 끝난 뒤에는 이 함수가 더 할 일이 없다.
@@ -454,7 +585,15 @@ export async function openManualLoginWindow(siteId: number, url: string): Promis
     await closeLoginWindow(siteId)
     // --no-first-run/--no-default-browser-check가 없으면 실제 크롬이 "Chrome에 로그인" 등 첫 실행 온보딩
     // 화면을 활성 탭으로 띄워버려, 요청한 몰 로그인 URL로 바로 이동하지 않는다.
-    const child = spawn(CHROME_EXE, ['--no-first-run', '--no-default-browser-check', url], { detached: true, stdio: 'ignore' })
+    // 주의: 크롬이 이미 그 프로필로 실행 중이면 이 커맨드라인은 기존 프로세스로 전달만 되고 새 스위치는
+    // 무시된다(크롬의 표준 동작) — --load-extension이 실제로 반영되려면 이 스폰이 그 프로필의 첫 실행이어야
+    // 한다. 위 주석대로 이 함수는 그런 "먼저 크롬을 닫아야 하는" 전제로 쓰이므로 보통은 문제 없다.
+    const child = spawn(CHROME_EXE, [
+      '--no-first-run', '--no-default-browser-check',
+      `--profile-directory=${PTP_MANUAL_LOGIN_CHROME_PROFILE}`,
+      `--load-extension=${PTP_EXTENSION_DIR}`,
+      url,
+    ], { detached: true, stdio: 'ignore' })
     child.unref()
   })
 }
@@ -463,8 +602,7 @@ export async function openManualLoginWindow(siteId: number, url: string): Promis
 export function getOpenPageUrl(siteId: number): string | null {
   const context = openSessions.get(siteId)
   if (!context) return null
-  const pages = context.pages()
-  return pages.length ? pages[pages.length - 1].url() : null
+  return resolveMainPage(context, siteId)?.url() ?? null
 }
 
 /**
@@ -478,8 +616,8 @@ export async function navigateOpenPageTo(siteId: number, url: string): Promise<s
   return withSiteLock(siteId, '로그인 확인', async () => {
     const context = openSessions.get(siteId)
     if (!context) return null
-    const pages = context.pages()
-    const page = pages.length ? pages[pages.length - 1] : await context.newPage()
+    const page = resolveMainPage(context, siteId) ?? await context.newPage()
+    setMainPage(siteId, page)
     if (page.url() !== url) {
       await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     }
@@ -548,8 +686,8 @@ export async function withContext<T>(
       const openContext = openSessions.get(siteId)
       if (openContext) {
         // 로그인 창이 열려있으면 그대로 재사용 (닫지 않음)
-        const pages = openContext.pages()
-        const page = pages.length ? pages[pages.length - 1] : await openContext.newPage()
+        const page = resolveMainPage(openContext, siteId) ?? await openContext.newPage()
+        setMainPage(siteId, page)
         return await fn(page, openContext)
       }
       if (await isManualLoginSite(siteId)) {
@@ -575,6 +713,7 @@ export async function withContext<T>(
             await context.addInitScript(() => {
               Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
             })
+            await context.addInitScript(polyfillEsbuildNameHelper)
           } catch (e) {
             throw new Error(`개인 크롬 프로필 복사본 실행에 실패했습니다: ${e instanceof Error ? e.message : String(e)}`)
           }
@@ -593,6 +732,7 @@ export async function withContext<T>(
       const context = await chromium.launchPersistentContext(profileDir(siteId), {
         headless: true, channel: 'chrome', chromiumSandbox: true,
       })
+      await context.addInitScript(polyfillEsbuildNameHelper)
       try {
         const page = context.pages()[0] || await context.newPage()
         return await fn(page, context)
@@ -605,6 +745,7 @@ export async function withContext<T>(
   const browser = await chromium.launch({ headless: true, channel: 'chrome', chromiumSandbox: true })
   try {
     const ctx  = await browser.newContext()
+    await ctx.addInitScript(polyfillEsbuildNameHelper)
     const page = await ctx.newPage()
     return await fn(page, ctx)
   } finally {
@@ -1014,6 +1155,12 @@ async function applyStockByOption(page: Page, product: ExtractedProduct): Promis
   }
 }
 
+/** MallProfileSignals.sortOptions/ScrapeOptions.categorySortClicks 공용 타입 — 위 sortOptions 필드
+ *  주석 참고. `kind`가 없는(옛 데이터, DB에 이미 저장돼 있던) 항목은 항상 'query'로 취급한다. */
+export type MallSortOption =
+  | { label: string; kind?: 'query'; paramsToAdd: Record<string, string> }
+  | { label: string; kind: 'click'; clickText: string }
+
 export interface MallProfileSignals {
   sampleCount: number
   /** 카페24/메이크샵/고도몰 등 감지된 구축 플랫폼 — 이후 이 몰을 다시 손볼 때(코드 수정, AI 규칙 생성)
@@ -1050,11 +1197,17 @@ export interface MallProfileSignals {
    *  30분 넘게 걸렸다). */
   hasPaginationWidget: boolean
   /** "카테고리별 정렬기준 설정" 기능용 — 이 몰의 목록 페이지가 지원하는 정렬 옵션(최신순/낮은가격순 등
-   *  표준 라벨)과, 그 정렬을 적용하려면 카테고리 URL에 추가해야 하는 쿼리파라미터. 샘플 카테고리 1개
-   *  기준으로 추출한 "파라미터 차이"라 다른 카테고리(base 쿼리파라미터가 달라도, 예: ?code=0049 vs
-   *  ?cate_no=45) URL에도 그대로 덧붙여 재사용할 수 있다. deep(="몰 구조분석")에서만 채워지고, 가벼운
-   *  구조변화감지(deep=false)나 지원 안 되는 몰은 빈 배열. */
-  sortOptions: { label: string; paramsToAdd: Record<string, string> }[]
+   *  표준 라벨)과, 그 정렬을 실제로 적용하는 방법. 두 가지 종류가 있다(2026-08-23, 펫투비 실사용 확인
+   *  — URL이 전혀 안 바뀌는 AJAX 정렬 몰을 만나 추가):
+   *  - `kind:'query'`(기존 방식, 대부분의 몰): 카테고리 URL에 추가해야 하는 쿼리파라미터. 샘플 카테고리
+   *    1개 기준으로 추출한 "파라미터 차이"라 다른 카테고리(base 쿼리파라미터가 달라도, 예: ?code=0049 vs
+   *    ?cate_no=45) URL에도 그대로 덧붙여 재사용할 수 있다.
+   *  - `kind:'click'`(고도몰 등 일부 스킨의 `javascript:sort(...)` 정렬): 정렬이 URL에 전혀 반영되지
+   *    않고 AJAX로 목록만 다시 그려진다 — 클릭해서 확인할 텍스트(clickText)만 저장해두고, 실제 스크랩
+   *    시점(collectProductUrls의 collectFromListing)에 그 카테고리 목록 페이지에 들어간 직후 이 텍스트를
+   *    실제로 한 번 클릭해 정렬을 적용한다.
+   *  deep(="몰 구조분석")에서만 채워지고, 가벼운 구조변화감지(deep=false)나 지원 안 되는 몰은 빈 배열. */
+  sortOptions: MallSortOption[]
   /** URL 계층/카테고리/결제계좌/택배사/재고관리형태/업체연락처/상품페이지구조/스크래핑 유의사항을 실제로
    *  수집한 원문(홈 하단 회사정보 + 이용안내·공지 등 게시판 + 상품페이지) 기반으로 AI가 요약한 리포트.
    *  ANTHROPIC_API_KEY 미설정이거나 원문을 하나도 못 모았으면 null. */
@@ -1078,6 +1231,10 @@ const MALL_PROFILE_CONCURRENCY = 4
 async function mapWithPageWorkers<T>(
   context: BrowserContext, page: Page, items: T[], concurrency: number,
   worker: (item: T, index: number, page: Page) => Promise<void>,
+  /** "몰 구조분석 중지"가 눌리면(2026-08-22) 아직 안 잡은 항목은 더 처리하지 않는다 — 이미 시작한
+   *  worker(item)은 그대로 끝까지 두되(중간에 끊으면 그 항목의 반쪽짜리 결과가 signals에 섞일 수 있음),
+   *  다음 커서만 멈춘다. */
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!items.length) return
   const n = Math.min(concurrency, items.length)
@@ -1087,6 +1244,7 @@ async function mapWithPageWorkers<T>(
   try {
     await Promise.all(pages.map(async workerPage => {
       while (true) {
+        if (signal?.aborted) return
         const i = cursor++
         if (i >= items.length) return
         await worker(items[i], i, workerPage)
@@ -1117,25 +1275,71 @@ async function mapWithPageWorkers<T>(
  * 로그인 확인/스크랩 시작마다 자동으로 도는 가벼운 구조 변화 감지(false)와는 용도가 다르다 — 사용자가
  * 직접 "이 둘은 서로 다른 용도"라고 확정함: 로그인 확인=구조 변화 감지 전용, 몰 구조분석=거래정보 분석 전용.
  */
+// "몰 구조분석 중지" 버튼용 — siteId별로 지금 진행 중인 분석의 AbortController를 들고 있는다. 다른
+// 인메모리 상태(siteLocks 등)와 같은 이유로 globalThis에 저장해 dev 서버 핫리로드에도 살아남게 한다
+// (2026-08-22, 사용자 요청: "중지를 누르면 llama-server 작업도 멈추게"). withSiteLock이 이미 siteId당
+// 분석 하나만 동시에 돌게 보장하므로, 슬롯 하나(Map)로 충분하다.
+const profileAbortControllers: Map<number, AbortController> =
+  globalThis.__scrapeProfileAbortControllers ?? (globalThis.__scrapeProfileAbortControllers = new Map())
+
+/** PTP의 "몰 구조분석 중지" 버튼이 호출한다 — 지금 그 몰에 대해 진행 중인 profileMallStructure가
+ *  있으면 즉시 신호를 보낸다(Ollama 호출 중이면 그 fetch가 바로 끊겨 llama-server도 생성을 멈춘다).
+ *  진행 중인 게 없으면 조용히 아무 일도 안 한다(이미 끝났거나 애초에 시작 안 한 경우). */
+export function stopProfileAnalysis(siteId: number): boolean {
+  const controller = profileAbortControllers.get(siteId)
+  if (!controller) return false
+  controller.abort()
+  profileAbortControllers.delete(siteId)
+  return true
+}
+
 export async function profileMallStructure(siteId: number, deep = false): Promise<MallProfileSignals | null> {
   const site = await siteInfo(siteId)
   if (!site.url) return null
+  const controller = new AbortController()
+  profileAbortControllers.set(siteId, controller)
   // withContext가 이미 siteId 기준 락(withSiteLock)을 쥐므로 여기서 따로 또 걸지 않는다 — 같은 키로
   // 이중으로 걸면 바깥 락이 안 풀린 채로 안쪽 락이 그 락을 기다려 영원히 멈춘다(데드락).
   // allowStaleManualLoginProfile: 개발자모드는 사용자가 실제 크롬을 켜둔 채로 쓰는 게 정상 상태라, 그
   // 크롬의 쿠키/세션 파일이 잠긴 채로 복사돼도(robocopy 일부 실패) 이 가벼운 확인은 그냥 진행한다 — 매번
   // "크롬을 꺼주세요"로 막으면 개발자모드에서는 사실상 이 버튼이 항상 실패한다(2026-08-15 실사용 확인).
-  return withContext({ siteId, url: site.url, allowStaleManualLoginProfile: true }, async (page, context) => {
-    await page.goto(site.url, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
-    const startUrl = page.url()
-    if (!startUrl || startUrl === 'about:blank') return null
-    return sampleMallProfile(page, context, startUrl, site.name, deep)
-  }, deep ? '몰 구조분석' : '구조 변화 감지')
+  try {
+    return await withContext({ siteId, url: site.url, allowStaleManualLoginProfile: true }, async (page, context) => {
+      await page.goto(site.url, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+      // 회원전용 도매몰(펫투비 등)은 저장된 로그인 세션이 만료돼 있으면 카테고리 목록/정렬 위젯이 있는
+      // 페이지가 전부 로그인폼으로 리다이렉트된다 — sortOptions가 매번 빈 배열로 나온 실제 원인이 "AI가
+      // 텍스트를 못 알아본 것"이 아니라 "정렬 링크 후보 자체가 0개"였음을 실사용(2026-08-23, 펫투비)으로
+      // 확인했다. 실제 스크래핑(scrapeSingleProduct 등)은 loginIfNeeded로 이 상황을 직접 복구하는데,
+      // 이 함수는 여태 그 단계가 없이 withContext가 재사용하는 쿠키에만 의존했다 — deep(="몰 구조분석"
+      // 버튼)에서만 저장된 아이디/비번으로 로그인을 시도한다(구조 변화 감지는 스크랩 시작 직전 매번 자동으로
+      // 도는 가벼운 체크라 범위를 넓히지 않음). 로그인 시도 후 원래 시작 URL로 다시 이동하는 것도
+      // scrapeSingleProduct와 같은 이유 — 로그인 성공 페이지가 잠깐 뜬 뒤 지연 리다이렉트되는 몰이 있어,
+      // 그 흐름이 끝난 뒤 항상 같은 시작점에서 프로파일링을 시작하게 한다.
+      if (deep && site.loginId && site.loginPw) {
+        await loginIfNeeded(page, { url: site.url, loginId: site.loginId, loginPw: site.loginPw }).catch(() => {})
+        await page.goto(site.url, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+      }
+      const startUrl = page.url()
+      if (!startUrl || startUrl === 'about:blank') return null
+      return sampleMallProfile(page, context, startUrl, site.name, deep, controller.signal, siteId)
+    }, deep ? '몰 구조분석' : '구조 변화 감지')
+  } finally {
+    // 이 실행이 등록해둔 컨트롤러가 그대로면(중간에 stopProfileAnalysis가 이미 지웠을 수도 있음) 지운다.
+    if (profileAbortControllers.get(siteId) === controller) profileAbortControllers.delete(siteId)
+  }
 }
 
-async function siteInfo(siteId: number): Promise<{ name: string; url: string }> {
-  const res = await pool.query<{ name: string; url: string }>('SELECT name, url FROM sites WHERE id = $1', [siteId])
-  return { name: res.rows[0]?.name || `site${siteId}`, url: res.rows[0]?.url || '' }
+async function siteInfo(siteId: number): Promise<{ name: string; url: string; loginId: string; loginPw: string }> {
+  const res = await pool.query<{ name: string; url: string; login_id: string | null; login_pw_encrypted: string | null; login_pw_iv: string | null }>(
+    'SELECT name, url, login_id, login_pw_encrypted, login_pw_iv FROM sites WHERE id = $1', [siteId],
+  )
+  const row = res.rows[0]
+  return {
+    name: row?.name || `site${siteId}`,
+    url: row?.url || '',
+    loginId: row?.login_id || '',
+    loginPw: decryptSecret(row?.login_pw_encrypted ?? null, row?.login_pw_iv ?? null),
+  }
 }
 
 // page.exposeFunction은 같은 Page 인스턴스에 같은 이름으로 두 번 부르면 에러가 난다 — "스크랩 대상 직접지정 시작"을
@@ -1159,8 +1363,8 @@ export async function startElementPicker(
   return withSiteLock(siteId, '스크랩 대상 직접지정', async () => {
     const context = openSessions.get(siteId)
     if (!context) return false
-    const pages = context.pages()
-    const page = pages.length ? pages[pages.length - 1] : await context.newPage()
+    const page = resolveMainPage(context, siteId) ?? await context.newPage()
+    setMainPage(siteId, page)
 
     // 미리보기 상품 페이지로 "이동"할 뿐, 새 탭을 열지 않는다 — 예전엔 호출부가 별도로 새 탭을 먼저 열고
     // (openUrlInLoginWindow) 그 다음 여기서 다시 "마지막 탭"을 골랐는데, "스크랩 대상 직접지정"을 다시
@@ -1168,7 +1372,7 @@ export async function startElementPicker(
     // 남아있던 피커가 안 닫힌 채로 방치되면, 그 탭은 계속 예전 시점의 코드로 저장을 시도해 최신 탭의
     // 저장과 서로 경쟁하며 값이 사라지는 것처럼 보일 수 있었다(신우 몰 재발 보고). 같은 컨텍스트의 다른
     // 탭에 아직 살아있는 피커가 있으면 먼저 정리하고, 이 탭 하나만 활성 상태로 유지한다.
-    for (const other of pages) {
+    for (const other of context.pages()) {
       if (other === page) continue
       await other.evaluate(() => (window as unknown as { __ptpPickerTeardown?: () => void }).__ptpPickerTeardown?.()).catch(() => {})
     }
@@ -1733,7 +1937,33 @@ export async function profileMallStructureForScrape(opts: ScrapeOptions): Promis
   return withContext(opts, (page, context) => sampleMallProfile(page, context, startUrlHint, site.name, false), '구조 변화 감지')
 }
 
-async function sampleMallProfile(page: Page, context: BrowserContext, startUrl: string, mallName: string, deep: boolean): Promise<MallProfileSignals | null> {
+async function sampleMallProfile(
+  page: Page, context: BrowserContext, startUrl: string, mallName: string, deep: boolean, signal?: AbortSignal, siteId?: number,
+): Promise<MallProfileSignals | null> {
+  // "몰 구조분석"이 항상 오래 걸리는데 label 하나("몰 구조분석")로는 지금 뭘 하고 있는지 알 방법이
+  // 없다는 지적(2026-08-22)으로, 주요 단계 경계마다 setSiteLockDetail로 세부 문구를 남긴다 — siteId가
+  // 없으면(가벼운 "구조 변화 감지" 등 일부 호출부) 조용히 no-op.
+  // 펫투비가 10.7분 걸린 사례처럼 "왜 오래 걸렸는지"를 사후에 되짚어볼 방법이 없다는 지적(2026-08-23)
+  // 으로, 각 단계가 끝나는 시점에 그 직전 단계가 실제로 몇 초 걸렸는지 .dev-server.log에 그대로 남긴다
+  // (새 단계로 넘어갈 때 이전 단계 소요시간을 찍는 방식이라, 마지막 단계는 함수 끝에서 따로 찍는다).
+  let lastStepAt = Date.now()
+  let lastStepLabel: string | null = null
+  const step = (detail: string) => {
+    const now = Date.now()
+    if (lastStepLabel) console.log(`[몰구조분석:${mallName}] "${lastStepLabel}" — ${((now - lastStepAt) / 1000).toFixed(1)}초`)
+    lastStepLabel = detail
+    lastStepAt = now
+    if (siteId != null) setSiteLockDetail(siteId, detail)
+  }
+  const logFinalStep = () => {
+    if (lastStepLabel) console.log(`[몰구조분석:${mallName}] "${lastStepLabel}" — ${((Date.now() - lastStepAt) / 1000).toFixed(1)}초`)
+  }
+  // "몰 구조분석 중지" 버튼이 눌리면(2026-08-22) 주요 단계 경계마다 여기서 확인해 더 진행하지 않고
+  // 즉시 빠진다 — 이미 모은 신호는 버린다(중간 상태를 scrape_profile에 저장하면 다음 조회 때 "이번에
+  // 정말 확인된 값"과 구분이 안 된다). AbortSignal 자체는 이 함수가 부르는 Ollama 호출(가장 CPU를 많이
+  // 쓰는 부분)에도 그대로 전달돼, 그 호출 자체도 즉시 끊긴다.
+  if (signal?.aborted) return null
+  step('목록 페이지 확인 중...')
   let sampleUrls: string[] = []
   let platform: MallPlatform = 'unknown'
   let categoryByUrl = new Map<string, CategoryLabel>()
@@ -1742,7 +1972,11 @@ async function sampleMallProfile(page: Page, context: BrowserContext, startUrl: 
     sampleUrls = collected.urls.slice(0, MALL_PROFILE_SAMPLE_SIZE)
     platform = collected.platform
     categoryByUrl = collected.categoryByUrl
-  } catch { /* 카탈로그로 인식되지 않으면 아래에서 현재 페이지를 상품 페이지 1건으로 취급 */ }
+    console.log(`[몰구조분석:진단:${mallName}] 시작 페이지(${startUrl}) 자체를 목록으로 인식, 상품 URL ${collected.urls.length}개 (needsLogin=${collected.needsLogin})`)
+  } catch (e) {
+    // 2026-08-23 임시 진단 로그
+    console.log(`[몰구조분석:진단:${mallName}] 시작 페이지(${startUrl})는 목록으로 인식 안 됨: ${e instanceof Error ? e.message : String(e)}`)
+  }
 
   // 지금 page는 아직 목록 페이지(startUrl)에 그대로 있다(collectProductUrls를 maxPages:1로 불러 페이지
   // 이동 없음) — 추가 네비게이션 없이 이 페이지의 페이지네이션 위젯을 바로 확인한다. countCategoryProductsOnce가
@@ -1761,7 +1995,9 @@ async function sampleMallProfile(page: Page, context: BrowserContext, startUrl: 
   // discoverTopLevelCategoryLinks가 AI를 먼저 시도하고 실패하면 기존 히스틱으로 폴백한다(discoverCategoryLinks
   // 와 공용, 2026-08-19 — 예전엔 여기만 AI 없이 히스틱만 썼다가 도매토피아에서 상품 링크가 카테고리로
   // 잘못 섞여 들어오는 문제를 겪었다). deep=false(구조 변화 감지)면 무거운 방문 폴백은 건너뛴다.
-  const { links: categoryLinks } = await discoverTopLevelCategoryLinks(page, mallName, deep)
+  step('카테고리 구조 확인 중...')
+  const { links: categoryLinks } = await discoverTopLevelCategoryLinks(context, page, mallName, deep, signal)
+  if (signal?.aborted) return null
 
   // "카테고리별 정렬기준 설정" 기능용 — 정렬 위젯은 보통 홈페이지가 아니라 카테고리 목록 페이지에만
   // 있어서(등록된 몰 URL이 홈페이지인 경우가 흔함), 방금 찾은 카테고리 중 하나를 실제로 열어봐야 확인할
@@ -1769,19 +2005,44 @@ async function sampleMallProfile(page: Page, context: BrowserContext, startUrl: 
   // 대분류 하나만 확인하면 충분. 무거운 작업이라 deep("몰 구조분석")에서만 한다.
   let sortOptions: MallProfileSignals['sortOptions'] = []
   if (deep && categoryLinks.length) {
-    const sampleCategoryUrl = categoryLinks[0].href
-    const moved = await page.goto(sampleCategoryUrl, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
-    if (moved) {
-      let sortCandidates = await collectSortCandidates(page)
-      // <a href>/<select><option> 어느 쪽으로도 못 찾으면(버튼 onclick, 커스텀 JS 드롭다운 등) 클릭
-      // 기반 폴백으로 한 번 더 시도한다 — collectSortCandidates 자체가 이미 정적으로 못 찾은 상태라
-      // page.url()이 sampleCategoryUrl 그대로이므로 baseUrl 계산에 영향 없다.
-      if (!sortCandidates.length) sortCandidates = await detectSortOptionsByClicking(page).catch(() => [])
+    step('정렬 옵션 확인 중...')
+    // categoryLinks[0]이 하필 상품 0개인 카테고리(안내/이벤트 허브 등)면 정렬 위젯 자체가 없어 아래
+    // 시도가 전부 헛수고로 끝난다 — 상품이 있는 카테고리를 만날 때까지 앞에서부터 최대 5개만 시도한다
+    // (전체를 다 훑진 않음, 무거운 작업이라 안전하게 상한을 둔다. 사용자 지시, 2026-08-23: "실지 상품이
+    // 있는 카테고리라면 반드시 정렬이 여기 있을 것").
+    let sampleCategoryUrl: string | null = null
+    for (const link of categoryLinks.slice(0, 5)) {
+      if (signal?.aborted) break
+      const moved = await page.goto(link.href, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
+      if (!moved) continue
+      const hasProducts = !!(await collectProductUrls(page, { maxPages: 1 }).catch(() => null))?.urls.length
+      if (hasProducts) { sampleCategoryUrl = link.href; break }
+    }
+    if (sampleCategoryUrl) {
+      const sortCandidates = await collectSortCandidates(page)
       const baseUrl = page.url()
-      const detected = await detectSortOptionsWithAI(mallName, sortCandidates, baseUrl).catch(() => [])
-      sortOptions = detected
-        .map(c => ({ label: c.label, paramsToAdd: diffQueryParams(baseUrl, c.href) }))
-        .filter((o): o is { label: string; paramsToAdd: Record<string, string> } => !!o.paramsToAdd)
+      // 후보 텍스트가 정렬스러운 낱말(looksLikeSortLabel)을 포함하는 것만 먼저 골라내고, diffQueryParams
+      // (같은 경로, 쿼리파라미터만 다름)까지 통과하면 그대로 확정한다 — 로컬 Ollama(detectSortOptionsWithAI)
+      // 에게 판별을 맡기던 걸 없앴다(2026-08-23, 사용자 지시로 재검토): collectSortCandidates가 모아오는
+      // 후보엔 카테고리 사이드바 링크 등 정렬과 전혀 무관한 것도 잔뜩 섞여있는데, 로컬 Ollama가 이걸
+      // 정렬로 잘못 골라 저장한 사고가 이미 있었고, 응답이 느리거나(수십~수백 초) 도구 호출 대신
+      // 텍스트로 새는 문제도 같은 세션에서 반복 확인됐다. "정렬스러운 텍스트"(의미)와 "실제로 다른
+      // 목록으로 이어지는 링크"(구조)라는 독립된 증거 두 개가 이미 있으니, 신뢰도 낮은 세 번째 신호(AI)를
+      // 더할 필요가 없다 — 키워드 매칭만 쓰는 클릭 폴백(detectSortOptionsByClicking)이 오히려 더
+      // 안정적이었던 것과 같은 이유. 개발자모드 확장의 별도 정렬감지 경로(app/api/sites/[id]/sort-options,
+      // detectSortOptionsWithAI 계속 사용)는 호출부가 달라 이번엔 손대지 않았다.
+      const queryBased = sortCandidates
+        .filter(c => looksLikeSortLabel(c.text))
+        .map(c => ({ label: c.text, kind: 'query' as const, paramsToAdd: diffQueryParams(baseUrl, c.href) }))
+        .filter((o): o is { label: string; kind: 'query'; paramsToAdd: Record<string, string> } => !!o.paramsToAdd)
+      if (queryBased.length) {
+        sortOptions = queryBased
+      } else {
+        // 정적 href/select 기반 감지가 후보를 못 찾았거나, 찾았어도 키워드 필터를 통과한 게 하나도
+        // 없을 때 — 화면 텍스트를 후보로 삼아 실제로 클릭해보고 URL/목록 순서 변화로 직접 검증한다
+        // (detectSortOptionsByClicking 주석 참고 — kind:'query'/kind:'click' 둘 다 여기서 나올 수 있다).
+        sortOptions = await detectSortOptionsByClicking(page, baseUrl).catch(() => [])
+      }
     }
   }
 
@@ -1797,7 +2058,21 @@ async function sampleMallProfile(page: Page, context: BrowserContext, startUrl: 
   // 페이지에 있다(실사용 몰 확인됨). deep(=="몰 구조분석" 버튼)에서만 하는 무거운 작업이라 로그인
   // 확인/스크랩 시작마다 도는 가벼운 체크에서는 건너뛴다. 페이지 이동이 있어 시간이 들 수 있어 실패해도
   // 나머지 흐름은 계속한다.
-  const contextText = deep ? await gatherMallContextText(page, context).catch(() => '') : ''
+  if (signal?.aborted) return null
+  if (deep) step('회사정보/이용안내 페이지 확인 중...')
+  const contextText = deep ? await gatherMallContextText(page, context, signal).catch(() => '') : ''
+  if (signal?.aborted) return null
+  // gatherMallContextText는 mapWithPageWorkers로 회사정보/배송조회 등 안내 링크를 동시에 훑는데, 그
+  // 워커 중 하나가 공유 page(로그인 창이 열려있으면 사용자가 보고 있는 그 탭) 자신을 그대로 재사용한다
+  // (mapWithPageWorkers 참고 — 새 탭 여러 개 + 이 page 자신을 합쳐 동시 처리). "배송조회" 안내 링크가
+  // 몰 자체 페이지가 아니라 택배사 조회 사이트(예: 롯데글로벌로지스)로 그대로 리다이렉트되는 몰이 있어,
+  // 그 링크가 이 page에 배정되면 몰 구조분석이 끝난 뒤에도 로그인 창이 그 택배사 사이트에 남아있었다
+  // (실사용 확인, 2026-08-23 — 그 직후 "카테고리 선택 가져오기"의 "현재 카테고리 가져옴"이 로그인 창의
+  // 마지막 탭 URL을 그대로 읽어가는데, 엉뚱한 택배사 URL을 몰 카테고리로 착각해 가져왔다). 위(1997줄)의
+  // 카테고리/정렬옵션 확인 직후 복귀 로직과 같은 이유로, 여기서도 반드시 몰의 시작 페이지로 되돌려놓는다.
+  if (deep && page.url() !== startUrl) {
+    await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+  }
 
   // 등록된 몰 URL이 배너/메뉴만 있는 랜딩 페이지라 상품 링크가 0개인 몰도 있다(실사용 확인: 진짜양말 —
   // 홈페이지엔 이미지 스프라이트 메뉴만 있고 상품은 그 메뉴를 눌러 들어간 카테고리 목록에만 있음). 그대로
@@ -1812,18 +2087,24 @@ async function sampleMallProfile(page: Page, context: BrowserContext, startUrl: 
     // 대체한 부분), cat/lnb/gnb 영역의 링크를 "상품 샘플을 찾아 들어가볼 후보"로만 넓게 쓴다 — 여기선
     // 정확한 카테고리 여부가 중요하지 않고 그냥 실제 상품이 있을 만한 페이지 몇 개면 충분하다.
     const categoryLinkCandidates = await findCategoryLinkCandidates(page)
+    // 2026-08-23 임시 진단 로그 — "샘플 상품 1건"(=아래 catch들이 조용히 삼켜서 원인이 안 보이는 문제)
+    // 재현 중이라 원인을 찾을 때까지만 남겨둔다.
+    console.log(`[몰구조분석:진단:${mallName}] 카테고리 후보 링크 ${categoryLinkCandidates.length}개: ${categoryLinkCandidates.slice(0, 8).join(', ')}`)
     for (const link of categoryLinkCandidates) {
       if (urls.length >= MALL_PROFILE_SAMPLE_SIZE) break
       try {
         const collected = await collectProductUrls(page, { url: link, maxPages: 1 })
         platform = collected.platform
+        console.log(`[몰구조분석:진단:${mallName}] ${link} → 상품 URL ${collected.urls.length}개 (needsLogin=${collected.needsLogin})`)
         for (const u of collected.urls.slice(0, 2)) {
           if (urls.length >= MALL_PROFILE_SAMPLE_SIZE || urls.includes(u)) continue
           urls.push(u)
           const label = collected.categoryByUrl.get(u)
           if (label) mergedByUrl.set(u, label)
         }
-      } catch { /* 이 후보 링크가 안되면 다음 후보로 */ }
+      } catch (e) {
+        console.log(`[몰구조분석:진단:${mallName}] ${link} → 실패: ${e instanceof Error ? e.message : String(e)}`)
+      }
     }
     if (urls.length) { sampleUrls = urls; categoryByUrl = mergedByUrl }
   }
@@ -1847,6 +2128,7 @@ async function sampleMallProfile(page: Page, context: BrowserContext, startUrl: 
   // 않는다(JS는 싱글스레드라 await 지점 사이엔 이 대입이 원자적이다).
   let contextClaimed = false
 
+  step(`샘플 상품 ${sampleUrls.length}건 확인 중...`)
   // 샘플 상품 방문(최대 MALL_PROFILE_SAMPLE_SIZE=6건)은 서로 완전히 독립적인 페이지라 순차 대신 여러
   // 탭으로 동시에 처리한다 — 모자사러처럼 카테고리/상품 페이지 로딩이 느린 몰에서 "몰 구조분석" 소요
   // 시간의 상당 부분이 이 순차 방문이었다(2026-08-22, 사용자 요청으로 병렬화). Set/카운터 갱신은 각
@@ -1885,14 +2167,19 @@ async function sampleMallProfile(page: Page, context: BrowserContext, startUrl: 
           + (imageHints.length ? `\n\n[샘플 상품페이지 이미지 설명/파일명]\n${imageHints.join(', ')}` : '')
         signals.sampleProductPageText = bodyText
       }
-    } catch { /* 개별 샘플 실패는 건너뛰고 다음 샘플로 */ }
-  })
+    } catch (e) {
+      // 2026-08-23 임시 진단 로그 — 위 카테고리 후보 로그와 짝
+      console.log(`[몰구조분석:진단:${mallName}] 샘플 방문 실패 ${url} → ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }, signal)
+  if (signal?.aborted) return null
   signals.optionUiTypes = [...optionTypes]
   signals.infoLabels = [...infoLabelSet].sort()
   signals.categoryPaths = [...categoryPathSet].sort()
   signals.categoryMaxDepth = signals.categoryPaths.reduce((max, p) => Math.max(max, p.split(' > ').length), 0)
 
   if (deep) {
+    step('AI로 결제/배송/업체정보 분석 중...')
     const combinedContext = [contextText, productContextText].filter(Boolean).join('\n\n')
     const categoryHints = categoryMenuNames.length ? categoryMenuNames : signals.categoryPaths
     // ANTHROPIC_API_KEY 크레딧이 없어 AI 호출이 안 되는 경우(월 정액 구독으로는 대체 불가 — API 과금과는
@@ -1907,6 +2194,7 @@ async function sampleMallProfile(page: Page, context: BrowserContext, startUrl: 
   }
 
   await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+  logFinalStep()
   return signals.sampleCount > 0 ? signals : null
 }
 
@@ -1929,7 +2217,7 @@ function collectImageHintsScript(rootSelector: string | null): string[] {
   return [...new Set(hints)].slice(0, 30)
 }
 
-async function gatherMallContextText(page: Page, context: BrowserContext): Promise<string> {
+async function gatherMallContextText(page: Page, context: BrowserContext, signal?: AbortSignal): Promise<string> {
   const sections: string[] = []
   const footerSelector = 'footer, #footer, .footer, .company_info, .footer_info'
   const footerText = await page.evaluate(sel => {
@@ -1966,7 +2254,7 @@ async function gatherMallContextText(page: Page, context: BrowserContext): Promi
       if (imageHints.length) parts.push(`[${link.text} 페이지 이미지 설명/파일명]\n${imageHints.join(', ')}`)
       infoSections[i] = parts.join('\n\n')
     } catch { /* 게시판 접근 실패(로그인 필요 등)는 건너뛰고 다음 링크로 */ }
-  })
+  }, signal)
   sections.push(...infoSections.filter(Boolean))
   return sections.join('\n\n')
 }
@@ -2065,6 +2353,7 @@ export async function extractFromHtml(
   const browser = await chromium.launch({ headless: true, channel: 'chrome', chromiumSandbox: true })
   try {
     const context = await browser.newContext()
+    await context.addInitScript(polyfillEsbuildNameHelper)
     const page = await context.newPage()
     await page.setContent(html, { waitUntil: 'domcontentloaded' })
     return await extractProductRuleBased(page, url, undefined, extractionRules)
@@ -2476,14 +2765,22 @@ async function findCategoryLinkCandidates(page: Page): Promise<string[]> {
  *  그대로 잡힌다)을 애초에 컨테이너를 안 골라서 자연히 피한다. 상품 상세페이지 링크까지 전부 섞여
  *  들어오는 게 정상이다 — "이 중 뭐가 카테고리냐"는 판단을 AI가 하므로 여기서는 최대한 넓게, 이름이
  *  없는(이미지뿐이고 alt도 없는) 링크만 걸러 모은다. */
+// AI(로컬 Ollama, CPU 전용)에게 후보 링크를 통째로 보낼 때의 상한 — 원래 400이었는데, 펫투비에서
+// "카테고리 구조 확인"/"정렬 옵션 확인" 각 단계가 300초 넘게 걸리는 걸 실측해보니 모델 로딩이 아니라
+// 순수 프롬프트 처리 시간이었다(2026-08-23: 171토큰짜리 작은 프롬프트도 프롬프트 처리에만 3.6초 —
+// 400개짜리 후보 목록이면 수천 토큰이라 그만큼 배로 늘어남). 카테고리 메뉴는 보통 몇십 개를 잘 안
+// 넘으므로, 120으로 낮춰 프롬프트를 3배 이상 줄인다 — 아주 드물게 카테고리가 120개보다 많은 몰에서만
+// 뒤쪽 후보가 잘릴 수 있는 트레이드오프.
+const AI_LINK_CANDIDATE_CAP = 120
+
 async function collectAllPageLinks(page: Page): Promise<{ text: string; href: string }[]> {
-  return page.evaluate(() => {
+  return page.evaluate((cap) => {
     const origin = location.origin
     const current = location.href.replace(/\/+$/, '')
     const seen = new Set<string>()
     const result: { text: string; href: string }[] = []
     for (const a of Array.from(document.querySelectorAll('a[href]'))) {
-      if (result.length >= 400) break // 몰 하나의 AI 호출 비용을 안전하게 상한선 안에 두기 위한 캡
+      if (result.length >= cap) break
       const href = (a as HTMLAnchorElement).href
       if (!href.startsWith(origin)) continue
       const norm = href.replace(/\/+$/, '')
@@ -2494,7 +2791,7 @@ async function collectAllPageLinks(page: Page): Promise<{ text: string; href: st
       result.push({ text, href })
     }
     return result
-  }).catch(() => [])
+  }, AI_LINK_CANDIDATE_CAP).catch(() => [])
 }
 
 /** "카테고리별 정렬기준 설정" 후보 수집 — collectAllPageLinks와 같은 <a href> 수집에 더해 <select><option>도
@@ -2504,13 +2801,13 @@ async function collectAllPageLinks(page: Page): Promise<{ text: string; href: st
  *  잡혔다(항상 빈 배열 → 화면엔 "기본순"만 남음). 계좌이체 은행 선택처럼 값이 다른 출처의 전체 URL인
  *  <select>는 origin 필터에서 자연히 걸러진다. */
 async function collectSortCandidates(page: Page): Promise<{ text: string; href: string }[]> {
-  return page.evaluate(() => {
+  return page.evaluate((cap) => {
     const origin = location.origin
     const current = location.href.replace(/\/+$/, '')
     const seen = new Set<string>()
     const result: { text: string; href: string }[] = []
     for (const a of Array.from(document.querySelectorAll('a[href]'))) {
-      if (result.length >= 400) break
+      if (result.length >= cap) break
       const href = (a as HTMLAnchorElement).href
       if (!href.startsWith(origin)) continue
       const norm = href.replace(/\/+$/, '')
@@ -2521,7 +2818,7 @@ async function collectSortCandidates(page: Page): Promise<{ text: string; href: 
       result.push({ text, href })
     }
     for (const opt of Array.from(document.querySelectorAll('select option')) as HTMLOptionElement[]) {
-      if (result.length >= 400) break
+      if (result.length >= cap) break
       if (!opt.value) continue
       let href: string
       try { href = new URL(opt.value, location.href).href } catch { continue }
@@ -2534,7 +2831,7 @@ async function collectSortCandidates(page: Page): Promise<{ text: string; href: 
       result.push({ text, href })
     }
     return result
-  }).catch(() => [])
+  }, AI_LINK_CANDIDATE_CAP).catch(() => [])
 }
 
 // 정렬 옵션 후보로 볼 만한 텍스트 — <a href>/<select><option> 어느 쪽도 아닌 버튼(onclick)이나 커스텀
@@ -2543,15 +2840,29 @@ async function collectSortCandidates(page: Page): Promise<{ text: string; href: 
 // 클릭해보고 diffQueryParams(같은 pathname, 쿼리파라미터만 다름)로 재확인하기 때문이다.
 const SORT_KEYWORD_PATTERN = '(신상|신규|최신|낮은\\s*가격|높은\\s*가격|인기|판매량|조회|클릭|리뷰|추천|할인|세일|낱개판매|기본순)'
 
-/** collectSortCandidates(정적 href/value 읽기)가 아무것도 못 찾았을 때의 폴백 — 버튼 onclick이나 커스텀
- *  JS 드롭다운처럼 마크업만 봐서는 URL을 알 수 없는 정렬 UI까지 잡기 위해, 화면 텍스트가 정렬 키워드와
- *  비슷한 요소를 태그 종류 상관없이 후보로 삼아 하나씩 실제로 클릭해본다. 클릭 후 diffQueryParams가
- *  성공하면(같은 pathname, 쿼리파라미터만 다름) 진짜 정렬 옵션으로 인정한다 — 엉뚱한 걸 클릭해도(다른
- *  카테고리로 이동, 상품 상세로 이동 등) pathname이 달라지면 자동으로 걸러지므로 후보를 넓게 잡아도
- *  안전하다. 시도마다 baseUrl로 되돌아와 서로 간섭하지 않게 하고, 끝나면 반드시 baseUrl에 있는 채로
- *  반환한다(호출부가 이 함수 리턴 직후의 page.url()을 diffQueryParams 기준으로 쓰기 때문). */
-async function detectSortOptionsByClicking(page: Page): Promise<{ text: string; href: string }[]> {
-  const baseUrl = page.url()
+/** SORT_KEYWORD_PATTERN을 쓰는 곳이 여러 자리라(sampleMallProfile의 AI 결과 사전 필터, 아래
+ *  detectSortOptionsByClicking의 페이지 내부 스캔) 판정 로직을 하나로 모았다 — 순수 함수라
+ *  tests/unit에서 실제 몰 마크업 없이 바로 검증할 수 있다. */
+export function looksLikeSortLabel(text: string): boolean {
+  return new RegExp(SORT_KEYWORD_PATTERN).test(text)
+}
+
+/** collectSortCandidates(정적 href/select 값 읽기)로 후보를 못 찾았거나, AI가 골랐어도 전혀 무관한
+ *  링크였을 때(sampleMallProfile의 SORT_KEYWORD_PATTERN 사전 필터 참고)의 폴백 — 버튼 onclick이나
+ *  커스텀 JS 드롭다운처럼 마크업만 봐서는 URL을 알 수 없는 정렬 UI까지 잡기 위해, 화면 텍스트가 정렬
+ *  키워드와 비슷한 요소를 태그 종류 상관없이 후보로 삼아 하나씩 실제로 클릭해본다. 클릭한 결과가 두
+ *  가지로 나뉜다(2026-08-23, 펫투비 실사용 확인 — 처음엔 "URL이 안 바뀌는 AJAX 정렬"이라고만 봤는데,
+ *  같은 몰의 같은 링크가 로그인 상태에 따라 실제로는 URL도 바뀜을 재확인해 한 함수로 합쳤다):
+ *  - URL이 바뀌고 diffQueryParams가 성공하면(같은 pathname, 쿼리파라미터만 다름) kind:'query'로 확정 —
+ *    엉뚱한 걸 클릭해도(다른 카테고리/상품 상세로 이동) pathname이 달라지면 자동으로 걸러진다.
+ *  - URL이 그대로면(AJAX로만 재정렬되는 경우, 예: 고도몰 일부 스킨의 `javascript:sort(...)`) 클릭
+ *    전후 실제 상품 목록 순서(collectProductUrls가 읽는 것과 같은 링크)가 바뀌었는지로 검증한다 —
+ *    텍스트 추측이 아니라 실제 결과 변화를 확인하는 것이라 AI(로컬 Ollama) 호출이 필요 없다. 확정되면
+ *    clickText만 저장해 실제 스크랩 시점에 그 목록 페이지에 들어간 직후 다시 클릭해 정렬을 적용한다
+ *    (collectFromListing 참고).
+ *  후보 하나를 시도할 때마다 baseUrl로 새로 불러와 "정렬 전" 기준을 매번 깨끗하게 다시 잡는다 — 이전
+ *  후보 클릭이 남긴 상태가 다음 후보 판정을 오염시킬 수 있어서다(URL 기반이든 AJAX 기반이든 공통). */
+async function detectSortOptionsByClicking(page: Page, baseUrl: string): Promise<MallSortOption[]> {
   const candidateTexts = await page.evaluate((pattern) => {
     const re = new RegExp(pattern)
     const seen = new Set<string>()
@@ -2569,18 +2880,32 @@ async function detectSortOptionsByClicking(page: Page): Promise<{ text: string; 
     return result
   }, SORT_KEYWORD_PATTERN).catch(() => [] as string[])
 
-  const confirmed: { text: string; href: string }[] = []
+  const confirmed: MallSortOption[] = []
   for (const text of candidateTexts) {
     try {
+      await page.goto(baseUrl, { waitUntil: 'load', timeout: 15_000 })
+      // URL이 안 바뀌는(AJAX) 경우를 확인하려면 클릭 전 목록 순서가 필요하다 — 어느 쪽으로 판정될지는
+      // 클릭 후에야 알 수 있으므로 매번 미리 잡아둔다.
+      const before = (await collectProductUrls(page, { maxPages: 1 }).catch(() => null))?.urls.slice(0, 10) || []
       const locator = page.getByText(text, { exact: true }).first()
       if (await locator.count() === 0) continue
       await locator.click({ timeout: 3_000 })
       await page.waitForLoadState('load', { timeout: 5_000 }).catch(() => {})
       const afterUrl = page.url()
-      if (afterUrl !== baseUrl && diffQueryParams(baseUrl, afterUrl)) confirmed.push({ text, href: afterUrl })
+      if (afterUrl !== baseUrl) {
+        const paramsToAdd = diffQueryParams(baseUrl, afterUrl)
+        if (paramsToAdd) confirmed.push({ label: text, kind: 'query', paramsToAdd })
+        continue
+      }
+      if (!before.length) continue
+      // AJAX 재정렬은 클릭 즉시 반영되지 않을 수 있어, 네트워크가 잠잠해질 때까지 우선 기다리고 그래도
+      // 못 잡으면 짧게 고정 대기로 대체한다.
+      await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(async () => { await page.waitForTimeout(800) })
+      const after = (await collectProductUrls(page, { maxPages: 1 }).catch(() => null))?.urls.slice(0, 10) || []
+      if (after.length && JSON.stringify(after) !== JSON.stringify(before)) confirmed.push({ label: text, kind: 'click', clickText: text })
     } catch { /* 이 후보가 안 되면 다음 후보로 */ }
-    if (page.url() !== baseUrl) await page.goto(baseUrl, { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
   }
+  if (page.url() !== baseUrl) await page.goto(baseUrl, { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
   return confirmed
 }
 
@@ -2589,19 +2914,23 @@ async function detectSortOptionsByClicking(page: Page): Promise<{ text: string; 
  *  메뉴 자체는 못 읽어도 "링크"(href)는 findCategoryLinkCandidates로 얻을 수 있으니, 그 링크로 실제
  *  들어가 목적지 목록 페이지 자신이 보여주는 카테고리 라벨(브레드크럼/타이틀 — 사용자가 봐야 하는 화면이라
  *  메뉴와 달리 거의 항상 실제 텍스트로 존재한다)을 detectCategoryLabel로 읽어 대신 채운다. */
-async function discoverCategoriesByVisitingLinks(page: Page, links: string[]): Promise<CategoryMenuLink[]> {
+// 후보 링크를 하나씩 순서대로 방문하던 게(펫투비 실사용 확인, 2026-08-23: "몰 구조분석"의 "카테고리
+// 구조 확인" 단계 하나가 307초 걸림 — AI/DOM 히스틱이 둘 다 못 찾아 이 폴백을 탄 경우) mapWithPageWorkers로
+// 서로 독립적인 방문이라 병렬화한다(샘플 상품 방문과 같은 패턴). seenNames/result 갱신은 각 워커의
+// await 없는 동기 구간에서만 일어나 경쟁 조건이 없다.
+async function discoverCategoriesByVisitingLinks(context: BrowserContext, page: Page, links: string[]): Promise<CategoryMenuLink[]> {
   const seenNames = new Set<string>()
   const result: CategoryMenuLink[] = []
-  for (const link of links) {
+  await mapWithPageWorkers(context, page, links, MALL_PROFILE_CONCURRENCY, async (link, _i, workerPage) => {
     try {
-      await page.goto(link, { waitUntil: 'load', timeout: 15_000 })
-      const { category } = await detectCategoryLabel(page)
+      await workerPage.goto(link, { waitUntil: 'load', timeout: 15_000 })
+      const { category } = await detectCategoryLabel(workerPage)
       if (category && !NON_CATEGORY_TEXT_RE.test(category) && !seenNames.has(category)) {
         seenNames.add(category)
         result.push({ name: category, href: link })
       }
     } catch { /* 이 링크가 안되면 다음 링크로 */ }
-  }
+  })
   return result
 }
 
@@ -2617,10 +2946,10 @@ async function discoverCategoriesByVisitingLinks(page: Page, links: string[]): P
  * false면(가벼운 구조 변화 감지 전용) 페이지를 추가로 방문해야 하는 이미지전용 메뉴 폴백은 건너뛴다
  * (sampleMallProfile의 deep=false와 동일한 이유 — 무거운 작업이라 "몰 구조분석" 버튼에서만 한다). */
 async function discoverTopLevelCategoryLinks(
-  page: Page, mallName: string, visitTextlessFallback: boolean,
+  context: BrowserContext, page: Page, mallName: string, visitTextlessFallback: boolean, signal?: AbortSignal,
 ): Promise<{ links: CategoryMenuLink[]; textlessHrefs: string[]; aiUsed: boolean }> {
   const aiCandidates = await collectAllPageLinks(page)
-  const aiLinks = await detectCategoryLinksWithAI(mallName, aiCandidates).catch(() => [])
+  const aiLinks = await detectCategoryLinksWithAI(mallName, aiCandidates, undefined, signal).catch(() => [])
   if (aiLinks.length) return { links: aiLinks, textlessHrefs: [], aiUsed: true }
 
   const scanned = await scanCategoryMenuRobust(page)
@@ -2629,9 +2958,9 @@ async function discoverTopLevelCategoryLinks(
   if (visitTextlessFallback) {
     if (!links.length) {
       const candidates = textlessHrefs.length ? textlessHrefs : await findCategoryLinkCandidates(page)
-      if (candidates.length) links = await discoverCategoriesByVisitingLinks(page, candidates)
+      if (candidates.length) links = await discoverCategoriesByVisitingLinks(context, page, candidates)
     } else if (textlessHrefs.length) {
-      const extra = await discoverCategoriesByVisitingLinks(page, textlessHrefs)
+      const extra = await discoverCategoriesByVisitingLinks(context, page, textlessHrefs)
       links = [...links, ...extra]
     }
   }
@@ -2753,7 +3082,7 @@ const MAX_PAGE_SEARCH_BOUND = AUTO_PAGINATION_CAP * 4
  * 항상 1페이지부터 끝까지 훑어야 그 페이지 이전에 있던 상품들을 놓치지 않는다 — "다음 페이지" 링크를
  * 따라가는 방식만으로는 중간 페이지에서 시작하면 그 이전 페이지들을 영영 못 본다.
  */
-function resetToFirstPage(url: string): string {
+export function resetToFirstPage(url: string): string {
   try {
     const u = new URL(url)
     if (u.searchParams.has('page')) {
@@ -2786,7 +3115,11 @@ export function diffQueryParams(baseUrl: string, variantUrl: string): Record<str
     const base = new URL(baseUrl)
     const variant = new URL(variantUrl)
     if (base.origin !== variant.origin || base.pathname !== variant.pathname) return null
-    const diff: Record<string, string> = {}
+    // Object.create(null)로 프로토타입 없는 객체를 쓴다 — 몰 URL의 쿼리파라미터 키를 그대로 diff[key]에
+    // 대입하는데, 키가 우연히(또는 악의적으로) "__proto__"면 일반 객체 리터럴({})에는 실제 속성이 아니라
+    // 그 객체의 프로토타입 자체가 바뀌어버려(Object.keys에도 안 잡힘) 정렬 파라미터가 조용히 사라진다
+    // (fast-check 속성 테스트가 실제로 찾아낸 사례, 2026-08-23).
+    const diff: Record<string, string> = Object.create(null)
     for (const [key, value] of variant.searchParams.entries()) {
       if (key === 'page') continue // 페이지 번호는 정렬과 무관한 우연한 차이일 뿐 — 정렬 파라미터가 아니다.
       if (base.searchParams.get(key) !== value) diff[key] = value
@@ -2896,7 +3229,60 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
   let collectionStopped = false
   async function collectFromListing(workerPage: Page, listingUrl: string) {
     if (workerPage.url() !== listingUrl) {
-      await workerPage.goto(listingUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+      // 실패를 조용히 삼키면(예전 코드) 워커페이지가 이전 카테고리 페이지나 about:blank에 그대로 머문
+      // 채로 아래 scanForProducts가 돌아, "이 카테고리는 상품이 0개"로 오판해버린다 — 실제로는 몰 서버가
+      // 순간적으로 응답이 느렸을 뿐인데도(펫투비 실사용 확인, 2026-08-23: 카테고리 19개를 8탭 동시
+      // 수집하다 11개가 통째로 0건·나머지도 일부만 수집됨, 상품 상세 스크랩 단계는 실패 0건이었던 것과
+      // 대조적으로 이 URL 수집 단계에만 재시도가 없었다) — 아래 다음 페이지 이동(withPageParam)과 같은
+      // 이유로 여기도 실패하면 더 긴 타임아웃으로 한 번 더 시도한다.
+      const moved = await workerPage.goto(listingUrl, { waitUntil: 'load', timeout: 30_000 }).then(() => true).catch(() => false)
+      if (!moved) await workerPage.goto(listingUrl, { waitUntil: 'load', timeout: 60_000 }).catch(() => {})
+    }
+
+    // "카테고리별 정렬기준 설정"에서 AJAX(클릭) 방식 정렬을 골랐으면(MallSortOption의 kind:'click' —
+    // 정렬이 URL에 반영되지 않는 몰, detectClickBasedSortOptions 참고) 이 목록에 처음 들어온 시점에 딱
+    // 한 번 클릭해 적용한다. 페이지네이션(아래 for문의 다음 페이지 이동)은 같은 workerPage/세션을 그대로
+    // 쓰므로 이미 적용된 정렬 상태가 이어진다고 본다 — 페이지마다 다시 클릭하지 않는다.
+    const sortClickText = opts.categorySortClicks?.[listingUrl]
+    if (sortClickText) {
+      try {
+        const locator = workerPage.getByText(sortClickText, { exact: true }).first()
+        if (await locator.count() > 0) {
+          await locator.click({ timeout: 3_000 })
+          await workerPage.waitForLoadState('load', { timeout: 5_000 }).catch(() => {})
+          await workerPage.waitForLoadState('networkidle', { timeout: 3_000 }).catch(async () => { await workerPage.waitForTimeout(800) })
+          // kind:'click' 정렬은 정의상 AJAX라 URL이 전혀 안 바뀌어야 한다(detectSortOptionsByClicking이
+          // 바로 이 조건 — afterUrl===baseUrl, 문자열 그대로 동일 — 으로 kind:'click'을 확정했다). 같은
+          // 정렬 텍스트가 상품 뱃지("신상품" 등)나, 이 카테고리 페이지에만 있는 진짜 href 링크(다른
+          // 카테고리에서 검증할 땐 AJAX였는데 이 페이지에선 진짜 이동 링크인 경우)에도 겹쳐서
+          // getByText(...).first()가 엉뚱한 걸 눌러버릴 수 있다는 게 실사용에서 두 가지 형태로 다
+          // 확인됐다(2026-08-24, 펫투비): (1) 경로 자체가 바뀌어 상품 상세로 튕겨나가 그 페이지의
+          // 추천상품 몇 개만 "카테고리 상품"으로 잘못 잡히거나(카테고리 상품이 0~소수건), (2) 경로는
+          // 같은 goods_list.php에 남았지만 쿼리에 `sort=price+desc` 같은 진짜 정렬 파라미터가 실려
+          // "AJAX라 URL 안 바뀜"이라는 전제가 깨진 채로 이후 다음 페이지 이동(withPageParam)이 이
+          // 오염된 URL을 base로 계속 페이지 번호만 늘려가며(예: page_num=60까지) 상품을 하나도 못 찾고
+          // 헛돌았다 — 그러다 결국 "카테고리 전체에서 상품 링크를 하나도 못 찾음" 처리로 빠져, 이
+          // 오염된 목록 URL 자체가 "상품 1건"인 것처럼 잘못 스크랩 시도되며 실패로 찍혔다. 두 경우 다
+          // pathname만으론 못 잡아서(2번은 경로가 그대로다) 쿼리까지 포함한 URL 전체를 비교한다 — 조금이라도
+          // 바뀌었으면 오클릭으로 보고 원래 목록 URL로 되돌린다. 정렬은 못 맞추더라도(기본순) 상품
+          // 자체를 놓치지 않는 게 우선이다.
+          if (workerPage.url() !== listingUrl) {
+            await workerPage.goto(listingUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+          } else {
+            // networkidle/800ms 대기 뒤에도 AJAX 재정렬이 상품 목록을 다 그려내지 못한 채로 스캔되는
+            // 경우가 실사용에서 확인됐다(펫투비 — 정렬 클릭은 제대로 됐는데 1페이지 60개 중 16개만
+            // 잡힘, 그래도 늘어나는 중이라면 아직 렌더링이 끝나지 않은 것). 개수가 더 늘어나는 동안만
+            // 짧게 한 번 더 기다린다 — 이미 다 그려졌으면(개수 변화 없음) 곧바로 통과한다.
+            let count = (await scanForProducts(workerPage)).length
+            for (let i = 0; i < 3; i++) {
+              await workerPage.waitForTimeout(500)
+              const nextCount = (await scanForProducts(workerPage)).length
+              if (nextCount <= count) break
+              count = nextCount
+            }
+          }
+        }
+      } catch { /* 정렬 클릭이 실패해도 기본 정렬로 스크랩을 계속한다 — 정렬 순서만 못 맞출 뿐 상품 자체는 그대로 수집 가능 */ }
     }
 
     const categoryLabel = await detectCategoryLabel(workerPage)
@@ -2956,7 +3342,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
   }
 
   if (context && listingUrls.length > 1) {
-    const LISTING_CONCURRENCY = Math.min(resolveConcurrency(opts, 8), listingUrls.length)
+    const LISTING_CONCURRENCY = Math.min(resolveConcurrency(opts, 16), listingUrls.length)
     let cursor = 0
     async function worker(workerPage: Page) {
       while (true) {
@@ -3915,7 +4301,7 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
         // 카테고리별 개수만 여러 탭으로 동시에 집계한다. 로그인 창을 재사용하는 siteId라도 그 공유 탭은
         // 절대 쓰지 않고 항상 새 탭만 연다(discoverCategoryLinks에서 같은 이유로 겪은 "다른 네비게이션에
         // 의해 중단됨" 충돌 방지).
-        const COUNT_CONCURRENCY = resolveConcurrency(opts, 8)
+        const COUNT_CONCURRENCY = resolveConcurrency(opts, 16)
         const categoryCounts = new Array<CategoryCount | undefined>(listingUrls.length)
         let cursor = 0
         async function worker() {
@@ -4057,9 +4443,10 @@ export async function scrapeCatalogPage(
     // concurrencyMode==='manual'이면 그 값으로 상한을 고정하고 시작값도 거기서 바로 시작한다(activeLimit이
     // 이미 MAX_CONCURRENCY와 같아 위 "연속 성공 시 상향" 조건이 못 만족돼 그대로 고정된 채 유지된다) —
     // 차단 감지 시 1로 낮췄다가 회복하는 안전장치는 auto/manual 구분 없이 그대로 적용되고, manual이면
-    // 8이 아니라 이 고정값까지만 다시 올라온다.
-    const manualLimit = opts.concurrencyMode === 'manual' ? Math.max(1, Math.min(opts.concurrency || 1, 8)) : null
-    const MAX_CONCURRENCY = manualLimit ?? 8
+    // 16이 아니라 이 고정값까지만 다시 올라온다. 상한(16) 자체의 근거는 resolveConcurrency 주석 참고 —
+    // 8이던 걸 2026-08-24에 리소스 실측 후 올렸다.
+    const manualLimit = opts.concurrencyMode === 'manual' ? Math.max(1, Math.min(opts.concurrency || 1, 16)) : null
+    const MAX_CONCURRENCY = manualLimit ?? 16
     const RAMP_UP_STREAK = 5
     let activeLimit = manualLimit ?? 1
     let okStreak = 0
@@ -4190,7 +4577,7 @@ export async function recheckMallProducts(opts: ScrapeOptions, targets: RecheckT
   return withContext(opts, async (page, context) => {
     const results: RecheckResult[] = []
     let cursor = 0
-    const concurrency = Math.max(1, Math.min(opts.concurrency || 4, 8))
+    const concurrency = Math.max(1, Math.min(opts.concurrency || 4, 16))
 
     async function recheckOne(workerPage: Page, target: RecheckTarget): Promise<RecheckResult> {
       for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
@@ -4293,7 +4680,7 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
       // "카테고리 메뉴/구조 탐지"는 sampleMallProfile("몰 구조분석")과 공용 함수(discoverTopLevelCategoryLinks)를
       // 쓴다 — AI(Gemini)를 우선 시도하고 실패하면 기존 셀렉터 히스틱 체인으로 폴백한다(2026-08-18/19).
       const mallName = opts.siteId ? (await siteInfo(opts.siteId)).name : new URL(url).hostname
-      const { links: topLevelLinks, aiUsed: topLevelAiUsed } = await discoverTopLevelCategoryLinks(scanPage, mallName, true)
+      const { links: topLevelLinks, aiUsed: topLevelAiUsed } = await discoverTopLevelCategoryLinks(context, scanPage, mallName, true)
       let categoryLinks = topLevelLinks
       // 화면에 "AI가 실제로 이번 결과에 기여했는지"를 작게 표시해주기 위한 신호(사용자 요청, 2026-08-18) —
       // 최상위 탐지든 아래 허브 하위메뉴 탐지든 AI 결과를 하나라도 그대로 채택했으면 true.
@@ -4318,7 +4705,7 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
       const detailPatternSrc = profile.detailUrlPattern?.source
       const baseUrl = new URL(url).origin
       const expandedByIndex: CategoryMenuLink[][] = new Array(categoryLinks.length)
-      const EXPAND_CONCURRENCY = Math.min(resolveConcurrency(opts, 8), categoryLinks.length || 1)
+      const EXPAND_CONCURRENCY = Math.min(resolveConcurrency(opts, 16), categoryLinks.length || 1)
       // 대분류 자기 자신의 href 목록 — 어느 카테고리 상세 페이지를 열어도 사이트 전체 대분류 메뉴(GNB)가
       // 항상 그대로 떠 있어, scanCategoryMenuRobust를 그 페이지에서 다시 돌리면 "하위 메뉴"가 아니라 이
       // GNB를 그대로 다시 찾아버릴 수 있다(모자사러 실사용 확인, 2026-08-17 — "캡모자"의 하위로 신발/가방

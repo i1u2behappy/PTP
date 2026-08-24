@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
-import { reExtractStagingItems } from '@/lib/scrape/reextract'
+import { reExtractStagingItems } from '@/lib/workerClient'
 
 /**
  * "조정 확정" — 일반모드 몰 전용. "스크랩 조정 개시"로 이미 저장된 sites.extraction_rules를 그대로,

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { isStopRequested } from '@/lib/scraper'
+import { isStopRequested } from '@/lib/workerClient'
 
 // chrome-extension:// 출처에서 오는 fetch라 CORS 프리플라이트(OPTIONS)를 직접 응답해야 하고,
 // 로컬(사설망) 주소로 가는 요청이라 Private Network Access 헤더도 같이 내려줘야 브라우저가 막지 않는다.
@@ -23,6 +23,6 @@ export async function OPTIONS() {
  */
 export async function GET(req: NextRequest) {
   const sessionId = Number(req.nextUrl.searchParams.get('sessionId'))
-  const stop = Number.isFinite(sessionId) ? isStopRequested(sessionId) : false
+  const stop = Number.isFinite(sessionId) ? await isStopRequested(sessionId) : false
   return NextResponse.json({ stop }, { headers: corsHeaders() })
 }

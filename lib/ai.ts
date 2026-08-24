@@ -22,6 +22,22 @@ const GEMINI_MODEL = 'gemini-flash-latest'
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:8b'
 
+/** Ollama는 이 PC에서 GPU 없이 CPU로만 추론한다(`ollama ps`의 `size_vram: 0`로 확인) — CPU 연산 자체인
+ *  추론은 요청이 동시에 여러 개 들어오면 서로 CPU를 나눠 쓰며 배로(경우에 따라 수십 배까지, think 모드
+ *  킴/끔 32배 차이가 같은 종류의 민감성을 보여줌) 느려진다. discoverCategoryLinks의 expandWorker가
+ *  카테고리를 최대 8개까지 동시에 확인하는데, 그중 상품 없는 "허브" 카테고리를 여러 개 만나면 각자
+ *  detectCategoryLinksWithAI를 불러 최대 8개 요청이 한꺼번에 몰릴 수 있었다(실사용 확인, 2026-08-22 —
+ *  개발자모드의 비슷한 경합을 먼저 발견하고 고친 뒤, 같은 문제가 여기도 있다는 사용자 지적으로 발견).
+ *  이 앱이 Ollama에 보내는 요청은 항상 이 큐를 거쳐 한 번에 하나씩만 실제로 나가게 한다 — 페이지 방문
+ *  자체(네트워크 대기가 대부분이라 동시 처리에 상대적으로 안전)는 그대로 병렬로 두고, CPU 경합에 훨씬
+ *  민감한 AI 호출만 직렬화하는 것이 핵심이다. */
+let ollamaQueue: Promise<unknown> = Promise.resolve()
+function withOllamaQueue<T>(fn: () => Promise<T>): Promise<T> {
+  const run = ollamaQueue.then(fn, fn)
+  ollamaQueue = run.then(() => undefined, () => undefined)
+  return run
+}
+
 /** detectCategoryLinksWithAI/detectSortOptionsWithAI 전용 — Gemini 무료 티어 일일 한도(20회/일)에
  *  너무 쉽게 걸려서(2026-08-22 실사용 확인: 모자사러 정렬 감지가 하루 한도 초과로 계속 조용히
  *  실패했는데, 그 전까지는 매번 다른 원인으로 착각하고 고쳤었다) 이 둘만 로컬 Ollama로 옮긴다 — 사용자가
@@ -33,16 +49,42 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:8b'
  *  도구 호출(함수 호출) 신뢰성 예시로 쓰는 모델이라 골랐다.
  *  think:false 필수 — qwen3는 기본이 "추론 모델"이라 답하기 전에 긴 내부 사고 과정을 토큰으로 전부
  *  생성한다(2026-08-22 실측: 4항목짜리 아주 작은 목록에서도 thinking 켠 채로 258초, 꺼서 8초 —
- *  32배 차이). 이 작업은 "목록에서 인덱스 고르기"라는 단순 분류라 추론 과정이 필요 없다. */
-async function pickIndicesWithOllama(prompt: string, toolName: string, toolDescription: string): Promise<number[]> {
+ *  32배 차이). 이 작업은 "목록에서 인덱스 고르기"라는 단순 분류라 추론 과정이 필요 없다.
+ *  MAX_CANDIDATES로 후보를 자르고 timeoutMs로 강제 마감하는 이유(2026-08-23, "펫투비 10.7분" 재발 조사):
+ *  처음엔 keep_alive 갱신으로 "5분 유휴 후 모델 언로드→콜드스타트"가 원인이라 보고 고쳤는데, 그 뒤에도
+ *  똑같이 매번 300초 안팎이 반복돼 실측으로 재확인했다 — 모델이 이미 메모리에 로드된(warm) 상태에서도
+ *  실제 몰 규모(약 120개 링크)의 프롬프트를 보내면 여전히 210초가 걸렸고, 그마저 think:false인데도
+ *  도구 호출 대신 장문의 일반 텍스트로 답하며 tool_calls가 비어 결과 없이 시간만 태웠다. 즉 진짜 원인은
+ *  "콜드스타트"가 아니라 "CPU 전용 8B 모델이 후보가 많은 긴 프롬프트를 못 감당해 도구 호출을 안 하고
+ *  텍스트로 새는 것"이었다 — 후보 수를 줄여 프롬프트를 짧게 유지하고, 그래도 오래 걸리면(모델이 여전히
+ *  텍스트로 새는 등) 몇 분씩 무작정 기다리지 않고 짧은 시간 안에 끊어 히스틱 폴백으로 넘어가게 한다. */
+const OLLAMA_MAX_CANDIDATES = 60
+const OLLAMA_TIMEOUT_MS = 25_000
+
+/** signal(선택)을 넘기면 "몰 구조분석 중지" 버튼이 이 호출까지 실제로 끊는다 — CPU 연산 자체인 로컬
+ *  추론은 끊자마자 Ollama(llama-server)도 그 요청의 생성을 멈춘다(fetch abort 시 서버가 요청 컨텍스트
+ *  취소를 감지하는 표준 동작, 2026-08-22 사용자 요청: "중지를 누르면 llama-server 작업도 멈추게"). */
+function pickIndicesWithOllama(prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal): Promise<number[]> {
+  return withOllamaQueue(() => pickIndicesWithOllamaOnce(prompt, toolName, toolDescription, signal))
+}
+
+async function pickIndicesWithOllamaOnce(prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal): Promise<number[]> {
+  // AbortSignal.timeout()과 호출부의 signal(중지 버튼) 둘 중 먼저 오는 쪽으로 끊는다 — 이 호출이 정상
+  // 범위(수 초~십수 초)를 넘기면 모델이 텍스트로 새고 있다고 보고 자른다. AbortSignal.any는 Node 20+.
+  const timeoutSignal = AbortSignal.timeout(OLLAMA_TIMEOUT_MS)
+  const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
   try {
     const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: combinedSignal,
       body: JSON.stringify({
         model: OLLAMA_MODEL,
         stream: false,
         think: false,
+        // 모델이 세션 중 계속 메모리에 남아있게(콜드스타트 자체는 실제로 막아준다 — 다만 위 주석대로
+        // 이게 300초 지연의 진짜 원인은 아니었다).
+        keep_alive: '30m',
         messages: [{ role: 'user', content: prompt }],
         tools: [{
           type: 'function',
@@ -67,6 +109,8 @@ async function pickIndicesWithOllama(prompt: string, toolName: string, toolDescr
     const indices = (args as { indices?: unknown } | null)?.indices
     return Array.isArray(indices) ? indices.filter((i): i is number => Number.isInteger(i)) : []
   } catch {
+    // 위 timeoutSignal이 끊은 경우도 여기로 온다 — 호출부는 빈 배열을 기존 히스틱/미검출 폴백과
+    // 똑같이 취급하므로 "느려서 포기"와 "원래 실패"를 구분할 필요가 없다.
     return []
   }
 }
@@ -478,8 +522,13 @@ export async function detectCategoryLinksWithAI(
   /** 지정하면 "이 카테고리의 하위 카테고리만 골라라"는 허브 펼치기 모드로 동작한다(discoverCategoryLinks의
    *  대분류 허브 확장과 같은 용도) — 생략하면 몰 전체의 최상위 카테고리 탐지 모드. */
   parentCategoryName?: string,
+  signal?: AbortSignal,
 ): Promise<CategoryLinkCandidate[]> {
   if (!linkCandidates.length) return []
+  // 후보가 많을수록(실사용 확인: 몰 하나에 100개 넘는 링크도 흔함) 프롬프트가 길어져 CPU 전용 로컬
+  // 모델이 도구 호출 대신 장문의 텍스트로 새며 몇 분씩 허비한다(pickIndicesWithOllamaOnce 주석 참고) —
+  // 카테고리 메뉴는 보통 앞쪽(헤더/전체메뉴)에 몰려있으므로 앞에서 OLLAMA_MAX_CANDIDATES개만 판단시킨다.
+  const candidates = linkCandidates.slice(0, OLLAMA_MAX_CANDIDATES)
 
   const scopeInstruction = parentCategoryName
     ? `이 링크들은 '${mallName}' 몰의 '${parentCategoryName}' 카테고리 페이지 안에 있던 것이다 — 이
@@ -494,16 +543,17 @@ export async function detectCategoryLinksWithAI(
 링크는 절대 포함하지 마라. 확실하지 않으면 빼라.
 
 [링크 목록 (인덱스. "링크텍스트" → URL)]
-${linkCandidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
+${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
 
   const indices = await pickIndicesWithOllama(
     prompt, 'set_category_link_indices',
     '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
+    signal,
   )
   const seen = new Set<number>()
   return indices
-    .filter(i => i >= 0 && i < linkCandidates.length && !seen.has(i) && seen.add(i))
-    .map(i => ({ name: linkCandidates[i].text, href: linkCandidates[i].href }))
+    .filter(i => i >= 0 && i < candidates.length && !seen.has(i) && seen.add(i))
+    .map(i => ({ name: candidates[i].text, href: candidates[i].href }))
 }
 
 export interface SortOptionCandidate { label: string; href: string }
@@ -528,8 +578,11 @@ export async function detectSortOptionsWithAI(
   mallName: string,
   linkCandidates: { text: string; href: string }[],
   baseUrl: string,
+  signal?: AbortSignal,
 ): Promise<SortOptionCandidate[]> {
   if (!linkCandidates.length) return []
+  // detectCategoryLinksWithAI와 같은 이유로 후보 수를 잘라 프롬프트를 짧게 유지한다.
+  const candidates = linkCandidates.slice(0, OLLAMA_MAX_CANDIDATES)
 
   const prompt = `이 링크들은 '${mallName}' 몰의 상품 목록(카테고리) 페이지(${baseUrl})에 있던 것이다.
 이 중 상품 정렬/정렬순서를 바꾸는 링크(신상품순, 낮은가격순, 높은가격순, 인기순, 판매량순, 조회순,
@@ -544,16 +597,17 @@ export async function detectSortOptionsWithAI(
 확실하지 않으면 빼라.
 
 [링크 목록 (인덱스. "링크텍스트" → URL)]
-${linkCandidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
+${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
 
   const indices = await pickIndicesWithOllama(
     prompt, 'set_sort_option_indices',
     '정렬 기준 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
+    signal,
   )
   const seen = new Set<number>()
   return indices
-    .filter(i => i >= 0 && i < linkCandidates.length && !seen.has(i) && seen.add(i))
-    .map(i => ({ label: linkCandidates[i].text, href: linkCandidates[i].href }))
+    .filter(i => i >= 0 && i < candidates.length && !seen.has(i) && seen.add(i))
+    .map(i => ({ label: candidates[i].text, href: candidates[i].href }))
 }
 
 export interface MallStructureReport {

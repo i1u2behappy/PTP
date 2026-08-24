@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { openUrlInLoginWindow } from '@/lib/scraper'
+import { openUrlInLoginWindow } from '@/lib/workerClient'
 import pool from '@/lib/db'
 
 /** 로그인 창에 새 탭으로 열어준다. 로그인 창이 닫혀있으면 저장된 로그인 쿠키로 새 창을 띄워서 연다.

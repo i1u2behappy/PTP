@@ -226,7 +226,7 @@ export function SitesListPanel() {
         </div>
       </div>
 
-      <ClientMallFilterBar showMallFilter={false} searchPlaceholder="이름 또는 URL 검색..."
+      <ClientMallFilterBar showMallFilter={false} searchPlaceholder="이름·URL·로그인ID·거래처·메인품목·메모 검색..."
         onChange={f => { setClientFilter(f.clientId); setQ(f.search) }} />
 
       {loadError ? (

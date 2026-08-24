@@ -34,10 +34,12 @@ export async function GET(req: NextRequest) {
   const res = await pool.query<{
     id: number; name: string | null; url: string; extraction_rules: unknown; devmode_ai_preview: boolean
     devmode_category_urls: string[] | null
+    devmode_category_settings: Record<string, { sortLabel?: string; limitMode?: 'count' | 'pages'; limitValue?: number }> | null
     last_adjustment_preview: { preview?: { product: Record<string, unknown> } | null } | null
-    scrape_profile: { categoryLinks?: { name: string; href: string }[] } | null
+    scrape_profile: { categoryLinks?: { name: string; href: string }[]; sortOptions?: { label: string; paramsToAdd: Record<string, string> }[] } | null
   }>(
-    `SELECT id, name, url, extraction_rules, devmode_ai_preview, devmode_category_urls, last_adjustment_preview, scrape_profile
+    `SELECT id, name, url, extraction_rules, devmode_ai_preview, devmode_category_urls, devmode_category_settings,
+            last_adjustment_preview, scrape_profile
      FROM sites WHERE manual_login_required = true`,
   )
   const targetHost = normalizeHost(host)
@@ -45,6 +47,18 @@ export async function GET(req: NextRequest) {
     try { return normalizeHost(new URL(row.url).hostname) === targetHost } catch { return false }
   })
   if (!match) return NextResponse.json({ error: 'not found' }, { status: 404, headers: corsHeaders() })
+
+  // 이 몰에서 이미 성공적으로 수집한 상품 URL — "스크래핑 시작"을 다시 눌러도(중지 후 이어서 하기,
+  // 300개 상한이 있던 예전 세션 등) 이미 받아둔 상품을 처음부터 다시 방문하지 않게 확장에 같이
+  // 내려준다(2026-08-22, 사용자 요청 — 일반모드가 mall_products 기준으로 이미 하는 것과 같은 이유이나,
+  // 개발자모드는 스크랩 직후 아직 검토/병합 전이라 mall_products가 아니라 scrape_item_log의 성공 기록을
+  // 기준으로 삼는다).
+  const excludeRes = await pool.query<{ url: string }>(
+    `SELECT DISTINCT l.url FROM scrape_item_log l
+     JOIN scrape_sessions s ON s.id = l.session_id
+     WHERE s.site_id = $1 AND l.status = 'success'`,
+    [match.id],
+  )
 
   // 스크랩 대상 직접지정 피커(개발자모드)의 필드 목록도 일반모드와 같은 기준 마스터테이블 라벨/순서를
   // 따르게 하려고 같이 내려준다 — lib/scraper.ts의 startElementPicker가 하는 것과 동일한 조회.
@@ -69,6 +83,9 @@ export async function GET(req: NextRequest) {
     id: match.id, name: match.name, extractionRules: match.extraction_rules || {}, aiPreviewMode: match.devmode_ai_preview,
     categoryUrls: match.devmode_category_urls || [],
     categoryLinks: match.scrape_profile?.categoryLinks || [],
+    categorySettings: match.devmode_category_settings || {},
+    sortOptions: match.scrape_profile?.sortOptions || [],
     masterLabels, masterOrder, previewProduct: match.last_adjustment_preview?.preview?.product || null,
+    excludeUrls: excludeRes.rows.map(r => r.url),
   }, { headers: corsHeaders() })
 }

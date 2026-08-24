@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { runAutoAnalysis } from '@/lib/scrape/adjustment'
-import { extractFromHtml } from '@/lib/scraper'
+import { persistCategoryCounts } from '@/lib/scraper'
+import { extractFromHtml } from '@/lib/workerClient'
 import type { ExtractionRule } from '@/lib/ai'
 
 // chrome-extension:// 출처에서 오는 fetch라 CORS 프리플라이트(OPTIONS)를 직접 응답해야 하고,
@@ -72,6 +73,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     `UPDATE sites SET last_adjustment_preview=$1 WHERE id=$2`,
     [JSON.stringify({ total, platform: 'unknown', preview, items, categoryCounts }), siteId],
   )
+  // 일반모드와 같은 이유로(카테고리 체크리스트의 개수/확인일시 컬럼) 저장해둔다.
+  if (categoryCounts.length) await persistCategoryCounts(siteId, categoryCounts).catch(() => {})
 
   return NextResponse.json({ preview }, { headers: corsHeaders() })
 }

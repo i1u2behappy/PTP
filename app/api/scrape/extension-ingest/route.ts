@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { stageScrapedProduct, clearStalePendingIfConfigChanged } from '@/lib/scrape/staging'
-import { clearStopRequest } from '@/lib/scraper'
+import { clearStopRequest } from '@/lib/workerClient'
 import type { ExtractedProduct, ExtractionRule } from '@/lib/ai'
 
 // chrome-extension:// 출처에서 오는 fetch라 CORS 프리플라이트(OPTIONS)를 직접 응답해야 하고,
@@ -28,6 +28,11 @@ interface IngestBody {
   stopped?: boolean
   /** 이 URL의 추출이 실패했을 때만 채워 보낸다 — product는 안 보낸다. */
   error?: string
+  /** done=true일 때만 같이 보낸다 — 개발자모드도 일반모드(lib/scrape/run.ts)와 같은 형태(AIMD 적응형
+   *  동시성 로그)를 만들어 여기서 한 번에 저장한다(2026-08-22, 사용자 요청: "일반모드처럼 8개까지 올리되
+   *  적응형 로직을 태우면 되지 않나"). 진행 중 실시간 갱신이 아니라 끝날 때 한 번에 기록하는 것도
+   *  일반모드와 동일 — "⚡ 동시 처리 최고 N개까지 사용" 배지가 그 형태를 이미 그대로 읽는다. */
+  concurrencyLog?: { at: string; level: number; reason: 'ramp_up' | 'block_detected' }[]
 }
 
 const EMPTY_PRODUCT: ExtractedProduct = {
@@ -71,8 +76,11 @@ export async function POST(req: NextRequest) {
     // "스크래핑 중지"로 도중에 끝난 것과 정상 완료를 구분해야 PTP 진행상황 화면이 올바른 상태를 보여준다
     // (일반모드는 이미 'stopped' 상태를 쓰고 있다 — 개발자모드도 같은 상태값으로 맞춘다). finished_at도
     // 일반모드(lib/scrape/run.ts)와 같은 기준으로 남겨 "소요시간" 표시가 개발자모드 세션에도 나오게 한다.
-    await pool.query(`UPDATE scrape_sessions SET status=$2, finished_at=NOW() WHERE id=$1`, [sessionId, body.stopped ? 'stopped' : 'done'])
-    clearStopRequest(sessionId)
+    await pool.query(
+      `UPDATE scrape_sessions SET status=$2, concurrency_log=$3, finished_at=NOW() WHERE id=$1`,
+      [sessionId, body.stopped ? 'stopped' : 'done', JSON.stringify(body.concurrencyLog || [])],
+    )
+    await clearStopRequest(sessionId)
     return NextResponse.json({ sessionId }, { headers: corsHeaders() })
   }
 

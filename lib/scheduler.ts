@@ -1,6 +1,5 @@
 import pool, { decryptSecret } from './db'
-import { runScraping } from './scrape/run'
-import { isAnySiteBusy } from './scraper'
+import { runScraping, isAnySiteBusy } from './workerClient'
 import { restartPtpServer, isRestartInFlight } from './systemRestart'
 
 // ponytail: 단일 프로세스 in-memory 스케줄러. 여러 서버 인스턴스로 스케일하면 각자 따로 돌아 중복 실행될 수 있음.
@@ -31,7 +30,7 @@ async function checkMemoryAndAutoRestart() {
   if (isRestartInFlight()) return
   const rssMB = process.memoryUsage().rss / 1024 / 1024
   if (rssMB < MEMORY_RESTART_THRESHOLD_MB) return
-  if (isAnySiteBusy()) {
+  if (await isAnySiteBusy()) {
     console.log(`[autoRestart] 메모리 ${Math.round(rssMB)}MB로 임계치(${MEMORY_RESTART_THRESHOLD_MB}MB) 초과했지만, 진행 중인 몰 작업이 있어 이번엔 건너뜀`)
     return
   }

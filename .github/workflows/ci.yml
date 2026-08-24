@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: 타입체크
+        run: npx tsc --noEmit
+
+      - name: 린트
+        run: npm run lint
+
+      # 순수 로직만 다루는 단위테스트(tests/unit) — 실제 몰 사이트/DB/로그인 세션이 필요한 Playwright
+      # e2e(tests/e2e)는 이 워크플로에서 다루지 않는다. CI 환경에 개발 DB/실제 로그인 계정이 없어서다.
+      - name: 단위테스트
+        run: npm run test:unit

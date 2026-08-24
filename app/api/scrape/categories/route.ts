@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
-import { discoverCategoryLinks, getCategoryScrapeHistory, type CategoryLink, type MallPlatform } from '@/lib/scraper'
+import { getCategoryScrapeHistory, type CategoryLink, type MallPlatform } from '@/lib/scraper'
+import { discoverCategoryLinks } from '@/lib/workerClient'
 
 interface CachedCategoryCount { count: number; truncated?: boolean; label: string; checkedAt: string }
 

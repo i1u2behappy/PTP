@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool, { encryptSecret, decryptSecret } from '@/lib/db'
-import { profileDir } from '@/lib/scraper'
+import { profileDir, getCategoryScrapeHistory } from '@/lib/scraper'
 import { isAdminRequest } from '@/lib/auth'
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -9,7 +9,8 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     `SELECT id, name, url, login_url, login_id, login_pw_encrypted, login_pw_iv, client_id,
             custom_name_selector, custom_price_selector, custom_thumbnail_selector,
             auto_scrape_enabled, auto_scrape_hour, manual_login_required, main_items, extraction_rules,
-            last_adjustment_preview, devmode_ai_preview, devmode_category_urls, scrape_profile, scrape_profile_updated_at,
+            last_adjustment_preview, devmode_ai_preview, devmode_category_urls, devmode_category_settings,
+            scrape_profile, scrape_profile_updated_at,
             last_login_confirmed_at, memo
      FROM sites WHERE id = $1`,
     [id],
@@ -29,6 +30,12 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   // "일반모드가 실제로 동작함이 검증됨"의 더 확실한 증거다.
   const doneRes = await pool.query(`SELECT 1 FROM scrape_sessions WHERE site_id=$1 AND status='done' LIMIT 1`, [id])
   const hasCompletedScrape = doneRes.rows.length > 0
+  // 카테고리 체크리스트의 "최근 스크랩"/"업체" 컬럼용 — scrape_profile.categoryCounts(previewCatalog가
+  // 저장해둔 카테고리별 라벨)를 기준으로만 조회하면 되므로, 몰을 선택할 때마다 매번 몰 전체를 다시
+  // 훑지 않고 이미 캐시된 라벨 목록만 사용한다.
+  const categoryCounts = (site.scrape_profile as { categoryCounts?: Record<string, { label: string }> } | null)?.categoryCounts || {}
+  const categoryLabels = [...new Set(Object.values(categoryCounts).map(c => c.label))]
+  const categoryScrapeHistory = await getCategoryScrapeHistory(site.id, categoryLabels)
   return NextResponse.json({
     id: site.id, name: site.name, url: site.url, login_url: site.login_url, login_id: site.login_id,
     login_pw: decryptSecret(site.login_pw_encrypted, site.login_pw_iv),
@@ -45,6 +52,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     last_adjustment_preview: site.last_adjustment_preview,
     devmode_ai_preview: site.devmode_ai_preview,
     devmode_category_urls: site.devmode_category_urls || [],
+    devmode_category_settings: site.devmode_category_settings || {},
     // "몰 구조분석"의 거래정보 리포트(있으면) — SiteDetailPanel이 운영 메모 아래 참고용으로 표시한다.
     mall_report: site.scrape_profile?.report ?? null,
     mall_report_updated_at: site.scrape_profile_updated_at,
@@ -60,6 +68,9 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     has_completed_scrape: hasCompletedScrape,
     latest_memo: latestMemo ? { content: latestMemo.content, createdAt: latestMemo.created_at } : null,
     profile_dir: profileDir(site.id),
+    // 카테고리 체크리스트의 "최근 스크랩"/"업체" 컬럼용(라벨 기준, lib/scraper.ts의 getCategoryScrapeHistory
+    // 참고) — 사용자 요청, 2026-08-17.
+    category_scrape_history: categoryScrapeHistory,
   })
 }
 
@@ -104,9 +115,14 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
  * 갖고 있지 않아, PUT을 그대로 쓰면 나머지 필드를 실수로 지울 위험이 있다). */
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const b = await req.json() as { manualLoginRequired?: boolean; devmodeAiPreview?: boolean; devmodeCategoryUrls?: string[] }
-  if (typeof b.manualLoginRequired !== 'boolean' && typeof b.devmodeAiPreview !== 'boolean' && !b.devmodeCategoryUrls) {
-    return NextResponse.json({ error: 'manualLoginRequired, devmodeAiPreview, devmodeCategoryUrls 중 하나가 필요합니다' }, { status: 400 })
+  const b = await req.json() as {
+    manualLoginRequired?: boolean
+    devmodeAiPreview?: boolean
+    devmodeCategoryUrls?: string[]
+    devmodeCategorySettings?: Record<string, { sortLabel?: string; limitMode?: 'count' | 'pages'; limitValue?: number }>
+  }
+  if (typeof b.manualLoginRequired !== 'boolean' && typeof b.devmodeAiPreview !== 'boolean' && !b.devmodeCategoryUrls && !b.devmodeCategorySettings) {
+    return NextResponse.json({ error: 'manualLoginRequired, devmodeAiPreview, devmodeCategoryUrls, devmodeCategorySettings 중 하나가 필요합니다' }, { status: 400 })
   }
   if (typeof b.manualLoginRequired === 'boolean') {
     await pool.query(`UPDATE sites SET manual_login_required=$1 WHERE id=$2`, [b.manualLoginRequired, id])
@@ -118,6 +134,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   // (devmode_ai_preview와 같은 이유, lib/db.ts 컬럼 주석 참고).
   if (b.devmodeCategoryUrls) {
     await pool.query(`UPDATE sites SET devmode_category_urls=$1 WHERE id=$2`, [JSON.stringify(b.devmodeCategoryUrls), id])
+  }
+  // 카테고리별 정렬/상한 그리드 설정 원본(가공 없이) — 확장의 run()이 스크랩 시작 순간에 URL에 반영한다
+  // (devmode_category_urls와 분리해두는 이유는 lib/db.ts 컬럼 주석 참고).
+  if (b.devmodeCategorySettings) {
+    await pool.query(`UPDATE sites SET devmode_category_settings=$1 WHERE id=$2`, [JSON.stringify(b.devmodeCategorySettings), id])
   }
   return NextResponse.json({ ok: true })
 }

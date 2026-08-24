@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool, { decryptSecret } from '@/lib/db'
-import { recheckMallProducts, type RecheckTarget } from '@/lib/scraper'
+import type { RecheckTarget } from '@/lib/scraper'
+import { recheckMallProducts } from '@/lib/workerClient'
 import { upsertMallProduct } from '@/lib/scrape/incremental'
 import type { ExtractionRule } from '@/lib/ai'
 

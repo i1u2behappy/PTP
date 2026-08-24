@@ -201,7 +201,7 @@ export function ClientsListPanel() {
 
         <div className="flex-[2_1_0%] min-h-0 flex flex-col">
           <ClientMallFilterBar showMallFilter={false}
-            searchPlaceholder="거래처명, 사업자번호, 대표자, 담당자, 연락처, 메모 검색..."
+            searchPlaceholder="거래처명, 코드, 사업자번호, 대표자, 담당자, 연락처, 결제정보, 메모 검색..."
             onChange={f => { setClientIdFilter(f.clientId); setQ(f.search) }} />
 
           {loadError ? (

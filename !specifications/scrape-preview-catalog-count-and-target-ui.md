@@ -439,10 +439,16 @@ bin-probe lo=4 hi=8 mid=6 count=48 currentPage=7 clamped=true fpMatch=false look
 `MAX_PRODUCTS=300`("이 이상은 세션을 나눠서 다시 실행"이라는 별개 설계)을 개수 집계 루프에도 그대로
 공유하고 있어, 개수만 세는 목적인데도 **300개(약 6~7페이지)에서 더 낮게 잘렸다** — 게다가 devmode
 쪽은 `truncated` 신호 자체가 없어 잘린 값을 정확한 값처럼 보여주고 있었다(서버 쪽보다 더 나쁜
-상태). **수정**: `collectCategoryLinks` 전용 상한 `MAX_PREVIEW_PAGES=1000`을 신설해 `MAX_PRODUCTS`
+상태). **수정**: `collectCategoryLinks` 전용 상한 `MAX_PREVIEW_PAGES`를 신설해 `MAX_PRODUCTS`
 공유를 끊고(개수만 세는 건 상세 추출만큼 비용이 크지 않아 `run()`의 세션-분할 제한과 성격이 다름),
 페이지 상한에 걸려 멈췄을 때 `truncated: true`를 반환해 `runPreview()`가 `categoryCounts`에
 같이 실어 보내도록 했다(`app/api/sites/[id]/preview-capture/route.ts`의 `CapturedCategoryCount`에도
+**후속 수정(같은 날, 모자사러 실사용 확인)**: 처음엔 Node쪽(`AUTO_PAGINATION_CAP`)과 똑같이 1000으로
+올렸는데, 이 확장엔 위젯 수식/지수+이분 탐색 같은 지름길이 전혀 없어 정말로 페이지마다 실제
+navigate+throttle(1.2~2.4초)을 거친다 — 카테고리를 여러 개 선택해두면 그중 하나만 페이지가 많아도
+체감상 "멈춘 것 같다"는 신고로 이어졌다. Node쪽과 성격이 달라 같은 숫자를 쓰면 안 된다고 판단해
+150으로 다시 낮췄다(원래 문제였던 50페이지 하한 노출은 여전히 피하면서, 최악의 경우에도 카테고리
+하나당 몇 분 안에는 끝나게 함).
 `truncated?: boolean` 추가). 확장 버전 1.38 → 1.39.
 
 ## 카테고리 간 중복 제거 총계 확인 (2026-08-17, 신규 기능)
@@ -743,10 +749,13 @@ React 상태를 전부 초기화하는데, `localStorage`에 저장해두던 항
 - (2026-08-17, 버그 15) `lib/scraper.ts`: `AUTO_PAGINATION_CAP` 50 → 1000(`MAX_PAGE_SEARCH_BOUND`도
   연동해 200 → 4000) — `collectProductUrls`(실제 스크랩)의 기본 `maxPages`와 미리보기 최후수단 순회가
   이 상수를 공유하므로 둘 다 같이 늘어남. `extension-poc/background.js`: `collectCategoryLinks`가
-  `MAX_PRODUCTS`(300, `run()`의 세션-분할 제한과 무관) 대신 전용 `MAX_PREVIEW_PAGES=1000`을 쓰도록
-  분리 + 상한에 걸리면 `truncated: true` 반환, `runPreview()`가 `categoryCounts`에 그대로 실어 보냄.
+  `MAX_PRODUCTS`(300, `run()`의 세션-분할 제한과 무관) 대신 전용 `MAX_PREVIEW_PAGES`(처음엔 1000,
+  이 확장엔 Node쪽 지름길이 없어 너무 느려 같은 날 150으로 재조정 — 아래 참고)를 쓰도록 분리 + 상한에
+  걸리면 `truncated: true` 반환, `runPreview()`가 `categoryCounts`에 그대로 실어 보냄.
   `app/api/sites/[id]/preview-capture/route.ts`의 `CapturedCategoryCount`에 `truncated?: boolean`
   추가. 확장 버전 1.38 → 1.39.
+- (2026-08-17, 같은 날 후속) `extension-poc/background.js`: `MAX_PREVIEW_PAGES` 1000 → 150(모자사러
+  실사용 확인 — 여러 카테고리 선택 시 체감상 멈춘 것처럼 보일 만큼 오래 걸림). 확장 버전 1.39 → 1.40.
 - (2026-08-17) `components/panels/ScraperPanel.tsx`: `previewSectionRef`/`profileResultRef`/
   `categoryResultRef`(신규) — 미리보기/몰구조분석/카테고리 불러오기 시작 시 결과 자리로 자동 스크롤
   (`progressSectionRef`와 같은 패턴).
@@ -841,3 +850,12 @@ clamp류 문제 자체가 없다는 걸 확인해뒀고(범위 밖 페이지에 
 서버 로그로 확인했다 — 다만 그 두 번째 테스트는 클라이언트 타임아웃으로 실제 중복 제거 수치 자체는
 못 받아왔다(중복 제거 로직인 `Set<string>`은 실제 스크랩에서 이미 오래 쓰인 코드라 별도 재확인은
 생략). 실제 화면에서 버튼을 눌러본 사용자 확인은 아직 받지 못한 상태.
+
+개발자모드 `MAX_PREVIEW_PAGES=1000`(버그 15 후속)은 실사용(모자사러, 카테고리 17개 선택)에서 바로
+문제가 드러났다 — Node쪽과 달리 이 확장은 지수+이분 탐색 같은 지름길이 없어 정말로 페이지마다
+실제 navigate+throttle을 거치는데, 그 상한을 Node쪽과 똑같이 1000으로 올려버려 카테고리 여러 개를
+선택하면 체감상 "미리보기가 멈췄다"는 신고로 이어졌다(실제로는 멈춘 게 아니라 매우 오래 걸리는
+중이었음 — 로그로 이후 preview-capture가 결국 도착한 것을 확인). 150으로 재조정하고 해당 몰의
+저장된 categoryCounts/last_adjustment_preview를 지워 사용자가 깨끗한 상태로 다시 시도할 수 있게
+했다. 확장은 코드만 고쳐서는 반영되지 않는다 — chrome://extensions에서 새로고침해야 새 로직이
+실제로 실행된다.

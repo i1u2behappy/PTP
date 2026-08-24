@@ -12,7 +12,20 @@ const INGEST_ENDPOINT = `${PTP_ORIGIN}/api/scrape/extension-ingest`
 const RESOLVE_ENDPOINT = `${PTP_ORIGIN}/api/sites/resolve`
 const SITE_API_BASE = `${PTP_ORIGIN}/api/sites`
 const STOP_REQUESTED_ENDPOINT = `${PTP_ORIGIN}/api/scrape/stop-requested`
-const MAX_PRODUCTS = 300 // 안전장치 — 이 이상은 세션을 나눠서 다시 실행
+const PROGRESS_ENDPOINT = `${PTP_ORIGIN}/api/scrape/extension-progress`
+
+/** "몰 구조분석"이 항상 오래 걸리는데 지금 뭘 하는지 알 방법이 없다는 지적(2026-08-22)으로, 이 확장이
+ *  맡은 두 단계(카테고리 하위구조 확인/정렬 옵션 감지)의 진행 상황을 서버(lib/scraper.ts의
+ *  setSiteLockDetail)에 남긴다 — PTP 화면이 이미 폴링 중인 site-lock-status가 그대로 실어보낸다. */
+async function reportProfileProgress(siteId, detail) {
+  await fetch(`${PTP_ORIGIN}/api/sites/${siteId}/profile-progress`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ detail }),
+  }).catch(() => {})
+}
+// 몰이 정한 기준이 아니라 이 확장이 세션 하나당 상품 수를 스스로 나눠 돌리던 내부 설계값이었다 — 사용자가
+// 선택한 카테고리 전체를 한 번에 끝까지 스크랩하길 원해(2026-08-22) 상한을 없앤다(Infinity).
+const MAX_PRODUCTS = Infinity
 // collectCategoryLinks(미리보기 개수 집계 전용) 페이지 상한 — lib/scraper.ts의 AUTO_PAGINATION_CAP과
 // 같은 이유로 50에서 한 번 올렸다가(2026-08-17: 걸스굽 "SOLD OUT"처럼 정말로 50페이지보다 큰 카테고리가
 // 있으면 조용히 그 상한에서 잘려 실제보다 훨씬 적게 보고됨), 1000은 너무 높았다는 게 바로 재현됨
@@ -43,6 +56,7 @@ async function resolveSite(hostname) {
     categoryUrls: data.categoryUrls || [], categoryLinks: data.categoryLinks || [],
     categorySettings: data.categorySettings || {}, sortOptions: data.sortOptions || [],
     masterLabels: data.masterLabels || {}, masterOrder: data.masterOrder || [], previewProduct: data.previewProduct || null,
+    excludeUrls: data.excludeUrls || [],
   }
 }
 
@@ -122,7 +136,11 @@ async function evalInTab(tabId, expression) {
 }
 
 async function navigate(tabId, url) {
-  await chrome.tabs.update(tabId, { url })
+  // chrome.tabs.update 자체엔 시간제한이 없다 — 아래 onUpdated 대기는 20초 제한을 이미 걸어뒀지만
+  // (2026-08-15 발견), 이 호출 자체가 응답을 안 주고 멈추면 그 대기 시작도 못 해 똑같이 콘솔 로그
+  // 한 줄 없이 영원히 멈춘다(2026-08-22, "스크랩 미리보기" 중 재발 확인 — chrome.tabs.create를 고친 것과
+  // 같은 종류의 문제). withTimeout으로 감싸 이 호출부터도 넉넉한 시간 안에 응답이 없으면 명확히 실패시킨다.
+  await withTimeout(chrome.tabs.update(tabId, { url }), 15_000, '탭 이동(chrome.tabs.update)')
   await new Promise(resolve => {
     let done = false
     function finish() {
@@ -205,6 +223,26 @@ const COLLECT_LINKS_EXPR = `(() => {
   const pageNumbers = Array.from(document.querySelectorAll('.ec-base-paginate ol li a'))
   const currentIdx = pageNumbers.findIndex(a => a.classList.contains('this'))
   if (currentIdx >= 0 && currentIdx + 1 < pageNumbers.length) nextUrl = pageNumbers[currentIdx + 1].href
+  // 카페24 기본 페이지네이션은 페이지 번호를 한 번에 5~10개 묶음으로만 보여주고, 그 묶음의 마지막 번호가
+  // "지금 이 페이지"가 아니면(=아직 이 묶음 안에 다음 번호가 있으면) 위에서 이미 잡힌다. 그런데 지금
+  // 페이지가 그 묶음의 마지막 번호 자체라면(currentIdx + 1 >= length) 다음 묶음은 번호가 아니라 별도
+  // 화살표 링크(.xans-product-listpagination a.next, lib/scraper.ts의 PLATFORM_PROFILES.cafe24와 같은
+  // 셀렉터)로만 이동할 수 있다 — 이 분기가 없으면 "묶음 끝"에서 다음 페이지가 있는데도 없다고 오판해
+  // 카테고리 전체를 다 못 돌고 조용히 멈춘다(2026-08-22, 모자사러 "버킷햇" 654개 중 180개에서 멈춘
+  // 문제로 발견 — lib/scraper.ts는 readLastPageFromNavButton 등으로 이미 해결해뒀는데 이 확장에는
+  // 포팅이 안 돼 있었다).
+  if (!nextUrl) {
+    const cafe24Next = document.querySelector('.xans-product-listpagination a.next, .ec-base-paginate a.next')
+    if (cafe24Next) nextUrl = cafe24Next.href
+  }
+  // 클래스명 대신 화살표를 <img alt="다음 페이지">로만 표시하는 구형/커스텀 카페24 스킨도 있다 —
+  // lib/scraper.ts의 readLastPageFromNavButton(마지막 페이지 버튼)이 이미 이미지 alt 기반으로 찾는 것과
+  // 같은 이유(2026-08-22, 모자사러 cate_no=45에서 실제 확인: <img alt="다음 페이지" src=".../btn_page_
+  // next.gif">를 감싼 <a>였고 클래스명이 전혀 없었다 — 위 클래스 기반 셀렉터로는 못 찾음).
+  if (!nextUrl) {
+    const nextImgLink = document.querySelector('a:has(img[alt*="다음"])')
+    if (nextImgLink) nextUrl = nextImgLink.href
+  }
   if (!nextUrl) {
     const godoNext = document.querySelector('.paginate a.next')
     if (godoNext) nextUrl = godoNext.href
@@ -260,13 +298,16 @@ const COLLECT_LINKS_EXPR = `(() => {
 // 구현해서, <a href>만 모으던 기존 방식으로는 정렬 옵션이 하나도 안 잡혔다(항상 "기본순"만 남음) — 모든
 // <select>의 <option>도 같은 방식으로 후보에 포함시킨다(계좌이체 은행 선택처럼 값이 다른 출처의 전체
 // URL인 것들은 origin 필터에서 자연히 걸러진다).
+// lib/scraper.ts의 AI_LINK_CANDIDATE_CAP과 같은 이유·같은 값으로 낮춘다(2026-08-23, 펫투비 실측:
+// 로컬 Ollama가 CPU 전용이라 400개짜리 후보 프롬프트 하나 처리하는 데만 300초 넘게 걸림 — 모델 로딩이
+// 아니라 순수 프롬프트 처리 시간이었다). detectSortOptionsWithAI가 이 목록을 그대로 AI에 보낸다.
 const COLLECT_ALL_LINKS_EXPR = `(() => {
   const origin = location.origin
   const current = location.href.replace(/\\/+$/, '')
   const seen = new Set()
   const result = []
   for (const a of Array.from(document.querySelectorAll('a[href]'))) {
-    if (result.length >= 400) break
+    if (result.length >= 120) break
     const href = a.href
     if (!href.startsWith(origin)) continue
     const norm = href.replace(/\\/+$/, '')
@@ -277,7 +318,7 @@ const COLLECT_ALL_LINKS_EXPR = `(() => {
     result.push({ text, href })
   }
   for (const opt of Array.from(document.querySelectorAll('select option'))) {
-    if (result.length >= 400) break
+    if (result.length >= 120) break
     if (!opt.value) continue
     let href
     try { href = new URL(opt.value, location.href).href } catch { continue }
@@ -627,11 +668,30 @@ function buildExtractExpr(rules) {
     stock_by_option: [], mall_product_code: code, custom_fields: {},
   }
 
+  // 라벨/셀렉터/고정값 규칙 하나를 실제 텍스트로 풀어낸다 — 단일 규칙과 'multi' 규칙의 각 조각이
+  // 공유하는 로직(lib/extract.ts의 resolveLabelOrSelector와 같은 규칙 형식을 그대로 옮김).
+  const resolvePart = (part) => {
+    if (part.type === 'fixed') return part.value
+    if (part.type === 'label') return infoValue(new RegExp(part.value)) || null
+    const el = document.querySelector(part.value)
+    return el ? (el.textContent || '').trim() : null
+  }
   const extractionRules = ${JSON.stringify(rules)}
   for (const [field, rule] of Object.entries(extractionRules)) {
     let text = null
-    if (rule.type === 'label') text = infoValue(new RegExp(rule.value)) || null
-    else { const el = document.querySelector(rule.value); text = el ? el.textContent : null }
+    if (rule.type === 'multi') {
+      // "스크랩 대상 직접지정"에서 값 하나를 여러 조각(라벨+셀렉터 등)으로 나눠 저장한 규칙 —
+      // lib/extract.ts와 같은 형식(JSON 배열)이라 여기도 똑같이 풀어서 공백으로 이어붙인다. 이 분기가
+      // 없으면 rule.value(JSON 문자열 그대로)를 CSS 셀렉터로 오인해 querySelector가 SyntaxError를
+      // 던진다(2026-08-22, 모자사러 실사용 중 발견 — name/category/cost_price/shipping_fee 규칙이
+      // 전부 이 형식이라 스크랩이 대량 실패했다).
+      let parts = []
+      try { parts = JSON.parse(rule.value) } catch { parts = [] }
+      const resolved = parts.map(resolvePart).filter(Boolean)
+      text = resolved.length ? resolved.join(' ') : null
+    } else {
+      text = resolvePart(rule)
+    }
     const trimmed = text ? text.trim() : ''
     if (!trimmed) continue
 
@@ -674,11 +734,25 @@ async function reportFailure(url, errorMessage) {
   if (data.sessionId) sessionId = data.sessionId
 }
 
-async function reportDone(stopped) {
+/** 카테고리를 하나씩 순회하기 시작할 때마다 호출 — 세션이 아직 없으면(sessionId===null) 이 호출이
+ *  만들어준다(report()/reportFailure()와 같은 패턴). 이미 받은 상품이 많은 카테고리는 앞쪽 페이지를
+ *  전부 건너뛰기만 하느라 상품을 하나도 저장 못 한 채 몇 분씩 지날 수 있는데, 그동안 세션 자체가 없으면
+ *  PTP가 "진행 중"이라는 걸 전혀 감지 못한다(2026-08-22, 사용자 지적: "PTP 상에서는 아무런 변화가
+ *  없는 상태야"). done/total은 lib/scraper.ts의 getCollectProgress와 같은 자리(카테고리 N/M)에 실린다. */
+async function reportCollectProgress(done, total) {
+  const res = await fetch(PROGRESS_ENDPOINT, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ siteId, sessionId, done, total }),
+  }).catch(() => null)
+  const data = await res?.json().catch(() => null)
+  if (data?.sessionId) sessionId = data.sessionId
+}
+
+async function reportDone(stopped, concurrencyLog) {
   if (!sessionId) return
   await fetch(INGEST_ENDPOINT, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ siteId, sessionId, done: true, stopped: !!stopped }),
+    body: JSON.stringify({ siteId, sessionId, done: true, stopped: !!stopped, concurrencyLog }),
   }).catch(() => {})
 }
 
@@ -695,18 +769,29 @@ async function reportDone(stopped) {
 // 몇 분에서 수십 분 걸릴 수 있는 긴 작업이라, 탭을 추가로 열지 못하면(브라우저 제한 등) 원래 탭
 // 하나만으로 조용히 낮은 동시 개수로 이어가고(안 그러면 몇 분 진행된 스크랩이 통째로 실패로 끝난다),
 // runExpandCategories처럼 실패를 그대로 던지지 않는다.
-const SCRAPE_TAB_CONCURRENCY = 4
+// 일반모드(lib/scraper.ts의 scrapeCatalogPage)와 같은 최대치(8)까지 열어두되, 실제로 동시에 일을 시키는
+// 개수(activeLimit, 아래)는 적응형으로 따로 조절한다 — "일반모드처럼 8까지 올리되 문제 생기면 적응형
+// 로직을 태우면 되지 않냐"는 요청(2026-08-22)으로, 무작정 8개 고정 대신 그 알고리즘(AIMD)을 그대로 옮겼다.
+const SCRAPE_TAB_CONCURRENCY = 8
 
-async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions) {
+async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions, excludeUrls) {
   running = true
   let processed = 0
   let stoppedByUser = false
   const listingStarts = categoryUrls && categoryUrls.length ? categoryUrls : [null]
+  // 이 몰에서 이미 성공적으로 수집한 상품(scrape_item_log 기준, resolveSite가 내려줌)은 다시 방문하지
+  // 않는다 — 중지 후 "이어서 스크랩하기"나, 예전 300개 상한에 걸렸던 세션 이후 재시작할 때 이미 받은
+  // 상품을 처음부터 또 여는 낭비를 없앤다(2026-08-22, 사용자 요청).
+  const excludeSet = new Set(excludeUrls || [])
 
   const extraTabIds = []
   for (let i = 1; i < SCRAPE_TAB_CONCURRENCY; i++) {
     try {
-      const t = await chrome.tabs.create({ url: 'about:blank', active: false })
+      // chrome.tabs.create 자체엔 시간제한이 없어, 크롬이 짧은 시간에 탭을 대량으로 여는 걸 조용히
+      // 늦추거나 막으면(4개에서 8개로 올린 뒤 실사용 중 확인, 2026-08-22 — 몰 탭이 아예 멈춘 것처럼
+      // 보이고 에러도 없었음) 이 루프 전체가 영원히 멈춰 run()이 시작도 못 한다. attachDebugger처럼
+      // withTimeout으로 감싸 시간이 오래 걸리면 그 시점까지 연 탭만으로 진행한다.
+      const t = await withTimeout(chrome.tabs.create({ url: 'about:blank', active: false }), 8_000, '탭 생성')
       await attachDebugger(t.id)
       extraTabIds.push(t.id)
     } catch (e) {
@@ -716,7 +801,19 @@ async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions)
   }
   const workerTabIds = [tabId, ...extraTabIds]
 
-  /** 상품 1건 방문·추출·보고 — 성공/실패 모두 여기서 끝낸다(호출부는 카운터만 올리면 됨). */
+  // 적응형 동시성(AIMD) — lib/scraper.ts의 scrapeCatalogPage와 같은 원리: 1(가장 안전)부터 시작해 연속
+  // 성공이 쌓이면 서서히 올리고, 차단으로 추정되는 응답이 나오면 즉시 1로 낮추고 잠시 쉰다. 열어둔 탭
+  // 수(workerTabIds.length, 최대 8)는 그대로 두고 "몇 번째 탭까지 실제로 일을 시킬지"만 오르내린다 —
+  // 탭을 매번 새로 열고 닫는 것보다 훨씬 가볍다.
+  const MAX_CONCURRENCY = workerTabIds.length
+  const RAMP_UP_STREAK = 5
+  let activeLimit = 1
+  let okStreak = 0
+  const concurrencyLog = []
+
+  /** 상품 1건 방문·추출·보고 — 성공/실패 모두 여기서 끝낸다(호출부는 카운터만 올리면 됨). 반환값의
+   *  blocked는 lib/scraper.ts의 scrapeOne과 같은 휴리스틱(가격/원가/대표이미지가 전부 없으면 정상 상품
+   *  페이지가 아니라 봇 차단/오류 안내 페이지일 가능성이 높음)으로 판정한다. */
   async function processProduct(workerTabId, link, category, brandFromCategory) {
     await navigate(workerTabId, link)
     try {
@@ -725,17 +822,41 @@ async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions)
       // 상세페이지 추출 결과 위에 덮어씌운다.
       if (category) product.category = category
       if (brandFromCategory) product.brand = brandFromCategory
+      const blocked = product.price == null && product.cost_price == null && !product.thumbnail_urls.length
       const result = await report(link, product)
       console.log('[PTP] 저장:', product.name, result)
+      return { blocked }
     } catch (e) {
       console.log('[PTP] 추출 실패:', link, e.message)
       await reportFailure(link, e.message).catch(() => {})
+      return { blocked: false }
+    }
+  }
+
+  /** lib/scraper.ts의 worker() 안 AIMD 조정과 동일한 규칙 — 차단이면 즉시 1로 낮추고 5초 쉬며, 연속
+   *  성공이 RAMP_UP_STREAK번 쌓이면 1씩 올린다. */
+  async function applyConcurrencyResult(blocked) {
+    if (blocked) {
+      okStreak = 0
+      if (activeLimit > 1) {
+        activeLimit = 1
+        concurrencyLog.push({ at: new Date().toISOString(), level: 1, reason: 'block_detected' })
+        await delay(5_000)
+      }
+    } else {
+      okStreak++
+      if (okStreak >= RAMP_UP_STREAK && activeLimit < MAX_CONCURRENCY) {
+        activeLimit++
+        okStreak = 0
+        concurrencyLog.push({ at: new Date().toISOString(), level: activeLimit, reason: 'ramp_up' })
+      }
     }
   }
 
   try {
     outer:
-    for (const listingStart of listingStarts) {
+    for (const [categoryIdx, listingStart] of listingStarts.entries()) {
+      await reportCollectProgress(categoryIdx, listingStarts.length)
       // 카테고리별 정렬/상한 설정 — href 원본 그대로 저장돼 있으므로(devmode_category_settings, ScraperPanel.tsx
       // buildCategoryUrlsAndLimits와 같은 이유) 여기서 키로 그대로 조회한다. categoryProcessed/pageNum은
       // 카테고리마다 새로 시작하는 지역 카운터다(상한이 "이 카테고리 안에서 몇 개/몇 페이지"이기 때문).
@@ -769,7 +890,8 @@ async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions)
         // 판정 자체는 건드리지 않는다(lib/scraper.ts의 collectFromListing과 같은 원칙: dead-end 감지는
         // 항상 전체 목록 기준).
         const countLimit = setting?.limitMode === 'count' ? setting.limitValue : null
-        const pageLinks = countLimit ? links.slice(0, Math.max(0, countLimit - categoryProcessed)) : links
+        const freshLinks = excludeSet.size ? links.filter(l => !excludeSet.has(l)) : links
+        const pageLinks = countLimit ? freshLinks.slice(0, Math.max(0, countLimit - categoryProcessed)) : freshLinks
 
         // report()는 sessionId가 아직 없으면(이 run() 전체에서 첫 상품) 서버가 새 세션을 만들어 응답으로
         // 돌려준다 — 그 첫 1건만은 여러 워커가 동시에 sessionId:null로 보내 세션이 여러 개로 쪼개지지
@@ -777,7 +899,8 @@ async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions)
         let startIdx = 0
         if (pageLinks.length && !sessionId) {
           if (await checkStopRequested(sessionId)) { stoppedByUser = true; break outer }
-          await processProduct(tabId, pageLinks[0], category, brandFromCategory)
+          const { blocked } = await processProduct(tabId, pageLinks[0], category, brandFromCategory)
+          applyConcurrencyResult(blocked)
           processed++
           categoryProcessed++
           startIdx = 1
@@ -787,14 +910,21 @@ async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions)
         const remaining = pageLinks.slice(startIdx)
         if (remaining.length) {
           let cursor = 0
-          await Promise.all(workerTabIds.map(async workerTabId => {
+          await Promise.all(workerTabIds.map(async (workerTabId, workerIndex) => {
             while (true) {
               // processed/stoppedByUser는 워커들 사이의 동기 구간(await 없는 부분)에서만 읽고 써서
               // 경쟁이 없다 — 다만 여러 워커가 "아직 상한 안 됨"을 동시에 확인한 뒤 각자 처리를 시작할
-              // 수 있어(그 시점엔 서로의 완료를 모름) MAX_PRODUCTS/countLimit을 최대 동시 개수(4)만큼
+              // 수 있어(그 시점엔 서로의 완료를 모름) MAX_PRODUCTS/countLimit을 최대 동시 개수만큼
               // 살짝 넘길 수 있다 — 둘 다 원래도 정확한 하드 리밋이 아니라 "이쯤에서 배치를 끊는다"는
               // 안전장치라 여유로 둔다.
               if (processed >= MAX_PRODUCTS || stoppedByUser) return
+              // 이 워커의 순번이 지금 활성 한도보다 높으면(아직 한도가 안 올라왔거나 방금 차단으로
+              // 낮아졌으면) 새 탭을 열어둔 채로 대기만 한다 — lib/scraper.ts의 worker()와 동일.
+              while (workerIndex >= activeLimit) {
+                if (processed >= MAX_PRODUCTS || stoppedByUser) return
+                if (cursor >= remaining.length) return
+                await delay(500)
+              }
               // PTP의 "스크래핑 중지" 버튼이 눌렸는지 상품마다 확인한다 — 다음 상품으로 넘어가기 전에 반영된다.
               if (await checkStopRequested(sessionId)) {
                 console.log('[PTP] 중지 요청을 확인해 스크래핑을 멈춥니다.')
@@ -803,7 +933,8 @@ async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions)
               }
               const i = cursor++
               if (i >= remaining.length) return
-              await processProduct(workerTabId, remaining[i], category, brandFromCategory)
+              const { blocked } = await processProduct(workerTabId, remaining[i], category, brandFromCategory)
+              applyConcurrencyResult(blocked)
               processed++
               categoryProcessed++
               await throttle()
@@ -822,7 +953,7 @@ async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions)
     }
     console.log(stoppedByUser ? `[PTP] 중지됨 — 총 ${processed}개 처리` : `[PTP] 완료 — 총 ${processed}개 처리`)
   } finally {
-    await reportDone(stoppedByUser)
+    await reportDone(stoppedByUser, concurrencyLog)
     // 목록 페이지로 되돌려놔야 다음 클릭 때 다시 상품 페이지로 오인하지 않는다.
     if (startUrl) await navigate(tabId, startUrl).catch(() => {})
     for (const id of extraTabIds) {
@@ -851,8 +982,11 @@ async function startScrape(tab, site) {
   // run()은 상품 여러 개를 순회하며 오래 걸릴 수 있어(수 분) 완료를 기다리지 않고 백그라운드로 흘려보낸다
   // — 팝업은 "시작했다"는 응답만 받고, 진행상황은 PTP 화면의 기존 5초 폴링이 이어받는다. site.categoryUrls가
   // 있으면(PTP에서 카테고리를 체크해뒀으면) 그 목록을 전부 순회하고, 없으면 기존처럼 지금 탭 위치만 처리한다.
-  run(tab.id, tab.url, site.categoryUrls, site.categorySettings, site.sortOptions).finally(() => safeDetach(tab.id))
-  return { ok: true }
+  run(tab.id, tab.url, site.categoryUrls, site.categorySettings, site.sortOptions, site.excludeUrls).finally(() => safeDetach(tab.id))
+  // "이어서 받는 건지 처음부터인지 알 수가 없다"는 지적(2026-08-22) — 팝업이 바로 닫히지 않고 열려있는
+  // 그 순간의 응답 메시지로 알려준다. skipCount는 resolveSite가 내려준 excludeUrls(이미 성공한 상품)
+  // 개수 그대로다.
+  return { ok: true, skipCount: (site.excludeUrls || []).length }
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -1107,6 +1241,8 @@ async function runExpandCategories(tab, site) {
     const workerTabIds = [tab.id, ...extraTabIds]
     const expandedByIndex = new Array(categoryLinks.length)
     let cursor = 0
+    let doneCount = 0
+    await reportProfileProgress(site.id, `카테고리 하위구조 확인 중 (0/${categoryLinks.length})`)
     async function worker(workerTabId) {
       while (true) {
         const i = cursor++
@@ -1127,6 +1263,9 @@ async function runExpandCategories(tab, site) {
         } catch {
           expandedByIndex[i] = [c] // 이 워커 탭에서 일시적으로 실패해도 그 카테고리 하나만 미확장으로 남기고 계속 진행
         }
+        doneCount++
+        // 여러 워커가 동시에 완료를 셀 수 있지만(경쟁), 진행률 표시 용도라 순서가 살짝 뒤바뀌어도 무해하다.
+        reportProfileProgress(site.id, `카테고리 하위구조 확인 중 (${doneCount}/${categoryLinks.length})`)
         await throttle()
       }
     }
@@ -1175,6 +1314,7 @@ async function runDetectSortOptions(tab, site) {
   }
   const startUrl = tab.url
   try {
+    await reportProfileProgress(site.id, '정렬 옵션 감지 중...')
     await navigate(tab.id, site.categoryLinks[0].href)
     let { links, baseUrl } = await evalInTab(tab.id, COLLECT_ALL_LINKS_EXPR)
     if (!links.length) {
@@ -1774,6 +1914,36 @@ async function runProfile(site) {
   }
 }
 
+/** "다음 페이지" 감지가 이 몰에서 실제로 끝까지 통하는지 미리 검증한다 — 모자사러에서 페이지 번호
+ *  묶음(1~9) 끝의 화살표를 못 찾아 실제 33페이지 중 9페이지에서 조용히 멈췄던 문제(2026-08-22)를,
+ *  스크랩을 다 돌려보고 나서야 개수가 모자란 걸로 알아채는 대신 "몰 구조분석" 시점에 바로 알 수 있게
+ *  한다 — "다른 몰이 다른 형태일 수 있는데 그때마다 이렇게 어려워지면 안 된다"는 사용자 요청. 정답은
+ *  buildPaginationSignalExpr의 "마지막 페이지로" 버튼 신호(href가 항상 진짜 마지막 페이지를 가리키는
+ *  구조라 신뢰도가 높다 — lib/scraper.ts의 readLastPageFromNavButton과 같은 근거)로 삼고, 실제 스크랩이
+ *  쓰는 것과 똑같은 COLLECT_LINKS_EXPR의 "다음" 링크를 실제로 따라가며 몇 페이지까지 도달하는지 센다.
+ *  전체를 다 걷지 않고 "블록 경계 하나는 넘는지"만 확인할 수 있는 만큼(최대 12페이지)만 시험해 검증
+ *  자체가 "몰 구조분석"을 과하게 늦추지 않게 한다. */
+async function verifyNextPageDetection(tab, categoryHref) {
+  try {
+    await navigate(tab.id, categoryHref)
+    const signal = await evalInTab(tab.id, buildPaginationSignalExpr('')).catch(() => null)
+    // "마지막 페이지" 버튼 자체를 못 찾았거나 1페이지짜리 카테고리면 검증할 게 없다 — 조용히 건너뛴다.
+    if (!signal?.lastPage || signal.lastPage <= 3) return null
+    const testTarget = Math.min(signal.lastPage, 12)
+    let reached = 1
+    while (reached < testTarget) {
+      const { nextUrl } = await evalInTab(tab.id, COLLECT_LINKS_EXPR).catch(() => ({ nextUrl: null }))
+      if (!nextUrl) break
+      await navigate(tab.id, nextUrl)
+      reached++
+    }
+    if (reached >= testTarget) return null // 정상 — 보고할 문제 없음
+    return { statedLastPage: signal.lastPage, reachedPage: reached }
+  } catch {
+    return null // 검증 자체가 실패해도 "몰 구조분석" 전체를 실패로 만들지 않는다 — 이건 부가 확인일 뿐이다.
+  }
+}
+
 /** "몰 구조분석" 버튼 하나로 셋을 같이 돌린다 — 예전엔 "몰 구조분석"/"카테고리 하위구조 자동확인"/
  *  "정렬 옵션 감지"가 따로 눌러야 하는 버튼 3개였는데, 사용자 입장에서 몰 하나를 처음 붙일 때 결국
  *  셋 다 순서대로 눌러야 해서 번거롭다는 지적으로 하나로 합쳤다(2026-08-22). runProfile은 서버가 알아서
@@ -1790,13 +1960,31 @@ async function runFullMallProfile(tab, site) {
   if (!profileRes.ok) failures.push(`몰 구조분석: ${profileRes.error}`)
   if (!expandRes.ok) failures.push(`카테고리 하위구조: ${expandRes.error}`)
   if (!sortRes.ok) failures.push(`정렬 옵션: ${sortRes.error}`)
-  if (failures.length === 3) return { ok: false, error: failures.join(' / ') }
+  // "3개 다 실패"만 진짜 실패로 본다 — 아래 페이지네이션 경고는 이 셋과 별개(부가 확인)라 이 개수에
+  // 안 섞는다. 섞으면 예컨대 핵심 2개만 실패했는데 경고까지 더해져 3개가 돼버려 "전부 실패"로
+  // 잘못 보고되는 문제가 생긴다.
+  const coreFailureCount = failures.length
+
+  // 방금 하위구조를 확인한 대분류 중 하나로 페이지네이션 "다음" 감지를 검증한다 — site.categoryLinks가
+  // 비어있으면(카테고리 불러오기를 아직 안 한 몰) 건너뛴다.
+  if (site.categoryLinks?.length) {
+    try {
+      await attachDebugger(tab.id)
+      const paginationIssue = await verifyNextPageDetection(tab, site.categoryLinks[0].href)
+      if (paginationIssue) {
+        failures.push(`⚠ 페이지네이션 "다음" 감지 불안정 — "${site.categoryLinks[0].name}" 카테고리가 실제 ${paginationIssue.statedLastPage}페이지인데 ${paginationIssue.reachedPage}페이지에서 멈춤(실제 스크랩 시 상품이 누락될 수 있습니다 — background.js의 COLLECT_LINKS_EXPR 셀렉터를 이 몰에 맞게 보완해야 합니다)`)
+      }
+    } catch { /* 검증 자체의 디버거 연결 실패는 "몰 구조분석"의 나머지 결과에 영향 주지 않는다 */ }
+    finally { await safeDetach(tab.id) }
+  }
+
+  if (coreFailureCount === 3) return { ok: false, error: failures.join(' / ') }
   return {
     ok: true,
     expandCount: expandRes.ok ? expandRes.count : null,
     sortCount: sortRes.ok ? sortRes.count : null,
-    // 셋 중 일부만 실패했으면(예: 카테고리 목록이 아직 없어 나머지 둘만 실패) 그래도 성공으로 보고하되
-    // 어떤 게 빠졌는지는 같이 알려준다.
+    // 일부만 실패했거나(예: 카테고리 목록이 아직 없어 나머지 둘만 실패) 페이지네이션 경고가 있으면
+    // 그래도 성공으로 보고하되 어떤 게 빠졌는지/무엇을 확인해야 하는지 같이 알려준다.
     partialErrors: failures.length ? failures : undefined,
   }
 }

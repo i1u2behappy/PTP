@@ -62,10 +62,32 @@ Gemini 무료 티어의 낮은 한도 문제를 근본적으로 피하기 위해
   다른 문서와 달리 이 결정 자체는 이 문서에만 기록됨). 표준 라벨 집합으로는 몰마다 제각각인 정렬
   기준(상품명순/제조사순/리뷰순 등)을 다 담을 수 없다는 게 실사용으로 확인됐기 때문.
 
+## 후속 — 동시 요청이 몰리면 배로 느려지는 문제 (2026-08-22, 같은 날)
+
+로컬 Ollama(`qwen3:8b`)는 이 PC에서 GPU 없이 CPU로만 추론한다(`ollama ps`의 `size_vram: 0`로 확인).
+CPU 연산 자체인 추론은 다른 작업과 CPU를 나눠 쓰면 배로(경우에 따라 수십 배까지 — 바로 위 `think:false`
+32배 차이가 같은 종류의 CPU 민감성을 보여줌) 느려진다.
+
+두 곳에서 이 문제가 실제로 재현됐다: (1) 개발자모드 `runFullMallProfile`이 AI가 들어있는 서버 쪽
+`runProfile`과 확장 쪽 브라우저 탭 작업(`runExpandCategories`, 탭 4개)을 동시에 돌려 AI 호출이 브라우저
+탭들과 CPU를 두고 경합(관련 수정: `!specifications/manual-login-required-malls.md`의 "runFullMallProfile"
+항목). (2) 사용자가 "그 부분(비슷한 경합)도 검토해서 고쳐달라"고 지적해 확인한, `lib/scraper.ts`의
+`discoverCategoryLinks`(`expandWorker`)가 카테고리를 최대 8개까지 동시에 확인하는데, 그중 상품 없는
+"허브" 카테고리를 여러 개 만나면 각 워커가 `detectCategoryLinksWithAI`를 각자 불러 **최대 8개의 Ollama
+요청이 한꺼번에 몰릴 수 있는** 구조였다.
+
+**수정**: `pickIndicesWithOllama`(두 함수가 공유하는 헬퍼) 앞에 전역 직렬화 큐(`withOllamaQueue`)를
+추가해, 이 앱이 Ollama로 보내는 요청은 호출 위치와 무관하게 항상 한 번에 하나씩만 실제로 나가도록
+했다. 페이지 방문 자체(`expandWorker`의 `page.goto`/`countProductsOnPage`)는 대부분 네트워크 대기
+시간이라 동시 처리에 상대적으로 안전해 그대로 병렬로 두고, CPU 경합에 훨씬 민감한 AI 호출만 직렬화한
+것이 핵심 — 워커 풀 자체의 병렬성(8개 탭 동시 확인)은 그대로 유지된다. 로컬 전용 단일 사용자 도구라
+전역 직렬화가 서로 무관한 다른 요청을 부당하게 기다리게 할 위험도 없다.
+
 ## 관련 파일
 
-- `lib/ai.ts`: `OLLAMA_BASE_URL`/`OLLAMA_MODEL` 상수, `pickIndicesWithOllama`, `detectCategoryLinksWithAI`,
-  `detectSortOptionsWithAI`
+- `lib/ai.ts`: `OLLAMA_BASE_URL`/`OLLAMA_MODEL` 상수, `withOllamaQueue`(신규, 전역 직렬화 큐),
+  `pickIndicesWithOllama`(큐를 거치는 얇은 래퍼로 분리)/`pickIndicesWithOllamaOnce`(신규, 실제 호출),
+  `detectCategoryLinksWithAI`, `detectSortOptionsWithAI`
 - `lib/scraper.ts`: `detectSortOptionsWithAI` 호출부(일반모드, `sampleMallProfile`) — `baseUrl`을
   호출 전에 계산해 전달하도록 순서 조정
 - `app/api/sites/[id]/sort-options/route.ts`: `detectSortOptionsWithAI` 호출부(개발자모드 확장 경유)

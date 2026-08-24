@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
-import { fetchPageText } from '@/lib/scraper'
 import { runAdjustment } from '@/lib/scrape/adjustment'
-import { reExtractStagingItems } from '@/lib/scrape/reextract'
+import { fetchPageText, reExtractStagingItems } from '@/lib/workerClient'
 import type { ExtractedProduct } from '@/lib/ai'
 
 interface AdjustBody {

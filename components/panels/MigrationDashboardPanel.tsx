@@ -20,6 +20,7 @@ interface Session {
   site_name: string | null
   client_name: string | null
   merge_group_id: number | null
+  merged_at: string | null
 }
 
 interface MasterRow {
@@ -155,8 +156,11 @@ export function MigrationDashboardPanel({ params }: { params?: Record<string, un
     if (querySiteId === '' && queryClientId !== '' && siteClientMap.get(s.site_id) !== queryClientId) return false
     const q = sessionSearch.trim().toLowerCase()
     if (!q) return true
+    // 그리드(ScrapeSessionGrid)가 실제로 보여주는 컬럼 중 "병합 일시"(merged_at)가 검색에서 빠져있었다
+    // (사용자 지적, 2026-08-17 — 다른 메뉴의 검색도 그리드에 보이는 컬럼 전부를 대상으로 해달라는 요청).
     return s.url.toLowerCase().includes(q) || s.status.toLowerCase().includes(q) || new Date(s.created_at).toLocaleString().toLowerCase().includes(q)
       || (s.client_name || '').toLowerCase().includes(q) || (s.site_name || '').toLowerCase().includes(q)
+      || (s.merged_at ? new Date(s.merged_at).toLocaleString() : '').toLowerCase().includes(q)
   })
 
   function selectClient(id: number | '') {

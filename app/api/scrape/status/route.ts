@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
-import { getSiteLockStatus, getCollectProgress } from '@/lib/scraper'
+import { getSiteLockStatus, getCollectProgress } from '@/lib/workerClient'
 
 export async function GET(req: NextRequest) {
   const sessionId = req.nextUrl.searchParams.get('sessionId')
@@ -34,14 +34,14 @@ export async function GET(req: NextRequest) {
   // 이 프로세스가 지금 이 몰 작업을 실제로 하고 있다는 직접 증거) 로그 정체와 무관하게 죽은 게 아니다.
   const lastActivity = row.last_activity || row.created_at
   const staleMs = Date.now() - new Date(lastActivity).getTime()
-  if (row.status === 'running' && staleMs > 90_000 && !getSiteLockStatus(row.site_id)) {
+  if (row.status === 'running' && staleMs > 90_000 && !(await getSiteLockStatus(row.site_id))) {
     await pool.query(`UPDATE scrape_sessions SET status='stopped' WHERE id=$1 AND status='running'`, [sessionId])
     row.status = 'stopped'
   }
 
   // 상품 URL 수집(카테고리 목록 순회) 단계는 product_count/saved_count가 아직 0이라, 화면이 오래 멈춘
   // 것처럼 보인다(실사용 확인: "수집 진행상황은 왜 안보여주는 거야?") — 그 단계 진행률을 같이 실어보낸다.
-  const collectProgress = row.status === 'running' ? getCollectProgress(row.id) : null
+  const collectProgress = row.status === 'running' ? await getCollectProgress(row.id) : null
 
   return NextResponse.json({ ...row, collect_progress: collectProgress })
 }

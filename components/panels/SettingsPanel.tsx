@@ -90,16 +90,19 @@ export function SettingsPanel() {
           <label className="block">
             <span className="block text-xs font-semibold text-gray-500 mb-1">아이디</span>
             <input value={newUsername} onChange={e => setNewUsername(e.target.value)}
+              autoComplete="off"
               className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </label>
           <label className="block">
             <span className="block text-xs font-semibold text-gray-500 mb-1">새 비밀번호 (변경하지 않으려면 비워두세요)</span>
             <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)}
+              autoComplete="new-password"
               className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </label>
           <label className="block">
             <span className="block text-xs font-semibold text-gray-500 mb-1">현재 비밀번호 (확인용, 필수)</span>
             <input type="password" value={currentPassword} onChange={e => setCurrentPassword(e.target.value)}
+              autoComplete="current-password"
               className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </label>
           {adminError && <p className="text-xs text-rose-500">{adminError}</p>}
@@ -153,11 +156,13 @@ export function SettingsPanel() {
             <label className="block">
               <span className="sr-only">새 사용자 아이디</span>
               <input value={newUserId} onChange={e => setNewUserId(e.target.value)} placeholder="아이디"
+                autoComplete="off"
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
             </label>
             <label className="block">
               <span className="sr-only">새 사용자 비밀번호</span>
               <input type="password" value={newUserPw} onChange={e => setNewUserPw(e.target.value)} placeholder="비밀번호"
+                autoComplete="new-password"
                 className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
             </label>
             {userError && <p className="text-xs text-rose-500">{userError}</p>}

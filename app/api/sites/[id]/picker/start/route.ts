@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { startElementPicker } from '@/lib/scraper'
+import { startElementPicker } from '@/lib/workerClient'
 
 /**
  * "스크랩 대상 직접지정" 버튼 — 로그인 창(openSessions)이 열려있는 실제 몰 페이지에 클릭식 엘리먼트 피커를

@@ -10,6 +10,15 @@ export interface RunScrapingOpts {
   productUrls?: string[]
   nextPageSelector?: string
   maxPages?: number
+  /** "카테고리별 정렬기준 설정" 기능용 — categoryUrls 각 URL에 대한 개별 상한(lib/scraper.ts의
+   *  ScrapeOptions.categoryLimits와 동일한 모양). */
+  categoryLimits?: Record<string, { mode: 'count' | 'pages'; value: number }>
+  /** AJAX(클릭) 방식 정렬용 — lib/scraper.ts의 ScrapeOptions.categorySortClicks와 동일한 모양. */
+  categorySortClicks?: Record<string, string>
+  /** true(기본)면 mall_products에 이미 있는 상품도 다시 스크랩 대상에 포함한다 — 위에서 선택한 카테고리
+   *  전체를 대상으로 "다시 받는" 것이 기본 기대이기 때문(사용자 지시, 2026-08-23). false면 예전 동작대로
+   *  이미 있는 상품(source_url 기준)은 건너뛴다. */
+  includeAlreadyScraped?: boolean
   delayMs?: number
   loginId?: string
   loginPw?: string
@@ -37,11 +46,18 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
   // 여기서 무조건 먼저 닫아버려서, 사용자가 그 창에서 캡차/본인인증 등을 마저 처리해야 하는 상품이
   // 실패했을 때 "실패 재시도"를 눌러도 그 창이 다시 닫혀버려 같은 이유로 계속 실패했다.
 
-  // 이미 스크랩된 상품(같은 몰)은 목록에서 발견되어도 건너뛴다 (이어서 스크랩하기)
-  const excluded = await pool.query<{ source_url: string }>(
-    `SELECT DISTINCT source_url FROM mall_products WHERE site_id=$1 AND source_url IS NOT NULL`,
-    [siteId],
-  )
+  // 이미 스크랩된 상품(같은 몰)을 건너뛸지 — "이어서 스크랩하기"(중단된 세션 재시작 등)나
+  // includeAlreadyScraped=false(사용자가 명시적으로 신상품만 원할 때)에서만 건너뛴다. 기본(true)은
+  // 위에서 선택한 카테고리 전체를 그대로 다시 대상으로 삼는다(사용자 지시, 2026-08-23 — "전체 카테고리
+  // 기준이건 일부 선택한 카테고리 기준이건... 이미 스크랩한 상품 포함 옵션을 디폴트로"). 포함하는
+  // 경우엔 이 목록 자체가 필요 없으니 쿼리도 건너뛴다.
+  const skipAlreadyScraped = scrapeMode !== 'incremental' && opts.includeAlreadyScraped === false
+  const excluded = skipAlreadyScraped
+    ? await pool.query<{ source_url: string }>(
+        `SELECT DISTINCT source_url FROM mall_products WHERE site_id=$1 AND source_url IS NOT NULL`,
+        [siteId],
+      )
+    : { rows: [] as { source_url: string }[] }
 
   const siteRes = await pool.query<{
     custom_name_selector: string | null; custom_price_selector: string | null; custom_thumbnail_selector: string | null
@@ -54,10 +70,11 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
 
   const scrapeOpts = {
     url: opts.url, categoryUrls: opts.categoryUrls, productUrls: opts.productUrls,
-    nextPageSelector: opts.nextPageSelector, maxPages: opts.maxPages, delayMs: opts.delayMs,
+    nextPageSelector: opts.nextPageSelector, maxPages: opts.maxPages, categoryLimits: opts.categoryLimits,
+    categorySortClicks: opts.categorySortClicks, delayMs: opts.delayMs,
     loginId: opts.loginId, loginPw: opts.loginPw, productLinkSelector: opts.productLinkSelector, siteId,
     concurrencyMode: opts.concurrencyMode, concurrency: opts.concurrency,
-    excludeUrls: scrapeMode === 'incremental' ? [] : excluded.rows.map(r => r.source_url), sessionId,
+    excludeUrls: excluded.rows.map(r => r.source_url), sessionId,
     nameSelector: site?.custom_name_selector || undefined,
     priceSelector: site?.custom_price_selector || undefined,
     thumbnailSelector: site?.custom_thumbnail_selector || undefined,

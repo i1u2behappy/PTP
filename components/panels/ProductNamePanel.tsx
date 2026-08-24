@@ -56,7 +56,12 @@ export function ProductNamePanel({ params }: { params?: Record<string, unknown> 
   }
 
   const q = search.trim().toLowerCase()
-  const visibleRows = q ? rows.filter(r => (r.name_final || r.name_ai || r.name_original || '').toLowerCase().includes(q)) : rows
+  // 원본/AI생성/최종 상품명이 표에 각자 다른 컬럼으로 나란히 보이는데(우선순위로 하나만 대표로 보여주는
+  // 게 아님), 검색은 우선순위상 첫 번째로 있는 값 하나만 봐서 다른 두 컬럼에 보이는 값으로는 검색이
+  // 안 됐다 — 세 컬럼 다 각각 검색 대상으로 삼는다(사용자 지적, 2026-08-17).
+  const visibleRows = q ? rows.filter(r =>
+    (r.name_original || '').toLowerCase().includes(q) || (r.name_ai || '').toLowerCase().includes(q) || (r.name_final || '').toLowerCase().includes(q),
+  ) : rows
   const missingCount = rows.filter(r => !r.name_ai).length
 
   return (

@@ -64,14 +64,18 @@ const OLLAMA_TIMEOUT_MS = 25_000
 /** signal(선택)을 넘기면 "몰 구조분석 중지" 버튼이 이 호출까지 실제로 끊는다 — CPU 연산 자체인 로컬
  *  추론은 끊자마자 Ollama(llama-server)도 그 요청의 생성을 멈춘다(fetch abort 시 서버가 요청 컨텍스트
  *  취소를 감지하는 표준 동작, 2026-08-22 사용자 요청: "중지를 누르면 llama-server 작업도 멈추게"). */
-function pickIndicesWithOllama(prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal): Promise<number[]> {
-  return withOllamaQueue(() => pickIndicesWithOllamaOnce(prompt, toolName, toolDescription, signal))
+function pickIndicesWithOllama(
+  prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal, timeoutMs = OLLAMA_TIMEOUT_MS,
+): Promise<number[]> {
+  return withOllamaQueue(() => pickIndicesWithOllamaOnce(prompt, toolName, toolDescription, signal, timeoutMs))
 }
 
-async function pickIndicesWithOllamaOnce(prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal): Promise<number[]> {
+async function pickIndicesWithOllamaOnce(
+  prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal, timeoutMs = OLLAMA_TIMEOUT_MS,
+): Promise<number[]> {
   // AbortSignal.timeout()과 호출부의 signal(중지 버튼) 둘 중 먼저 오는 쪽으로 끊는다 — 이 호출이 정상
   // 범위(수 초~십수 초)를 넘기면 모델이 텍스트로 새고 있다고 보고 자른다. AbortSignal.any는 Node 20+.
-  const timeoutSignal = AbortSignal.timeout(OLLAMA_TIMEOUT_MS)
+  const timeoutSignal = AbortSignal.timeout(timeoutMs)
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
   try {
     const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
@@ -516,6 +520,12 @@ export interface CategoryLinkCandidate { name: string; href: string }
  * 로컬 Ollama(pickIndicesWithOllama)를 쓴다 — 판단 실패/빈 결과/Ollama 미실행이면 빈 배열 반환,
  * 호출부가 기존 scanCategoryMenu 히스틱 체인으로 그대로 폴백한다.
  */
+// 규칙 기반(구조 패턴) 스캔이 전부 실패했을 때만 도달하는 마지막 수단이 됐다(discoverTopLevelCategoryLinks
+// 순서 변경, 사용자 요청 2026-08-26: "규칙기반 방식을 먼저 시도하고, 이후 AI 방식으로"). 이전엔 AI가
+// 항상 먼저 시도돼 25초 안에 끊어야 했지만, 이제는 드물게만(규칙 기반이 못 찾는 몰에서만) 불리는 경로라
+// 시간을 좀 더 넉넉히 줘도 전체 흐름이 그만큼 자주 느려지지 않는다("AI 시간을 충분히 늘려주고").
+const CATEGORY_AI_TIMEOUT_MS = 60_000
+
 export async function detectCategoryLinksWithAI(
   mallName: string,
   linkCandidates: { text: string; href: string }[],
@@ -523,6 +533,12 @@ export async function detectCategoryLinksWithAI(
    *  대분류 허브 확장과 같은 용도) — 생략하면 몰 전체의 최상위 카테고리 탐지 모드. */
   parentCategoryName?: string,
   signal?: AbortSignal,
+  /** 이 몰에서 이미 확인된 진짜 카테고리 URL 예시 — 규칙 기반 탐지가 예전에 성공해뒀거나(scrape_profile.
+   *  categoryLinks), 사용자가 "카테고리 선택 가져오기"로 직접 모아둔 것(scrape_profile.
+   *  manualCategorySamples)이 있으면 프롬프트에 실제 근거로 얹어준다 — "이 몰은 이런 모양의 URL이
+   *  카테고리다"라는 구체적인 기준을 주면 후보가 많아도 판단이 쉬워진다(사용자 요청, 2026-08-26: "수동
+   *  선택 작업한 내용을 참고하여 AI가 참고해서 분석 가능하도록"). */
+  knownExamples?: string[],
 ): Promise<CategoryLinkCandidate[]> {
   if (!linkCandidates.length) return []
   // 후보가 많을수록(실사용 확인: 몰 하나에 100개 넘는 링크도 흔함) 프롬프트가 길어져 CPU 전용 로컬
@@ -537,10 +553,14 @@ export async function detectCategoryLinksWithAI(
     : `이 링크들은 '${mallName}' 몰의 홈페이지(또는 전체메뉴)에 있던 것이다 — 실제 상품 대분류
 카테고리로 이동하는 링크만 골라라.`
 
+  const examplesSection = knownExamples?.length
+    ? `\n\n[참고 — 이 몰에서 이미 실제 카테고리로 확인된 URL 예시]\n${knownExamples.slice(0, 5).map(u => `- ${u}`).join('\n')}\n위 예시와 비슷한 URL 모양(경로/쿼리파라미터 패턴)을 가진 링크는 카테고리일 가능성이 높다 — 참고만 하고, 실제로 판단이 안 서면 이 예시와 안 비슷해도 후보에서 빼지는 마라.`
+    : ''
+
   const prompt = `${scopeInstruction}
 로그인/회원가입/장바구니/마이페이지/고객센터/검색/공지사항/이용약관/사업자정보/이벤트 배너처럼 사이트
 운영용이거나 상품 카테고리가 아닌 링크, 그리고 카테고리 목록이 아니라 상품 상세페이지로 바로 가는
-링크는 절대 포함하지 마라. 확실하지 않으면 빼라.
+링크는 절대 포함하지 마라. 확실하지 않으면 빼라.${examplesSection}
 
 [링크 목록 (인덱스. "링크텍스트" → URL)]
 ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
@@ -548,7 +568,7 @@ ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
   const indices = await pickIndicesWithOllama(
     prompt, 'set_category_link_indices',
     '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
-    signal,
+    signal, CATEGORY_AI_TIMEOUT_MS,
   )
   const seen = new Set<number>()
   return indices
@@ -679,6 +699,13 @@ ${contextText.slice(0, 20_000)}`
 
 /** Anthropic으로 "몰 구조분석" 리포트를 생성한다. ANTHROPIC_API_KEY가 없거나 크레딧 부족 등으로
  *  실패하면 null — 호출부(generateMallProfileReport)가 Gemini로 재시도한다. */
+// "몰 구조분석"의 AI 리포트 단계 하나가 164초까지 걸리는 게 실사용에서 확인됐다(2026-08-25, 가방쟁이 —
+// Anthropic은 크레딧 부족으로 즉시 400 실패했지만, Gemini가 503(과부하)에 대해 응답하기까지 오래 걸렸다).
+// 이미 규칙기반(buildHeuristicMallReport) 폴백이 있어 AI가 느리거나 안 되면 그걸로 대체하면 되는데,
+// 아무 타임아웃도 없어 API가 응답을 줄 때까지(또는 SDK가 내부적으로 재시도하는 동안) 무작정 기다렸다 —
+// pickIndicesWithOllamaOnce의 OLLAMA_TIMEOUT_MS와 같은 이유로, 여기도 짧게 끊고 폴백으로 넘어가게 한다.
+const MALL_REPORT_TIMEOUT_MS = 20_000
+
 async function generateMallProfileReportAnthropic(
   mallName: string, platform: string, categoryHints: string[], sampleProductUrl: string, contextText: string,
 ): Promise<MallStructureReport | null> {
@@ -701,7 +728,7 @@ async function generateMallProfileReportAnthropic(
       }],
       tool_choice: { type: 'tool', name: 'set_mall_report' },
       messages: [{ role: 'user', content: prompt }],
-    })
+    }, { signal: AbortSignal.timeout(MALL_REPORT_TIMEOUT_MS) })
     const toolUse = response.content.find(b => b.type === 'tool_use')
     if (!toolUse || toolUse.type !== 'tool_use') return null
     return { ...(toolUse.input as Omit<MallStructureReport, 'generatedBy'>), generatedBy: 'ai' }
@@ -735,6 +762,7 @@ async function generateMallProfileReportGemini(
           parameters: { type: Type.OBJECT, properties, required: MALL_REPORT_FIELDS.map(f => f.key) },
         }] }],
         toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_mall_report'] } },
+        abortSignal: AbortSignal.timeout(MALL_REPORT_TIMEOUT_MS),
       },
     })
     const call = response.functionCalls?.[0]

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { diffQueryParams, looksLikeSortLabel, resetToFirstPage } from '../../lib/scraper'
+import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern } from '../../lib/scraper'
 
 // diffQueryParams는 "카테고리별 정렬기준 설정" 기능의 핵심 — 정렬 후보 링크가 baseUrl과 같은 경로에서
 // 쿼리파라미터만 다른지 확인해, 다른 카테고리/상품 상세로 튀는 링크를 걸러낸다.
@@ -70,5 +70,48 @@ describe('resetToFirstPage', () => {
 
   it('잘못된 URL이면 원본 문자열을 그대로 반환한다', () => {
     expect(resetToFirstPage('not a url')).toBe('not a url')
+  })
+})
+
+describe('deriveCategoryUrlPattern', () => {
+  it('과반수 URL에 공통된 쿼리파라미터 키로 패턴을 만든다', () => {
+    const urls = [
+      'https://www.sinwoo.com/shop/socks.php?cat_code=48/57/',
+      'https://www.sinwoo.com/shop/knit.php?cat_code=319/320/',
+      'https://www.sinwoo.com/shop/bra.php?cat_code=1/2/',
+    ]
+    const pattern = deriveCategoryUrlPattern(urls)
+    expect(pattern).toBe('[?&]cat_code=')
+    urls.forEach(u => expect(new RegExp(pattern!).test(u)).toBe(true))
+  })
+
+  it('공통 키가 과반수 미만이면 패턴을 만들지 않는다', () => {
+    const urls = [
+      'https://mall.com/a.php?x=1',
+      'https://mall.com/b.php?y=1',
+      'https://mall.com/c.php?z=1',
+    ]
+    expect(deriveCategoryUrlPattern(urls)).toBeNull()
+  })
+
+  it('URL이 1개뿐이면 패턴을 만들지 않는다', () => {
+    expect(deriveCategoryUrlPattern(['https://mall.com/a.php?cat=1'])).toBeNull()
+  })
+
+  it('URL이 하나도 없으면 패턴을 만들지 않는다', () => {
+    expect(deriveCategoryUrlPattern([])).toBeNull()
+  })
+
+  it('잘못된 URL은 건너뛰고 나머지로 패턴을 만든다', () => {
+    const urls = ['not a url', 'https://mall.com/a.php?cat=1', 'https://mall.com/b.php?cat=2']
+    expect(deriveCategoryUrlPattern(urls)).toBe('[?&]cat=')
+  })
+
+  it('정규식 특수문자가 포함된 키는 이스케이프한다', () => {
+    // URLSearchParams가 실제로 만들어낼 일은 드물지만, 방어적으로 이스케이프 여부를 확인한다.
+    const urls = ['https://mall.com/a.php?a.b=1', 'https://mall.com/b.php?a.b=2']
+    const pattern = deriveCategoryUrlPattern(urls)
+    expect(pattern).toBe('[?&]a\\.b=')
+    expect(new RegExp(pattern!).test('https://mall.com/x.php?aXb=9')).toBe(false)
   })
 })

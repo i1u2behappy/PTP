@@ -1189,6 +1189,15 @@ export interface MallProfileSignals {
    *  몰 구조분석 결과를 그대로 재사용해 후보를 다시 훑지 않고 즉시 목록을 보여줄 때 쓴다. 지원 안 되는
    *  플랫폼/스캔 실패 시 빈 배열. */
   categoryLinks: CategoryMenuLink[]
+  /** categoryLinks를 찾을 때 AI(로컬 Ollama, detectCategoryLinksWithAI)가 실제로 기여했는지 —
+   *  applyProfileResult가 이번 결과가 규칙 기반으로 떨어졌을 때 예전 AI 결과를 지키는 판단 기준으로
+   *  쓴다("카테고리 불러오기"의 categoryLinksAiUsed와 같은 개념, 몰 구조분석 쪽에도 똑같이 필요해졌다 —
+   *  신우 몰 실사용 확인, 2026-08-25). */
+  categoryLinksAiUsed?: boolean
+  /** deriveCategoryUrlPattern이 categoryLinks에서 역산해둔 "이 몰의 카테고리 URL 패턴"(정규식 문자열) —
+   *  규칙 기반이든 AI든 한 번 카테고리를 찾을 때마다 갱신된다. 다음번 탐지 시 scanByKnownUrlPattern이
+   *  구조 스캔/AI 없이 즉시 카테고리를 다시 찾는 "기억" 역할을 한다(사용자 요청, 2026-08-26). */
+  categoryUrlPattern?: string | null
   /** 목록 페이지에 이 코드가 읽을 수 있는 페이지네이션 위젯(마지막 페이지 버튼 또는 페이지 번호 링크)이
    *  있는지 — false면 미리보기의 카테고리별 개수 집계(countCategoryProductsOnce)가 매 카테고리마다 같은
    *  확인을 반복하지 않고 곧장 지수+이분 탐색으로 넘어간다(knownNoPaginationWidget 참고). 위젯이 전혀
@@ -1293,9 +1302,10 @@ export function stopProfileAnalysis(siteId: number): boolean {
   return true
 }
 
-export async function profileMallStructure(siteId: number, deep = false): Promise<MallProfileSignals | null> {
+export async function profileMallStructure(siteId: number, deep = false, useAi = true): Promise<MallProfileSignals | null> {
   const site = await siteInfo(siteId)
   if (!site.url) return null
+  const { pattern: categoryUrlPattern, manualSamples: knownCategoryExamples } = await getCategoryMemory(siteId)
   const controller = new AbortController()
   profileAbortControllers.set(siteId, controller)
   // withContext가 이미 siteId 기준 락(withSiteLock)을 쥐므로 여기서 따로 또 걸지 않는다 — 같은 키로
@@ -1321,7 +1331,7 @@ export async function profileMallStructure(siteId: number, deep = false): Promis
       }
       const startUrl = page.url()
       if (!startUrl || startUrl === 'about:blank') return null
-      return sampleMallProfile(page, context, startUrl, site.name, deep, controller.signal, siteId)
+      return sampleMallProfile(page, context, startUrl, site.name, deep, controller.signal, siteId, useAi, categoryUrlPattern, knownCategoryExamples)
     }, deep ? '몰 구조분석' : '구조 변화 감지')
   } finally {
     // 이 실행이 등록해둔 컨트롤러가 그대로면(중간에 stopProfileAnalysis가 이미 지웠을 수도 있음) 지운다.
@@ -1340,6 +1350,46 @@ async function siteInfo(siteId: number): Promise<{ name: string; url: string; lo
     loginId: row?.login_id || '',
     loginPw: decryptSecret(row?.login_pw_encrypted ?? null, row?.login_pw_iv ?? null),
   }
+}
+
+/** discoverTopLevelCategoryLinks가 "기억"으로 쓸 재료를 scrape_profile에서 읽어온다 — categoryUrlPattern은
+ *  이전 탐지(규칙 기반이든 AI든)가 역산해둔 URL 패턴, manualCategorySamples는 사용자가 "카테고리 선택
+ *  가져오기"로 직접 확인해 모은 URL이다(사용자 요청, 2026-08-26). 후자는 그 자체로 AI 프롬프트의 근거
+ *  예시로도 쓰이므로 둘 다 같이 반환한다. */
+async function getCategoryMemory(siteId: number): Promise<{ pattern: string | null; manualSamples: string[] }> {
+  const res = await pool.query<{ scrape_profile: { categoryUrlPattern?: string | null; manualCategorySamples?: string[] } | null }>(
+    'SELECT scrape_profile FROM sites WHERE id = $1', [siteId],
+  )
+  const profile = res.rows[0]?.scrape_profile
+  return { pattern: profile?.categoryUrlPattern || null, manualSamples: profile?.manualCategorySamples || [] }
+}
+
+// manualCategorySamples는 AI 프롬프트 근거/패턴 역산 재료로만 쓰는 참고용이라, 몰 하나에 카테고리를
+// 수십~수백 개씩 수동으로 모아도 무한정 쌓아둘 필요가 없다 — 패턴 역산에는 몇 개만 있어도 충분하고
+// (deriveCategoryUrlPattern은 과반수 일치만 보면 됨), 너무 많으면 scrape_profile JSONB만 불필요하게
+// 커진다.
+const MANUAL_CATEGORY_SAMPLE_CAP = 20
+
+/** "몰 카테고리 선택 가져오기(반복)"로 사용자가 카테고리를 직접 확인해 가져올 때마다 호출된다 — 그
+ *  URL을 scrape_profile.manualCategorySamples에 쌓고, 쌓인 샘플로 categoryUrlPattern을 다시 역산해
+ *  갱신한다. 이렇게 하면 사용자가 수동으로 확인한 카테고리가 다음번 자동 탐지(규칙 기반의
+ *  scanByKnownUrlPattern, AI의 근거 예시) 양쪽 모두에 그대로 참고된다(사용자 요청, 2026-08-26: "수동
+ *  선택 작업한 내용을 참고하여서... 룰 방식이건 AI가 참고해서 분석이 가능하도록"). */
+export async function recordManualCategorySample(siteId: number, url: string): Promise<void> {
+  const { pattern: prevPattern, manualSamples } = await getCategoryMemory(siteId)
+  if (manualSamples.includes(url)) return
+  const nextSamples = [...manualSamples, url].slice(-MANUAL_CATEGORY_SAMPLE_CAP)
+  // 샘플이 아직 하나뿐이거나(패턴 역산엔 최소 2개 필요) 우연히 서로 다른 쿼리파라미터를 써서 역산에
+  // 실패해도, 이미 알던 패턴(다른 경로로 확인됐을 수 있음)을 지우지 않는다.
+  const pattern = deriveCategoryUrlPattern(nextSamples) ?? prevPattern
+  await pool.query(
+    `UPDATE sites SET
+       scrape_profile = COALESCE(scrape_profile, '{}'::jsonb)
+         || jsonb_build_object('manualCategorySamples', $1::jsonb, 'categoryUrlPattern', $2::jsonb),
+       scrape_profile_updated_at = NOW()
+     WHERE id=$3`,
+    [JSON.stringify(nextSamples), JSON.stringify(pattern), siteId],
+  )
 }
 
 // page.exposeFunction은 같은 Page 인스턴스에 같은 이름으로 두 번 부르면 에러가 난다 — "스크랩 대상 직접지정 시작"을
@@ -1939,6 +1989,7 @@ export async function profileMallStructureForScrape(opts: ScrapeOptions): Promis
 
 async function sampleMallProfile(
   page: Page, context: BrowserContext, startUrl: string, mallName: string, deep: boolean, signal?: AbortSignal, siteId?: number,
+  useAi = true, categoryUrlPattern?: string | null, knownCategoryExamples?: string[],
 ): Promise<MallProfileSignals | null> {
   // "몰 구조분석"이 항상 오래 걸리는데 label 하나("몰 구조분석")로는 지금 뭘 하고 있는지 알 방법이
   // 없다는 지적(2026-08-22)으로, 주요 단계 경계마다 setSiteLockDetail로 세부 문구를 남긴다 — siteId가
@@ -1996,7 +2047,14 @@ async function sampleMallProfile(
   // 와 공용, 2026-08-19 — 예전엔 여기만 AI 없이 히스틱만 썼다가 도매토피아에서 상품 링크가 카테고리로
   // 잘못 섞여 들어오는 문제를 겪었다). deep=false(구조 변화 감지)면 무거운 방문 폴백은 건너뛴다.
   step('카테고리 구조 확인 중...')
-  const { links: categoryLinks } = await discoverTopLevelCategoryLinks(context, page, mallName, deep, signal)
+  const { links: categoryLinks, aiUsed: categoryLinksAiUsed } = await discoverTopLevelCategoryLinks(
+    context, page, mallName, deep, signal, useAi, categoryUrlPattern, knownCategoryExamples,
+  )
+  // 이번에 카테고리를 찾았으면(어느 방법으로든) URL 패턴을 다시 역산해 "기억"을 최신 상태로 갱신한다 —
+  // 카테고리 구성이 바뀐 몰도 계속 정확한 패턴을 유지하기 위함. 이번엔 하나도 못 찾았으면 새로 역산할
+  // 근거가 없으니 예전에 알던 패턴(categoryUrlPattern 인자)을 그대로 들고 간다 — 일시적 실패로 "기억"
+  // 자체를 지우지 않는다.
+  const finalCategoryUrlPattern = (categoryLinks.length ? deriveCategoryUrlPattern(categoryLinks.map(c => c.href)) : null) ?? categoryUrlPattern ?? null
   if (signal?.aborted) return null
 
   // "카테고리별 정렬기준 설정" 기능용 — 정렬 위젯은 보통 홈페이지가 아니라 카테고리 목록 페이지에만
@@ -2117,7 +2175,8 @@ async function sampleMallProfile(
     sampleCount: 0, platform, sampleProductUrl: sampleUrls[0], hasMainImages: false, hasDetailImages: false,
     optionUiTypes: [], hasCascadingOptions: false, hasStockQty: false, hasStockStatusText: false,
     hasStockByOption: false, hasDetailText: false, infoLabels: [], categoryPaths: [], categoryMaxDepth: 0,
-    categoryMenuNames, categoryLinks, hasPaginationWidget, sortOptions, report: null,
+    categoryMenuNames, categoryLinks, categoryLinksAiUsed, categoryUrlPattern: finalCategoryUrlPattern,
+    hasPaginationWidget, sortOptions, report: null,
   }
   const optionTypes = new Set<'select' | 'swatch' | 'none'>()
   const infoLabelSet = new Set<string>()
@@ -2184,7 +2243,10 @@ async function sampleMallProfile(
     const categoryHints = categoryMenuNames.length ? categoryMenuNames : signals.categoryPaths
     // ANTHROPIC_API_KEY 크레딧이 없어 AI 호출이 안 되는 경우(월 정액 구독으로는 대체 불가 — API 과금과는
     // 별개)에도 "몰 구조분석"이 결과 없이 끝나지 않도록, AI 실패 시 규칙 기반 리포트로 대체한다.
-    signals.report = await generateMallProfileReport(mallName, platform, categoryHints, signals.sampleProductUrl, combinedContext).catch(() => null)
+    // useAi=false(사용자가 "AI 사용" 체크를 끈 경우)면 AI 호출 자체를 시도하지 않고 곧장 규칙 기반으로
+    // 간다 — 크레딧이 없는 걸 이미 아는 상황에서 매번 타임아웃(20초)을 기다리지 않게 한다(사용자 요청,
+    // 2026-08-25).
+    signals.report = (useAi ? await generateMallProfileReport(mallName, platform, categoryHints, signals.sampleProductUrl, combinedContext).catch(() => null) : null)
       ?? buildHeuristicMallReport({
         platform, categoryHints, sampleProductUrl: signals.sampleProductUrl, contextText: combinedContext,
         optionUiTypes: signals.optionUiTypes, hasCascadingOptions: signals.hasCascadingOptions,
@@ -2435,7 +2497,11 @@ export interface CategoryMenuLink {
 // 납품사례/제작문의/도매인증/상품문의: 도매(B2B) 몰 상단에 흔한 "회원가입 유도/문의" 성격의 메뉴로,
 // 실제 상품 카테고리가 아니다(모자사러 실사용 확인, 2026-08-16 — 진짜 카테고리(캡모자/버킷햇 등)가
 // 담긴 메뉴는 래퍼 div가 여러 겹이라 못 찾고, 이 문의성 메뉴만 카테고리로 잘못 집어온 사례).
-const NON_CATEGORY_TEXT_RE = /로그인|회원가입|로그아웃|장바구니|마이페이지|고객센터|검색어?|주문|배송조회|결제|사이트맵|관리자|촬영명령|입고대?기|입고대령|단가\s*(인상|조정)|재진행|색상?\s*(별)?\s*분류|공지사항|공지\b|납품\s*사례|제작\s*문의|도매\s*인증|상품\s*문의|notice|cart|login|logout|mypage|search|sitemap/i
+// 회원 정보/적립금 현황/관심상품/최근 본상품: "마이페이지" 플라이아웃 메뉴의 하위 항목들 — 부모 자신은
+// 이미 "마이페이지"에 걸려 제외되지만, 이 몰(신우, godomall)은 이 항목들이 부모 라벨 없이 그 자체로
+// 최상위 메뉴 항목이라 안 걸러졌다(신우 실사용 확인, 2026-08-25 — 로컬 Ollama가 타임아웃 나 규칙 기반
+// 폴백으로 떨어졌을 때 이 위젯을 카테고리 메뉴로 잘못 집어옴).
+const NON_CATEGORY_TEXT_RE = /로그인|회원가입|로그아웃|장바구니|마이페이지|고객센터|검색어?|주문|배송조회|결제|사이트맵|관리자|촬영명령|입고대?기|입고대령|단가\s*(인상|조정)|재진행|색상?\s*(별)?\s*분류|공지사항|공지\b|납품\s*사례|제작\s*문의|도매\s*인증|상품\s*문의|회원\s*정보|적립금|관심\s*상품|최근\s*본\s*상품|위시\s*리스트|찜\s*(목록)?|notice|cart|login|logout|mypage|search|sitemap|wishlist/i
 
 export interface CategoryMenuScanResult {
   links: CategoryMenuLink[]
@@ -2494,7 +2560,13 @@ async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResult> {
     function ownHref(li: Element): string {
       const clone = li.cloneNode(true) as Element
       clone.querySelectorAll('ul, ol').forEach(n => n.remove())
-      return (clone.querySelector('a[href]') as HTMLAnchorElement | null)?.href || ''
+      const href = (clone.querySelector('a[href]') as HTMLAnchorElement | null)?.href || ''
+      // href="#"(빈 프래그먼트만 있는, 실제로는 아무 데도 안 가는 드롭다운 토글/장식용 링크)는 .href로
+      // 읽으면 "현재 페이지 URL + #"으로 resolve된다 — 이걸 실제 카테고리로 취급하면, 하필 그 페이지가
+      // (홈페이지처럼) 그 자체로 상품 목록이기도 한 몰에서는 "홈페이지 전체"가 가짜 카테고리 하나로
+      // 둔갑해 이미 다른 진짜 카테고리에서 센 상품과 통째로 중복 집계된다(실사용 확인, 2026-08-25 —
+      // 가방쟁이에서 이 가짜 카테고리 하나가 미리보기 총 개수를 592개 부풀림).
+      return href.endsWith('#') ? '' : href
     }
     function buildPaths(li: Element, prefix: string[], depth: number, out: { name: string; href: string }[]) {
       if (depth > 3 || out.length > 200) return
@@ -2604,7 +2676,12 @@ function scanCategoryMenuFromHtml(html: string, baseUrl: string): CategoryMenuSc
   const isMeaningful = (s: string) => !!s && /[가-힣a-zA-Z0-9]/.test(s)
   const resolve = (href: string | undefined): string => {
     if (!href) return ''
-    try { return new URL(href, baseUrl).href } catch { return '' }
+    try {
+      const resolved = new URL(href, baseUrl).href
+      // scanCategoryMenu(라이브 DOM)의 ownHref와 같은 이유로 href="#"(빈 프래그먼트) 링크를 걸러낸다 —
+      // 두 스캔 결과가 갈리지 않도록 항상 같이 맞춘다.
+      return resolved.endsWith('#') ? '' : resolved
+    } catch { return '' }
   }
   const ownText = (li: CheerioNode): string => {
     // scanCategoryMenu(라이브 DOM)의 ownText와 같은 이유(앵커 우선 읽기)로 맞춘다 — 두 스캔 결과가
@@ -2746,6 +2823,7 @@ async function findCategoryLinkCandidates(page: Page): Promise<string[]> {
         Array.from(root.querySelectorAll('a[href]')).forEach(a => {
           const href = (a as HTMLAnchorElement).href
           if (!href.startsWith(origin)) return
+          if (href.endsWith('#')) return // href="#" — 실제로는 아무 데도 안 가는 토글 링크 (scanCategoryMenu의 ownHref 참고)
           const norm = href.replace(/\/+$/, '')
           if (norm === current || norm === origin || seen.has(norm)) return
           seen.add(norm)
@@ -2779,17 +2857,33 @@ async function collectAllPageLinks(page: Page): Promise<{ text: string; href: st
     const current = location.href.replace(/\/+$/, '')
     const seen = new Set<string>()
     const result: { text: string; href: string }[] = []
-    for (const a of Array.from(document.querySelectorAll('a[href]'))) {
-      if (result.length >= cap) break
-      const href = (a as HTMLAnchorElement).href
-      if (!href.startsWith(origin)) continue
-      const norm = href.replace(/\/+$/, '')
-      if (norm === current || norm === origin || seen.has(norm)) continue
-      const text = (a.textContent || '').trim() || (a.querySelector('img[alt]') as HTMLImageElement | null)?.alt.trim() || ''
-      if (!text) continue
-      seen.add(norm)
-      result.push({ text, href })
+    const pushFrom = (anchors: Element[]) => {
+      for (const a of anchors) {
+        if (result.length >= cap) break
+        const href = (a as HTMLAnchorElement).href
+        if (!href.startsWith(origin)) continue
+        if (href.endsWith('#')) continue // href="#" — 실제로는 아무 데도 안 가는 토글 링크 (scanCategoryMenu의 ownHref 참고)
+        const norm = href.replace(/\/+$/, '')
+        if (norm === current || norm === origin || seen.has(norm)) continue
+        const text = (a.textContent || '').trim() || (a.querySelector('img[alt]') as HTMLImageElement | null)?.alt.trim() || ''
+        if (!text) continue
+        seen.add(norm)
+        result.push({ text, href })
+      }
     }
+    // 카테고리 메뉴는 보통 헤더/nav 영역(scanCategoryMenu가 찾는 것과 같은 후보 영역)에 몰려있다 — 이
+    // 영역의 링크를 먼저 담아야, detectCategoryLinksWithAI가 다시 OLLAMA_MAX_CANDIDATES로 자를 때 페이지
+    // 뒷부분(상품 썸네일/푸터 등)의 무관한 링크에 밀려 진짜 카테고리 링크가 통째로 잘려나가지 않는다.
+    // 프롬프트 앞부분이 실제 카테고리 링크로 채워지면 그만큼 프롬프트도 짧아져, CPU 전용 로컬 모델이
+    // 도구 호출 대신 장문 텍스트로 새 타임아웃되는 확률도 같이 줄어든다(신우 실사용 확인, 2026-08-25).
+    const navSelectors = '[class*="cat" i], [id*="cat" i], [class*="lnb" i], [id*="lnb" i], [class*="snb" i], [id*="snb" i], [class*="ovmenu" i], [class*="gnb" i], [id*="gnb" i], nav'
+    let navRoots: Element[] = []
+    try { navRoots = Array.from(document.querySelectorAll(navSelectors)) } catch { navRoots = [] }
+    for (const root of navRoots) {
+      if (result.length >= cap) break
+      pushFrom(Array.from(root.querySelectorAll('a[href]')))
+    }
+    if (result.length < cap) pushFrom(Array.from(document.querySelectorAll('a[href]')))
     return result
   }, AI_LINK_CANDIDATE_CAP).catch(() => [])
 }
@@ -2810,6 +2904,7 @@ async function collectSortCandidates(page: Page): Promise<{ text: string; href: 
       if (result.length >= cap) break
       const href = (a as HTMLAnchorElement).href
       if (!href.startsWith(origin)) continue
+      if (href.endsWith('#')) continue // href="#" — 실제로는 아무 데도 안 가는 토글 링크 (scanCategoryMenu의 ownHref 참고)
       const norm = href.replace(/\/+$/, '')
       if (norm === current || norm === origin || seen.has(norm)) continue
       const text = (a.textContent || '').trim() || (a.querySelector('img[alt]') as HTMLImageElement | null)?.alt.trim() || ''
@@ -2823,6 +2918,7 @@ async function collectSortCandidates(page: Page): Promise<{ text: string; href: 
       let href: string
       try { href = new URL(opt.value, location.href).href } catch { continue }
       if (!href.startsWith(origin)) continue
+      if (href.endsWith('#')) continue
       const norm = href.replace(/\/+$/, '')
       if (norm === current || norm === origin || seen.has(norm)) continue
       const text = (opt.textContent || '').trim()
@@ -2909,6 +3005,40 @@ async function detectSortOptionsByClicking(page: Page, baseUrl: string): Promise
   return confirmed
 }
 
+/**
+ * "몰 카테고리 선택 가져오기(반복)" 탭 전용 — 사용자가 카테고리를 하나 가져오면 "몰 구조분석"을 따로
+ * 돌리지 않아도 그 즉시 "정렬" 드롭다운을 쓸 수 있게, 그 카테고리 페이지에서 바로 정렬 옵션을 찾는다
+ * (사용자 요청, 2026-08-26 — "카테고리를 가져오기 하면 그 즉시 정렬/스크랩 상한 작업이 가능하도록").
+ * sampleMallProfile(deep)의 정렬 감지와 같은 순서(정적 href/select 후보 → looksLikeSortLabel+
+ * diffQueryParams로 확정 → 실패하면 실제 클릭 검증 폴백)를 쓰되, "카테고리 여러 개 중 상품이 있는 것을
+ * 찾아 도는" 부분은 없다 — 사용자가 이미 실제 카테고리 페이지라고 확인해 가져온 URL이라 그대로 믿는다
+ * (상품이 없는 허브 페이지였다면 정렬 위젯도 없어 빈 배열이 나올 뿐 해가 되지 않는다). 몰 전체가 같은
+ * 정렬 메커니즘을 쓴다고 보므로(sampleMallProfile과 같은 가정) 카테고리마다 다시 부를 필요는 없다 —
+ * 호출부(app/api/scrape/categories/sort-options)가 이미 정렬 옵션을 찾아둔 몰이면 다시 부르지 않는다.
+ */
+export async function detectSortOptionsForCategory(opts: ScrapeOptions, categoryUrl: string): Promise<MallSortOption[]> {
+  return withContext(opts, async (page, context) => {
+    const scanPage = await context.newPage()
+    try {
+      await scanPage.goto(categoryUrl, { waitUntil: 'load', timeout: 20_000 })
+      await loginIfNeeded(scanPage, { url: categoryUrl, ...opts })
+      if (opts.loginId && scanPage.url() !== categoryUrl) {
+        await scanPage.goto(categoryUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+      }
+      const baseUrl = scanPage.url()
+      const sortCandidates = await collectSortCandidates(scanPage)
+      const queryBased = sortCandidates
+        .filter(c => looksLikeSortLabel(c.text))
+        .map(c => ({ label: c.text, kind: 'query' as const, paramsToAdd: diffQueryParams(baseUrl, c.href) }))
+        .filter((o): o is { label: string; kind: 'query'; paramsToAdd: Record<string, string> } => !!o.paramsToAdd)
+      if (queryBased.length) return queryBased
+      return await detectSortOptionsByClicking(scanPage, baseUrl).catch(() => [])
+    } finally {
+      await scanPage.close().catch(() => {})
+    }
+  }, '카테고리 정렬 옵션 확인')
+}
+
 /** scanCategoryMenu가 메뉴 텍스트를 못 읽을 때(이미지 스프라이트/아이콘 폰트 메뉴 등이라 <li> 안에 글자가
  *  전혀 없는 경우, 실사용 확인: 진짜양말 — alt 없는 메뉴 이미지라 이름이 마크업 어디에도 없음)의 대안이다.
  *  메뉴 자체는 못 읽어도 "링크"(href)는 findCategoryLinkCandidates로 얻을 수 있으니, 그 링크로 실제
@@ -2934,6 +3064,124 @@ async function discoverCategoriesByVisitingLinks(context: BrowserContext, page: 
   return result
 }
 
+/** 시작 페이지(대개 홈페이지)에 "전체카테고리"류 허브 링크가 있으면 실제 카테고리 메뉴는 홈페이지
+ *  상단 nav보다 그 안에 훨씬 깔끔하게 정리돼 있는 경우가 많다(신우 실사용 확인, 2026-08-26 — 홈페이지
+ *  nav는 "양말&세트/남성속옷/..." 대분류 탭만 있고 실제 하위 카테고리는 "전체카테고리+" 링크를 눌러야
+ *  나오는 "카테고리 전체보기" 페이지에 계층별로 정리돼 있었다). "카테고리"라는 단어가 들어간 링크를
+ *  찾아 먼저 들어가보면, 그 뒤 AI/히스틱 스캔의 후보도 그만큼 짧고 관련성 높아져(홈페이지의 배너/상품
+ *  썸네일 등 잡음이 없음) CPU 전용 로컬 모델의 도구 호출 성공률도 같이 올라간다. "전체"가 들어간 링크를
+ *  우선하고(전체카테고리 등 허브일 가능성이 가장 높음), 없으면 "카테고리"만 들어간 첫 링크를 쓴다. */
+async function findCategoryOverviewLink(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const origin = location.origin
+    const anchors = Array.from(document.querySelectorAll('a[href]')) as HTMLAnchorElement[]
+    const candidates = anchors.filter(a => a.href.startsWith(origin) && /카테고리/.test((a.textContent || '').trim()))
+    if (!candidates.length) return null
+    const preferred = candidates.find(a => /전체/.test(a.textContent || '')) || candidates[0]
+    return preferred.href
+  }).catch(() => null)
+}
+
+/** "카테고리 전체보기" 류 페이지에 흔한 구조 — scanCategoryMenu가 찾는 `<li>` 중첩 트리가 아니라,
+ *  "짧은 제목 요소 바로 뒤에 링크 목록(ul/ol)이 따라오는" 짝이 대분류 개수만큼 페이지 안에 반복된다
+ *  (findCategoryOverviewLink로 들어간 신우의 "카테고리 전체보기" 페이지 실사용 확인, 2026-08-26 —
+ *  `<p class="cate_t"><a>양말＆세트</a></p><ul><li><a>...하위...</a></li>...</ul>` 형태가 9번 반복).
+ *  특정 클래스명(cate_t, mapArea 등)이 아니라 "짧은 텍스트 하나 + 바로 뒤 형제 링크 목록"이라는 구조
+ *  자체로 찾으므로, 클래스명이 몰마다 달라도 일반적으로 적용된다 — scanCategoryMenu가 부분 문자열
+ *  클래스 매칭으로 일반화했던 것과 같은 원리를, 클래스명이 아예 없는(또는 무관한) 몰에도 확장한 것. */
+async function scanCategoryOverviewPage(page: Page): Promise<CategoryMenuLink[]> {
+  return page.evaluate(() => {
+    const origin = location.origin
+    const isShortLabel = (s: string) => {
+      const t = s.trim()
+      return t.length > 0 && t.length <= 20 && !/https?:\/\//.test(t)
+    }
+    const result: { name: string; href: string }[] = []
+    const seen = new Set<string>()
+    const headingCandidates = Array.from(document.querySelectorAll('p, h1, h2, h3, h4, h5, strong, b, dt'))
+      .filter(el => !el.querySelector('ul, ol') && isShortLabel(el.textContent || ''))
+    let groupsFound = 0
+    for (const heading of headingCandidates) {
+      // 제목 바로 다음 형제가 목록이면 그걸 쓰고, 아니면(제목이 한 겹 더 감싸져 있는 마크업) 제목의
+      // 부모 바로 다음 형제도 한 번 더 본다.
+      let list: Element | null = heading.nextElementSibling
+      if (!list || (list.tagName !== 'UL' && list.tagName !== 'OL')) {
+        list = heading.parentElement?.nextElementSibling || null
+      }
+      if (!list || (list.tagName !== 'UL' && list.tagName !== 'OL')) continue
+      const items = Array.from(list.querySelectorAll('a[href]')) as HTMLAnchorElement[]
+      const validItems = items.filter(a => a.href.startsWith(origin) && (a.textContent || '').trim())
+      if (validItems.length < 2) continue
+      groupsFound++
+      const groupName = (heading.textContent || '').trim()
+      for (const a of validItems) {
+        const norm = a.href.replace(/\/+$/, '')
+        if (seen.has(norm)) continue
+        seen.add(norm)
+        const itemText = (a.textContent || '').trim().replace(/^[·•\s]+/, '')
+        result.push({ name: groupName ? `${groupName} > ${itemText}` : itemText, href: a.href })
+      }
+    }
+    // "제목+목록" 짝이 최소 2개는 반복돼야 진짜 카테고리 구조로 인정한다(하나만 우연히 걸리면 무관한
+    // 위젯일 수 있음) — scanCategoryMenu의 "최소 2개 경로" 조건과 같은 이유.
+    return groupsFound >= 2 ? result : []
+  }).catch(() => [])
+}
+
+/**
+ * "이 몰은 카테고리 URL이 이런 모양이다"를 실제 확인된 URL들에서 역산한다 — 규칙 기반이든 AI든 한 번
+ * 성공한 결과, 또는 사용자가 "카테고리 선택 가져오기"로 직접 모은 URL(scrape_profile.
+ * manualCategorySamples)이 그 재료다. 쿼리파라미터 키(예: cat_code, cateCd) 중 확인된 URL의 과반수에
+ * 공통으로 등장하는 게 있으면 그 키를 "이 몰의 카테고리 신호"로 본다 — 카테고리마다 값(48/57/ 등)은
+ * 달라도 키 이름 자체는 같은 페이지 스크립트(socks.php/knit.php 등 서로 다른 파일이어도)가 공유하는
+ * 경우가 흔하다(신우 실사용 확인, 2026-08-26 — 모든 카테고리가 cat_code= 파라미터를 씀). 다음번 이
+ * 몰의 카테고리 탐지 시 scanByKnownUrlPattern이 이 패턴 하나로 즉시(구조 스캔/AI 없이) 카테고리를
+ * 다시 찾는 "기억" 역할을 한다. 순수 함수라 tests/unit에서 검증 가능.
+ */
+export function deriveCategoryUrlPattern(urls: string[]): string | null {
+  if (urls.length < 2) return null
+  const keyCounts = new Map<string, number>()
+  for (const u of urls) {
+    try {
+      const seenInThis = new Set<string>()
+      for (const key of new URL(u).searchParams.keys()) {
+        if (seenInThis.has(key)) continue
+        seenInThis.add(key)
+        keyCounts.set(key, (keyCounts.get(key) || 0) + 1)
+      }
+    } catch { /* URL 파싱 실패한 항목은 건너뛴다 */ }
+  }
+  if (!keyCounts.size) return null
+  const [bestKey, count] = [...keyCounts.entries()].sort((a, b) => b[1] - a[1])[0]
+  // 절반 미만의 URL에만 우연히 겹치는 키는 진짜 패턴으로 보지 않는다(예: 여러 카테고리 중 하나만 특이하게
+  // 홍보 파라미터를 달고 있는 경우).
+  if (count < Math.ceil(urls.length / 2)) return null
+  return `[?&]${bestKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=`
+}
+
+/** deriveCategoryUrlPattern이 찾아둔(=기억해둔) URL 패턴으로, 지금 페이지의 링크 중 그 패턴에 맞는 것을
+ *  전부 카테고리로 간주한다 — 구조 스캔이나 AI보다 훨씬 빠르고(그냥 정규식 매칭), 한 번 확인된 몰은
+ *  다음부터 거의 즉시 카테고리를 다시 찾을 수 있다. */
+async function scanByKnownUrlPattern(page: Page, patternSrc: string): Promise<CategoryMenuLink[]> {
+  return page.evaluate((patternSrc) => {
+    const re = new RegExp(patternSrc)
+    const origin = location.origin
+    const seen = new Set<string>()
+    const result: { name: string; href: string }[] = []
+    for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+      const href = (a as HTMLAnchorElement).href
+      if (!href.startsWith(origin) || !re.test(href)) continue
+      const norm = href.replace(/\/+$/, '')
+      if (seen.has(norm)) continue
+      const text = (a.textContent || '').trim()
+      if (!text) continue
+      seen.add(norm)
+      result.push({ name: text, href })
+    }
+    return result
+  }, patternSrc).catch(() => [])
+}
+
 /**
  * "카테고리 메뉴/구조 탐지"의 공용 진입점 — discoverCategoryLinks("카테고리 불러오기")와
  * sampleMallProfile("몰 구조분석"/구조 변화 감지)가 각자 따로 이 판단을 구현하고 있었는데, 후자만
@@ -2942,15 +3190,49 @@ async function discoverCategoriesByVisitingLinks(context: BrowserContext, page: 
  * scanCategoryMenu가 두 `<ul>`을 구분 못 하고 상품 링크까지 카테고리로 잘못 묶어 왔다. "몰 구조분석"을
  * 먼저 실행해 이 잘못된 결과가 sites.scrape_profile.categoryLinks에 캐시되면, "카테고리 불러오기"가
  * discoverCategoryLinks/AI를 아예 타지 않고 그 캐시를 그대로 돌려줘 화면에도 그대로 나타났다).
- * AI를 먼저 시도하고, 실패하면 기존 scanCategoryMenuRobust 히스틱으로 폴백한다. visitTextlessFallback이
- * false면(가벼운 구조 변화 감지 전용) 페이지를 추가로 방문해야 하는 이미지전용 메뉴 폴백은 건너뛴다
- * (sampleMallProfile의 deep=false와 동일한 이유 — 무거운 작업이라 "몰 구조분석" 버튼에서만 한다). */
+ *
+ * 순서를 규칙 기반 우선으로 뒤집었다(사용자 요청, 2026-08-26: "규칙기반 방식을 먼저 시도하고, 이후
+ * AI 방식으로") — AI(로컬 Ollama)는 느리고 후보가 많으면 실패하기 쉬운데, 신우처럼 규칙 기반(구조
+ * 패턴)만으로 충분히 찾히는 몰이 많다는 게 실사용으로 확인됐다. 순서:
+ *   0) categoryUrlPattern(이전에 "기억"해둔 이 몰의 카테고리 URL 패턴)이 있으면 그걸로 즉시 스캔 —
+ *      구조 스캔/AI보다 훨씬 빠르고 확실하다.
+ *   1) findCategoryOverviewLink로 "전체카테고리"류 허브가 있으면 먼저 들어가본다.
+ *   2) scanCategoryOverviewPage("제목+목록" 구조) → scanCategoryMenuRobust(클래스명 기반, +
+ *      textless 방문 폴백) 순서로 규칙 기반을 전부 시도한다.
+ *   3) 그래도 못 찾으면 마지막 수단으로 AI — 이땐 시간을 넉넉히 준다(detectCategoryLinksWithAI의
+ *      CATEGORY_AI_TIMEOUT_MS). knownCategoryExamples(수동으로 확인된 카테고리 URL 등)가 있으면
+ *      프롬프트에 근거로 얹어 판단을 돕는다.
+ * visitTextlessFallback이 false면(가벼운 구조 변화 감지 전용) 페이지를 추가로 방문해야 하는
+ * 이미지전용 메뉴 폴백은 건너뛴다(sampleMallProfile의 deep=false와 동일한 이유 — 무거운 작업이라
+ * "몰 구조분석" 버튼에서만 한다). */
 async function discoverTopLevelCategoryLinks(
-  context: BrowserContext, page: Page, mallName: string, visitTextlessFallback: boolean, signal?: AbortSignal,
+  context: BrowserContext, page: Page, mallName: string, visitTextlessFallback: boolean, signal?: AbortSignal, useAi = true,
+  categoryUrlPattern?: string | null, knownCategoryExamples?: string[],
 ): Promise<{ links: CategoryMenuLink[]; textlessHrefs: string[]; aiUsed: boolean }> {
-  const aiCandidates = await collectAllPageLinks(page)
-  const aiLinks = await detectCategoryLinksWithAI(mallName, aiCandidates, undefined, signal).catch(() => [])
-  if (aiLinks.length) return { links: aiLinks, textlessHrefs: [], aiUsed: true }
+  if (categoryUrlPattern) {
+    const patternLinks = await scanByKnownUrlPattern(page, categoryUrlPattern)
+    if (patternLinks.length >= 2) {
+      console.log(`[카테고리탐지:진단:${mallName}] 기억해둔 URL 패턴(${categoryUrlPattern})으로 ${patternLinks.length}개 찾음`)
+      return { links: patternLinks, textlessHrefs: [], aiUsed: false }
+    }
+  }
+
+  const overviewUrl = await findCategoryOverviewLink(page)
+  if (overviewUrl && overviewUrl.replace(/\/+$/, '') !== page.url().replace(/\/+$/, '')) {
+    const moved = await page.goto(overviewUrl, { waitUntil: 'load', timeout: 15_000 }).then(() => true).catch(() => false)
+    console.log(`[카테고리탐지:진단:${mallName}] "전체카테고리"류 링크 발견 → ${overviewUrl} (이동 ${moved ? '성공' : '실패'})`)
+  } else {
+    console.log(`[카테고리탐지:진단:${mallName}] "카테고리" 단어가 든 링크를 못 찾음 — 지금 페이지(${page.url()}) 그대로 스캔`)
+  }
+
+  // "카테고리 전체보기"류 페이지(제목+목록 반복 구조)부터 먼저 시도한다 — findCategoryOverviewLink가
+  // 방금 이런 페이지로 이동시켰을 가능성이 높고, scanCategoryMenuRobust(클래스명 기반)가 못 찾는
+  // 마크업(신우처럼 cat/lnb/gnb류 클래스가 아예 없는 몰)에서도 통한다.
+  const overviewLinks = await scanCategoryOverviewPage(page)
+  if (overviewLinks.length) {
+    console.log(`[카테고리탐지:진단:${mallName}] "제목+목록" 구조로 ${overviewLinks.length}개 찾음`)
+    return { links: overviewLinks, textlessHrefs: [], aiUsed: false }
+  }
 
   const scanned = await scanCategoryMenuRobust(page)
   let links = scanned.links
@@ -2964,6 +3246,17 @@ async function discoverTopLevelCategoryLinks(
       links = [...links, ...extra]
     }
   }
+  if (links.length) return { links, textlessHrefs, aiUsed: false }
+
+  // 규칙 기반이 전부 실패했을 때만 AI로 넘어간다 — 마지막 수단이라 시간을 넉넉히 준다.
+  if (useAi) {
+    const aiCandidates = await collectAllPageLinks(page)
+    console.log(`[카테고리탐지:진단:${mallName}] 규칙 기반 실패 → AI 시도(후보 ${aiCandidates.length}개)`)
+    const aiLinks = await detectCategoryLinksWithAI(mallName, aiCandidates, undefined, signal, knownCategoryExamples).catch(() => [])
+    console.log(`[카테고리탐지:진단:${mallName}] AI 결과 ${aiLinks.length}개`)
+    if (aiLinks.length) return { links: aiLinks, textlessHrefs, aiUsed: true }
+  }
+
   return { links, textlessHrefs, aiUsed: false }
 }
 
@@ -3054,6 +3347,13 @@ interface CollectedLinks {
    *  없어서 "중지"를 눌러도 상품 하나도 못 긁고도 이 수집이 끝날 때까지 그대로 계속 돌았다
    *  (2026-08-11 실사용 확인·수정). */
   stopped: boolean
+  /** 실제로 방문한 목록 페이지 URL 목록(resetToFirstPage로 정규화된 값 — perCategoryUrls의 키와 동일) —
+   *  "카테고리별 중복 개수 확인"이 이 순서 그대로 어느 카테고리가 어떤 상품을 처음 발견했는지 계산한다. */
+  listingUrls: string[]
+  /** 카테고리(목록 URL)별로 그 카테고리에서 발견한 상품 URL 전체 — productUrlSet과 달리 카테고리 간
+   *  중복을 지우지 않고 그대로 남겨, 나중에(countCategoryOverlap) 어느 카테고리가 다른 카테고리와 얼마나
+   *  겹치는지 계산할 수 있게 한다. */
+  perCategoryUrls: Map<string, Set<string>>
 }
 
 // 사용자가 최대 페이지 수를 지정하지 않으면 "다음 페이지" 링크가 더 이상 없을 때까지 끝까지 따라간다 —
@@ -3138,7 +3438,10 @@ export function diffQueryParams(baseUrl: string, variantUrl: string): Record<str
  *  순차로 돈다. */
 async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: BrowserContext): Promise<CollectedLinks> {
   if (opts.productUrls?.length) {
-    return { urls: opts.productUrls, platform: 'unknown', categoryByUrl: new Map(), linkInfo: new Map(), needsLogin: false, stopped: false }
+    return {
+      urls: opts.productUrls, platform: 'unknown', categoryByUrl: new Map(), linkInfo: new Map(), needsLogin: false, stopped: false,
+      listingUrls: [], perCategoryUrls: new Map(),
+    }
   }
   // 실제 스크랩(sessionId+isStopRequested)뿐 아니라, DB 세션이 없는 단발 호출(정확한 총 개수 확인 —
   // countDedupedProductUrls)도 이 수집 단계를 쓴다 — previewCatalog와 같은 이유로 stopSignal도 같이 본다.
@@ -3170,6 +3473,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
   const productUrlSet = new Set<string>()
   const categoryByUrl = new Map<string, CategoryLabel>()
   const linkInfo = new Map<string, { name: string; thumbnail: string }>()
+  const perCategoryUrls = new Map<string, Set<string>>(listingUrls.map(u => [u, new Set<string>()]))
 
   async function scanForProducts(targetPage: Page): Promise<{ href: string; name: string; thumbnail: string }[]> {
     const items: { href: string; name: string; thumbnail: string }[] = await targetPage.evaluate(({ userSel, platformSel, detailPatternSrc, widgetExcludeSrc }) => {
@@ -3322,6 +3626,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
       const itemsToAdd = limit?.mode === 'count' ? matched.slice(0, Math.max(0, limit.value - listingCount)) : matched
       itemsToAdd.forEach(item => {
         productUrlSet.add(item.href)
+        perCategoryUrls.get(listingUrl)!.add(item.href)
         if (categoryLabel.category && !categoryByUrl.has(item.href)) categoryByUrl.set(item.href, categoryLabel)
         if (!linkInfo.has(item.href) && (item.name || item.thumbnail)) linkInfo.set(item.href, { name: item.name, thumbnail: item.thumbnail })
       })
@@ -3366,13 +3671,16 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
     }
   }
 
-  // 목록 페이지 자체와 이미 스크랩된 상품은 제외
+  // 목록 페이지 자체와 이미 스크랩된 상품은 제외 — perCategoryUrls도 urls와 같은 기준으로 걸러야
+  // countCategoryOverlap의 카테고리별 개수 합이 최종 urls.length와 어긋나지 않는다.
   const listingSet = new Set(listingUrls)
   const excludeSet  = new Set(opts.excludeUrls || [])
-  const urls = [...productUrlSet].filter(h => !listingSet.has(h) && !excludeSet.has(h))
+  const dropExcluded = (h: string) => !listingSet.has(h) && !excludeSet.has(h)
+  const urls = [...productUrlSet].filter(dropExcluded)
+  perCategoryUrls.forEach((set, key) => perCategoryUrls.set(key, new Set([...set].filter(dropExcluded))))
 
   if (opts.sessionId != null) collectProgress.delete(opts.sessionId)
-  return { urls, platform, categoryByUrl, linkInfo, needsLogin, stopped: collectionStopped }
+  return { urls, platform, categoryByUrl, linkInfo, needsLogin, stopped: collectionStopped, listingUrls, perCategoryUrls }
 }
 
 /**
@@ -3389,6 +3697,43 @@ export async function countDedupedProductUrls(opts: ScrapeOptions): Promise<{ to
     const { urls, needsLogin, stopped } = await collectProductUrls(page, opts, context)
     return { total: urls.length, needsLogin, stopped }
   }, '정확한 총 개수 확인')
+}
+
+/**
+ * "카테고리별 중복 개수 확인" — countDedupedProductUrls는 총합 하나만 보여주는데, 정작 "그래서 어느
+ * 카테고리끼리 얼마나 겹치길래 이렇게 줄어드는지"는 알 수 없다는 질문(2026-08-25, 미리보기 2800여개 vs
+ * 실제 스크랩 1600여개 — 원인 확인 과정에서 나온 요청)에 답하기 위해, countDedupedProductUrls와 같은
+ * 실제 수집(collectProductUrls)을 한 번 해서 카테고리별로 "이 카테고리에서 찾은 개수", 그중 "다른
+ * 카테고리에는 없던(=최종 스크랩에 새로 보태는) 개수", "이미 다른 카테고리에도 있던(=중복) 개수"를
+ * 나눠 돌려준다.
+ * 실제 스크랩은 카테고리를 여러 탭으로 동시에 처리해 같은 상품을 "누가 먼저" 찾는지가 그때그때 달라질 수
+ * 있어(경합) 어느 카테고리가 중복의 "주인"인지 자체는 원래 결정론적이지 않다 — 화면에 매번 다른 숫자가
+ * 나오면 혼란스러우므로, 여기서는 항상 opts.categoryUrls에 준 순서를 기준으로 "먼저 나열된 카테고리가
+ * 그 상품의 주인"으로 고정해서 계산한다. 이 순서는 카테고리 체크리스트가 항상 쓰는 순서와 같다(순서를
+ * 바꿔도 카테고리별 귀속만 달라질 뿐, 카테고리 개수 합계(중복 제거된 총합)는 순서와 무관하게 항상
+ * 실제 스크랩과 같다).
+ */
+export async function countCategoryOverlap(opts: ScrapeOptions): Promise<{
+  categories: { url: string; count: number; uniqueCount: number; duplicateCount: number }[]
+  total: number
+  needsLogin: boolean
+  stopped: boolean
+}> {
+  return withContext(opts, async (page, context) => {
+    const { urls, listingUrls, perCategoryUrls, needsLogin, stopped } = await collectProductUrls(page, opts, context)
+    const seen = new Set<string>()
+    const categories = listingUrls.map(url => {
+      const set = perCategoryUrls.get(url) ?? new Set<string>()
+      let uniqueCount = 0
+      for (const href of set) {
+        if (seen.has(href)) continue
+        seen.add(href)
+        uniqueCount++
+      }
+      return { url, count: set.size, uniqueCount, duplicateCount: set.size - uniqueCount }
+    })
+    return { categories, total: urls.length, needsLogin, stopped }
+  }, '카테고리별 중복 개수 확인')
 }
 
 /** "카테고리 불러오기" 체크리스트에 상품개수/확인일시 컬럼을 보여주기 위해, 미리보기(일반모드
@@ -4680,7 +5025,11 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
       // "카테고리 메뉴/구조 탐지"는 sampleMallProfile("몰 구조분석")과 공용 함수(discoverTopLevelCategoryLinks)를
       // 쓴다 — AI(Gemini)를 우선 시도하고 실패하면 기존 셀렉터 히스틱 체인으로 폴백한다(2026-08-18/19).
       const mallName = opts.siteId ? (await siteInfo(opts.siteId)).name : new URL(url).hostname
-      const { links: topLevelLinks, aiUsed: topLevelAiUsed } = await discoverTopLevelCategoryLinks(context, scanPage, mallName, true)
+      const { pattern: categoryUrlPattern, manualSamples: knownCategoryExamples } = opts.siteId
+        ? await getCategoryMemory(opts.siteId) : { pattern: null, manualSamples: [] }
+      const { links: topLevelLinks, aiUsed: topLevelAiUsed } = await discoverTopLevelCategoryLinks(
+        context, scanPage, mallName, true, undefined, true, categoryUrlPattern, knownCategoryExamples,
+      )
       let categoryLinks = topLevelLinks
       // 화면에 "AI가 실제로 이번 결과에 기여했는지"를 작게 표시해주기 위한 신호(사용자 요청, 2026-08-18) —
       // 최상위 탐지든 아래 허브 하위메뉴 탐지든 AI 결과를 하나라도 그대로 채택했으면 true.
@@ -4762,4 +5111,45 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
       await scanPage.close().catch(() => {})
     }
   }, '카테고리 불러오기')
+}
+
+/**
+ * "몰 카테고리 선택 가져오기(반복)" 탭 전용 — 사용자가 로그인 창에서 직접 골라 가져온 카테고리 하나가
+ * "하위 카테고리 있음"으로 체크되면, 그 카테고리 페이지를 열어 하위 메뉴만 찾아 반환한다. discoverCategoryLinks의
+ * expandWorker(대분류를 자동 탐지한 뒤 상품 0개인 허브만 자동으로 펼치는 로직)와 같은 AI→히스틱 폴백을
+ * 쓰지만, 자동 최상위 탐지(discoverTopLevelCategoryLinks)를 아예 거치지 않고 사용자가 이미 골라온 URL
+ * 하나만 대상으로 한다 — 최상위 탐지가 안 되는 몰(신우 실사용 확인, 2026-08-26: 로컬 Ollama가 후보 많은
+ * 프롬프트에서 도구 호출을 못 하고 타임아웃, 규칙 기반 히스틱은 무관한 메뉴를 잘못 집어옴)에서도 "사용자가
+ * 직접 대분류를 골라오고, 그 페이지 하나만 펼쳐본다"는 훨씬 좁은 범위라 AI/히스틱 둘 다 성공 확률이 높다.
+ */
+export async function expandCategoryChildren(
+  opts: ScrapeOptions, parentUrl: string, parentName: string,
+): Promise<{ platform: MallPlatform; links: CategoryLink[]; aiUsed: boolean }> {
+  return withContext(opts, async (page, context) => {
+    const scanPage = await context.newPage()
+    try {
+      await scanPage.goto(parentUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 })
+      await loginIfNeeded(scanPage, { url: parentUrl, ...opts })
+      if (opts.loginId && scanPage.url() !== parentUrl) {
+        await scanPage.goto(parentUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {})
+      }
+      const platform = await detectMallPlatform(scanPage)
+      const mallName = opts.siteId ? (await siteInfo(opts.siteId)).name : new URL(parentUrl).hostname
+      const aiCandidates = await collectAllPageLinks(scanPage)
+      let children = await detectCategoryLinksWithAI(mallName, aiCandidates, parentName || '지금 보고 있는 카테고리').catch(() => [])
+      const aiUsed = children.length > 0
+      if (!children.length) {
+        const sub = await scanCategoryMenuRobust(scanPage)
+        children = sub.links
+      }
+      // scanCategoryMenuRobust가 대분류 메뉴(GNB)를 다시 찾아버리면 방문한 그 페이지 자신으로 되돌아오는
+      // 항목이 섞일 수 있다(discoverCategoryLinks의 expandWorker와 같은 이유) — 자기 자신은 제외한다.
+      const parentNorm = parentUrl.replace(/\/+$/, '')
+      children = children.filter(c => c.href.replace(/\/+$/, '') !== parentNorm)
+      const links: CategoryLink[] = children.map(c => ({ href: c.href, text: parentName ? `${parentName} > ${c.name}` : c.name }))
+      return { platform, links, aiUsed }
+    } finally {
+      await scanPage.close().catch(() => {})
+    }
+  }, '카테고리 하위구조 확인')
 }

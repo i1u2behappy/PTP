@@ -63,9 +63,9 @@ export interface ProfileCheckResult {
  * "몰 구조분석" 버튼(deep=true)이 만들어둔 거래정보 리포트를 지워버리면 안 되므로 prev.report를 그대로
  * 이어받는다. */
 async function applyProfileResult(siteId: number, next: MallProfileSignals, deep: boolean): Promise<ProfileCheckResult> {
-  const res = await pool.query<{ scrape_profile: MallProfileSignals | null }>(
-    `SELECT scrape_profile FROM sites WHERE id = $1`, [siteId],
-  )
+  const res = await pool.query<{
+    scrape_profile: (MallProfileSignals & { categoryCounts?: unknown; excludedCategoryHrefs?: string[] }) | null
+  }>(`SELECT scrape_profile FROM sites WHERE id = $1`, [siteId])
   const prev = res.rows[0]?.scrape_profile || null
   if (!next.report && prev?.report) next.report = prev.report
   // AI 크레딧이 없어 규칙 기반으로 떨어진 결과가, 이전에 실제 AI가 만들어둔 더 정확한 리포트를 조용히
@@ -78,20 +78,37 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
   // (사용자 요청, 2026-08-19 — 위 report 가드와 같은 이유).
   if (!next.sortOptions?.length && prev?.sortOptions?.length) next.sortOptions = prev.sortOptions
 
-  // categoryLinks는 deep=false("구조 변화 감지", 로그인 확인/스크랩 시작마다 자동으로 돎)에서도 매번
-  // 다시(얕게) 계산된다 — 개발자모드 확장의 "카테고리 하위구조 자동확인"(runExpandCategories)이 펼쳐둔
-  // 하위 카테고리 목록의 권위 있는 갱신 창구가 아니므로, 그 결과가 이전보다 얕아졌으면(개수가 줄었으면)
-  // 덮어쓰지 않는다. deep=true(사용자가 명시적으로 누른 "몰 구조분석")는 실제 카테고리 구조 축소를
-  // 반영할 수 있어야 하므로 건드리지 않는다.
-  if (!deep && prev?.categoryLinks?.length && next.categoryLinks.length < prev.categoryLinks.length) {
+  // 카테고리도 report와 같은 이유로 AI→규칙기반 품질 저하를 막는다: 이번엔 AI(로컬 Ollama)가 실패해
+  // 규칙 기반으로 떨어졌는데 예전엔 AI가 성공해 정확한 카테고리를 찾아둔 상태였다면, 그 결과를 그대로
+  // 유지한다(신우 몰 실사용 확인, 2026-08-25 — "몰구조분석을 다시 하니 '규칙 기반' + 무관한 카테고리만
+  // 나온다"). deep=true도 예외 없이 적용한다 — 아래 개수 축소 가드(deep=false 전용)는 "실제로 카테고리가
+  // 줄었을 수 있다"는 다른 문제를 다루는 것이라 별개다.
+  if (!next.categoryLinksAiUsed && prev?.categoryLinksAiUsed && prev.categoryLinks?.length) {
     next.categoryLinks = prev.categoryLinks
+    next.categoryMenuNames = prev.categoryMenuNames
+    next.categoryLinksAiUsed = prev.categoryLinksAiUsed
+  } else if (!deep && prev?.categoryLinks?.length && next.categoryLinks.length < prev.categoryLinks.length) {
+    // categoryLinks는 deep=false("구조 변화 감지", 로그인 확인/스크랩 시작마다 자동으로 돎)에서도 매번
+    // 다시(얕게) 계산된다 — 개발자모드 확장의 "카테고리 하위구조 자동확인"(runExpandCategories)이 펼쳐둔
+    // 하위 카테고리 목록의 권위 있는 갱신 창구가 아니므로, 그 결과가 이전보다 얕아졌으면(개수가 줄었으면)
+    // 덮어쓰지 않는다. deep=true(사용자가 명시적으로 누른 "몰 구조분석")는 실제 카테고리 구조 축소를
+    // 반영할 수 있어야 하므로 건드리지 않는다.
+    next.categoryLinks = prev.categoryLinks
+    next.categoryMenuNames = prev.categoryMenuNames
   }
 
   // sampleProductPageText는 아래(runMallStructureReport)에서 추출규칙 자동생성에만 쓰는 임시 값 —
-  // 원문 그대로라 용량이 커 기준정보로 영구 저장하지 않는다.
+  // 원문 그대로라 용량이 커 기준정보로 영구 저장하지 않는다. categoryCounts/excludedCategoryHrefs는
+  // MallProfileSignals에 없는 필드(app/api/scrape/categories/route.ts가 따로 관리)인데, 이 UPDATE가
+  // scrape_profile 전체를 next로 통째로 갈아치우므로 명시적으로 이어받지 않으면 "몰 구조분석"을 한 번
+  // 돌릴 때마다 카테고리 체크리스트의 상품개수/확인일시와 "제외" 표시가 조용히 사라진다(신우 몰 확인
+  // 과정에서 같이 발견한 별개 결함, 2026-08-25).
   await pool.query(
     `UPDATE sites SET scrape_profile = $1, scrape_profile_updated_at = NOW() WHERE id = $2`,
-    [JSON.stringify({ ...next, sampleProductPageText: undefined }), siteId],
+    [JSON.stringify({
+      ...next, sampleProductPageText: undefined,
+      categoryCounts: prev?.categoryCounts, excludedCategoryHrefs: prev?.excludedCategoryHrefs,
+    }), siteId],
   )
 
   // "몰 구조분석"(deep)은 site_memos("운영 메모")에 아무것도 쓰지 않는다 — 운영 메모는 사용자가 직접
@@ -129,8 +146,8 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
  * 것을, 몰 구조분석 직후 자동으로 runAutoAnalysis(기존 값이 있는 필드는 덮어쓰지 않음)를 돌려
  * sites.extraction_rules를 즉시 채운다 — 이후 모든 미리보기/스크랩이 자동으로 이 규칙을 쓴다.
  */
-export async function runMallStructureReport(siteId: number): Promise<ProfileCheckResult | null> {
-  const next = await profileMallStructure(siteId, true)
+export async function runMallStructureReport(siteId: number, useAi = true): Promise<ProfileCheckResult | null> {
+  const next = await profileMallStructure(siteId, true, useAi)
   if (!next) return null
   const result = await applyProfileResult(siteId, next, true)
 

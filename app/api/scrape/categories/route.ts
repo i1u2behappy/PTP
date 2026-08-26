@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
-import { getCategoryScrapeHistory, type CategoryLink, type MallPlatform } from '@/lib/scraper'
+import { getCategoryScrapeHistory, deriveCategoryUrlPattern, type CategoryLink, type MallPlatform } from '@/lib/scraper'
 import { discoverCategoryLinks } from '@/lib/workerClient'
 
 interface CachedCategoryCount { count: number; truncated?: boolean; label: string; checkedAt: string }
@@ -12,6 +12,9 @@ interface CachedProfile {
    *  내려줄 때도 화면에 표시할 수 있도록 discoverCategoryLinks의 결과(aiUsed)를 그대로 같이 저장한다
    *  (사용자 요청, 2026-08-18). */
   categoryLinksAiUsed?: boolean
+  /** deriveCategoryUrlPattern이 역산해둔 "이 몰의 카테고리 URL 패턴" — 다음 탐지 때 즉시 재확인하는
+   *  "기억" 용도(사용자 요청, 2026-08-26). */
+  categoryUrlPattern?: string | null
   excludedCategoryHrefs?: string[]
   categoryCounts?: Record<string, CachedCategoryCount>
 }
@@ -102,25 +105,46 @@ export async function POST(req: NextRequest) {
   // 실패) 진행한다 — 안 그러면 개발자모드에서는 캐시가 없는 몰/"다시 확인"이 사실상 항상 실패한다
   // (몰 구조분석에서 이미 같은 이유로 적용한 것과 동일, 2026-08-16).
   const result = await discoverCategoryLinks({ url, siteId, loginId, loginPw, allowStaleManualLoginProfile: true })
+  // "다시 확인"(force)이 이번엔 AI(로컬 Ollama) 없이 규칙 기반으로만 카테고리를 찾았는데, 예전엔 AI가
+  // 성공해 정확한 카테고리를 캐시해뒀다면 그 결과를 덮어쓰지 않는다 — lib/scrape/mallProfile.ts의
+  // applyProfileResult가 "몰 구조분석"에 거는 것과 같은 보호(신우 몰 실사용 확인, 2026-08-25: "다시
+  // 확인"을 눌렀더니 무관한 카테고리로 캐시가 덮어써짐). 둘 다 같은 sites.scrape_profile.categoryLinks를
+  // 쓰므로 이 보호도 똑같이 필요하다.
+  let responseLinks = result.links
+  let responseAiUsed = result.aiUsed
   if (siteId && result.links.length) {
-    const categoryLinks = result.links.map(l => ({ name: l.text, href: l.href }))
-    await pool.query(
-      `UPDATE sites SET
-         scrape_profile = COALESCE(scrape_profile, '{}'::jsonb)
-           || jsonb_build_object(
-                'platform', $1::text, 'categoryLinks', $2::jsonb, 'categoryMenuNames', $3::jsonb,
-                'categoryLinksAiUsed', $4::boolean),
-         scrape_profile_updated_at = NOW()
-       WHERE id=$5`,
-      [result.platform, JSON.stringify(categoryLinks), JSON.stringify(categoryLinks.map(c => c.name)), !!result.aiUsed, siteId],
+    const prevRes = await pool.query<{ scrape_profile: CachedProfile | null }>(
+      `SELECT scrape_profile FROM sites WHERE id=$1`, [siteId],
     )
+    const prevProfile = prevRes.rows[0]?.scrape_profile
+    if (!result.aiUsed && prevProfile?.categoryLinksAiUsed && prevProfile.categoryLinks?.length) {
+      responseLinks = prevProfile.categoryLinks.map(c => ({ href: c.href, text: c.name }))
+      responseAiUsed = true
+    } else {
+      const categoryLinks = result.links.map(l => ({ name: l.text, href: l.href }))
+      // 이번에 찾은 카테고리로 URL 패턴도 다시 역산해 "기억"을 갱신한다(사용자 요청, 2026-08-26) —
+      // 다음 탐지(규칙 기반이든 AI든) 때 discoverTopLevelCategoryLinks가 이 패턴으로 즉시 재확인한다.
+      const categoryUrlPattern = deriveCategoryUrlPattern(result.links.map(l => l.href))
+        ?? prevProfile?.categoryUrlPattern ?? null
+      await pool.query(
+        `UPDATE sites SET
+           scrape_profile = COALESCE(scrape_profile, '{}'::jsonb)
+             || jsonb_build_object(
+                  'platform', $1::text, 'categoryLinks', $2::jsonb, 'categoryMenuNames', $3::jsonb,
+                  'categoryLinksAiUsed', $4::boolean, 'categoryUrlPattern', $5::jsonb),
+           scrape_profile_updated_at = NOW()
+         WHERE id=$6`,
+        [result.platform, JSON.stringify(categoryLinks), JSON.stringify(categoryLinks.map(c => c.name)), !!result.aiUsed, JSON.stringify(categoryUrlPattern), siteId],
+      )
+    }
   }
   const { hrefs: scrapedHrefs, allScraped } = siteId ? await findScrapedCategoryHrefs(siteId) : { hrefs: [], allScraped: false }
   const excludedCategoryHrefs = siteId ? await getExcludedCategoryHrefs(siteId) : []
   const { categoryCounts, categoryScrapeHistory } = siteId
     ? await getCategoryCountInfo(siteId) : { categoryCounts: {}, categoryScrapeHistory: {} }
   return NextResponse.json({
-    ...result, cached: false, scrapedHrefs, allScraped, excludedCategoryHrefs, categoryCounts, categoryScrapeHistory,
+    ...result, links: responseLinks, aiUsed: responseAiUsed, cached: false,
+    scrapedHrefs, allScraped, excludedCategoryHrefs, categoryCounts, categoryScrapeHistory,
     loginBlockedExpansion: !!result.loginBlockedExpansion,
   })
 }

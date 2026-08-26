@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
 import { runMallStructureReport } from '@/lib/workerClient'
+
+// 개발자모드 확장은 이 라우트를 바디 없이 POST하므로(기존 동작), useAi는 항상 optional — 없으면 true로
+// 본다(기존 기본 동작 그대로, 사용자가 명시적으로 "AI 사용"을 꺼야만 false가 온다).
+const RequestSchema = z.object({ useAi: z.boolean().optional() })
 
 // 개발자모드 확장(extension-poc/background.js의 runProfile)도 chrome-extension:// 출처에서 이 라우트를
 // 그대로 호출한다 — CORS 프리플라이트(OPTIONS) 응답과 Private Network Access 헤더가 필요하다(다른
@@ -25,12 +30,16 @@ export async function OPTIONS() {
  * 컨텍스트를 얻으므로 로그인 창이 열려있을 필요는 없다 — 직접로그인 필수 몰은 신뢰가 쌓인 사용자의 개인
  * 크롬 프로필 사본을 서버가 알아서 헤드리스로 띄운다(2026-08-15).
  */
-export async function POST(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const siteId = Number(id)
   if (!siteId) return NextResponse.json({ error: 'invalid site id' }, { status: 400, headers: corsHeaders() })
 
-  const result = await runMallStructureReport(siteId)
+  // 개발자모드 확장은 바디 없이 POST한다 — 빈 바디의 req.json()은 예외를 던지므로 그 경우 {}로 본다.
+  const parsed = RequestSchema.safeParse(await req.json().catch(() => ({})))
+  const useAi = parsed.success ? (parsed.data.useAi ?? true) : true
+
+  const result = await runMallStructureReport(siteId, useAi)
   if (!result) {
     // "중지" 버튼(stopProfileAnalysis)이 눌려도 profileMallStructure가 조용히 null을 반환하므로
     // (2026-08-22) 이 메시지가 "실패"만이 아니라 "중지됨"일 수도 있다는 걸 같이 알려준다.

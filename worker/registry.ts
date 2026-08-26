@@ -56,6 +56,8 @@ export function registerAll() {
 
   // 카테고리/재확인 — opts.sessionId+isStopRequested로 중지(기존 방식 그대로, 별도 신호 주입 불필요).
   reg('discoverCategoryLinks', scraper.discoverCategoryLinks)
+  reg('expandCategoryChildren', scraper.expandCategoryChildren)
+  reg('detectSortOptionsForCategory', scraper.detectSortOptionsForCategory)
   reg('recheckMallProducts', scraper.recheckMallProducts)
   reg('reExtractStagingItems', reExtractStagingItems)
 
@@ -67,6 +69,7 @@ export function registerAll() {
   // opts.stopSignal(브라우저의 "중지" 버튼 → fetch abort)로 취소되는 것들만 별도 래핑.
   reg('previewCatalog', withStopSignal(scraper.previewCatalog))
   reg('countDedupedProductUrls', withStopSignal(scraper.countDedupedProductUrls))
+  reg('countCategoryOverlap', withStopSignal(scraper.countCategoryOverlap))
 
   // lib/scrape/staging.ts의 mergeStagingItems가 이미지 다운로드 실패 시(로그인 쿠키가 필요한 이미지
   // 호스트) 로그인된 브라우저로 재시도하는 경로 — withContext를 통째로 RPC할 수 없어 이 전용 함수로

@@ -5,6 +5,20 @@ import { startRpcServer } from './rpc-server'
 import { startScreenRelayServer } from './screenRelay'
 import { registerAll } from './registry'
 
+// Playwright 내부(예: context.request.get()의 TLS 인증서 파싱 — coreBundle.js의 captureSecurityDetails)가
+// 우리 코드의 try/catch 밖(자체 내부 이벤트 핸들러)에서 예외를 던지는 경우가 실사용에서 확인됐다
+// (2026-08-25, "Cannot read properties of undefined (reading 'CN')") — 이런 예외는 우리 쪽 어떤
+// try/catch로도 못 잡고, 잡지 않으면 Node가 프로세스 전체를 죽여 로그인 창부터 스크래핑까지 모든
+// 사용자의 모든 기능이 한꺼번에 멈춘다. Node 공식 문서는 uncaughtException 이후 정상 동작 재개가
+// 안전하지 않다고 경고하지만, 이 워커에서는 "하던 작업 하나가 실패" vs "워커 전체가 죽어 다음
+// 수동 재시작 전까지 아무도 못 씀" 중 후자가 훨씬 나쁘다 — 로그만 남기고 계속 돌게 한다.
+process.on('uncaughtException', (err) => {
+  console.error('[worker][uncaughtException]', err instanceof Error ? (err.stack ?? err.message) : err)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[worker][unhandledRejection]', reason instanceof Error ? (reason.stack ?? reason.message) : reason)
+})
+
 // lib/scheduler.ts가 Next.js 프로세스 자신의 메모리(RSS)를 보고 자동 재시작하던 것과 같은 이유
 // (Playwright를 오래 반복해서 쓰면 메모리가 계속 불어나며 안 줄어듦) — 워커 분리(2026-08-23) 이후로는
 // Playwright/Ollama가 실제로 이 프로세스에서 도니, 감시 대상도 여기로 옮겨야 한다. 8코어16스레드/28GB

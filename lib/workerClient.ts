@@ -1,7 +1,7 @@
 import { Agent } from 'undici'
 import type {
   ScrapeOptions, ScrapeResult, MallProfileSignals, CatalogPreviewResult,
-  RecheckTarget, RecheckResult, CategoryDiscoveryResult,
+  RecheckTarget, RecheckResult, CategoryDiscoveryResult, CategoryLink, MallPlatform, MallSortOption,
 } from './scraper'
 import type { ProfileCheckResult } from './scrape/mallProfile'
 import type { RunScrapingOpts } from './scrape/run'
@@ -85,11 +85,15 @@ export const startElementPicker = (siteId: number, previewProduct?: Record<strin
   callWorker<boolean>('startElementPicker', [siteId, previewProduct, targetUrl])
 
 // ── 몰 구조분석 ───────────────────────────────────────────────────────────
-export const runMallStructureReport = (siteId: number) => callWorker<ProfileCheckResult | null>('runMallStructureReport', [siteId])
+export const runMallStructureReport = (siteId: number, useAi = true) => callWorker<ProfileCheckResult | null>('runMallStructureReport', [siteId, useAi])
 export const runMallProfileCheckForScrape = (opts: ScrapeOptions) => callWorker<ProfileCheckResult | null>('runMallProfileCheckForScrape', [opts])
 
 // ── 카테고리/재확인/재추출 ─────────────────────────────────────────────────
 export const discoverCategoryLinks = (opts: ScrapeOptions) => callWorker<CategoryDiscoveryResult>('discoverCategoryLinks', [opts])
+export const expandCategoryChildren = (opts: ScrapeOptions, parentUrl: string, parentName: string) =>
+  callWorker<{ platform: MallPlatform; links: CategoryLink[]; aiUsed: boolean }>('expandCategoryChildren', [opts, parentUrl, parentName])
+export const detectSortOptionsForCategory = (opts: ScrapeOptions, categoryUrl: string) =>
+  callWorker<MallSortOption[]>('detectSortOptionsForCategory', [opts, categoryUrl])
 export const recheckMallProducts = (opts: ScrapeOptions, targets: RecheckTarget[]) => callWorker<RecheckResult[]>('recheckMallProducts', [opts, targets])
 export const reExtractStagingItems = (ids: number[]) => callWorker<{ updated: number[]; failed: { id: number; error: string }[] }>('reExtractStagingItems', [ids])
 
@@ -103,6 +107,11 @@ export const runScraping = (sessionId: number, opts: RunScrapingOpts) => callWor
 export const previewCatalog = (opts: ScrapeOptions, signal?: AbortSignal) => callWorker<CatalogPreviewResult>('previewCatalog', [opts], { signal })
 export const countDedupedProductUrls = (opts: ScrapeOptions, signal?: AbortSignal) =>
   callWorker<{ total: number; needsLogin: boolean; stopped: boolean }>('countDedupedProductUrls', [opts], { signal })
+export const countCategoryOverlap = (opts: ScrapeOptions, signal?: AbortSignal) =>
+  callWorker<{
+    categories: { url: string; count: number; uniqueCount: number; duplicateCount: number }[]
+    total: number; needsLogin: boolean; stopped: boolean
+  }>('countCategoryOverlap', [opts], { signal })
 
 // ── lib/images.ts 전용 ────────────────────────────────────────────────────
 export const fetchImageViaBrowser = (siteId: number, urls: string[]) => callWorker<Record<string, string>>('fetchImageViaBrowser', [siteId, urls])

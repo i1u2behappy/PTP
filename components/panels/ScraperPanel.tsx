@@ -588,6 +588,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 화면에서 알 방법이 없었다(사용자 요청, 2026-08-23). handleProfileMall(PTP 버튼으로 직접 시작한
   // 경우)만 측정한다 — 개발자모드 확장 팝업에서 트리거된 실행은 PTP가 시작 시각을 모르므로 잴 수 없다.
   const [profileElapsedSec, setProfileElapsedSec] = useState<number | null>(null)
+  // "몰 구조분석 시 AI 사용" — 기본 켜짐(기존 동작과 동일: 로컬 Ollama로 카테고리, Anthropic/Gemini로
+  // 결제/택배 리포트를 먼저 시도하고 실패하면 규칙 기반으로 대체). 꺼두면 그 AI 시도 자체를 건너뛰고
+  // 곧장 규칙 기반으로 간다 — AI 크레딧이 없는 걸 이미 아는 상황에서 매번 타임아웃을 기다리지 않게
+  // 하거나, 반대로 "몰 구조분석이 제대로 안 됐을 때 AI를 켜고 다시 시도"하는 용도(사용자 요청, 2026-08-25).
+  const [profileUseAi, setProfileUseAi] = useState(true)
 
   const [pickerActive, setPickerActive] = useState(false)
   // 개발자모드 버튼을 눌렀을 때 "몰 탭/확장에서 이어서 하세요" 안내 — alert()는 사용자가 직접 확인을
@@ -633,6 +638,17 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 바뀔 때마다 실제 스크랩 대상(categoryUrlsText)에 자동으로 합쳐준다(한쪽 방향 — 여기서 지운다고
   // categoryUrlsText에서도 지워지진 않는다, 체크리스트 쪽 항목까지 건드리면 안 되므로).
   const [manualCategoryUrlsText, setManualCategoryUrlsText] = useState('')
+  // "하위 카테고리 있음" 체크(href 기준) — categorySettings(정렬/상한, 스크랩 시 그대로 서버로 나가는
+  // 설정값)와는 성격이 달라(순수 UI 로컬 상태, 펼쳐보고 나면 의미가 없어짐) 별도로 둔다. expandingHref는
+  // 지금 하위구조를 가져오는 중인 href 하나(동시에 여러 개를 누르면 헷갈리므로 한 번에 하나만 허용).
+  const [manualHasSubcategory, setManualHasSubcategory] = useState<Record<string, boolean>>({})
+  const [expandingHref, setExpandingHref] = useState<string | null>(null)
+  // "몰 카테고리 선택 가져오기(반복)"로 카테고리를 가져오면 그 즉시 "정렬" 드롭다운이 쓰이도록, 몰
+  // 구조분석 없이도 그 카테고리 페이지에서 바로 정렬 옵션을 확인해 둔다(사용자 요청, 2026-08-26 —
+  // "카테고리를 가져오기 하면 그 즉시 정렬/스크랩 상한 작업이 가능하도록"). gridSortOptions가
+  // profileResult 쪽에 아직 없을 때만 이걸로 대신 채운다 — 서버에도 scrape_profile.sortOptions로 같이
+  // 저장되므로(app/api/scrape/categories/sort-options), 몰을 다시 선택해도 캐시로 복원된다.
+  const [manualSortOptions, setManualSortOptions] = useState<MallProfileSignals['sortOptions']>([])
   // manualCategoryUrlsText가 세션 복원(applyFormState)/몰 전환(selectSite)으로 "이미 예전에 합쳐진 값
   // 그대로" 다시 세팅될 때, 아래 병합 useEffect가 이걸 "새로 추가된 줄"로 오인해 체크리스트에서 이미
   // 지운 항목까지 되살리는 문제가 있었다(2026-08-22, 사용자 보고: "지정한 카테고리 리스트가 아니라
@@ -683,8 +699,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [previewTotal, setPreviewTotal]     = useState<number | null>(null)
   // "정확한 총 개수 확인" — previewTotal(카테고리별 빠른 합계, 카테고리 간 상품이 겹치면 중복 포함될 수
   // 있음)과 별개로, 버튼을 눌렀을 때만 실제 스크랩과 같은 방식으로 중복 제거된 정확한 개수를 구한다
-  // (사용자 요청, 2026-08-17 — lib/scraper.ts의 countDedupedProductUrls 참고).
-  const [exactTotal, setExactTotal] = useState<{ total: number; needsLogin: boolean } | null>(null)
+  // (사용자 요청, 2026-08-17 — lib/scraper.ts의 countDedupedProductUrls 참고). categories는 그 총합이
+  // "어느 카테고리가 몇 개 중복이라 몇 개만 새로 스크랩되는지"까지 카테고리별로 보여주는 후속 요청
+  // (2026-08-25 — countCategoryOverlap 참고)에 쓰인다.
+  const [exactTotal, setExactTotal] = useState<{
+    total: number; needsLogin: boolean
+    categories?: { url: string; count: number; uniqueCount: number; duplicateCount: number }[]
+  } | null>(null)
   const [exactTotalLoading, setExactTotalLoading] = useState(false)
   const exactTotalAbortRef = useRef<AbortController | null>(null)
   const [previewItems, setPreviewItems]     = useState<PreviewItem[]>([])
@@ -1281,6 +1302,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setCategorySettings(full.manual_login_required === true ? (full.devmode_category_settings || {}) : {})
     setDetectedPlatform(null)
     setProfileResult(null)
+    setManualSortOptions([])
     setProfileError('')
     setProfileElapsedSec(null)
     setScrapedCategoryHrefs([])
@@ -1299,6 +1321,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (cachedProfile && cachedProfile.sampleCount > 0) {
       setProfileResult({ signals: cachedProfile, diffs: [], isFirstTime: false, autoRuleFields: [] })
     }
+    // sortOptions는 몰 구조분석(sampleCount>0)과 무관하게 "선택 가져오기"만으로도 저장될 수 있다
+    // (app/api/scrape/categories/sort-options) — categoryLinks 유무와 별개로 항상 복원한다.
+    if (cachedProfile?.sortOptions?.length) setManualSortOptions(cachedProfile.sortOptions)
     if (cachedProfile?.categoryLinks?.length) {
       setCategories(dedupeCategoryLinks(cachedProfile.categoryLinks.map(c => ({ href: c.href, text: c.name }))))
       setDetectedPlatform(cachedProfile.platform || null)
@@ -1397,7 +1422,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     // handlePreview와 같은 이유로, 결과(또는 로딩 스켈레톤)가 나올 자리로 화면을 스크롤한다(사용자 요청, 2026-08-17).
     requestAnimationFrame(() => profileResultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
     try {
-      const res = await fetch(`/api/sites/${selectedSite.id}/profile`, { method: 'POST' })
+      const res = await fetch(`/api/sites/${selectedSite.id}/profile`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ useAi: profileUseAi }),
+      })
       const d = await res.json()
       if (!res.ok) { setProfileError(d.error || '몰 구조분석에 실패했습니다'); return }
       setProfileResult(d as ProfileCheckResult)
@@ -1476,11 +1504,36 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       const res = await fetch(`/api/scrape/current-url?siteId=${selectedSite.id}`)
       const d = await res.json() as { url: string | null }
       if (d.url) {
+        const isNew = !manualCategoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean).includes(d.url)
         setManualCategoryUrlsText(prev => {
           const lines = prev.split('\n').map(s => s.trim()).filter(Boolean)
           return lines.includes(d.url!) ? prev : [...lines, d.url].join('\n')
         })
         setCurrentUrlFetched(true)
+        // 사용자가 직접 확인한 카테고리를 서버에도 "기억"시켜, 다음번 자동 탐지(규칙 기반의 URL 패턴
+        // 재확인/AI의 근거 예시)가 이 확인 내역을 그대로 참고하게 한다(사용자 요청, 2026-08-26 — "수동
+        // 선택 작업한 내용을 참고하여서... 룰 방식이건 AI가 참고해서 분석이 가능하도록"). 화면 흐름을
+        // 막지 않는 조용한 백그라운드 작업이라 실패해도 알리지 않는다.
+        if (isNew) {
+          fetch('/api/scrape/categories/sample', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ siteId: selectedSite.id, url: d.url }),
+          }).catch(() => {})
+        }
+        // 카테고리를 가져온 즉시 "정렬"을 쓸 수 있게, 아직 이 몰의 정렬 옵션을 모르면(몰 구조분석도 안
+        // 돌렸고 이전에 이 자리에서도 못 찾았으면) 방금 가져온 카테고리 페이지로 바로 확인해둔다 — 몰
+        // 전체가 같은 정렬 메커니즘을 쓴다고 보므로 한 번 찾으면 충분하다(사용자 요청, 2026-08-26).
+        // "스크랩 상한"은 이 확인과 무관하게 이미 항상 바로 쓸 수 있다.
+        if (isNew && !gridSortOptions.length) {
+          try {
+            const sortRes = await fetch('/api/scrape/categories/sort-options', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ siteId: selectedSite.id, url: d.url }),
+            })
+            const sortData = await sortRes.json() as { sortOptions?: MallProfileSignals['sortOptions'] }
+            if (sortRes.ok && sortData.sortOptions?.length) setManualSortOptions(sortData.sortOptions)
+          } catch { /* 정렬 옵션을 못 찾아도 카테고리 자체는 이미 정상 추가됐으니 조용히 넘어간다 */ }
+        }
       }
     } finally {
       setCurrentUrlLoading(false)
@@ -1947,7 +2000,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   /** "정확한 총 개수 확인" — previewTotal(카테고리별 빠른 합계)이 카테고리 간 중복을 포함할 수 있어,
    *  실제로 스크랩될 상품이 몇 개인지 궁금할 때만 누르는 버튼. 실제 스크랩(collectProductUrls)과 같은
    *  방식으로 선택된 카테고리 전체의 상품 URL을 모아 중복 제거한 개수를 구하므로, 카테고리별 집계보다
-   *  느릴 수 있다 — 그래서 항상 자동으로 하지 않고 버튼으로 둔다(사용자 요청, 2026-08-17). */
+   *  느릴 수 있다 — 그래서 항상 자동으로 하지 않고 버튼으로 둔다(사용자 요청, 2026-08-17).
+   *  category-overlap 엔드포인트는 exact-total과 똑같은(느린) 실제 수집을 하되 총합과 함께 카테고리별
+   *  breakdown도 돌려주므로, 굳이 두 번 수집하지 않도록 exact-total 대신 이걸 호출한다(2026-08-25). */
   async function handleCheckExactTotal() {
     if (!selectedSite) return
     setExactTotalLoading(true)
@@ -1956,7 +2011,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     exactTotalAbortRef.current = controller
     try {
       const { categoryUrls, categoryLimits, categorySortClicks } = buildCategoryUrlsAndLimits()
-      const res = await fetch('/api/scrape/exact-total', {
+      const res = await fetch('/api/scrape/category-overlap', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
@@ -1970,8 +2025,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         }),
       })
       if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`확인 실패: ${e.error || res.status}`); return }
-      const d = await res.json() as { total: number; needsLogin: boolean; stopped: boolean }
-      setExactTotal({ total: d.total, needsLogin: d.needsLogin })
+      const d = await res.json() as {
+        total: number; needsLogin: boolean; stopped: boolean
+        categories: { url: string; count: number; uniqueCount: number; duplicateCount: number }[]
+      }
+      setExactTotal({ total: d.total, needsLogin: d.needsLogin, categories: d.categories })
     } catch (err) {
       if (!(err instanceof DOMException && err.name === 'AbortError')) throw err
     } finally {
@@ -1995,9 +2053,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     sessionStorage.removeItem(LAST_SESSION_KEY)
   }
 
-  async function handleStart() {
+  // "이어서 하기"/"처음부터 다시 하기" 버튼은 체크박스(includeAlreadyScraped)를 거치지 않고 그 자리에서
+  // 바로 의도를 확정하고 싶다는 요청(2026-08-25, "이어서 하기 외에 처음부터 다시 하기 기능도") — 인자로
+  // 넘기면 그 값이 체크박스 상태보다 우선한다(체크박스는 그대로 첫 시작(status==='idle')에만 남겨둠).
+  async function handleStart(overrideIncludeAlreadyScraped?: boolean) {
     if (!selectedSite || !canStart) return
     myLockClickAtRef.current = Date.now()
+    const effectiveIncludeAlreadyScraped = overrideIncludeAlreadyScraped ?? includeAlreadyScraped
     const { categoryUrls, categoryLimits, categorySortClicks } = buildCategoryUrlsAndLimits()
     setStatus('running')
     setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
@@ -2021,7 +2083,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         delayMs: 1000,
         loginId: loginId || undefined, loginPw: loginPw || undefined,
         mode: 'catalog', siteId: selectedSite.id, concurrencyMode, concurrency,
-        includeAlreadyScraped,
+        includeAlreadyScraped: effectiveIncludeAlreadyScraped,
       }),
     })
     // 이 몰에 이미 진행 중인 세션이 있으면(app/api/scrape/route.ts) 새로 시작하는 대신 그 세션에
@@ -2081,9 +2143,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
   // "카테고리별 정렬기준 설정" 그리드 컬럼용(사용자 요청, 2026-08-19). 정렬 옵션은 몰 단위로 몰 구조분석이
   // (일반모드) 또는 확장의 "🧭 정렬 옵션 감지"(개발자모드, runDetectSortOptions)가 찾아둔 값을 그대로 쓴다
-  // (카테고리마다 다시 탐지하지 않음 — 실사용상 몰 전체가 같은 정렬 메커니즘을 씀). 두 경로 모두 같은
-  // 자리(scrape_profile.sortOptions)에 저장되므로 profileResult 하나로 충분하다.
-  const gridSortOptions = profileResult?.signals.sortOptions || []
+  // (카테고리마다 다시 탐지하지 않음 — 실사용상 몰 전체가 같은 정렬 메커니즘을 씀). 세 경로 모두 같은
+  // 자리(scrape_profile.sortOptions)에 저장되므로, "선택 가져오기"가 즉석에서 찾아둔 manualSortOptions는
+  // profileResult 쪽에 아직 없을 때만 대신 쓴다(2026-08-26).
+  const gridSortOptions = profileResult?.signals.sortOptions?.length ? profileResult.signals.sortOptions : (manualSortOptions || [])
 
   // 카테고리 불러오기 결과(캐시 안내/감지된 플랫폼/체크리스트) — 일반모드의 "스크랩 대상" 카드와
   // 개발자모드 안내 카드가 그대로 같이 쓴다(2026-08-15, 개발자모드도 카테고리를 선택해 그것만 스크랩할
@@ -2305,10 +2368,37 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       return next
     })
   }
+  /** "하위 카테고리 있음" 체크 후 누르는 버튼 — 이 카테고리 페이지만 열어(자동 최상위 탐지 없이) 하위
+   *  메뉴를 찾아 목록에 이어붙인다(lib/scraper.ts의 expandCategoryChildren 참고). 이 대분류 자신은
+   *  상품이 없는 허브일 수도, 있을 수도 있어 자동으로 지우지 않는다 — 필요 없으면 "제거"로 직접 뺀다.
+   */
+  async function handleExpandSubcategory(href: string) {
+    if (!selectedSite) return
+    setExpandingHref(href)
+    try {
+      const res = await fetch('/api/scrape/categories/expand', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ siteId: selectedSite.id, url: href }),
+      })
+      const d = await res.json() as { links?: { href: string; text: string }[]; error?: string }
+      if (!res.ok) { alert(`하위 카테고리 확인 실패: ${d.error || res.status}`); return }
+      if (!d.links?.length) { alert('하위 카테고리를 찾지 못했습니다.'); return }
+      setManualCategoryUrlsText(prev => {
+        const lines = new Set(prev.split('\n').map(s => s.trim()).filter(Boolean))
+        d.links!.forEach(l => lines.add(l.href))
+        return [...lines].join('\n')
+      })
+    } catch {
+      alert('하위 카테고리 확인에 실패했습니다.')
+    } finally {
+      setExpandingHref(null)
+    }
+  }
   const manualCategoryTableBox = (
     <div className="mt-2 border border-teal-200 bg-white rounded-xl overflow-hidden">
       <p className="text-xs text-teal-700 px-3 pt-2">
-        💡 카테고리마다 정렬 순서/스크랩 상한을 다르게 설정할 수 있습니다.
+        💡 카테고리마다 정렬 순서/스크랩 상한을 다르게 설정할 수 있습니다. 대분류 페이지 안에 하위(중분류)
+        메뉴가 더 있으면 &quot;하위 카테고리&quot;를 체크하고 &quot;↳ 가져오기&quot;를 눌러 그 하위 목록을 이어서 담을 수 있습니다.
       </p>
       {manualCategoryUrls.length === 0 ? (
         <p className="text-xs text-gray-400 px-3 py-3">위 &quot;현재 카테고리 가져오기&quot;로 모으면 여기에 나타납니다.</p>
@@ -2320,6 +2410,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="이 카테고리를 스크랩할 때 적용할 정렬 순서">정렬</th>
               <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="이 카테고리에서 몇 개/몇 페이지까지만 스크랩할지 상한을 둡니다(비워두면 무제한)">스크랩 상한</th>
               <th className="px-3 py-1.5 text-gray-500 font-normal text-left">URL</th>
+              <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="체크하면 이 카테고리 페이지 안의 하위(중분류) 메뉴를 찾아 목록에 추가할 수 있습니다">하위 카테고리</th>
               <th className="px-3 py-1.5 w-12 sticky right-0 bg-teal-50" />
             </tr>
           </thead>
@@ -2363,6 +2454,20 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       className="text-gray-400 hover:text-teal-600 hover:underline truncate max-w-full">
                       {href}
                     </button>
+                  </td>
+                  <td className="px-3 py-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <input type="checkbox" checked={!!manualHasSubcategory[href]}
+                        onChange={e => setManualHasSubcategory(prev => ({ ...prev, [href]: e.target.checked }))}
+                        className="w-3.5 h-3.5 accent-teal-500" />
+                      {manualHasSubcategory[href] && (
+                        <button type="button" onClick={() => handleExpandSubcategory(href)} disabled={expandingHref === href}
+                          title="이 카테고리 페이지를 열어 하위 메뉴를 찾아 목록에 추가합니다"
+                          className="px-2 py-0.5 bg-teal-50 border border-teal-200 text-teal-700 hover:bg-teal-100 rounded-full text-[10px] font-semibold whitespace-nowrap disabled:opacity-50">
+                          {expandingHref === href ? '가져오는 중...' : '↳ 가져오기'}
+                        </button>
+                      )}
+                    </div>
                   </td>
                   <td className="px-3 py-1.5 w-12 text-right sticky right-0 bg-white group-hover:bg-gray-50">
                     <button type="button" onClick={() => removeManualCategoryUrl(href)}
@@ -2629,6 +2734,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               </div>
             )}
             {loginStep === 'confirmed' && (
+              <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none"
+                title="꺼두면 AI(로컬 Ollama/Anthropic·Gemini) 시도를 건너뛰고 곧장 규칙 기반으로 분석합니다 — 결과가 부실하면 다시 켜고 재시도해보세요.">
+                <input type="checkbox" checked={profileUseAi} onChange={e => setProfileUseAi(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-teal-500" />
+                AI 사용
+              </label>
+            )}
+            {loginStep === 'confirmed' && (
               <button onClick={handleProfileMall} disabled={profileLoading}
                 className="px-4 py-2 bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors">
                 {profileLoading ? '몰 구조분석 중...' : '🔍 몰 구조분석'}
@@ -2715,36 +2828,20 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </button>
           </div>
           {!scrapeTargetCollapsed && <>
-          {/* "자동으로 전체 불러오기"와 "로그인 창에서 하나씩 모으기"는 나란히 두고 같이 쓰는 보조 관계가
-              아니라, 그중 하나를 고르면 그 뒤로 보게 되는 화면 자체가 완전히 달라지는 대체 흐름이다
-              (자동=체크리스트로 골라내기, 수동=텍스트박스에 쌓인 걸 확인하기) — 둘을 동시에 나란히
-              보여주면 "지금 어느 쪽 결과를 보고 있는 건지" 헷갈린다는 지적(2026-08-22)으로, 탭으로 먼저
-              방법을 고르게 하고 그 방법의 화면만 보여주는 구조로 다시 짰다. categoryUrlsText 자체는
-              지금도 두 방법 다 같은 값을 채우지만(탭을 바꿔도 체크리스트에서 골라둔 건 안 지워짐),
-              실제로 미리보기/스크랩이 대상으로 삼는 목록은 지금 활성 탭 기준으로만 본다
-              (buildCategoryUrlsAndLimits 참고, 2026-08-24 — 예전엔 항상 categoryUrlsText 전체를
-              써서, "선택 가져오기" 탭에서 몇 개만 새로 모아도 화면엔 안 보이는 예전 체크리스트 선택까지
-              같이 대상이 돼버렸다). */}
-          {/* 실행 버튼(진한 teal 채움)과는 다르지만, 회색 세그먼트 컨트롤은 대비가 너무 약해 뭘 골랐는지
-              잘 안 보인다는 재지적(2026-08-22)으로 밑줄 탭 방식으로 바꿨다 — 흔히 쓰는 "탭 전환" 시각
-              언어라 그 자체로 "선택 기능"임이 직관적으로 읽히면서, 선택된 탭은 teal 밑줄+굵은 teal
-              글자로 대비를 확실히 준다(채움이 아니라 밑줄이라 실행 버튼과는 형태로 구분됨). */}
-          <p className="text-xs text-gray-400 mb-2">카테고리 URL 목록을 만드는 방법을 고르세요.</p>
-          <div className="flex border-b-2 border-gray-200 mb-3">
-            <button type="button" onClick={() => setCategorySourceMode('auto')}
-              className={`flex-1 px-3 py-2.5 -mb-0.5 text-sm font-semibold border-b-2 rounded-t-lg transition-colors ${
-                categorySourceMode === 'auto' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
-              ⚡ 몰 카테고리 전체 가져오기
-            </button>
-            <button type="button" onClick={() => setCategorySourceMode('manual')}
-              className={`flex-1 px-3 py-2.5 -mb-0.5 text-sm font-semibold border-b-2 rounded-t-lg transition-colors ${
-                categorySourceMode === 'manual' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
-              🖱 몰 카테고리 선택 가져오기(반복)
-            </button>
-          </div>
-
-          {categorySourceMode === 'auto' ? (
-            <>
+          {/* 예전엔 탭으로 하나만 보여줬는데(2026-08-22 — 둘을 나란히 보이면 "지금 뭘 보고 있는지"
+              헷갈린다는 이유), 이번엔 반대로 "탭을 오가는 게 오히려 헷갈린다"는 지적(2026-08-26)으로
+              좌우 카드로 항상 둘 다 펼쳐두고, 각 카드 제목의 라디오로만 "실제로 스크랩에 쓸 쪽"을
+              고르게 한다 — 라디오가 선택 표시를 명확히 대신하므로 둘을 동시에 보여줘도 헷갈리지 않는다.
+              두 카드 다 항상 조작 가능하다(예: auto가 선택된 상태에서도 manual 쪽 목록을 미리 모아둘 수
+              있음) — 실제로 미리보기/스크랩이 쓰는 목록만 라디오 선택 기준(buildCategoryUrlsAndLimits). */}
+          <p className="text-xs text-gray-400 mb-2">카테고리 URL 목록을 만드는 방법 — 왼쪽/오른쪽 아무 쪽이나 미리 준비해두고, 실제로 스크랩에 쓸 쪽만 라디오로 고르세요.</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className={`rounded-xl border-2 p-3 transition-colors ${categorySourceMode === 'auto' ? 'border-teal-400 bg-teal-50/30' : 'border-gray-200'}`}>
+              <label className="flex items-center gap-2 mb-3 cursor-pointer select-none">
+                <input type="radio" name="categorySourceMode" checked={categorySourceMode === 'auto'}
+                  onChange={() => setCategorySourceMode('auto')} className="w-4 h-4 accent-teal-500" />
+                <span className="text-sm font-semibold text-gray-700">⚡ 몰 카테고리 전체 가져오기</span>
+              </label>
               <ScrapeStepBox
                 description="💡 몰에 있는 카테고리들을 자동으로 찾아옵니다 — 시작 URL을 하나하나 알아낼 필요 없이 원하는 카테고리를 바로 불러올 수 있습니다. 결과는 아래 체크리스트에 나타납니다."
                 primary={{
@@ -2759,9 +2856,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 } : undefined} />
               {/* 카테고리 불러오기 결과(캐시 안내/감지된 플랫폼/체크리스트) */}
               <div ref={categoryResultRef}>{categoryChecklistBox}</div>
-            </>
-          ) : (
-            <>
+            </div>
+            <div className={`rounded-xl border-2 p-3 transition-colors ${categorySourceMode === 'manual' ? 'border-teal-400 bg-teal-50/30' : 'border-gray-200'}`}>
+              <label className="flex items-center gap-2 mb-3 cursor-pointer select-none">
+                <input type="radio" name="categorySourceMode" checked={categorySourceMode === 'manual'}
+                  onChange={() => setCategorySourceMode('manual')} className="w-4 h-4 accent-teal-500" />
+                <span className="text-sm font-semibold text-gray-700">🖱 몰 카테고리 선택 가져오기(반복)</span>
+              </label>
               <ScrapeStepBox
                 description="💡 로그인 창에서 원하는 카테고리 페이지로 이동했다면, 그 페이지를 아래 목록에 하나씩 추가합니다 — 여러 번 눌러 여러 개를 모을 수 있습니다."
                 primary={{
@@ -2771,8 +2872,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                   onClick: handleRefreshCurrentUrl,
                 }} />
               {manualCategoryTableBox}
-            </>
-          )}
+            </div>
+          </div>
           </>}
         </div>
       )}
@@ -2803,6 +2904,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                     열기"/로그인과 무관하게 아무 때나 눌러도 된다 — 순서상 종속이 아니라 그냥 보조 액션이라
                     주 액션(teal) 오른쪽에 보조 스타일(흰 테두리)로 둔다(2026-08-15, 사용자 지적으로 순서
                     조정 — 전엔 왼쪽에 있어 "이걸 먼저 해야 하나"로 오인하기 쉬웠음). */}
+                <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none shrink-0"
+                  title="꺼두면 AI(로컬 Ollama/Anthropic·Gemini) 시도를 건너뛰고 곧장 규칙 기반으로 분석합니다 — 결과가 부실하면 다시 켜고 재시도해보세요.">
+                  <input type="checkbox" checked={profileUseAi} onChange={e => setProfileUseAi(e.target.checked)}
+                    className="w-3.5 h-3.5 accent-teal-500" />
+                  AI 사용
+                </label>
                 <button onClick={handleProfileMall} disabled={profileLoading}
                   className="px-4 py-2 bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 text-sm font-semibold rounded-full disabled:opacity-50 transition-colors shrink-0">
                   {profileLoading ? '몰 구조분석 중...' : '🔍 몰 구조분석'}
@@ -2893,58 +3000,55 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               버튼들과 같은 패턴(몰 탭 열기 + showDevHint 안내)으로 동작한다 — 실제 결과는 위쪽
               "현재 카테고리 가져오기" 큐 폴링이 카테고리 URL 목록에 자동으로 채워준다(2026-08-22,
               사용자 지적: "개발자모드에는 이 기능이 반영 안 돼 있다"). */}
-          <div className="mt-4 bg-white border border-gray-200 rounded-xl p-4">
-            <div className="flex border-b-2 border-gray-200 mb-3">
-              <button type="button" onClick={() => setCategorySourceMode('auto')}
-                className={`flex-1 px-3 py-2.5 -mb-0.5 text-sm font-semibold border-b-2 rounded-t-lg transition-colors ${
-                  categorySourceMode === 'auto' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
-                ⚡ 몰 카테고리 전체 가져오기
-              </button>
-              <button type="button" onClick={() => setCategorySourceMode('manual')}
-                className={`flex-1 px-3 py-2.5 -mb-0.5 text-sm font-semibold border-b-2 rounded-t-lg transition-colors ${
-                  categorySourceMode === 'manual' ? 'border-teal-500 bg-teal-50 text-teal-700' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
-                🖱 몰 카테고리 선택 가져오기(반복)
-              </button>
+          {/* 일반모드와 같은 이유(2026-08-26)로 탭 대신 좌우 카드 + 라디오 선택으로 바꿨다 —
+              components/panels/ScraperPanel.tsx의 일반모드 "스크랩 대상" 카드 주석 참고. */}
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className={`bg-white border-2 rounded-xl p-4 transition-colors ${categorySourceMode === 'auto' ? 'border-teal-400 bg-teal-50/30' : 'border-gray-200'}`}>
+              <label className="flex items-center gap-2 mb-3 cursor-pointer select-none">
+                <input type="radio" name="categorySourceMode" checked={categorySourceMode === 'auto'}
+                  onChange={() => setCategorySourceMode('auto')} className="w-4 h-4 accent-teal-500" />
+                <span className="text-sm font-semibold text-gray-700">⚡ 몰 카테고리 전체 가져오기</span>
+              </label>
+              <ScrapeStepBox
+                description="💡 카테고리를 불러와 원하는 것만 체크하면, &quot;스크랩 시작&quot;이 그 카테고리들만 순서대로 처리합니다(선택사항)."
+                primary={{
+                  label: '모든 카테고리 불러오기', doneLabel: '카테고리 불러옴', icon: '↻',
+                  loading: categoriesLoading, loadingLabel: '불러오는 중...',
+                  done: categories.length > 0, colorDone: !!previewResult, disabled: categoriesLoading || !targetUrl,
+                  onClick: () => handleLoadCategories(false),
+                }}
+                secondary={categories.length > 0 ? {
+                  label: '↻ 다시 확인', title: '몰 메뉴가 바뀌었을 수 있으면 직접 다시 훑어서 최신 목록으로 갱신합니다',
+                  disabled: categoriesLoading || !targetUrl, onClick: () => handleLoadCategories(true),
+                } : undefined} />
+              <div ref={categoryResultRef}>{categoryChecklistBox}</div>
             </div>
-            {categorySourceMode === 'auto' ? (
-              <>
-                <ScrapeStepBox
-                  description="💡 카테고리를 불러와 원하는 것만 체크하면, &quot;스크랩 시작&quot;이 그 카테고리들만 순서대로 처리합니다(선택사항)."
-                  primary={{
-                    label: '모든 카테고리 불러오기', doneLabel: '카테고리 불러옴', icon: '↻',
-                    loading: categoriesLoading, loadingLabel: '불러오는 중...',
-                    done: categories.length > 0, colorDone: !!previewResult, disabled: categoriesLoading || !targetUrl,
-                    onClick: () => handleLoadCategories(false),
-                  }}
-                  secondary={categories.length > 0 ? {
-                    label: '↻ 다시 확인', title: '몰 메뉴가 바뀌었을 수 있으면 직접 다시 훑어서 최신 목록으로 갱신합니다',
-                    disabled: categoriesLoading || !targetUrl, onClick: () => handleLoadCategories(true),
-                  } : undefined} />
-                <div ref={categoryResultRef}>{categoryChecklistBox}</div>
-              </>
-            ) : (
-              <>
-                <ScrapeStepBox
-                  description="💡 몰 탭에서 원하는 카테고리 페이지로 이동했다면, 그 페이지를 아래 목록에 하나씩 추가합니다 — 여러 번 눌러 여러 개를 모을 수 있습니다."
-                  primary={{
-                    label: '현재 카테고리 가져오기', doneLabel: '현재 카테고리 가져옴', icon: '↻',
-                    loading: false, done: false,
-                    onClick: async () => {
-                      if (loginStep === 'none' && selectedSite) {
-                        await handleOpenMallUrlDirect(selectedSite.login_url || selectedSite.url)
-                        showDevHint('몰 탭을 열었습니다 — 로그인 후 원하는 카테고리로 이동한 뒤 확장 아이콘 → 팝업의 "📍 보조 - 현재 카테고리 가져오기"를 클릭하세요.')
-                      } else if (selectedSite) {
-                        const hostname = new URL(selectedSite.login_url || selectedSite.url).hostname
-                        const result = await sendExtensionAction('current-category', hostname)
-                        showDevHint(result?.ok
-                          ? '지금 몰 탭이 보고 있는 카테고리를 목록에 추가했습니다.'
-                          : (result?.error ? `자동 실행 실패: ${result.error} — ` : '') + '몰 확장프로그램에서 실행하세요 — 몰 탭에서 원하는 카테고리로 이동한 뒤 확장 아이콘 → 팝업의 "📍 보조 - 현재 카테고리 가져오기"를 클릭하세요.')
-                      }
-                    },
-                  }} />
-                {manualCategoryTableBox}
-              </>
-            )}
+            <div className={`bg-white border-2 rounded-xl p-4 transition-colors ${categorySourceMode === 'manual' ? 'border-teal-400 bg-teal-50/30' : 'border-gray-200'}`}>
+              <label className="flex items-center gap-2 mb-3 cursor-pointer select-none">
+                <input type="radio" name="categorySourceMode" checked={categorySourceMode === 'manual'}
+                  onChange={() => setCategorySourceMode('manual')} className="w-4 h-4 accent-teal-500" />
+                <span className="text-sm font-semibold text-gray-700">🖱 몰 카테고리 선택 가져오기(반복)</span>
+              </label>
+              <ScrapeStepBox
+                description="💡 몰 탭에서 원하는 카테고리 페이지로 이동했다면, 그 페이지를 아래 목록에 하나씩 추가합니다 — 여러 번 눌러 여러 개를 모을 수 있습니다."
+                primary={{
+                  label: '현재 카테고리 가져오기', doneLabel: '현재 카테고리 가져옴', icon: '↻',
+                  loading: false, done: false,
+                  onClick: async () => {
+                    if (loginStep === 'none' && selectedSite) {
+                      await handleOpenMallUrlDirect(selectedSite.login_url || selectedSite.url)
+                      showDevHint('몰 탭을 열었습니다 — 로그인 후 원하는 카테고리로 이동한 뒤 확장 아이콘 → 팝업의 "📍 보조 - 현재 카테고리 가져오기"를 클릭하세요.')
+                    } else if (selectedSite) {
+                      const hostname = new URL(selectedSite.login_url || selectedSite.url).hostname
+                      const result = await sendExtensionAction('current-category', hostname)
+                      showDevHint(result?.ok
+                        ? '지금 몰 탭이 보고 있는 카테고리를 목록에 추가했습니다.'
+                        : (result?.error ? `자동 실행 실패: ${result.error} — ` : '') + '몰 확장프로그램에서 실행하세요 — 몰 탭에서 원하는 카테고리로 이동한 뒤 확장 아이콘 → 팝업의 "📍 보조 - 현재 카테고리 가져오기"를 클릭하세요.')
+                    }
+                  },
+                }} />
+              {manualCategoryTableBox}
+            </div>
           </div>
         </div>
       )}
@@ -3369,7 +3473,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             const selectedHrefs = categoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean)
             if (!selectedHrefs.length) return null
             const categoryTextByHref = new Map(categories.map(c => [c.href, c.text]))
-            type Row = { url: string; label: string; count: number | null; truncated: boolean }
+            // "정확한 총 개수 확인(중복 제거)"를 눌러야만 채워진다 — categoryCountByHref와 같은 키(href)로
+            // 매칭한다(2026-08-25, 미리보기 총합과 실제 스크랩 개수가 다른 이유를 카테고리별로 보여달라는
+            // 요청 — lib/scraper.ts의 countCategoryOverlap 참고).
+            const exactOverlapByUrl = new Map((exactTotal?.categories || []).map(c => [c.url, c]))
+            type Row = { url: string; label: string; count: number | null; truncated: boolean; duplicateCount: number | null }
             const rows: Row[] = selectedHrefs.map(href => {
               // 개수/절단 여부는 이번 세션에 방금 미리보기를 돌린 값(categoryCountByHref)만 쓴다 — 서버에
               // 저장된 예전 기록(categoryInfo)을 값으로 대신 채우면, 미리보기를 아직 안 돌렸는데도 마치
@@ -3382,12 +3490,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                 label: live?.label || info?.label || categoryTextByHref.get(href) || href,
                 count: live?.count ?? null,
                 truncated: live?.truncated ?? false,
+                duplicateCount: exactOverlapByUrl.get(href)?.duplicateCount ?? null,
               }
             })
             // label은 "최상위 > 하위" 형태(lib/scraper.ts가 path.join(' > ')로 만듦) — 최상위 기준으로
             // 묶는다. 아직 미확인이라 label이 체크리스트 텍스트(하위 구분 없음)뿐인 행은 그 텍스트 전체를
             // 최상위로 본다. 최상위 하나에 하위가 1개뿐이면 굳이 접을 필요 없어 그대로 보여준다.
-            const groups: { key: string; total: number; truncated: boolean; unknownCount: number; items: Row[] }[] = []
+            const groups: {
+              key: string; total: number; truncated: boolean; unknownCount: number; items: Row[]
+              duplicateTotal: number; duplicateUnknownCount: number
+            }[] = []
             const groupIndexByKey = new Map<string, number>()
             for (const r of rows) {
               const top = r.label.split(' > ')[0]
@@ -3395,10 +3507,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               if (idx === undefined) {
                 idx = groups.length
                 groupIndexByKey.set(top, idx)
-                groups.push({ key: top, total: 0, truncated: false, unknownCount: 0, items: [] })
+                groups.push({ key: top, total: 0, truncated: false, unknownCount: 0, items: [], duplicateTotal: 0, duplicateUnknownCount: 0 })
               }
               if (r.count == null) groups[idx].unknownCount++
               else groups[idx].total += r.count
+              if (r.duplicateCount == null) groups[idx].duplicateUnknownCount++
+              else groups[idx].duplicateTotal += r.duplicateCount
               groups[idx].truncated = groups[idx].truncated || !!r.truncated
               groups[idx].items.push(r)
             }
@@ -3407,12 +3521,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             // 참고) — "N개 이상"으로 정직하게 표시한다.
             const countLabel = (r: { count: number | null; truncated?: boolean }) =>
               r.count == null ? '미확인' : `${r.count.toLocaleString()}개${r.truncated ? ' 이상' : ''}`
+            const duplicateLabel = (n: number | null) => n == null ? '-' : n === 0 ? '없음' : `${n.toLocaleString()}개 중복`
             const truncatedTitle = '확인 상한에 도달할 때까지도 새 상품이 계속 나와 멈췄습니다 — 실제로는 더 많을 수 있습니다.'
             const unconfirmedTitle = '아직 이 카테고리로 "스크랩 미리보기"를 돌리지 않아 개수를 모릅니다.'
+            const duplicateUnknownTitle = '"정확한 총 개수 확인(중복 제거)"를 눌러야 이 카테고리의 중복 개수를 알 수 있습니다.'
+            const duplicateTitle = '다른 선택 카테고리에도 이미 있는 상품 수 — 실제 스크랩 때 이만큼은 새로 추가되지 않습니다.'
             return (
               <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
                 <div className="px-3 py-2 bg-gray-50 border-b border-gray-100 text-xs text-gray-500">
                   카테고리별 상품 개수 (목록 페이지 기준 — 상세페이지는 열어보지 않아 빠릅니다) — 위 체크리스트에서 선택한 카테고리 전체를 같은 순서로 보여줍니다.
+                  &quot;중복&quot; 열은 &quot;🎯 정확한 총 개수 확인(중복 제거)&quot;을 눌러야 채워집니다 — 다른 선택 카테고리와 겹쳐 실제로는 새로 스크랩되지 않는 상품 수입니다.
                 </div>
                 {/* 세로로 드래그해서 원하는 높이만큼 늘려볼 수 있게(resize-y) — 행이 많은 몰에서 고정
                     높이/스크롤만으론 답답하다는 피드백. */}
@@ -3422,6 +3540,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       <tr className="border-b border-gray-200 text-gray-500 font-semibold">
                         <th className="px-3 py-2 text-left">카테고리</th>
                         <th className="px-3 py-2 text-right w-20">개수</th>
+                        <th className="px-3 py-2 text-right w-28">중복</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -3436,6 +3555,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                               <td className={`px-3 py-1.5 text-right ${r.count == null ? 'text-gray-400' : 'text-gray-700'}`}
                                 title={r.count == null ? unconfirmedTitle : r.truncated ? truncatedTitle : undefined}>
                                 {countLabel(r)}
+                              </td>
+                              <td className={`px-3 py-1.5 text-right ${!r.duplicateCount ? 'text-gray-400' : 'text-amber-600 font-semibold'}`}
+                                title={r.duplicateCount == null ? duplicateUnknownTitle : duplicateTitle}>
+                                {duplicateLabel(r.duplicateCount)}
                               </td>
                             </tr>
                           )
@@ -3456,6 +3579,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                               <td className="px-3 py-1.5 text-right text-gray-700 font-semibold" title={g.truncated ? truncatedTitle : undefined}>
                                 {g.total.toLocaleString()}개{g.truncated ? ' 이상' : ''}{g.unknownCount > 0 && ` (+미확인 ${g.unknownCount}개)`}
                               </td>
+                              <td className={`px-3 py-1.5 text-right font-semibold ${!g.duplicateTotal ? 'text-gray-400' : 'text-amber-600'}`}
+                                title={g.duplicateUnknownCount > 0 ? duplicateUnknownTitle : duplicateTitle}>
+                                {g.duplicateUnknownCount === g.items.length ? '-' : `${duplicateLabel(g.duplicateTotal)}${g.duplicateUnknownCount > 0 ? ` (+미확인 ${g.duplicateUnknownCount}개)` : ''}`}
+                              </td>
                             </tr>
                             {!collapsed && g.items.map(r => (
                               <tr key={r.url} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
@@ -3467,6 +3594,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                                 <td className={`px-3 py-1.5 text-right ${r.count == null ? 'text-gray-400' : 'text-gray-700'}`}
                                   title={r.count == null ? unconfirmedTitle : r.truncated ? truncatedTitle : undefined}>
                                   {countLabel(r)}
+                                </td>
+                                <td className={`px-3 py-1.5 text-right ${!r.duplicateCount ? 'text-gray-400' : 'text-amber-600 font-semibold'}`}
+                                  title={r.duplicateCount == null ? duplicateUnknownTitle : duplicateTitle}>
+                                  {duplicateLabel(r.duplicateCount)}
                                 </td>
                               </tr>
                             ))}
@@ -3501,22 +3632,37 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               ⚠ 로그인 확인이 필요합니다 — 위 &quot;로그인 창 열기&quot; → &quot;로그인 확인&quot;을 먼저 진행해주세요.
             </p>
           )}
-          <label className="flex items-center gap-2 mb-2 text-xs text-gray-500 cursor-pointer select-none"
-            title="꺼두면 예전 동작대로 이미 상품마스터에 있는 상품(source_url 기준)은 건너뛴다 — 신상품만 빠르게 받고 싶을 때 유용하다.">
-            <input type="checkbox" checked={includeAlreadyScraped} onChange={e => setIncludeAlreadyScraped(e.target.checked)}
-              className="w-3.5 h-3.5 accent-teal-500" />
-            이미 스크랩한 상품 포함 (위에서 선택한 카테고리 전체를 대상으로 다시 수집)
-          </label>
-          <button onClick={handleStart} disabled={!canStart}
-            title={!canStart && needsLogin ? '로그인 확인이 필요합니다' : undefined}
-            className={`w-full py-3 rounded-2xl font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${
-              status === 'done'
-                ? 'bg-white border-2 border-teal-500 text-teal-600 hover:bg-teal-50'
-                : 'bg-teal-500 text-white hover:bg-teal-600'}`}>
-            {status === 'stopped' || status === 'error'
-              ? `이어서 스크랩하기${includeAlreadyScraped ? '' : ' (기존 상품 제외)'}`
-              : status === 'done' ? '✓ 스크래핑 완료 (다시 시작)' : '스크래핑 시작'}
-          </button>
+          {status === 'idle' ? (
+            <>
+              <label className="flex items-center gap-2 mb-2 text-xs text-gray-500 cursor-pointer select-none"
+                title="꺼두면 예전 동작대로 이미 상품마스터에 있는 상품(source_url 기준)은 건너뛴다 — 신상품만 빠르게 받고 싶을 때 유용하다.">
+                <input type="checkbox" checked={includeAlreadyScraped} onChange={e => setIncludeAlreadyScraped(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-teal-500" />
+                이미 스크랩한 상품 포함 (위에서 선택한 카테고리 전체를 대상으로 다시 수집)
+              </label>
+              <button onClick={() => handleStart()} disabled={!canStart}
+                title={!canStart && needsLogin ? '로그인 확인이 필요합니다' : undefined}
+                className="w-full py-3 rounded-2xl font-semibold text-sm bg-teal-500 text-white hover:bg-teal-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                스크래핑 시작
+              </button>
+            </>
+          ) : (
+            // 중지됨/오류/완료 뒤에는 "이어서"와 "처음부터"의 의도가 갈리므로, 체크박스 하나로 뭉뚱그리지
+            // 않고 버튼 두 개로 바로 확정한다(사용자 요청, 2026-08-25 — "이어서 하기 외에 처음부터 다시
+            // 하기 기능도"). 각 버튼이 includeAlreadyScraped를 명시적으로 override해서 보낸다.
+            <div className="flex gap-2">
+              <button onClick={() => handleStart(false)} disabled={!canStart}
+                title={!canStart && needsLogin ? '로그인 확인이 필요합니다' : '이미 상품마스터에 있는 상품(source_url 기준)은 건너뛰고, 남은 것만 이어서 받습니다.'}
+                className="flex-1 py-3 rounded-2xl font-semibold text-sm bg-teal-500 text-white hover:bg-teal-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                ▶ 이어서 하기 (기존 상품 제외)
+              </button>
+              <button onClick={() => handleStart(true)} disabled={!canStart}
+                title={!canStart && needsLogin ? '로그인 확인이 필요합니다' : '위에서 선택한 카테고리 전체를 이미 스크랩한 상품까지 포함해 처음부터 다시 수집합니다.'}
+                className="flex-1 py-3 rounded-2xl font-semibold text-sm bg-white border-2 border-teal-500 text-teal-600 hover:bg-teal-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                🔄 처음부터 다시 하기
+              </button>
+            </div>
+          )}
         </>
       ) : (
         // 개발자모드는 실제 스크랩을 PTP가 아니라 사용자의 개인 크롬 확장이 몰 탭에서 직접 실행한다
@@ -3549,13 +3695,15 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       {/* 진행 상황 */}
       {status !== 'idle' && (
         <div ref={progressSectionRef} className="mt-4 bg-white rounded-2xl border border-gray-200 p-5">
-          <div className="flex items-center justify-between mb-3">
+          <div className="grid grid-cols-3 items-center mb-3">
             <span className="text-sm font-semibold text-gray-700">진행 상황</span>
-            <div className="flex items-center gap-3">
-              <span className={`text-sm font-semibold inline-flex items-center gap-1.5 ${statusColor[status]}`}>
-                {status === 'running' && <span className="animate-spin leading-none" aria-hidden="true">🔄</span>}
-                {statusLabel[status]}
-              </span>
+            {/* 상태 배지(특히 진행 중 스피너)는 가운데 열에 둬 항상 카드 정중앙에 오게 한다(사용자 요청,
+                2026-08-25) — 옆 두 열(라벨/버튼) 폭이 서로 달라도 배지 위치가 한쪽으로 쏠리지 않는다. */}
+            <span className={`text-sm font-semibold inline-flex items-center justify-center gap-1.5 ${statusColor[status]}`}>
+              {status === 'running' && <span className="animate-spin leading-none" aria-hidden="true">🔄</span>}
+              {statusLabel[status]}
+            </span>
+            <div className="flex items-center justify-end gap-3">
               {/* 중지된 세션도 그때까지 수집한 상품은 이미 저장돼 있으니, "완료"와 마찬가지로 바로 Raw
                   확인으로 넘어갈 수 있어야 한다 — 이어서 스크랩할지 여기서 끝낼지는 사용자 선택이라,
                   중지 상태에서도 이 버튼을 숨길 이유가 없다(2026-08-22, 사용자 요청). */}

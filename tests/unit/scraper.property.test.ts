@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import fc from 'fast-check'
-import { diffQueryParams, resetToFirstPage, looksLikeSortLabel } from '../../lib/scraper'
+import { diffQueryParams, resetToFirstPage, looksLikeSortLabel, deriveCategoryUrlPattern } from '../../lib/scraper'
 
 // 사람이 떠올리는 예시 몇 개(scraper.test.ts)와 달리, 여기는 "이 함수가 어떤 입력에서도 지켜야 할 규칙"을
 // 정의해두고 fast-check가 극단값(빈 문자열, 유니코드, 아주 긴 문자열 등)을 대량으로 생성해 대신 검증한다.
@@ -50,5 +50,36 @@ describe('looksLikeSortLabel (속성 기반)', () => {
     fc.assert(fc.property(fc.string(), (s) => {
       expect(() => looksLikeSortLabel(s)).not.toThrow()
     }))
+  })
+})
+
+describe('deriveCategoryUrlPattern (속성 기반)', () => {
+  it('임의 문자열 배열에 대해 절대 예외를 던지지 않는다', () => {
+    fc.assert(fc.property(fc.array(fc.string()), (urls) => {
+      expect(() => deriveCategoryUrlPattern(urls)).not.toThrow()
+    }))
+  })
+
+  it('URL이 2개 미만이면 항상 null이다', () => {
+    fc.assert(fc.property(fc.array(fc.webUrl(), { maxLength: 1 }), (urls) => {
+      expect(deriveCategoryUrlPattern(urls)).toBeNull()
+    }))
+  })
+
+  it('모든 URL이 같은 쿼리파라미터 키를 공유하면, 역산된 패턴이 그 URL들을 전부 매칭한다', () => {
+    fc.assert(fc.property(
+      fc.webUrl(), safeToken, fc.array(safeToken, { minLength: 2, maxLength: 10 }),
+      (base, key, values) => {
+        const urls = values.map(v => {
+          const u = new URL(base)
+          u.searchParams.set(key, v)
+          return u.toString()
+        })
+        const pattern = deriveCategoryUrlPattern(urls)
+        expect(pattern).not.toBeNull()
+        const re = new RegExp(pattern!)
+        urls.forEach(u => expect(re.test(u)).toBe(true))
+      },
+    ))
   })
 })

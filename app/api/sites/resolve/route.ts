@@ -23,9 +23,14 @@ function normalizeHost(host: string): string {
 }
 
 /**
- * 개발자모드(크롬 확장) 몰 공용 조회 — 확장이 지금 보고 있는 탭의 호스트명으로 이 몰이 어느 site_id인지
- * 물어본다. 확장에 몰별 siteId를 하드코딩하지 않아도, Mall 관리에서 체크박스만 켜면 새 몰도 그대로
- * 인식되게 하기 위함(sites.manual_login_required = true인 몰만 대상으로 좁힌다).
+ * 확장(크롬) 몰 공용 조회 — 확장이 지금 보고 있는 탭의 호스트명으로 이 몰이 어느 site_id인지 물어본다.
+ * 확장에 몰별 siteId를 하드코딩하지 않아도, Mall 관리에 등록만 하면 새 몰도 그대로 인식되게 하기 위함.
+ * 개발자모드(manual_login_required=true) 몰뿐 아니라 일반모드 몰도 대상에 포함한다 — 일반모드의 "로그인
+ * 창"(launchVisibleWindow)도 --load-extension으로 이 확장을 항상 같이 띄우므로, 몰 구조분석만큼은
+ * 일반모드에서도 확장으로 실행해 카테고리 하위구조/정렬옵션/페이지네이션 검증까지 받을 수 있게 한다
+ * (2026-08-29). 응답의 mode 필드로 일반/개발자를 구분해 확장 쪽(background.js)이 일반모드 몰에서는
+ * "몰 구조분석" 외 액션(스크랩 시작 등)을 걸러내게 한다 — 일반모드는 서버가 이미 정규 파이프라인을
+ * 돌리므로, 확장이 같은 몰에 별도 파이프라인(scrape_staging_items)을 동시에 만들면 안 된다.
  */
 export async function GET(req: NextRequest) {
   const host = req.nextUrl.searchParams.get('host')
@@ -37,10 +42,11 @@ export async function GET(req: NextRequest) {
     devmode_category_settings: Record<string, { sortLabel?: string; limitMode?: 'count' | 'pages'; limitValue?: number }> | null
     last_adjustment_preview: { preview?: { product: Record<string, unknown> } | null } | null
     scrape_profile: { categoryLinks?: { name: string; href: string }[]; sortOptions?: { label: string; paramsToAdd: Record<string, string> }[] } | null
+    manual_login_required: boolean
   }>(
     `SELECT id, name, url, extraction_rules, devmode_ai_preview, devmode_category_urls, devmode_category_settings,
-            last_adjustment_preview, scrape_profile
-     FROM sites WHERE manual_login_required = true`,
+            last_adjustment_preview, scrape_profile, manual_login_required
+     FROM sites`,
   )
   const targetHost = normalizeHost(host)
   const match = res.rows.find(row => {
@@ -80,7 +86,8 @@ export async function GET(req: NextRequest) {
   // 카테고리를 확인한다(2026-08-18, discoverCategoryLinks의 서버 헤드리스 방식은 로그인 필요 몰에서
   // 세션이 넘어오지 않아 항상 실패하는 게 확인됨 — !specifications/manual-login-required-malls.md 참고).
   return NextResponse.json({
-    id: match.id, name: match.name, extractionRules: match.extraction_rules || {}, aiPreviewMode: match.devmode_ai_preview,
+    id: match.id, name: match.name, mode: match.manual_login_required ? 'devmode' : 'normal',
+    extractionRules: match.extraction_rules || {}, aiPreviewMode: match.devmode_ai_preview,
     categoryUrls: match.devmode_category_urls || [],
     categoryLinks: match.scrape_profile?.categoryLinks || [],
     categorySettings: match.devmode_category_settings || {},

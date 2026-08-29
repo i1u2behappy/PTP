@@ -1,5 +1,13 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Documentation
+
+Feature/bugfix history and design decisions live in `!specifications/` as individual Markdown
+docs — [`!specifications/index.md`](./!specifications/index.md) is the topic-organized entry
+point (built for the [Foam](https://foambubble.github.io/foam/) VS Code extension: open it and
+`Ctrl`/`Cmd`+click any `[[wikilink]]` to jump, or run `Foam: Show Graph` to see how the docs
+connect).
+
 ## Database
 
 PostgreSQL runs in its own Docker container dedicated to this project: `scrape-postgres`

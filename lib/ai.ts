@@ -20,7 +20,10 @@ const GEMINI_MODEL = 'gemini-flash-latest'
 
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:8b'
+// qwen3:8b는 실측 비교(2026-08-30)에서 봇차단 페이지 링크를 카테고리로 오인하는 사고를 놓쳐 로컬에서
+// 삭제하고 qwen3:14b로 교체했다(.env.local의 OLLAMA_MODEL) — 이 하드코드 기본값도 실제 설치된 모델과
+// 맞춰둔다(env var가 없는 환경에서 이미 지운 8b를 다시 찾는 걸 방지).
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:14b'
 
 /** Ollama는 이 PC에서 GPU 없이 CPU로만 추론한다(`ollama ps`의 `size_vram: 0`로 확인) — CPU 연산 자체인
  *  추론은 요청이 동시에 여러 개 들어오면 서로 CPU를 나눠 쓰며 배로(경우에 따라 수십 배까지, think 모드
@@ -633,6 +636,7 @@ ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
 export interface MallStructureReport {
   urlHierarchy: string
   categoryStructure: string
+  sortStructure: string
   bankName: string
   accountNumber: string
   shippingCourier: string
@@ -649,6 +653,7 @@ export interface MallStructureReport {
 const MALL_REPORT_FIELDS: { key: keyof MallStructureReport; label: string; hint: string }[] = [
   { key: 'urlHierarchy', label: 'URL 계층', hint: '목록/상세 페이지 URL 패턴, 페이지네이션 방식' },
   { key: 'categoryStructure', label: '카테고리 구조', hint: '대분류/중분류 등 실제 카테고리 트리' },
+  { key: 'sortStructure', label: '정렬 구조', hint: '카테고리 목록 페이지에서 실제로 확인된 정렬 옵션(인기순/낮은가격순 등)' },
   { key: 'bankName', label: '은행명', hint: '무통장입금 시 사용하는 은행명' },
   { key: 'accountNumber', label: '계좌번호', hint: '무통장입금 계좌번호' },
   { key: 'shippingCourier', label: '배송 택배사 정보', hint: '이용하는 택배사명' },
@@ -678,7 +683,7 @@ const MALL_ANALYSIS_KNOWLEDGE = [
 ]
 
 function buildMallReportPrompt(
-  mallName: string, platform: string, categoryHints: string[], sampleProductUrl: string, contextText: string,
+  mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
 ): string {
   return `몰 '${mallName}'(플랫폼: ${platform})의 실제 페이지에서 수집한 원문이다. 이 내용만 근거로 아래 항목들을 조사하라.
 추측이나 일반적인 쇼핑몰 상식으로 채우지 말고, 원문에 실제로 있는 내용만 답하라. 원문에 없으면 그 항목은 정확히 "확인 안됨"이라고만 답한다.
@@ -692,6 +697,10 @@ ${sampleProductUrl}
 
 [카테고리 메뉴/경로]
 ${categoryHints.join(', ') || '(확인 안됨)'}
+
+[카테고리 목록 페이지에서 실제로 확인된 정렬 옵션 — 클릭/URL 검증까지 거쳐 이미 구조적으로 확정된 값이니
+그대로 정렬 구조 항목에 옮겨 적으면 된다(추측 불필요)]
+${sortHints.join(', ') || '(확인 안됨)'}
 
 [수집한 원문]
 ${contextText.slice(0, 20_000)}`
@@ -707,7 +716,7 @@ ${contextText.slice(0, 20_000)}`
 const MALL_REPORT_TIMEOUT_MS = 20_000
 
 async function generateMallProfileReportAnthropic(
-  mallName: string, platform: string, categoryHints: string[], sampleProductUrl: string, contextText: string,
+  mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
 ): Promise<MallStructureReport | null> {
   if (!process.env.ANTHROPIC_API_KEY || !contextText.trim()) return null
 
@@ -715,7 +724,7 @@ async function generateMallProfileReportAnthropic(
   MALL_REPORT_FIELDS.forEach(f => {
     properties[f.key] = { type: 'string', description: `${f.label} — ${f.hint}. 아래 원문에서 확인할 수 없으면 반드시 "확인 안됨"이라고만 답한다(추측 금지).` }
   })
-  const prompt = buildMallReportPrompt(mallName, platform, categoryHints, sampleProductUrl, contextText)
+  const prompt = buildMallReportPrompt(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText)
 
   try {
     const response = await getClient().messages.create({
@@ -723,7 +732,7 @@ async function generateMallProfileReportAnthropic(
       max_tokens: 1500,
       tools: [{
         name: 'set_mall_report',
-        description: '조사한 11개 항목을 각각 문자열로 채운다. 원문에서 확인 못한 항목은 반드시 "확인 안됨"으로 채운다.',
+        description: `조사한 ${MALL_REPORT_FIELDS.length}개 항목을 각각 문자열로 채운다. 원문에서 확인 못한 항목은 반드시 "확인 안됨"으로 채운다.`,
         input_schema: { type: 'object', properties, required: MALL_REPORT_FIELDS.map(f => f.key) },
       }],
       tool_choice: { type: 'tool', name: 'set_mall_report' },
@@ -741,7 +750,7 @@ async function generateMallProfileReportAnthropic(
 /** Anthropic이 안 되면(크레딧 부족 등) Gemini로 같은 리포트를 시도한다 — "AI모드 스크래핑"/"스크랩 조정"과
  *  같은 GEMINI_API_KEY를 재사용. GEMINI_API_KEY가 없거나 원문이 없으면 null(호출부가 규칙 기반으로 대체). */
 async function generateMallProfileReportGemini(
-  mallName: string, platform: string, categoryHints: string[], sampleProductUrl: string, contextText: string,
+  mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
 ): Promise<MallStructureReport | null> {
   if (!process.env.GEMINI_API_KEY || !contextText.trim()) return null
 
@@ -749,7 +758,7 @@ async function generateMallProfileReportGemini(
   MALL_REPORT_FIELDS.forEach(f => {
     properties[f.key] = { type: Type.STRING, description: `${f.label} — ${f.hint}. 아래 원문에서 확인할 수 없으면 반드시 "확인 안됨"이라고만 답한다(추측 금지).` }
   })
-  const prompt = buildMallReportPrompt(mallName, platform, categoryHints, sampleProductUrl, contextText)
+  const prompt = buildMallReportPrompt(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText)
 
   try {
     const response = await getGeminiClient().models.generateContent({
@@ -758,7 +767,7 @@ async function generateMallProfileReportGemini(
       config: {
         tools: [{ functionDeclarations: [{
           name: 'set_mall_report',
-          description: '조사한 11개 항목을 각각 문자열로 채운다. 원문에서 확인 못한 항목은 반드시 "확인 안됨"으로 채운다.',
+          description: `조사한 ${MALL_REPORT_FIELDS.length}개 항목을 각각 문자열로 채운다. 원문에서 확인 못한 항목은 반드시 "확인 안됨"으로 채운다.`,
           parameters: { type: Type.OBJECT, properties, required: MALL_REPORT_FIELDS.map(f => f.key) },
         }] }],
         toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_mall_report'] } },
@@ -776,7 +785,7 @@ async function generateMallProfileReportGemini(
 
 /**
  * "몰 구조분석" 기능 — 실제로 수집한 원문(홈/게시판/상품페이지 텍스트)만 근거로 사용자가 알고 싶어하는
- * 11개 항목(URL 계층/카테고리/은행명/계좌번호/택배사/택배비/반품주소/재고관리/연락처/상품페이지 구조/
+ * 12개 항목(URL 계층/카테고리/정렬/은행명/계좌번호/택배사/택배비/반품주소/재고관리/연락처/상품페이지 구조/
  * 스크래핑 유의사항)을 채운다. 원문에 없는 내용을 추측하지 않도록 프롬프트에서 명시적으로 금지하고,
  * 확인 못한 항목은 "확인 안됨"으로 답하게 한다. Anthropic을 먼저 시도하고, 크레딧 부족 등으로 실패하면
  * Gemini로 재시도한다(둘 다 실패하거나 원문을 하나도 못 모았으면 null — 호출부가 규칙 기반으로 대체).
@@ -785,11 +794,207 @@ export async function generateMallProfileReport(
   mallName: string,
   platform: string,
   categoryHints: string[],
+  sortHints: string[],
   sampleProductUrl: string,
   contextText: string,
 ): Promise<MallStructureReport | null> {
-  return await generateMallProfileReportAnthropic(mallName, platform, categoryHints, sampleProductUrl, contextText).catch(() => null)
-    ?? await generateMallProfileReportGemini(mallName, platform, categoryHints, sampleProductUrl, contextText).catch(() => null)
+  return await generateMallProfileReportAnthropic(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText).catch(() => null)
+    ?? await generateMallProfileReportGemini(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText).catch(() => null)
+}
+
+export interface CategoryAnomalyVerdict { suspicious: boolean; reason: string; source: 'anthropic' | 'gemini' | 'ollama' }
+
+const CATEGORY_ANOMALY_TIMEOUT_MS = 20_000
+
+/** 두 AI 함수(Anthropic/Gemini)가 공유하는 프롬프트 — 봇 차단/로그인 안내 페이지의 링크가 "카테고리"로
+ *  잘못 저장됐던 사고(2026-08-29, 펫토리: veritas-hub.cafe24.com/challenge?auth=... 링크 110개가 카테고리로
+ *  둔갑)의 재발을 사람이 매번 눈으로 확인하지 않아도 감지하기 위한 안전망. migratedLabels(마이그레이션
+ *  확정된 상품의 실제 카테고리명)와 manualCategoryUrls(사용자가 몰에 직접 들어가 확인한 카테고리 URL —
+ *  이름은 없음, URL 패턴만 참고)를 "검증된 과거 증거"로 주고, freshLinks(방금 새로 찾은 카테고리)가
+ *  이것과 터무니없이 다른지 판단시킨다. 몰이 실제로 메뉴를 개편했을 수 있으니 "완전 일치"를 요구하지
+ *  않는다 — 새 목록이 페이지 탐색/로그인 안내/무관한 텍스트처럼 보이거나 두 증거 중 어느 쪽과도 URL
+ *  패턴이 하나도 안 겹칠 때만 의심하도록 명시한다. */
+function buildCategoryAnomalyPrompt(
+  mallName: string, freshLinks: { name: string; href: string }[], migratedLabels: string[], manualCategoryUrls: string[],
+): string {
+  const freshList = freshLinks.slice(0, 60).map(l => `- ${l.name} (${l.href})`).join('\n')
+  const migratedList = migratedLabels.length ? migratedLabels.slice(0, 40).map(l => `- ${l}`).join('\n') : '(없음)'
+  const manualList = manualCategoryUrls.length ? manualCategoryUrls.slice(0, 20).map(u => `- ${u}`).join('\n') : '(없음)'
+  return `쇼핑몰 "${mallName}"의 카테고리 구조를 방금 새로 자동 탐지했다. 이 결과가 신뢰할 만한지 판단해줘.
+
+## 새로 찾은 카테고리 목록 (이번 탐지 결과)
+${freshList || '(없음)'}
+
+## 증거 ①: 실제로 스크랩→검수→마이그레이션 확정까지 끝난 과거 카테고리명
+${migratedList}
+
+## 증거 ②: 사용자가 이 몰에 직접 로그인해 카테고리 페이지로 이동한 뒤 확인한 URL(이름 정보는 없음 — URL 경로/파라미터 패턴만 참고)
+${manualList}
+
+중요: 새 목록이 증거 ①·②와 겹치는 항목이 있다는 것은 "의심스러운 신호"가 아니라 정반대로 "이 몰의 진짜
+카테고리를 제대로 찾았다는 안심 신호"다 — 겹침 자체를 절대 suspicious 사유로 쓰지 마라. 몰이 실제로 메뉴를
+개편했을 수 있으니 증거와 일부만 겹치거나 새 항목이 섞여 있는 정도도 정상이다 — 완전 일치를 요구하지 마라.
+다만 "새로 찾은 카테고리 목록"이 아래 중 하나에 해당하면 suspicious:true로 판단해라:
+- 실제 상품 분류명이 아니라 페이지 탐색/로그인 안내/에러 안내처럼 보이는 이름(예: "컨텐츠 바로가기", "로그인", "이전 페이지" 등)이 다수 섞여 있다.
+- href가 이 몰의 실제 도메인이 아닌 다른 도메인(로그인 우회, 보안 인증, 광고 등)을 가리키는 게 다수다.
+- 증거 ①·②가 모두 존재하는데(즉 비교할 근거가 있는데) 새 목록의 URL 패턴이 증거와 단 하나도 겹치지 않는다.
+확실하지 않으면 suspicious:false로 판단해라(과잉 경고보다 누락이 낫다).`
+}
+
+async function detectCategoryAnomalyAnthropic(
+  mallName: string, freshLinks: { name: string; href: string }[], migratedLabels: string[], manualCategoryUrls: string[],
+): Promise<CategoryAnomalyVerdict | null> {
+  if (!process.env.ANTHROPIC_API_KEY || !freshLinks.length) return null
+  const prompt = buildCategoryAnomalyPrompt(mallName, freshLinks, migratedLabels, manualCategoryUrls)
+  try {
+    const response = await getClient().messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 500,
+      tools: [{
+        name: 'set_category_anomaly_verdict',
+        description: '새로 찾은 카테고리 목록이 의심스러운지 판정한다.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            suspicious: { type: 'boolean', description: '터무니없어 보이면 true' },
+            reason: { type: 'string', description: '판단 근거를 한두 문장으로. suspicious가 false여도 간단히 채운다.' },
+          },
+          required: ['suspicious', 'reason'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'set_category_anomaly_verdict' },
+      messages: [{ role: 'user', content: prompt }],
+    }, { signal: AbortSignal.timeout(CATEGORY_ANOMALY_TIMEOUT_MS) })
+    const toolUse = response.content.find(b => b.type === 'tool_use')
+    if (!toolUse || toolUse.type !== 'tool_use') return null
+    return { ...(toolUse.input as Omit<CategoryAnomalyVerdict, 'source'>), source: 'anthropic' }
+  } catch (e) {
+    console.error('[detectCategoryAnomalyAnthropic] API call failed:', e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : e)
+    return null
+  }
+}
+
+async function detectCategoryAnomalyGemini(
+  mallName: string, freshLinks: { name: string; href: string }[], migratedLabels: string[], manualCategoryUrls: string[],
+): Promise<CategoryAnomalyVerdict | null> {
+  if (!process.env.GEMINI_API_KEY || !freshLinks.length) return null
+  const prompt = buildCategoryAnomalyPrompt(mallName, freshLinks, migratedLabels, manualCategoryUrls)
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_category_anomaly_verdict',
+          description: '새로 찾은 카테고리 목록이 의심스러운지 판정한다.',
+          parameters: {
+            type: Type.OBJECT,
+            properties: {
+              suspicious: { type: Type.BOOLEAN, description: '터무니없어 보이면 true' },
+              reason: { type: Type.STRING, description: '판단 근거를 한두 문장으로. suspicious가 false여도 간단히 채운다.' },
+            },
+            required: ['suspicious', 'reason'],
+          },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_category_anomaly_verdict'] } },
+        abortSignal: AbortSignal.timeout(CATEGORY_ANOMALY_TIMEOUT_MS),
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) return null
+    return { ...(call.args as unknown as Omit<CategoryAnomalyVerdict, 'source'>), source: 'gemini' }
+  } catch (e) {
+    console.error('[detectCategoryAnomalyGemini] API call failed:', e instanceof Error ? e.message : e)
+    return null
+  }
+}
+
+// 실측(2026-08-29~30, CPU 전용): qwen3:8b는 짧은 프롬프트도 20초, qwen3:14b는 실제 봇차단 사고
+//재현 프롬프트에 87~125초까지 걸렸다(같은 프롬프트인데도 실행마다 변동 폭이 큼) — 8b는 이 사고를
+// suspicious:false로 놓쳤고 14b는 정확히 잡아내(실사용 비교 확인) 기본 모델을 14b로 교체했다
+// (.env.local의 OLLAMA_MODEL). 이 검사는 "카테고리 불러오기"/"몰 구조분석" 자체가 이미 몇 분씩
+// 걸리는 걸 사용자가 감수하는 무거운 작업의 마지막 단계일 뿐이라(사용자 판단: "정상적으로 분석
+// 진행된다 싶으면 시간을 늘려도 된다"), 다른 Ollama 호출(25초, 반복 호출이라 짧게 끊어야 함)과 달리
+// 여유 있게 잡는다 — 125초 실측치에 여유를 더해 180초. 그래도 무한정은 아니다 — 정말 응답이 없는
+// 경우(Ollama 다운 등) 이 검사 하나 때문에 전체 작업이 무한히 멈춰있으면 안 되므로 상한은 둔다.
+const CATEGORY_ANOMALY_OLLAMA_TIMEOUT_MS = 180_000
+const CATEGORY_ANOMALY_OLLAMA_MAX_ITEMS = 30
+
+/** Anthropic·Gemini가 둘 다 안 되면(크레딧 소진, 과부하 등 — 실사용 확인, 2026-08-29: Anthropic 크레딧
+ *  부족 + Gemini 타임아웃이 동시에 겹쳐 이 검사 자체가 조용히 무력화됨) 로컬 Ollama로 마지막 시도한다.
+ *  다른 Ollama 호출(pickIndicesWithOllama)과 같은 큐 관행을 따르되, 그쪽은 "인덱스 선택" 스키마가
+ *  고정이라 이 종합 판단(suspicious/reason)에는 못 쓰므로 별도 함수로 둔다.
+ *
+ *  실측 경고(2026-08-29): qwen3:8b로 직접 테스트해보니 "새 카테고리가 과거 카테고리와 겹친다"를
+ *  거꾸로 "중복이라 의심스럽다"고 판단하는 등, 이 비교·부정 추론 자체를 안정적으로 못 할 때가 있었다
+ *  (원래 이 함수가 클라우드 모델을 우선하는 이유 — generateMallProfileReport와 같은 판단: 종합 추론은
+ *  로컬 소형 모델에 안 맞음, 단순 분류(pickIndicesWithOllama류)만 로컬로 돌림). 그래도 "클라우드가 둘 다
+ *  막혔을 때 아예 검사를 못 하는 것"보다는 낫다고 보고 마지막 폴백으로만 둔다 — 화면에 뜨는 경고 문구가
+ *  Ollama발이면 그만큼 신뢰도가 더 낮을 수 있다는 걸 감안해야 한다. */
+async function detectCategoryAnomalyOllama(
+  mallName: string, freshLinks: { name: string; href: string }[], migratedLabels: string[], manualCategoryUrls: string[],
+): Promise<CategoryAnomalyVerdict | null> {
+  if (!freshLinks.length) return null
+  const prompt = buildCategoryAnomalyPrompt(
+    mallName,
+    freshLinks.slice(0, CATEGORY_ANOMALY_OLLAMA_MAX_ITEMS),
+    migratedLabels.slice(0, CATEGORY_ANOMALY_OLLAMA_MAX_ITEMS),
+    manualCategoryUrls.slice(0, CATEGORY_ANOMALY_OLLAMA_MAX_ITEMS),
+  )
+  return withOllamaQueue(async () => {
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(CATEGORY_ANOMALY_OLLAMA_TIMEOUT_MS),
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          stream: false,
+          think: false,
+          keep_alive: '30m',
+          messages: [{ role: 'user', content: prompt }],
+          tools: [{
+            type: 'function',
+            function: {
+              name: 'set_category_anomaly_verdict',
+              description: '새로 찾은 카테고리 목록이 의심스러운지 판정한다.',
+              parameters: {
+                type: 'object',
+                required: ['suspicious', 'reason'],
+                properties: {
+                  suspicious: { type: 'boolean', description: '터무니없어 보이면 true' },
+                  reason: { type: 'string', description: '판단 근거를 한두 문장으로. suspicious가 false여도 간단히 채운다.' },
+                },
+              },
+            },
+          }],
+        }),
+      })
+      if (!res.ok) return null
+      const data = await res.json() as { message?: { tool_calls?: { function: { name: string; arguments: unknown } }[] } }
+      const call = data.message?.tool_calls?.[0]
+      if (!call) return null
+      const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments
+      const verdict = args as { suspicious?: unknown; reason?: unknown } | null
+      if (typeof verdict?.suspicious !== 'boolean') return null
+      return { suspicious: verdict.suspicious, reason: typeof verdict.reason === 'string' ? verdict.reason : '', source: 'ollama' }
+    } catch {
+      return null
+    }
+  })
+}
+
+/** "카테고리 불러오기"/"몰 구조분석"이 새로 찾은 카테고리 구조가 터무니없는지 AI로 한 번 더 확인한다 —
+ *  검증된 과거 카테고리(마이그레이션 확정분 + 사용자가 직접 확인한 URL)와 비교해 판단한다. Anthropic →
+ *  Gemini → 로컬 Ollama 순으로 시도하고, 셋 다 실패하면 null(판단 불가 = 경고 안 함, 오탐으로 정상
+ *  결과를 막지 않기 위해 fail-open). 호출부(lib/scrape/categoryAnomalyCheck.ts)가 애초에 비교할 과거
+ *  증거가 충분할 때만 이 함수를 부른다. */
+export async function detectCategoryAnomaly(
+  mallName: string, freshLinks: { name: string; href: string }[], migratedLabels: string[], manualCategoryUrls: string[],
+): Promise<CategoryAnomalyVerdict | null> {
+  return await detectCategoryAnomalyAnthropic(mallName, freshLinks, migratedLabels, manualCategoryUrls).catch(() => null)
+    ?? await detectCategoryAnomalyGemini(mallName, freshLinks, migratedLabels, manualCategoryUrls).catch(() => null)
+    ?? await detectCategoryAnomalyOllama(mallName, freshLinks, migratedLabels, manualCategoryUrls).catch(() => null)
 }
 
 const COURIER_NAMES = ['CJ대한통운', '한진택배', '로젠택배', '우체국택배', '롯데택배', '경동택배', '대신택배', '합동택배', '일양로지스', 'CU편의점택배', 'GS Postbox']
@@ -849,6 +1054,7 @@ function findContact(text: string): string {
 export function buildHeuristicMallReport(input: {
   platform: string
   categoryHints: string[]
+  sortHints: string[]
   sampleProductUrl: string
   contextText: string
   optionUiTypes: string[]
@@ -864,6 +1070,7 @@ export function buildHeuristicMallReport(input: {
   return {
     urlHierarchy: input.sampleProductUrl ? `상품 상세 URL 예시: ${input.sampleProductUrl} (플랫폼: ${input.platform})` : '확인 안됨',
     categoryStructure: input.categoryHints.length ? input.categoryHints.join(', ') : '확인 안됨',
+    sortStructure: input.sortHints.length ? input.sortHints.join(', ') : '확인 안됨',
     bankName,
     accountNumber: findAccountNumber(input.contextText, bankName),
     shippingCourier: findCourier(input.contextText),

@@ -59,6 +59,25 @@ message... deadline has elapsed`)나고 있었고, 단순 API 라우트 하나 �
   `ScrapeDevServerDailyRestart`라는 이름으로 Windows 작업 스케줄러에 `/SC DAILY /ST 04:00`으로 등록
   (기존 `ScrapeDevServer`의 `/SC ONLOGON`과는 별개 작업).
 
+## 정정 — "알약"이 원인이라던 진단은 틀렸음 (2026-08-28)
+
+사용자 확인: 알약(AhnLab)은 애초에 이 PC에 설치된 적이 없다. 위 "원인" 항목의 Security Center 조회
+당시엔 Windows Defender가 꺼져 있었던 게 맞지만, 그 자리를 채운 게 알약이라는 추론은 잘못됐다 —
+방금 다시 조회해보니 지금은 **Windows Defender 자체가 실시간 보호까지 켜진 채 정상 동작 중**이다
+(`Get-MpComputerStatus`: RealTimeProtectionEnabled=True). 즉 "webpack/Turbopack이 `.next`/
+`node_modules`에 쏟아내는 대량의 작은 파일 I/O를 실시간 백신 검사가 가로채 늦춘다"는 메커니즘 자체는
+여전히 유효한 가설이지만, 그 백신이 지금은 알약이 아니라 Windows Defender다.
+
+이전엔 Defender 서비스가 꺼져 있어 `Add-MpPreference -ExclusionPath ...`가 `0x800106ba`로 실패했는데,
+지금은 Defender가 켜져 있으니 이 명령이 실제로 동작해야 한다 — 아직 예외 등록이 안 돼 있다면(관리자
+권한 없이는 Claude Code가 직접 조회도 등록도 못 한다, `Get-MpPreference`가 "Must be an administrator"로
+막힘) 관리자 PowerShell에서 직접 등록해보는 걸 권장한다:
+```powershell
+Add-MpPreference -ExclusionPath "C:\Users\seyi-DESK\Project\scrape\node_modules"
+Add-MpPreference -ExclusionPath "C:\Users\seyi-DESK\Project\scrape\.next"
+Add-MpPreference -ExclusionPath "C:\Users\seyi-DESK\Project\scrape\.playwright-profiles"
+```
+
 ## 검증 (2026-08 추가분)
 - 수동으로 프로세스를 죽이고(`Get-CimInstance Win32_Process` + `Stop-Process`) `.next` 삭제 후 스케줄
   작업을 재실행해, 캐시 없이도 깨끗하게 재기동되고 이후 컴파일이 진행됨을 확인.

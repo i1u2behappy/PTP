@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool, { encryptSecret, decryptSecret } from '@/lib/db'
 import { profileDir, getCategoryScrapeHistory } from '@/lib/scraper'
+import { countUnmigratedForSite } from '@/lib/master/migrate'
 import { isAdminRequest } from '@/lib/auth'
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -30,6 +31,10 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   // "일반모드가 실제로 동작함이 검증됨"의 더 확실한 증거다.
   const doneRes = await pool.query(`SELECT 1 FROM scrape_sessions WHERE site_id=$1 AND status='done' LIMIT 1`, [id])
   const hasCompletedScrape = doneRes.rows.length > 0
+  // 거래처 없이 확정돼 상품마스터 반영이 건너뛰어진 상품 개수 — SiteDetailPanel의 거래처 선택 옆에
+  // 보여주고, 거래처를 지정/저장하면 자동으로(또는 "지금 반영" 버튼으로 수동) 소급 반영한다
+  // (lib/master/migrate.ts의 migrateUnmigratedForSite 참고, 사용자 요청 2026-08-27).
+  const unmigratedCount = await countUnmigratedForSite(site.id)
   // 카테고리 체크리스트의 "최근 스크랩"/"업체" 컬럼용 — scrape_profile.categoryCounts(previewCatalog가
   // 저장해둔 카테고리별 라벨)를 기준으로만 조회하면 되므로, 몰을 선택할 때마다 매번 몰 전체를 다시
   // 훑지 않고 이미 캐시된 라벨 목록만 사용한다.
@@ -40,6 +45,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     id: site.id, name: site.name, url: site.url, login_url: site.login_url, login_id: site.login_id,
     login_pw: decryptSecret(site.login_pw_encrypted, site.login_pw_iv),
     client_id: site.client_id,
+    unmigrated_count: unmigratedCount,
     custom_name_selector: site.custom_name_selector,
     custom_price_selector: site.custom_price_selector,
     custom_thumbnail_selector: site.custom_thumbnail_selector,

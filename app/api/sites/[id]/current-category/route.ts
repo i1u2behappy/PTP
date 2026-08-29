@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
+import { recordManualCategorySample } from '@/lib/scraper'
 
 // chrome-extension:// 출처에서 오는 fetch라 CORS 프리플라이트(OPTIONS)를 직접 응답해야 하고,
 // 로컬(사설망) 주소로 가는 요청이라 Private Network Access 헤더도 같이 내려줘야 브라우저가 막지 않는다.
@@ -59,6 +60,11 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
       `UPDATE sites SET scrape_profile = COALESCE(scrape_profile, '{}'::jsonb) || '{"categoryQueue":[]}'::jsonb WHERE id=$1`,
       [siteId],
     )
+    // 일반모드의 "URL 불러오기"(handleRefreshCurrentUrl)는 이미 recordManualCategorySample을 불러
+    // scrape_profile.manualCategorySamples에 기록하는데, 개발자모드의 이 폴링 경로만 빠져 있었다 —
+    // 사용자가 직접 확인한 카테고리가 나중에(카테고리 이상탐지 등) 기준 데이터로 전혀 안 쌓이는
+    // 결함이었다(2026-08-29). 큐를 비우는 UPDATE 이후 순차로 기록해 경쟁을 피한다.
+    for (const url of urls) await recordManualCategorySample(siteId, url)
   }
   return NextResponse.json({ urls })
 }

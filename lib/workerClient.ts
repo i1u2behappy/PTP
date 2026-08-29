@@ -75,6 +75,7 @@ export const stopProfileAnalysis = (siteId: number) => callWorker<boolean>('stop
 export const openLoginWindow = (siteId: number, opts: { url: string; loginId?: string; loginPw?: string }) => callWorker<void>('openLoginWindow', [siteId, opts])
 export const openManualLoginWindow = (siteId: number, url: string) => callWorker<void>('openManualLoginWindow', [siteId, url])
 export const openUrlInLoginWindow = (siteId: number, url: string) => callWorker<void>('openUrlInLoginWindow', [siteId, url])
+export const focusManualLoginChrome = () => callWorker<boolean>('focusManualLoginChrome', [])
 
 // ── 단발 스크랩/추출 ──────────────────────────────────────────────────────
 export const scrapeSingleProduct = (opts: ScrapeOptions) => callWorker<ScrapeResult>('scrapeSingleProduct', [opts])
@@ -90,6 +91,7 @@ export const runMallProfileCheckForScrape = (opts: ScrapeOptions) => callWorker<
 
 // ── 카테고리/재확인/재추출 ─────────────────────────────────────────────────
 export const discoverCategoryLinks = (opts: ScrapeOptions) => callWorker<CategoryDiscoveryResult>('discoverCategoryLinks', [opts])
+export const stopCategoryDiscovery = (siteId: number) => callWorker<boolean>('stopCategoryDiscovery', [siteId])
 export const expandCategoryChildren = (opts: ScrapeOptions, parentUrl: string, parentName: string) =>
   callWorker<{ platform: MallPlatform; links: CategoryLink[]; aiUsed: boolean }>('expandCategoryChildren', [opts, parentUrl, parentName])
 export const detectSortOptionsForCategory = (opts: ScrapeOptions, categoryUrl: string) =>

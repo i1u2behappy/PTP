@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern } from '../../lib/scraper'
+import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern, scanCategoryMenuFromHtml } from '../../lib/scraper'
 
 // diffQueryParams는 "카테고리별 정렬기준 설정" 기능의 핵심 — 정렬 후보 링크가 baseUrl과 같은 경로에서
 // 쿼리파라미터만 다른지 확인해, 다른 카테고리/상품 상세로 튀는 링크를 걸러낸다.
@@ -113,5 +113,71 @@ describe('deriveCategoryUrlPattern', () => {
     const pattern = deriveCategoryUrlPattern(urls)
     expect(pattern).toBe('[?&]a\\.b=')
     expect(new RegExp(pattern!).test('https://mall.com/x.php?aXb=9')).toBe(false)
+  })
+
+  // 실사용 확인(2026-08-30, 소꿉노리) — 공지/문의 게시글이 한 번 "카테고리"로 잘못 저장되면, 그 URL들의
+  // 공통 쿼리파라미터(bdId)가 "이 몰의 카테고리 패턴"으로 학습돼버려 이후 실행마다 게시판 글만 계속
+  // 카테고리로 재발견하는 자기강화 오염 루프가 생겼다(발견된 "카테고리" 59개 중 59개 전부가 게시판 글).
+  // board/bbs 경로의 URL은 애초에 투표 대상에서 빼서, 진짜 카테고리 URL(cateCd=)이 과반수를 차지하면
+  // 그 키로 정상 학습되게 한다.
+  it('board/bbs 경로 URL은 투표에서 제외한다(게시판 글이 학습되는 것을 막음)', () => {
+    const urls = [
+      'https://mall.com/board/view.php?bdId=notice&sno=1',
+      'https://mall.com/board/view.php?bdId=notice&sno=2',
+      'https://mall.com/board/view.php?bdId=qna&sno=3',
+      'https://mall.com/goods/goods_list.php?cateCd=011',
+      'https://mall.com/goods/goods_list.php?cateCd=017',
+    ]
+    expect(deriveCategoryUrlPattern(urls)).toBe('[?&]cateCd=')
+  })
+
+  it('board/bbs 경로 URL만 있으면 패턴을 만들지 않는다', () => {
+    const urls = [
+      'https://mall.com/board/view.php?bdId=notice&sno=1',
+      'https://mall.com/bbs/board.php?bdId=qna&sno=2',
+    ]
+    expect(deriveCategoryUrlPattern(urls)).toBeNull()
+  })
+})
+
+// 도매의신 실사용 확인(2026-08-26): 카테고리 메뉴 전체가 <a href> 없이 <li onclick="location.href='...'">
+// 로만 이동하는 구형 몰 템플릿 — scanCategoryMenu(라이브 DOM)/scanCategoryMenuFromHtml(원본 HTML) 둘 다
+// ownHref가 <a>를 못 찾으면 onclick 속성을 정규식으로 파싱하는 폴백을 추가했다. 브라우저 없이도 검증
+// 가능한 cheerio 버전(scanCategoryMenuFromHtml)으로 실제 마크업을 그대로 재현해 회귀를 막는다.
+describe('scanCategoryMenuFromHtml — onclick="location.href=...\'" 메뉴(구형 몰 템플릿)', () => {
+  const html = `
+    <html><body>
+      <div id="div_cat" style="display:none">
+        <ul>
+          <li onmouseover="getsub(1);">가구/인테리어
+            <ul id="subul_1" style="display:none">
+              <li onclick="location.href='shop.html?p=list.html&cid=632';">DIY자재/용품</li>
+              <li onclick="location.href='shop.html?p=list.html&cid=633';">조명/전등</li>
+            </ul>
+          </li>
+          <li onmouseover="getsub(2);">디지털/가전
+            <ul id="subul_2" style="display:none">
+              <li onclick="location.href='shop.html?p=list.html&cid=722';">생활가전</li>
+              <li onclick="location.href='shop.html?p=list.html&cid=723';">주방가전</li>
+            </ul>
+          </li>
+        </ul>
+      </div>
+    </body></html>
+  `
+  it('<a> 없이 onclick만 있는 리프 항목의 href를 onclick에서 뽑아낸다', () => {
+    const { links } = scanCategoryMenuFromHtml(html, 'https://www.domesin.com/')
+    const hrefs = links.map(l => l.href).sort()
+    expect(hrefs).toEqual([
+      'https://www.domesin.com/shop.html?p=list.html&cid=632',
+      'https://www.domesin.com/shop.html?p=list.html&cid=633',
+      'https://www.domesin.com/shop.html?p=list.html&cid=722',
+      'https://www.domesin.com/shop.html?p=list.html&cid=723',
+    ].sort())
+  })
+
+  it('상위 항목 이름을 경로에 포함한 이름(예: "가구/인테리어 > DIY자재/용품")을 만든다', () => {
+    const { links } = scanCategoryMenuFromHtml(html, 'https://www.domesin.com/')
+    expect(links.some(l => l.name === '가구/인테리어 > DIY자재/용품')).toBe(true)
   })
 })

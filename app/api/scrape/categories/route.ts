@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { getCategoryScrapeHistory, deriveCategoryUrlPattern, type CategoryLink, type MallPlatform } from '@/lib/scraper'
 import { discoverCategoryLinks } from '@/lib/workerClient'
+import { shouldKeepPreviousCategoryLinks } from '@/lib/scrape/categoryCachePolicy'
+import { checkCategoryAnomaly } from '@/lib/scrape/categoryAnomalyCheck'
 
 interface CachedCategoryCount { count: number; truncated?: boolean; label: string; checkedAt: string }
 
@@ -17,6 +19,9 @@ interface CachedProfile {
   categoryUrlPattern?: string | null
   excludedCategoryHrefs?: string[]
   categoryCounts?: Record<string, CachedCategoryCount>
+  /** checkCategoryAnomaly가 이 categoryLinks를 검증된 과거 카테고리와 비교해 의심스럽다고 판단했을 때만
+   *  채워진다(2026-08-29) — lib/scrape/categoryAnomalyCheck.ts 참고. */
+  categoryAnomalyWarning?: { reason: string; checkedAt: string; source: 'anthropic' | 'gemini' | 'ollama' } | null
 }
 
 /** 체크리스트의 "상품개수"/"확인일시"/"최근 스크랩"/"업체" 컬럼용 — previewCatalog가 저장해둔
@@ -96,6 +101,7 @@ export async function POST(req: NextRequest) {
         excludedCategoryHrefs: profile.excludedCategoryHrefs || [],
         categoryCounts, categoryScrapeHistory,
         aiUsed: !!profile.categoryLinksAiUsed,
+        categoryAnomalyWarning: profile.categoryAnomalyWarning || null,
       })
     }
   }
@@ -105,36 +111,60 @@ export async function POST(req: NextRequest) {
   // 실패) 진행한다 — 안 그러면 개발자모드에서는 캐시가 없는 몰/"다시 확인"이 사실상 항상 실패한다
   // (몰 구조분석에서 이미 같은 이유로 적용한 것과 동일, 2026-08-16).
   const result = await discoverCategoryLinks({ url, siteId, loginId, loginPw, allowStaleManualLoginProfile: true })
-  // "다시 확인"(force)이 이번엔 AI(로컬 Ollama) 없이 규칙 기반으로만 카테고리를 찾았는데, 예전엔 AI가
-  // 성공해 정확한 카테고리를 캐시해뒀다면 그 결과를 덮어쓰지 않는다 — lib/scrape/mallProfile.ts의
-  // applyProfileResult가 "몰 구조분석"에 거는 것과 같은 보호(신우 몰 실사용 확인, 2026-08-25: "다시
-  // 확인"을 눌렀더니 무관한 카테고리로 캐시가 덮어써짐). 둘 다 같은 sites.scrape_profile.categoryLinks를
-  // 쓰므로 이 보호도 똑같이 필요하다.
+  // "다시 확인"(force)이 새로 훑은 결과로 캐시를 덮어써도 되는지는 shouldKeepPreviousCategoryLinks(순수
+  // 함수, 유닛테스트로 검증됨) 참고 — AI 결과 보호 + 로그인 벽에 막힌 부실한 결과로부터 확장이 저장해둔
+  // 좋은 결과를 지키는 것, 두 가지를 판단한다(실사용 확인, 2026-08-29: "몇 번을 다시 확인해도 카테고리가
+  // 하나도 안 바뀐다" — 화면 안내가 시키는 "확장 실행 → 다시 확인"의 그 "다시 확인"이 매번 결과를
+  // 원상복구시키고 있었음).
   let responseLinks = result.links
   let responseAiUsed = result.aiUsed
+  let responseLoginBlockedExpansion = result.loginBlockedExpansion
+  let responseCategoryAnomalyWarning: { reason: string; checkedAt: string; source: 'anthropic' | 'gemini' | 'ollama' } | null = null
   if (siteId && result.links.length) {
-    const prevRes = await pool.query<{ scrape_profile: CachedProfile | null }>(
-      `SELECT scrape_profile FROM sites WHERE id=$1`, [siteId],
+    const prevRes = await pool.query<{ scrape_profile: CachedProfile | null; name: string | null }>(
+      `SELECT scrape_profile, name FROM sites WHERE id=$1`, [siteId],
     )
     const prevProfile = prevRes.rows[0]?.scrape_profile
-    if (!result.aiUsed && prevProfile?.categoryLinksAiUsed && prevProfile.categoryLinks?.length) {
-      responseLinks = prevProfile.categoryLinks.map(c => ({ href: c.href, text: c.name }))
-      responseAiUsed = true
+    const prevCategoryLinks = prevProfile?.categoryLinks
+    const keepPrevious = shouldKeepPreviousCategoryLinks({
+      freshAiUsed: !!result.aiUsed,
+      freshLoginBlockedExpansion: !!result.loginBlockedExpansion,
+      prevAiUsed: !!prevProfile?.categoryLinksAiUsed,
+      prevCategoryLinksCount: prevCategoryLinks?.length ?? 0,
+    })
+    if (keepPrevious && prevCategoryLinks?.length) {
+      responseLinks = prevCategoryLinks.map(c => ({ href: c.href, text: c.name }))
+      responseAiUsed = !!prevProfile?.categoryLinksAiUsed
+      responseLoginBlockedExpansion = false
+      // 이전 캐시를 그대로 지키는 거라 그 캐시에 이미 붙어있던 이상탐지 경고(있었다면)도 그대로 보여준다
+      // — 새로 검사하지 않는다(이미 검증됐거나 검사 대상이 아니었던 데이터이므로).
+      responseCategoryAnomalyWarning = prevProfile?.categoryAnomalyWarning || null
     } else {
       const categoryLinks = result.links.map(l => ({ name: l.text, href: l.href }))
       // 이번에 찾은 카테고리로 URL 패턴도 다시 역산해 "기억"을 갱신한다(사용자 요청, 2026-08-26) —
       // 다음 탐지(규칙 기반이든 AI든) 때 discoverTopLevelCategoryLinks가 이 패턴으로 즉시 재확인한다.
       const categoryUrlPattern = deriveCategoryUrlPattern(result.links.map(l => l.href))
         ?? prevProfile?.categoryUrlPattern ?? null
+      // 방금 확정한 카테고리가 이 몰의 검증된 과거 카테고리(마이그레이션 확정분/사용자가 직접 확인한 URL)와
+      // 비교해 터무니없는지 AI로 한 번 더 확인한다 — lib/scrape/categoryAnomalyCheck.ts 참고(2026-08-29,
+      // 봇 차단 페이지 링크가 카테고리로 잘못 저장됐던 사고의 재발 감지용 안전망). 과거 증거가 부족하면
+      // 조용히 건너뛴다.
+      const mallName = prevRes.rows[0]?.name || `site-${siteId}`
+      const anomaly = await checkCategoryAnomaly(siteId, mallName, categoryLinks)
+      responseCategoryAnomalyWarning = anomaly ? { reason: anomaly.reason, checkedAt: new Date().toISOString(), source: anomaly.source } : null
       await pool.query(
         `UPDATE sites SET
            scrape_profile = COALESCE(scrape_profile, '{}'::jsonb)
              || jsonb_build_object(
                   'platform', $1::text, 'categoryLinks', $2::jsonb, 'categoryMenuNames', $3::jsonb,
-                  'categoryLinksAiUsed', $4::boolean, 'categoryUrlPattern', $5::jsonb),
+                  'categoryLinksAiUsed', $4::boolean, 'categoryUrlPattern', $5::jsonb,
+                  'categoryAnomalyWarning', $6::jsonb),
            scrape_profile_updated_at = NOW()
-         WHERE id=$6`,
-        [result.platform, JSON.stringify(categoryLinks), JSON.stringify(categoryLinks.map(c => c.name)), !!result.aiUsed, JSON.stringify(categoryUrlPattern), siteId],
+         WHERE id=$7`,
+        [
+          result.platform, JSON.stringify(categoryLinks), JSON.stringify(categoryLinks.map(c => c.name)),
+          !!result.aiUsed, JSON.stringify(categoryUrlPattern), JSON.stringify(responseCategoryAnomalyWarning), siteId,
+        ],
       )
     }
   }
@@ -145,6 +175,7 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     ...result, links: responseLinks, aiUsed: responseAiUsed, cached: false,
     scrapedHrefs, allScraped, excludedCategoryHrefs, categoryCounts, categoryScrapeHistory,
-    loginBlockedExpansion: !!result.loginBlockedExpansion,
+    loginBlockedExpansion: !!responseLoginBlockedExpansion,
+    categoryAnomalyWarning: responseCategoryAnomalyWarning,
   })
 }

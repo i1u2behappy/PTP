@@ -71,7 +71,7 @@ async function syncManualLoginProfileCopy(allowStale = false): Promise<{ userDat
   await execFileAsync('robocopy', [
     path.join(srcRoot, profileDirName), path.join(destRoot, profileDirName),
     '/MIR', '/NFL', '/NDL', '/NJH', '/NJS', '/R:1', '/W:1', ...excludeArgs,
-  ]).catch(e => {
+  ], { windowsHide: true }).catch(e => {
     // robocopy는 0~7이 정상(파일 복사/스킵 조합), 8 이상은 일부 파일을 못 옮겼다는 뜻 — 대개 개인 크롬이
     // 실행 중이라 Cookies/Login Data 같은 세션 파일이 잠겨있어서다(2026-07-18 확인: 실제로 이 경우였음).
     // allowStale이면(개발자모드는 실제 크롬을 켜둔 채 쓰는 게 정상이라 이 잠금이 항상 나는 흔한 경우다)
@@ -211,6 +211,7 @@ declare global {
   var __scrapeSiteLockStatus: Map<number | string, { label: string; since: number }> | undefined
   var __scrapeSiteLockDetail: Map<number | string, string> | undefined
   var __scrapeProfileAbortControllers: Map<number, AbortController> | undefined
+  var __scrapeCategoryDiscoveryAbortControllers: Map<number, AbortController> | undefined
 }
 
 interface PreviewRunState {
@@ -473,7 +474,7 @@ function killChromeByPathScript(pathFilter: string): string {
  */
 async function killOrphanedProfileProcess(siteId: number): Promise<void> {
   if (process.platform !== 'win32') return
-  await execFileAsync('powershell.exe', ['-NoProfile', '-Command', killChromeByPathScript(profileDir(siteId))]).catch(() => {})
+  await execFileAsync('powershell.exe', ['-NoProfile', '-Command', killChromeByPathScript(profileDir(siteId))], { windowsHide: true }).catch(() => {})
 }
 
 /** `app/api/system/restart-server`가 재시작 스크립트에 이어붙여 쓰는 PowerShell 조각(문자열만 돌려주고
@@ -595,6 +596,57 @@ export async function openManualLoginWindow(siteId: number, url: string): Promis
       url,
     ], { detached: true, stdio: 'ignore' })
     child.unref()
+  })
+}
+
+/**
+ * 이미 로그인해둔 개발자모드 창(위 openManualLoginWindow가 띄운 실제 개인 크롬)을 새 탭/새 창 없이 그대로
+ * 화면 앞으로 가져온다 — "몰 구조분석" 버튼을 다시 눌렀다고 openManualLoginWindow를 또 부르면 매번 새 탭이
+ * 쌓이고, 사용자가 보기엔 "다른 창이 뜬 것"처럼 느껴진다(사용자 지적, 2026-08-29).
+ *
+ * 처음엔 WMI(Get-CimInstance Win32_Process)로 커맨드라인에서 --type=(렌더러/GPU) 제외 + --profile-
+ * directory 매칭을 시도했는데, CommandLine 속성 자체가 항상 채워진다는 보장이 없고(권한/버전에 따라
+ * 비어있을 수 있음, 실사용에서 "창을 계속 못 찾는다"로 확인) 실제 브라우저 창 프로세스인지 판별하는
+ * 더 직접적인 신호가 이미 있다 — Get-Process의 MainWindowTitle: 최상위 창을 가진 프로세스만 이 값이
+ * 채워지고, 렌더러/GPU/유틸리티 등 자식 프로세스는 항상 비어있다. 그래서 WMI/커맨드라인 매칭을 걷어내고
+ * 이 방식으로 단순화했다(2026-08-29). 여러 개면 하나라도 AppActivate가 성공할 때까지 순서대로 시도한다.
+ * SetForegroundWindow API를 직접 쓰면 "포그라운드 프로세스만 호출 가능"이라는 Windows 제약에 걸리는데,
+ * AppActivate는 더 오래된 COM 경로라 이 제약을 우회해 동작한다(범용적으로 쓰이는 방식).
+ *
+ * -ExecutionPolicy Bypass가 없으면 이 환경의 정책상 인라인 -Command도 조용히 막힐 수 있다 —
+ * lib/workerRestart.ts가 이미 그 이유로 이 플래그를 쓰고 있어 그대로 맞췄다. 창을 하나도 못 찾으면
+ * (크롬 자체가 안 떠 있음) false를 반환해 호출부가 "먼저 로그인 창을 열어달라"는 안내로 대체하게 한다.
+ *
+ * MainWindowTitle만으로는 이 창(실제 개인 크롬)과 launchVisibleWindow/withContext 등이 띄우는 Playwright
+ * 자동화 창(정상모드 몰구조분석용, 이 창도 --load-extension으로 같은 PTP를 로드하고 화면에 보이므로
+ * MainWindowTitle이 채워짐)을 구분할 수 없다 — 실사용 확인(2026-08-30): 같은 몰(siteId 19)에 두 창이
+ * 동시에 떠 있을 때 이 함수가 Playwright 창(PID가 더 작아 foreach가 먼저 만남)을 활성화해버려 "여기서는
+ * PTP를 못 쓴다"는 결과로 이어졌다. Playwright가 띄운 창은 항상 `--remote-debugging-pipe`로 CDP를 붙이고
+ * `.playwright-profiles` 아래 전용 프로필을 쓰므로, 커맨드라인에 이 신호가 있으면 후보에서 제외한다 —
+ * "특정 플래그가 있어야 매칭"이 아니라 "이 신호가 있으면 확실히 아니다"는 배제 규칙이라, 위 611행 근처의
+ * "CommandLine이 항상 채워진다는 보장이 없다"는 문제(포함 매칭 실패)와 달리 CommandLine을 못 읽어도
+ * 안전하게 폴백(그냥 후보로 남김)할 수 있다.
+ */
+export async function focusManualLoginChrome(): Promise<boolean> {
+  const script = `
+$ErrorActionPreference = 'SilentlyContinue'
+$procs = Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle }
+if (-not $procs) { Write-Output 'NO_WINDOW'; exit 1 }
+$shell = New-Object -ComObject WScript.Shell
+foreach ($p in $procs) {
+  $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId=$($p.Id)" -ErrorAction SilentlyContinue).CommandLine
+  if ($cmdLine -and ($cmdLine -match '--remote-debugging-pipe' -or $cmdLine -match '\\.playwright-profiles')) { continue }
+  if ($shell.AppActivate($p.Id)) { Write-Output "ACTIVATED $($p.Id)"; exit 0 }
+}
+Write-Output 'ACTIVATE_FAILED'
+exit 1
+`
+  return new Promise(resolve => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      (err, stdout, stderr) => {
+        if (err) console.log(`[focusManualLoginChrome] 실패: ${stdout?.trim()} ${stderr?.trim()} ${err.message}`)
+        resolve(!err)
+      })
   })
 }
 
@@ -1225,6 +1277,11 @@ export interface MallProfileSignals {
    *  추출규칙(runAutoAnalysis)을 생성할 때만 쓰고 DB에는 저장하지 않는다(applyProfileResult에서 제외).
    *  가벼운 구조변화감지(deep=false)에서는 항상 undefined. */
   sampleProductPageText?: string
+  /** categoryLinks가 실제로 검증된 과거 카테고리(마이그레이션 확정 상품/사용자가 직접 확인한 카테고리
+   *  URL)와 비교해 AI가 "터무니없다"고 판단했을 때만 채워진다 — lib/scrape/categoryAnomalyCheck.ts의
+   *  checkCategoryAnomaly 참고(2026-08-29, 봇 차단 페이지 링크가 카테고리로 잘못 저장됐던 사고의
+   *  재발 감지용 안전망). null이면 이상 없음(또는 비교할 기준선이 부족해 검사를 건너뜀). */
+  categoryAnomalyWarning?: { reason: string; checkedAt: string; source: 'anthropic' | 'gemini' | 'ollama' } | null
 }
 
 const MALL_PROFILE_SAMPLE_SIZE = 6
@@ -1356,7 +1413,7 @@ async function siteInfo(siteId: number): Promise<{ name: string; url: string; lo
  *  이전 탐지(규칙 기반이든 AI든)가 역산해둔 URL 패턴, manualCategorySamples는 사용자가 "카테고리 선택
  *  가져오기"로 직접 확인해 모은 URL이다(사용자 요청, 2026-08-26). 후자는 그 자체로 AI 프롬프트의 근거
  *  예시로도 쓰이므로 둘 다 같이 반환한다. */
-async function getCategoryMemory(siteId: number): Promise<{ pattern: string | null; manualSamples: string[] }> {
+export async function getCategoryMemory(siteId: number): Promise<{ pattern: string | null; manualSamples: string[] }> {
   const res = await pool.query<{ scrape_profile: { categoryUrlPattern?: string | null; manualCategorySamples?: string[] } | null }>(
     'SELECT scrape_profile FROM sites WHERE id = $1', [siteId],
   )
@@ -2047,14 +2104,32 @@ async function sampleMallProfile(
   // 와 공용, 2026-08-19 — 예전엔 여기만 AI 없이 히스틱만 썼다가 도매토피아에서 상품 링크가 카테고리로
   // 잘못 섞여 들어오는 문제를 겪었다). deep=false(구조 변화 감지)면 무거운 방문 폴백은 건너뛴다.
   step('카테고리 구조 확인 중...')
-  const { links: categoryLinks, aiUsed: categoryLinksAiUsed } = await discoverTopLevelCategoryLinks(
-    context, page, mallName, deep, signal, useAi, categoryUrlPattern, knownCategoryExamples,
+  let { links: categoryLinks, aiUsed: categoryLinksAiUsed } = await discoverTopLevelCategoryLinks(
+    context, page, mallName, deep, signal, useAi, categoryUrlPattern, knownCategoryExamples, startUrl,
   )
   // 이번에 카테고리를 찾았으면(어느 방법으로든) URL 패턴을 다시 역산해 "기억"을 최신 상태로 갱신한다 —
   // 카테고리 구성이 바뀐 몰도 계속 정확한 패턴을 유지하기 위함. 이번엔 하나도 못 찾았으면 새로 역산할
   // 근거가 없으니 예전에 알던 패턴(categoryUrlPattern 인자)을 그대로 들고 간다 — 일시적 실패로 "기억"
-  // 자체를 지우지 않는다.
+  // 자체를 지우지 않는다. 패턴은 항상 최상위 목록(허브 펼치기 전)을 기준으로 뽑는다 — 펼친 뒤 목록을
+  // 써도 결과가 크게 달라지지 않고, 최상위 기준이 기존 동작과 일치한다.
   const finalCategoryUrlPattern = (categoryLinks.length ? deriveCategoryUrlPattern(categoryLinks.map(c => c.href)) : null) ?? categoryUrlPattern ?? null
+  if (signal?.aborted) return null
+
+  // 허브 펼치기(discoverCategoryLinks와 공유, expandCategoryHubs 참고) — "몰 구조분석"은 자주 안 도는
+  // 무거운 버튼이니, 어차피 몰에 들어간 김에 여기서도 scrape_profile.categoryLinks 캐시를 최신 상태로
+  // 갱신해둔다(2026-08-27, 사용자 요청 — "허브 펼치기를 몰 구조분석 시점에 해서, 카테고리 불러오기가
+  // 그 결과를 캐시로 바로 쓸 수 있게"). deep=false("구조 변화 감지", 로그인 확인/스크랩 시작마다 자동
+  // 실행)에서는 카테고리 수만큼 페이지를 더 여는 이 무거운 단계를 건너뛴다 — 그쪽까지 넣으면 원래
+  // 목적(빠른 변화 감지)을 해친다.
+  if (deep && categoryLinks.length) {
+    step('카테고리 하위구조 확인 중...')
+    // platform이 아직 'unknown'이면(collectProductUrls가 목록 인식에 실패한 경우) 여기서 먼저 확인한다 —
+    // countProductsOnPage가 플랫폼별 셀렉터를 골라 쓰므로, 'unknown'인 채로 넘기면 정확도가 떨어진다.
+    const expandPlatform = platform === 'unknown' ? await detectMallPlatform(page).catch(() => 'unknown' as MallPlatform) : platform
+    const expansion = await expandCategoryHubs(context, categoryLinks, mallName, expandPlatform, new URL(startUrl).origin, {}, signal)
+    categoryLinks = expansion.links
+    categoryLinksAiUsed = categoryLinksAiUsed || expansion.aiUsed
+  }
   if (signal?.aborted) return null
 
   // "카테고리별 정렬기준 설정" 기능용 — 정렬 위젯은 보통 홈페이지가 아니라 카테고리 목록 페이지에만
@@ -2241,14 +2316,18 @@ async function sampleMallProfile(
     step('AI로 결제/배송/업체정보 분석 중...')
     const combinedContext = [contextText, productContextText].filter(Boolean).join('\n\n')
     const categoryHints = categoryMenuNames.length ? categoryMenuNames : signals.categoryPaths
+    // 정렬 옵션도 카테고리와 같은 방식으로 리포트에 옮긴다("정렬 구조" 필드, 사용자 요청 2026-08-30) —
+    // 이미 위(2139-2180행)에서 클릭/URL 검증까지 거쳐 구조적으로 확정한 값이라, AI에게 원문에서 다시
+    // 찾아내라고 시키지 않고 label만 그대로 힌트로 준다(카테고리 힌트와 동일한 신뢰도 취급).
+    const sortHints = sortOptions.map(o => o.label)
     // ANTHROPIC_API_KEY 크레딧이 없어 AI 호출이 안 되는 경우(월 정액 구독으로는 대체 불가 — API 과금과는
     // 별개)에도 "몰 구조분석"이 결과 없이 끝나지 않도록, AI 실패 시 규칙 기반 리포트로 대체한다.
     // useAi=false(사용자가 "AI 사용" 체크를 끈 경우)면 AI 호출 자체를 시도하지 않고 곧장 규칙 기반으로
     // 간다 — 크레딧이 없는 걸 이미 아는 상황에서 매번 타임아웃(20초)을 기다리지 않게 한다(사용자 요청,
     // 2026-08-25).
-    signals.report = (useAi ? await generateMallProfileReport(mallName, platform, categoryHints, signals.sampleProductUrl, combinedContext).catch(() => null) : null)
+    signals.report = (useAi ? await generateMallProfileReport(mallName, platform, categoryHints, sortHints, signals.sampleProductUrl, combinedContext).catch(() => null) : null)
       ?? buildHeuristicMallReport({
-        platform, categoryHints, sampleProductUrl: signals.sampleProductUrl, contextText: combinedContext,
+        platform, categoryHints, sortHints, sampleProductUrl: signals.sampleProductUrl, contextText: combinedContext,
         optionUiTypes: signals.optionUiTypes, hasCascadingOptions: signals.hasCascadingOptions,
         hasMainImages: signals.hasMainImages, hasDetailImages: signals.hasDetailImages, hasDetailText: signals.hasDetailText,
         hasStockQty: signals.hasStockQty, hasStockStatusText: signals.hasStockStatusText, hasStockByOption: signals.hasStockByOption,
@@ -2503,6 +2582,18 @@ export interface CategoryMenuLink {
 // 폴백으로 떨어졌을 때 이 위젯을 카테고리 메뉴로 잘못 집어옴).
 const NON_CATEGORY_TEXT_RE = /로그인|회원가입|로그아웃|장바구니|마이페이지|고객센터|검색어?|주문|배송조회|결제|사이트맵|관리자|촬영명령|입고대?기|입고대령|단가\s*(인상|조정)|재진행|색상?\s*(별)?\s*분류|공지사항|공지\b|납품\s*사례|제작\s*문의|도매\s*인증|상품\s*문의|회원\s*정보|적립금|관심\s*상품|최근\s*본\s*상품|위시\s*리스트|찜\s*(목록)?|notice|cart|login|logout|mypage|search|sitemap|wishlist/i
 
+// 공지/문의/후기 등 게시판 글은 플랫폼 무관하게 URL 경로에 거의 항상 board/bbs 세그먼트를 쓴다(카페24
+// board/view.php, 고도몰 bbs/board.php 등) — deriveCategoryUrlPattern(학습)과 scanByKnownUrlPattern
+// (그 학습된 패턴의 재사용) 양쪽에서 이 경로의 링크는 이름과 무관하게 처음부터 후보에서 뺀다.
+// NON_CATEGORY_TEXT_RE(이름 기반)만으로는 막지 못한 사고가 실제로 있었다(2026-08-30, 소꿉노리 — 공지/
+// 문의 게시글이 한 번 "카테고리"로 잘못 저장되자, 그 URL들의 공통 쿼리파라미터(bdId)가 "이 몰의 카테고리
+// URL 패턴"으로 학습돼버렸다. scanByKnownUrlPattern은 이름을 보지 않고 그 패턴에 맞는 링크를 전부
+// 받아들이므로, 이후 "카테고리 불러오기"/"몰 구조분석"을 몇 번을 다시 돌려도 매번 같은 오염이 재생산돼
+// 발견된 카테고리 59개 전부가 게시판 글이었다 — 규칙 기반 탐지가 한 번이라도 만든 학습 결과는 이렇게
+// 스스로 강화되며 영구화될 수 있어, 이 경로 필터를 학습/재사용 두 지점 모두에 넣어 다음 실행이 스스로
+// 회복(구조 스캔/AI로 다시 폴백)할 수 있게 한다.
+const BOARD_PATH_RE = /\/(board|bbs)\//i
+
 export interface CategoryMenuScanResult {
   links: CategoryMenuLink[]
   /** <li> 안에 글자가 전혀 없어(이미지 스프라이트/아이콘 폰트 메뉴 등) 이름을 못 지은 항목의 href —
@@ -2557,6 +2648,17 @@ async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResult> {
     // 하위 <ul>(다음 레벨) 안의 <a>까지 섞이지 않도록, li 바로 안(중첩 목록 제외)의 첫 링크만 이 항목의
     // 실제 이동 URL로 본다 — "카테고리 불러오기"가 이름뿐 아니라 클릭해서 스크랩할 수 있는 링크도 함께
     // 쓸 수 있도록 하기 위함(예전엔 이름만 남기고 버렸다).
+    // <a href> 없이 onclick="location.href='...'"(또는 location='...')만으로 이동하는 구형 몰 메뉴용
+    // 폴백 — 도매의신 실사용 확인(2026-08-26): 카테고리 메뉴 전체가 <li onclick="location.href='shop.html
+    // ?p=list.html&cid=632';">처럼 <a> 태그 없이 JS onclick만으로 이동한다(메뉴 자체는 display:none일
+    // 뿐 최초 HTML에 이미 다 있어, JS 실행 없이 속성만 읽으면 된다). li 자신에 없으면 안쪽 자손도 한 번
+    // 더 살펴본다(라벨이 span 등 다른 태그에 onclick을 다는 몰 대비).
+    function hrefFromOnclick(el: Element): string {
+      const raw = el.getAttribute('onclick') || el.querySelector('[onclick]')?.getAttribute('onclick') || ''
+      const m = raw.match(/location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/)
+      if (!m) return ''
+      try { return new URL(m[1], location.href).href } catch { return '' }
+    }
     function ownHref(li: Element): string {
       const clone = li.cloneNode(true) as Element
       clone.querySelectorAll('ul, ol').forEach(n => n.remove())
@@ -2566,7 +2668,8 @@ async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResult> {
       // (홈페이지처럼) 그 자체로 상품 목록이기도 한 몰에서는 "홈페이지 전체"가 가짜 카테고리 하나로
       // 둔갑해 이미 다른 진짜 카테고리에서 센 상품과 통째로 중복 집계된다(실사용 확인, 2026-08-25 —
       // 가방쟁이에서 이 가짜 카테고리 하나가 미리보기 총 개수를 592개 부풀림).
-      return href.endsWith('#') ? '' : href
+      if (href) return href.endsWith('#') ? '' : href
+      return hrefFromOnclick(clone)
     }
     function buildPaths(li: Element, prefix: string[], depth: number, out: { name: string; href: string }[]) {
       if (depth > 3 || out.length > 200) return
@@ -2669,7 +2772,7 @@ async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResult> {
  *  그대로 있으므로, scanCategoryMenuRobust가 이 결과와 라이브 DOM 결과를 합쳐 누락을 메운다.
  *  탭 위젯 라벨 접두사(findTabLabel)는 이 무브라우저 경로에서는 재현하지 않는다 — 이름이 겹칠 수 있는
  *  드문 경우(펫투비류)의 부가 기능이라, 라이브 DOM 쪽 결과가 이미 그 케이스를 정확히 처리해 담당한다. */
-function scanCategoryMenuFromHtml(html: string, baseUrl: string): CategoryMenuScanResult {
+export function scanCategoryMenuFromHtml(html: string, baseUrl: string): CategoryMenuScanResult {
   const $ = loadHtml(html)
   type CheerioNode = ReturnType<typeof $>[number]
   const textlessHrefs: string[] = []
@@ -2697,10 +2800,18 @@ function scanCategoryMenuFromHtml(html: string, baseUrl: string): CategoryMenuSc
     clone.find('ul, ol').remove()
     return clone.text().trim()
   }
+  // scanCategoryMenu(라이브 DOM)의 hrefFromOnclick과 같은 이유(onclick="location.href='...'"만으로
+  // 이동하는 구형 몰 메뉴)로 맞춘다 — 두 스캔 결과가 갈리지 않게 항상 같이 맞춘다(2026-08-26).
+  const hrefFromOnclick = (el: ReturnType<typeof $>): string => {
+    const raw = el.attr('onclick') || el.find('[onclick]').first().attr('onclick') || ''
+    const m = raw.match(/location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/)
+    return m ? resolve(m[1]) : ''
+  }
   const ownHref = (li: CheerioNode): string => {
     const clone = $(li).clone()
     clone.find('ul, ol').remove()
-    return resolve(clone.find('a[href]').first().attr('href'))
+    const href = resolve(clone.find('a[href]').first().attr('href'))
+    return href || hrefFromOnclick(clone)
   }
   const childLisOf = (li: CheerioNode): CheerioNode[] => [
     ...$(li).children('ul').children('li').toArray(),
@@ -2851,9 +2962,14 @@ async function findCategoryLinkCandidates(page: Page): Promise<string[]> {
 // 뒤쪽 후보가 잘릴 수 있는 트레이드오프.
 const AI_LINK_CANDIDATE_CAP = 120
 
-async function collectAllPageLinks(page: Page): Promise<{ text: string; href: string }[]> {
-  return page.evaluate((cap) => {
-    const origin = location.origin
+/** baseOrigin을 넘기면 그 origin으로 필터링하고, 안 넘기면(옛 호출부 호환) location.origin으로
+ *  대체한다 — location.origin만 쓰면 이 페이지가 이미 다른 도메인(봇 차단 인터스티셜 등)으로
+ *  리다이렉트된 경우 그 차단 페이지 자신의 origin이 기준이 돼버려 필터가 무력화된다(펫토리 실사용
+ *  확인, 2026-08-29 — 카페24 차단 페이지 veritas-hub.cafe24.com의 링크 110개가 "카테고리"로 잘못
+ *  저장됨). 호출부는 몰의 실제 URL에서 뽑은 origin을 넘겨야 한다. */
+async function collectAllPageLinks(page: Page, baseOrigin?: string): Promise<{ text: string; href: string }[]> {
+  return page.evaluate(({ cap, baseOrigin }) => {
+    const origin = baseOrigin || location.origin
     const current = location.href.replace(/\/+$/, '')
     const seen = new Set<string>()
     const result: { text: string; href: string }[] = []
@@ -2885,7 +3001,7 @@ async function collectAllPageLinks(page: Page): Promise<{ text: string; href: st
     }
     if (result.length < cap) pushFrom(Array.from(document.querySelectorAll('a[href]')))
     return result
-  }, AI_LINK_CANDIDATE_CAP).catch(() => [])
+  }, { cap: AI_LINK_CANDIDATE_CAP, baseOrigin }).catch(() => [])
 }
 
 /** "카테고리별 정렬기준 설정" 후보 수집 — collectAllPageLinks와 같은 <a href> 수집에 더해 <select><option>도
@@ -3139,9 +3255,15 @@ async function scanCategoryOverviewPage(page: Page): Promise<CategoryMenuLink[]>
  * 다시 찾는 "기억" 역할을 한다. 순수 함수라 tests/unit에서 검증 가능.
  */
 export function deriveCategoryUrlPattern(urls: string[]): string | null {
-  if (urls.length < 2) return null
+  // 게시판 글(BOARD_PATH_RE)은 애초에 카테고리 후보가 아니므로, "과반수" 기준의 분모(전체 개수)에서도
+  // 뺀다 — 안 그러면 진짜 카테고리 URL이 남은 URL의 100%를 차지해도 원래 urls.length 기준 과반수에
+  // 못 미쳐 패턴을 못 만드는 경우가 생긴다.
+  const nonBoardUrls = urls.filter(u => {
+    try { return !BOARD_PATH_RE.test(new URL(u).pathname) } catch { return true }
+  })
+  if (nonBoardUrls.length < 2) return null
   const keyCounts = new Map<string, number>()
-  for (const u of urls) {
+  for (const u of nonBoardUrls) {
     try {
       const seenInThis = new Set<string>()
       for (const key of new URL(u).searchParams.keys()) {
@@ -3155,7 +3277,7 @@ export function deriveCategoryUrlPattern(urls: string[]): string | null {
   const [bestKey, count] = [...keyCounts.entries()].sort((a, b) => b[1] - a[1])[0]
   // 절반 미만의 URL에만 우연히 겹치는 키는 진짜 패턴으로 보지 않는다(예: 여러 카테고리 중 하나만 특이하게
   // 홍보 파라미터를 달고 있는 경우).
-  if (count < Math.ceil(urls.length / 2)) return null
+  if (count < Math.ceil(nonBoardUrls.length / 2)) return null
   return `[?&]${bestKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=`
 }
 
@@ -3165,12 +3287,18 @@ export function deriveCategoryUrlPattern(urls: string[]): string | null {
 async function scanByKnownUrlPattern(page: Page, patternSrc: string): Promise<CategoryMenuLink[]> {
   return page.evaluate((patternSrc) => {
     const re = new RegExp(patternSrc)
+    // BOARD_PATH_RE(lib/scraper.ts 상단)와 반드시 같은 값을 유지한다 — page.evaluate 콜백은 브라우저에서
+    // 실행돼 바깥 모듈 상수를 그대로 참조할 수 없어(Playwright가 인자로 넘긴 값만 직렬화) 여기에 그대로
+    // 복제해둔다. 학습된 패턴이 예전에 오염돼 있었더라도(예: bdId=) 게시판 글은 여기서 다시 걸러 재확산을
+    // 막는다.
+    const boardPathRe = /\/(board|bbs)\//i
     const origin = location.origin
     const seen = new Set<string>()
     const result: { name: string; href: string }[] = []
     for (const a of Array.from(document.querySelectorAll('a[href]'))) {
       const href = (a as HTMLAnchorElement).href
       if (!href.startsWith(origin) || !re.test(href)) continue
+      if (boardPathRe.test(new URL(href).pathname)) continue
       const norm = href.replace(/\/+$/, '')
       if (seen.has(norm)) continue
       const text = (a.textContent || '').trim()
@@ -3207,7 +3335,7 @@ async function scanByKnownUrlPattern(page: Page, patternSrc: string): Promise<Ca
  * "몰 구조분석" 버튼에서만 한다). */
 async function discoverTopLevelCategoryLinks(
   context: BrowserContext, page: Page, mallName: string, visitTextlessFallback: boolean, signal?: AbortSignal, useAi = true,
-  categoryUrlPattern?: string | null, knownCategoryExamples?: string[],
+  categoryUrlPattern?: string | null, knownCategoryExamples?: string[], baseUrl?: string,
 ): Promise<{ links: CategoryMenuLink[]; textlessHrefs: string[]; aiUsed: boolean }> {
   if (categoryUrlPattern) {
     const patternLinks = await scanByKnownUrlPattern(page, categoryUrlPattern)
@@ -3250,7 +3378,7 @@ async function discoverTopLevelCategoryLinks(
 
   // 규칙 기반이 전부 실패했을 때만 AI로 넘어간다 — 마지막 수단이라 시간을 넉넉히 준다.
   if (useAi) {
-    const aiCandidates = await collectAllPageLinks(page)
+    const aiCandidates = await collectAllPageLinks(page, baseUrl ? new URL(baseUrl).origin : undefined)
     console.log(`[카테고리탐지:진단:${mallName}] 규칙 기반 실패 → AI 시도(후보 ${aiCandidates.length}개)`)
     const aiLinks = await detectCategoryLinksWithAI(mallName, aiCandidates, undefined, signal, knownCategoryExamples).catch(() => [])
     console.log(`[카테고리탐지:진단:${mallName}] AI 결과 ${aiLinks.length}개`)
@@ -3291,16 +3419,38 @@ async function detectCategoryLabel(page: Page): Promise<CategoryLabel> {
   }, { timeout: 3_000 }).catch(() => {})
 
   return page.evaluate(() => {
+    // 일부 몰은 공지사항/구매후기 같은 위젯에 브레드크럼과 같은 제네릭 클래스명(.path/.location/
+    // .breadcrumb/.location_wrap)을 재사용한다(실사용 확인, 2026-08-30, 소구프놀리 — "일부제품 가격
+    // 인상안내", "·좋습니다.", "NOTICE" 같은 공지/후기 문구가 그대로 "카테고리"로 들어감). 진짜 카테고리
+    // 경로는 짧고 문장이 아니므로, 후기 목록 특유의 불릿(·)/문장 종결 어미 반복/게시판 특유 키워드/날짜
+    // 표기가 있거나 전체 길이가 비정상적으로 길면 이 후보를 신뢰하지 않고 다음 셀렉터로 넘어간다 — 잘못된
+    // 값을 자신 있게 보여주는 것보다 "확인 안됨"으로 남기는 게 낫다. "이벤트"는 실제 카테고리명으로도
+    // 흔히 쓰여 블록리스트에서 뺐다 — 이 필터가 모든 공지 제목을 잡아내진 못한다(예: "~이미지 수정"류는
+    // 키워드/길이만으로 구분 불가) — 완벽한 필터가 아니라 확실한 신호만 걸러내는 안전망이다. 아래 모든
+    // 후보 분기(브랜드 분기 포함)가 반드시 이 필터를 거치게 한다 — 처음엔 .location_wrap 분기(바로 아래)를
+    // 빠뜨려서 그 분기가 이 필터 없이 그대로 통과시켰다(2026-08-30 재발 확인, 소꿉노리 — 이 분기가
+    // 공지/문의 게시판의 "현재 위치" 표시를 그대로 읽어옴).
+    const looksLikeNoise = (text: string) =>
+      text.length > 60
+      || /·/.test(text)
+      || (text.match(/(습니다|해요|세요|어요)[.!]?/g) || []).length >= 2
+      || /(공지|안내|이벤트\s|할인판매|상품문의|NOTICE)/i.test(text)
+      || /\d+\s*월\s*\d+\s*일/.test(text)
+
     // 고도몰의 또 다른 스킨(가방쟁이, 실제 페이지로 확인)은 브레드크럼 각 단계를 .location_select로 감싸,
     // 그 안에 "현재 선택된 이름"(.location_tit)과 그 옆 다른 카테고리로 바로 갈 수 있는 숨겨진 <ul> 드롭다운을
     // 같이 둔다. 아래 범용 로직처럼 <li>를 그대로 다 훑으면 그 드롭다운 대안 목록까지 섞여 카테고리가
     // 완전히 틀어지므로, 이 구조는 .location_tit만 콕 집어 먼저 처리한다.
     const locationTits = Array.from(document.querySelectorAll('.location_wrap .location_select > .location_tit'))
       .map(el => (el.textContent || '').trim()).filter(Boolean)
-    if (locationTits.length) return { category: locationTits.join(' > '), brand: '' }
+    if (locationTits.length) {
+      const joined = locationTits.join(' > ')
+      if (!looksLikeNoise(joined)) return { category: joined, brand: '' }
+    }
 
     // .path는 고도몰(펫투비 등) 표준 브레드크럼 클래스 — <li> 없이 "HOME &gt; 강아지 &gt; 간식 &gt; 덴탈껌"
     // 처럼 평문 텍스트+구분자로만 되어 있다(실제 페이지로 확인).
+
     const candidates = ['.xans-product-headcategory', 'nav[aria-label*="breadcrumb" i]', '.breadcrumb', '.location', '.path']
     for (const sel of candidates) {
       for (const el of Array.from(document.querySelectorAll(sel))) {
@@ -3318,14 +3468,16 @@ async function detectCategoryLabel(page: Page): Promise<CategoryLabel> {
           const raw = (el.textContent || '').trim()
           const parts = (raw.includes('>') ? raw.split('>') : raw.split('/')).map(s => s.trim()).filter(Boolean)
           const text = parts.filter(p => !/^(home|홈)$/i.test(p)).join(' > ')
-          if (text) return { category: text, brand: '' }
+          if (text && !looksLikeNoise(text)) return { category: text, brand: '' }
           continue
         }
+        const joined = items.join(' > ')
+        if (looksLikeNoise(joined)) continue
         const brandIdx = items.findIndex(t => t === '브랜드')
         if (brandIdx !== -1 && brandIdx + 1 < items.length) {
           return { category: items.slice(0, brandIdx).join(' > '), brand: items[brandIdx + 1] }
         }
-        return { category: items.join(' > '), brand: '' }
+        return { category: joined, brand: '' }
       }
     }
     return { category: '', brand: '' }
@@ -3791,6 +3943,21 @@ export async function getCategoryScrapeHistory(
     result[row.mall_category].clientName = row.client_name
   }
   return result
+}
+
+/** 이 몰에서 실제로 검수를 통과해 마이그레이션 확정된(product_master로 넘어간) 상품들의 카테고리명 —
+ *  "스크랩이 정상적으로 끝까지(다음 단계까지) 이어졌다"는 증거가 있는 카테고리만 모은다는 점에서
+ *  mall_products.mall_category(스크랩 시도만으로 채워짐)보다 신뢰도가 높다. lib/scrape/
+ *  categoryAnomalyCheck.ts의 checkCategoryAnomaly가 "새로 찾은 카테고리 구조가 터무니없는지" AI에게
+ *  판단시킬 때 기준선으로 쓴다(2026-08-29). */
+export async function getMigratedCategoryLabels(siteId: number): Promise<string[]> {
+  const res = await pool.query<{ mall_category: string }>(
+    `SELECT DISTINCT pm.mall_category FROM product_master pm
+     JOIN mall_products mp ON mp.id = pm.mall_product_id
+     WHERE mp.site_id = $1 AND pm.mall_category IS NOT NULL AND pm.mall_category != ''`,
+    [siteId],
+  )
+  return res.rows.map(r => r.mall_category)
 }
 
 /**
@@ -4977,6 +5144,25 @@ export interface CategoryLink {
   text: string
 }
 
+// "카테고리 불러오기" 중지 버튼용 — profileAbortControllers(몰 구조분석)와 같은 이유로 siteId별 슬롯
+// 하나씩 globalThis에 저장한다(2026-08-26, 사용자 요청: "여기도 중지 버튼을 만들어줘" — 신우처럼 허브
+// 펼치기 단계에서 카테고리 수백 개를 순회하느라 몇 분씩 걸리는 몰이 실제로 있어, 그 중간에 멈출 방법이
+// 필요했다). withSiteLock이 siteId당 하나만 동시에 돌게 이미 보장하므로 Map 슬롯 하나로 충분하다.
+const categoryDiscoveryAbortControllers: Map<number, AbortController> =
+  globalThis.__scrapeCategoryDiscoveryAbortControllers ?? (globalThis.__scrapeCategoryDiscoveryAbortControllers = new Map())
+
+/** PTP의 "카테고리 불러오기" 중지 버튼이 호출한다 — profileMallStructure 쪽과 달리 discoverCategoryLinks는
+ *  신호를 받아도 예외를 던지지 않고 지금까지 찾은 부분 결과를 그대로 반환한다(허브 펼치기 루프가 새
+ *  카테고리를 더 꺼내지 않고 곧장 끝냄) — 화면은 원래 요청한 fetch가 그 부분 결과로 정상 응답할 때까지
+ *  기다리기만 하면 된다. 진행 중인 게 없으면 조용히 아무 일도 안 한다. */
+export function stopCategoryDiscovery(siteId: number): boolean {
+  const controller = categoryDiscoveryAbortControllers.get(siteId)
+  if (!controller) return false
+  controller.abort()
+  categoryDiscoveryAbortControllers.delete(siteId)
+  return true
+}
+
 export interface CategoryDiscoveryResult {
   platform: MallPlatform
   links: CategoryLink[]
@@ -5010,6 +5196,151 @@ export interface CategoryDiscoveryResult {
  *  수 있는 공유 탭이라, 탐색은 항상 새 탭에서 한다(공유 탭 재사용 시 실제로 "다른 네비게이션에 의해
  *  중단됨" 충돌을 겪었다). */
 export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<CategoryDiscoveryResult> {
+  const controller = opts.siteId ? new AbortController() : undefined
+  if (opts.siteId && controller) categoryDiscoveryAbortControllers.set(opts.siteId, controller)
+  try {
+    return await discoverCategoryLinksInner(opts, controller?.signal)
+  } finally {
+    if (opts.siteId && controller && categoryDiscoveryAbortControllers.get(opts.siteId) === controller) {
+      categoryDiscoveryAbortControllers.delete(opts.siteId)
+    }
+  }
+}
+
+interface CategoryExpansionResult {
+  links: CategoryMenuLink[]
+  aiUsed: boolean
+  loginBlockedExpansion: boolean
+}
+
+/** 봇/과속요청 차단 인터스티셜 감지 — countProductsOnPage의 isLoginPage(비밀번호 입력창 유무)와는
+ *  다른 신호다. 실사용 확인(2026-08-29, 펫토리): 카페24가 "잠시 접속이 제한되었습니다" 같은 안내
+ *  페이지로 대신 응답하는데, count===0으로만 판정하면 진짜 하위 카테고리가 없는 대분류로 오판한다.
+ *  extension-poc/background.js에도 같은 정규식으로 IS_BLOCK_PAGE_EXPR을 뒀다(런타임이 달라 코드는
+ *  공유 못 함 — 문구 바뀌면 두 곳 다 같이 고친다). */
+async function isBotBlockPage(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const text = document.title + ' ' + (document.body?.innerText || '').slice(0, 800)
+    return /접속\s*(이|을)?\s*제한|일시적으로\s*(접속|이용)|비정상적인\s*(접근|접속)|잠시\s*접속|과도한\s*요청|too many requests|access denied/i.test(text)
+  }).catch(() => false)
+}
+
+/** 최상위 카테고리 중 상품이 없는 "허브"(하위 메뉴로만 이어지는 대분류)를 실제로 방문해 진짜 하위
+ *  카테고리로 펼친다 — discoverCategoryLinks("카테고리 불러오기"/"다시 확인")와 sampleMallProfile
+ *  ("몰 구조분석", deep일 때만)가 공유한다(2026-08-27, 사용자 요청: "허브 펼치기를 자주 안 하는 몰
+ *  구조분석 시점에도 해서, 카테고리 불러오기가 그 결과를 캐시로 바로 쓸 수 있게" — 절충안: "다시 확인"은
+ *  여전히 실제로 다시 확인하는 무거운 버튼으로 남기고, 몰 구조분석도 어차피 몰에 들어간 김에 같은
+ *  캐시(scrape_profile.categoryLinks)를 최신화해 그 직후의 "카테고리 불러오기"가 바로 최신 결과를 빠르게
+ *  보여주게 한다). 카테고리 수만큼 페이지를 열어야 해 시간이 걸리므로, 자주 도는 "구조 변화 감지"
+ *  (deep=false, 로그인 확인/스크랩 시작마다 자동으로 돎)에서는 호출하지 않는다 — 그쪽까지 이 무거운
+ *  단계를 넣으면 원래 목적(가벼운 변화 감지)을 해친다. */
+async function expandCategoryHubs(
+  context: BrowserContext, categoryLinks: CategoryMenuLink[], mallName: string, platform: MallPlatform,
+  baseUrl: string, concurrencyOpts: ScrapeOptions, signal?: AbortSignal,
+): Promise<CategoryExpansionResult> {
+  let aiUsed = false
+  const profile = PLATFORM_PROFILES[platform]
+  const userSel = concurrencyOpts.productLinkSelector || null
+  const platformSel = profile.productLinkSelector
+  const detailPatternSrc = profile.detailUrlPattern?.source
+  const expandedByIndex: CategoryMenuLink[][] = new Array(categoryLinks.length)
+  const EXPAND_CONCURRENCY = Math.min(resolveConcurrency(concurrencyOpts, 16), categoryLinks.length || 1)
+  // 대분류 자기 자신의 href 목록 — 어느 카테고리 상세 페이지를 열어도 사이트 전체 대분류 메뉴(GNB)가
+  // 항상 그대로 떠 있어, scanCategoryMenuRobust를 그 페이지에서 다시 돌리면 "하위 메뉴"가 아니라 이
+  // GNB를 그대로 다시 찾아버릴 수 있다(모자사러 실사용 확인, 2026-08-17). 대분류 자신의 href와 겹치는
+  // 항목은 진짜 하위 메뉴가 아니라 그 GNB 재검출이므로 걸러낸다.
+  const topLevelHrefSet = new Set(categoryLinks.map(c => c.href))
+  let cursor = 0
+  let loginBlockedExpansion = false
+  // 차단이 감지되면 남은 카테고리 전체를 워커 1개로 낮춰 계속 두드리지 않는다 — 이 실행 안에서는 다시
+  // 안 올린다(카테고리 개수가 보통 수십 개 안팎이라, lib/scraper.ts의 상품 스크랩 AIMD처럼 서서히
+  // 회복시키면 처리량 대부분이 낮은 동시성에 갇혀 정상 상황(차단이 아예 없는 대다수 몰)에서도 매번
+  // 느려진다 — 펫토리 실사용 확인, 2026-08-29). 처음부터 1로 시작하지 않는 것도 같은 이유다.
+  let activeLimit = EXPAND_CONCURRENCY
+  const BLOCK_RETRY_COUNT = 2
+  async function probeOnce(workerPage: Page, href: string) {
+    return workerPage.goto(href, { waitUntil: 'domcontentloaded', timeout: 20_000 })
+      .then(() => countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl))
+      .catch(() => ({ count: 0, isLoginPage: false, fingerprint: '', hrefs: [] }))
+  }
+  async function expandWorker(workerPage: Page, workerIndex: number) {
+    while (true) {
+      // "카테고리 불러오기" 중지 버튼(stopCategoryDiscovery) — 이미 시작한 페이지 방문은 끝까지 두고,
+      // 새 항목만 더 꺼내지 않는다. 남은 인덱스는 expandedByIndex에서 구멍(hole)으로 남아 아래 .flat()이
+      // 자연히 건너뛰므로, 지금까지 확인된 부분 결과만 반환된다.
+      if (signal?.aborted) return
+      while (workerIndex >= activeLimit) {
+        if (signal?.aborted) return
+        if (cursor >= categoryLinks.length) return
+        await sleep(500)
+      }
+      const i = cursor++
+      if (i >= categoryLinks.length) return
+      const c = categoryLinks[i]
+      let probe = await probeOnce(workerPage, c.href)
+      // isLoginPage(로그인 폼)와는 별개 신호 — 봇 차단 인터스티셜은 count===0인데 로그인 폼도 없다.
+      // 재시도 전에 확인해 진짜 빈 페이지에 매번 isBotBlockPage를 낭비하지 않는다.
+      let botBlocked = !probe.isLoginPage && probe.count === 0 && await isBotBlockPage(workerPage)
+      for (let attempt = 0; botBlocked && attempt < BLOCK_RETRY_COUNT; attempt++) {
+        await sleep(5_000 * (attempt + 1))
+        probe = await probeOnce(workerPage, c.href)
+        botBlocked = !probe.isLoginPage && probe.count === 0 && await isBotBlockPage(workerPage)
+      }
+      if (botBlocked) {
+        // 재시도해도 안 풀림 — 원래 항목을 미확장인 채로 남기고, 하위구조 확인 자체가 로그인 벽에 막힌
+        // 것과 같은 방식으로 취급한다(shouldKeepPreviousCategoryLinks가 이 신호로 부실한 결과의 캐시
+        // 덮어쓰기를 막아준다 — lib/scrape/categoryCachePolicy.ts 참고).
+        expandedByIndex[i] = [c]
+        loginBlockedExpansion = true
+        activeLimit = 1
+        continue
+      }
+      if (probe.isLoginPage) loginBlockedExpansion = true
+      if (probe.count > 0 || probe.isLoginPage) { expandedByIndex[i] = [c]; continue }
+      // 하위 메뉴 탐지도 최상위 탐지와 같은 이유로 규칙 기반(scanCategoryMenuRobust)을 먼저 시도하고,
+      // 실패해야 AI로 폴백한다(discoverTopLevelCategoryLinks 순서 변경, 사용자 요청 2026-08-26과 같은
+      // 패턴을 여기도 맞춘다 — 이 함수가 안 맞춰져 있던 게 실제로 "펫토리 몰구조분석 수십 분" 원인이었다,
+      // 2026-08-29: 허브 카테고리가 많은 몰은 그 개수만큼 Ollama 전역 대기열에 최대 60초씩 직렬로 쌓여
+      // AI를 먼저 타면 몇십 분까지 걸릴 수 있는데, 규칙 기반은 페이지당 즉시 끝난다).
+      let realChildren: CategoryMenuLink[]
+      const sub = await scanCategoryMenuRobust(workerPage)
+      realChildren = sub.links.filter(s => !topLevelHrefSet.has(s.href))
+      if (!realChildren.length) {
+        const aiSubCandidates = await collectAllPageLinks(workerPage, baseUrl)
+        realChildren = (await detectCategoryLinksWithAI(mallName, aiSubCandidates, c.name, signal).catch(() => []))
+          .filter(s => !topLevelHrefSet.has(s.href))
+        if (realChildren.length) aiUsed = true
+      }
+      if (realChildren.length) {
+        expandedByIndex[i] = realChildren.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
+        continue
+      }
+      // 상품도 하위 메뉴도 못 찾은 빈 허브 — 진짜로 상품이 없는 카테고리일 수도 있으니 기본은 그대로
+      // 남긴다. 다만 이 페이지에 정렬 옵션조차 하나도 안 보이면(collectSortCandidates — 위 몰 전체 정렬
+      // 확인과 같은 가벼운 DOM 판정만, 클릭 검증까지는 안 해 비용이 낮다) 애초에 상품 목록 페이지가
+      // 아닐 가능성이 높다고 보고 통째로 뺀다 — 공지/문의 게시판 글이 "상품 0개짜리 빈 허브"로 오인돼
+      // 계속 카테고리 목록에 남던 사고(2026-08-30, 소꿉노리)를 막는 안전장치(사용자 승인, 2026-08-30 —
+      // 상품이 실제로 있는 카테고리는 위에서 이미 걸러져 이 분기 자체를 안 타므로, 정렬 UI가 없어서
+      // 생기는 진짜 카테고리 오탐 위험은 "상품 0개 + 하위메뉴 0개"인 경우로 좁혀져 있다).
+      const sortCandidates = await collectSortCandidates(workerPage).catch(() => [])
+      const hasSort = sortCandidates.some(sc => looksLikeSortLabel(sc.text))
+      expandedByIndex[i] = hasSort ? [c] : []
+    }
+  }
+  if (categoryLinks.length) {
+    const workerPages = await Promise.all(Array.from({ length: EXPAND_CONCURRENCY }, () => context.newPage()))
+    await Promise.all(workerPages.map((p, idx) => expandWorker(p, idx)))
+    await Promise.all(workerPages.map(p => p.close().catch(() => {})))
+  }
+  let links = expandedByIndex.flat()
+  // 서로 다른 대분류 허브가 겹치는 하위 카테고리로 펼쳐지면 같은 href가 두 번 나올 수 있다(모자사러
+  // 실사용 확인, 2026-08-18) — 먼저 나온 것을 남기고 뒤에 나온 중복만 제거한다.
+  const seenHrefs = new Set<string>()
+  links = links.filter(c => (seenHrefs.has(c.href) ? false : (seenHrefs.add(c.href), true)))
+  return { links, aiUsed, loginBlockedExpansion }
+}
+
+async function discoverCategoryLinksInner(opts: ScrapeOptions, signal: AbortSignal | undefined): Promise<CategoryDiscoveryResult> {
   return withContext(opts, async (page, context) => {
     const url = opts.url || page.url()
     const scanPage = await context.newPage()
@@ -5028,85 +5359,21 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
       const { pattern: categoryUrlPattern, manualSamples: knownCategoryExamples } = opts.siteId
         ? await getCategoryMemory(opts.siteId) : { pattern: null, manualSamples: [] }
       const { links: topLevelLinks, aiUsed: topLevelAiUsed } = await discoverTopLevelCategoryLinks(
-        context, scanPage, mallName, true, undefined, true, categoryUrlPattern, knownCategoryExamples,
+        context, scanPage, mallName, true, signal, true, categoryUrlPattern, knownCategoryExamples, url,
       )
-      let categoryLinks = topLevelLinks
-      // 화면에 "AI가 실제로 이번 결과에 기여했는지"를 작게 표시해주기 위한 신호(사용자 요청, 2026-08-18) —
-      // 최상위 탐지든 아래 허브 하위메뉴 탐지든 AI 결과를 하나라도 그대로 채택했으면 true.
-      let aiUsed = topLevelAiUsed
-
       // 대분류=상품목록인 카테고리와 대분류=중분류허브(그 자체엔 상품이 없고 하위 메뉴로만 이어짐)인
-      // 카테고리가 섞여 있는 몰이 있다(모자사러 실사용 확인, 2026-08-17 — "캡모자"는 볼캡/캠프캡/군모
-      // 등 중분류로 가는 허브일 뿐 그 자체엔 상품 링크가 0개라, 미리보기/스크랩 단계의 "링크 0개면
-      // 조용히 건너뛴다" 처리 때문에 체크리스트에 카테고리가 있어도 개수가 영영 안 나왔다). 발견된
-      // 카테고리마다 실제로 상품이 있는지 한 번 확인하고, 없으면 그 페이지 안의 하위 메뉴를 찾아 그
-      // 하위 카테고리들로 대신 펼친다 — 1단계만 펼치고 재귀는 하지 않는다(무한 확장 방지, 실사용상
-      // 대분류>중분류 2단이면 충분). 처음엔 카테고리마다 순서대로 하나씩(waitUntil:'load') 확인했는데,
-      // "카테고리만 불러오는데 몇 분씩 걸린다"는 지적(2026-08-17)으로 두 가지를 같이 고쳤다: (1) 상품
-      // 링크만 보면 되니 이미지까지 기다리는 'load' 대신 'domcontentloaded'로 충분하다(카운팅 로직이
-      // 이미 같은 이유로 쓰는 것과 동일), (2) collectProductUrls의 LISTING_CONCURRENCY와 같은 방식으로
-      // 탭 여러 개를 동시에 열어 확인한다. 그래도 카테고리 수만큼 페이지를 더 열어야 하는 건 그대로라
-      // "카테고리 불러오기"/"다시 확인"은 여전히 이전보다 느리지만, 결과가 캐시되므로 매 미리보기마다
-      // 반복되지는 않는다(사용자 동의, 2026-08-17).
-      const profile = PLATFORM_PROFILES[platform]
-      const userSel = opts.productLinkSelector || null
-      const platformSel = profile.productLinkSelector
-      const detailPatternSrc = profile.detailUrlPattern?.source
+      // 카테고리가 섞여 있는 몰이 있다(모자사러 실사용 확인, 2026-08-17) — expandCategoryHubs가 각
+      // 카테고리를 실제로 열어 상품 유무를 확인하고, 없으면 하위 메뉴로 대신 펼친다. sampleMallProfile
+      // ("몰 구조분석")과 공유하는 함수다(2026-08-27, 절충안 — 몰 구조분석도 어차피 몰에 들어간 김에
+      // 같은 캐시를 최신화해둔다).
       const baseUrl = new URL(url).origin
-      const expandedByIndex: CategoryMenuLink[][] = new Array(categoryLinks.length)
-      const EXPAND_CONCURRENCY = Math.min(resolveConcurrency(opts, 16), categoryLinks.length || 1)
-      // 대분류 자기 자신의 href 목록 — 어느 카테고리 상세 페이지를 열어도 사이트 전체 대분류 메뉴(GNB)가
-      // 항상 그대로 떠 있어, scanCategoryMenuRobust를 그 페이지에서 다시 돌리면 "하위 메뉴"가 아니라 이
-      // GNB를 그대로 다시 찾아버릴 수 있다(모자사러 실사용 확인, 2026-08-17 — "캡모자"의 하위로 신발/가방
-      // 같은 다른 대분류가 잘못 붙어 나옴). 대분류 자신의 href와 겹치는 항목은 진짜 하위 메뉴가 아니라 그
-      // GNB 재검출이므로 걸러낸다.
-      const topLevelHrefSet = new Set(categoryLinks.map(c => c.href))
-      let cursor = 0
-      let loginBlockedExpansion = false
-      async function expandWorker(workerPage: Page) {
-        while (true) {
-          const i = cursor++
-          if (i >= categoryLinks.length) return
-          const c = categoryLinks[i]
-          const probe = await workerPage.goto(c.href, { waitUntil: 'domcontentloaded', timeout: 20_000 })
-            .then(() => countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl))
-            .catch(() => ({ count: 0, isLoginPage: false, fingerprint: '', hrefs: [] }))
-          if (probe.isLoginPage) loginBlockedExpansion = true
-          if (probe.count > 0 || probe.isLoginPage) { expandedByIndex[i] = [c]; continue }
-          // 하위 메뉴 탐지도 위 최상위 탐지와 같은 이유로 AI를 우선 시도하고, 실패하면 기존
-          // scanCategoryMenuRobust 히스틱으로 폴백한다.
-          const aiSubCandidates = await collectAllPageLinks(workerPage)
-          let realChildren = (await detectCategoryLinksWithAI(mallName, aiSubCandidates, c.name).catch(() => []))
-            .filter(s => !topLevelHrefSet.has(s.href))
-          if (realChildren.length) {
-            aiUsed = true
-          } else {
-            const sub = await scanCategoryMenuRobust(workerPage)
-            realChildren = sub.links.filter(s => !topLevelHrefSet.has(s.href))
-          }
-          // 하위 메뉴도 못 찾으면(진짜로 빈 카테고리일 수도 있음) 원래 항목을 그대로 남긴다.
-          expandedByIndex[i] = realChildren.length
-            ? realChildren.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
-            : [c]
-        }
-      }
-      if (categoryLinks.length) {
-        const workerPages = await Promise.all(
-          Array.from({ length: EXPAND_CONCURRENCY }, (_, idx) => (idx === 0 ? scanPage : context.newPage())),
-        )
-        await Promise.all(workerPages.map(expandWorker))
-        await Promise.all(workerPages.slice(1).map(p => p.close().catch(() => {})))
-      }
-      categoryLinks = expandedByIndex.flat()
+      const expansion = await expandCategoryHubs(context, topLevelLinks, mallName, platform, baseUrl, opts, signal)
+      // 화면에 "AI가 실제로 이번 결과에 기여했는지"를 작게 표시해주기 위한 신호(사용자 요청, 2026-08-18) —
+      // 최상위 탐지든 허브 하위메뉴 탐지든 AI 결과를 하나라도 그대로 채택했으면 true.
+      const aiUsed = topLevelAiUsed || expansion.aiUsed
 
-      // 서로 다른 대분류 허브가 겹치는 하위 카테고리로 펼쳐지면 같은 href가 두 번 나올 수 있다(모자사러
-      // 실사용 확인, 2026-08-18 — 체크리스트가 href를 React key로 그대로 쓰기 때문에 중복이 있으면
-      // 렌더링 경고/오동작이 난다). 먼저 나온 것을 남기고 뒤에 나온 중복만 제거한다.
-      const seenHrefs = new Set<string>()
-      categoryLinks = categoryLinks.filter(c => (seenHrefs.has(c.href) ? false : (seenHrefs.add(c.href), true)))
-
-      const links: CategoryLink[] = categoryLinks.map(c => ({ href: c.href, text: c.name }))
-      return { platform, links, loginBlockedExpansion, aiUsed }
+      const links: CategoryLink[] = expansion.links.map(c => ({ href: c.href, text: c.name }))
+      return { platform, links, loginBlockedExpansion: expansion.loginBlockedExpansion, aiUsed }
     } finally {
       await scanPage.close().catch(() => {})
     }
@@ -5135,18 +5402,25 @@ export async function expandCategoryChildren(
       }
       const platform = await detectMallPlatform(scanPage)
       const mallName = opts.siteId ? (await siteInfo(opts.siteId)).name : new URL(parentUrl).hostname
-      const aiCandidates = await collectAllPageLinks(scanPage)
+      const aiCandidates = await collectAllPageLinks(scanPage, new URL(parentUrl).origin)
       let children = await detectCategoryLinksWithAI(mallName, aiCandidates, parentName || '지금 보고 있는 카테고리').catch(() => [])
       const aiUsed = children.length > 0
+      // 실사용 중 "하위 메뉴가 없는 카테고리를 체크했더니 무관한 대분류가 잔뜩 딸려왔다"는 문제가 있었는데
+      // (오토카필, 2026-08-27), 이 함수 자체엔 진단 로그가 전혀 없어 서버 로그만으로 원인(정말 하위
+      // 메뉴였는지, 아니면 scanCategoryMenuRobust가 GNB를 통째로 재검출한 건지)을 재구성할 수 없었다.
+      // discoverCategoryLinks/discoverTopLevelCategoryLinks와 같은 방식으로 진단 로그를 남긴다.
+      console.log(`[하위카테고리:진단:${mallName}] ${parentUrl} — AI 후보 ${aiCandidates.length}개, AI 결과 ${children.length}개`)
       if (!children.length) {
         const sub = await scanCategoryMenuRobust(scanPage)
         children = sub.links
+        console.log(`[하위카테고리:진단:${mallName}] AI 실패 → 규칙 기반 메뉴 스캔 결과 ${children.length}개(대분류 메뉴 전체를 다시 찾았을 수 있음 — 진짜 하위 메뉴가 아닐 위험)`)
       }
       // scanCategoryMenuRobust가 대분류 메뉴(GNB)를 다시 찾아버리면 방문한 그 페이지 자신으로 되돌아오는
       // 항목이 섞일 수 있다(discoverCategoryLinks의 expandWorker와 같은 이유) — 자기 자신은 제외한다.
       const parentNorm = parentUrl.replace(/\/+$/, '')
       children = children.filter(c => c.href.replace(/\/+$/, '') !== parentNorm)
       const links: CategoryLink[] = children.map(c => ({ href: c.href, text: parentName ? `${parentName} > ${c.name}` : c.name }))
+      console.log(`[하위카테고리:진단:${mallName}] 최종 ${links.length}개 반환 (aiUsed=${aiUsed}): ${links.slice(0, 5).map(l => l.text).join(', ')}${links.length > 5 ? ' 등' : ''}`)
       return { platform, links, aiUsed }
     } finally {
       await scanPage.close().catch(() => {})

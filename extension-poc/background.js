@@ -7,6 +7,8 @@
 // 사용법: 로그인된 상태로 상품 목록(카테고리) 페이지를 열고 이 확장 아이콘을 클릭하면,
 // 그 페이지의 상품 링크를 전부 찾아 하나씩 방문 → 추출 → 서버로 전송 → 다음 페이지로 자동 진행한다.
 
+importScripts('actions.js') // PTP_ACTIONS — popup.js와 공유하는 액션 이름 상수, actions.js 참고.
+
 const PTP_ORIGIN = 'http://127.0.0.1:3000'
 const INGEST_ENDPOINT = `${PTP_ORIGIN}/api/scrape/extension-ingest`
 const RESOLVE_ENDPOINT = `${PTP_ORIGIN}/api/sites/resolve`
@@ -52,7 +54,8 @@ async function resolveSite(hostname) {
   const data = await res.json()
   if (data.id == null) return null
   return {
-    id: data.id, extractionRules: data.extractionRules || {}, aiPreviewMode: !!data.aiPreviewMode,
+    id: data.id, mode: data.mode === 'normal' ? 'normal' : 'devmode',
+    extractionRules: data.extractionRules || {}, aiPreviewMode: !!data.aiPreviewMode,
     categoryUrls: data.categoryUrls || [], categoryLinks: data.categoryLinks || [],
     categorySettings: data.categorySettings || {}, sortOptions: data.sortOptions || [],
     masterLabels: data.masterLabels || {}, masterOrder: data.masterOrder || [], previewProduct: data.previewProduct || null,
@@ -190,6 +193,16 @@ function bakeSortUrl(url, setting, sortOptions) {
   }
 }
 
+// 봇/과속요청 차단 인터스티셜 감지 — "로그인 필요"(비밀번호 입력창 유무로 판정하는 별도 신호)와는
+// 다른 종류다. 실사용 확인(2026-08-29, 펫토리): 카페24가 "잠시 접속이 제한되었습니다" 같은 안내
+// 페이지로 대신 응답하는데, 이걸 감지 못 하면 진짜 하위 카테고리가 없는 대분류로 오판해버린다.
+// lib/scraper.ts에도 같은 정규식으로 isBotBlockPage를 뒀다(런타임이 달라 코드는 공유 못 함 — 문구
+// 바뀌면 두 곳 다 같이 고친다).
+const IS_BLOCK_PAGE_EXPR = `(() => {
+  const text = document.title + ' ' + (document.body ? document.body.innerText.slice(0, 800) : '')
+  return /접속\\s*(이|을)?\\s*제한|일시적으로\\s*(접속|이용)|비정상적인\\s*(접근|접속)|잠시\\s*접속|과도한\\s*요청|too many requests|access denied/i.test(text)
+})()`
+
 // 상품 링크/다음페이지 링크 수집 — 페이지 이동 없이 현재 문서만 읽는다. 몰마다 플랫폼이 달라(카페24
 // SEO형, 카페24 고전형, 신우 같은 구형 자체 솔루션, 고도몰 등) 여러 패턴을 다 시도한다(lib/scraper.ts의
 // PLATFORM_PROFILES와 같은 패턴을 씀 — 두 구현이 갈라지지 않도록 플랫폼이 추가되면 항상 같이 반영):
@@ -255,6 +268,15 @@ const COLLECT_LINKS_EXPR = `(() => {
   // 이 목록(카테고리) 페이지의 카테고리 경로(예: "모자 > 귀도리")를 찾는다. .xans-product-headcategory는
   // 카페24 표준 클래스인데 배너 이미지용으로도 같이 쓰여 텍스트가 비어있을 수 있어, 후보 중 텍스트가
   // 있는 걸 찾는다 — lib/scraper.ts의 detectCategoryLabel과 같은 방식.
+  // 일부 몰은 공지사항/구매후기 위젯에 이 셀렉터들과 같은 제네릭 클래스명을 재사용한다(실사용 확인,
+  // 2026-08-30, 소구프놀리 — 공지 제목·후기 문구가 그대로 "카테고리"로 들어감) — lib/scraper.ts의
+  // detectCategoryLabel과 동일한 looksLikeNoise 필터로 확실한 신호만 걸러낸다(완벽하진 않음).
+  const looksLikeNoise = (text) =>
+    text.length > 60
+    || /·/.test(text)
+    || (text.match(/(습니다|해요|세요|어요)[.!]?/g) || []).length >= 2
+    || /(공지|안내|이벤트\s|할인판매|상품문의|NOTICE)/i.test(text)
+    || /\d+\s*월\s*\d+\s*일/.test(text)
   let category = ''
   let brandFromCategory = ''
   const categorySelectors = ['.xans-product-headcategory', 'nav[aria-label*="breadcrumb" i]', '.breadcrumb', '.location']
@@ -269,16 +291,18 @@ const COLLECT_LINKS_EXPR = `(() => {
         .filter(Boolean)
       if (!liItems.length) {
         const text = (el.textContent || '').split('/').map(s => s.trim()).filter(Boolean).join(' > ')
-        if (text) { category = text; break }
+        if (text && !looksLikeNoise(text)) { category = text; break }
         continue
       }
+      const joined = liItems.join(' > ')
+      if (looksLikeNoise(joined)) continue
       // "브랜드"라는 카테고리 노드 바로 아래는 상품 종류 구분이 아니라 실제 브랜드명이다(예: 브랜드 > 나이키).
       const brandIdx = liItems.findIndex(t => t === '브랜드')
       if (brandIdx !== -1 && brandIdx + 1 < liItems.length) {
         category = liItems.slice(0, brandIdx).join(' > ')
         brandFromCategory = liItems[brandIdx + 1]
       } else {
-        category = liItems.join(' > ')
+        category = joined
       }
       break
     }
@@ -1212,6 +1236,8 @@ function buildScanSubmenuExpr(topLevelHrefs) {
 // 별도 로그인 처리가 필요 없다. 너무 많은 탭을 한꺼번에 열면 몰 서버에 부담을 주거나(작은 도매몰이
 // 대상) 사용자 탭 목록이 어수선해지므로 4개로 제한한다.
 const EXPAND_TAB_CONCURRENCY = 4
+// 봇 차단 인터스티셜을 만났을 때 포기하기 전에 몇 번 더 재시도할지 — 매번 더 길게 쉰다(아래 expandOne).
+const EXPAND_BLOCK_RETRY_COUNT = 2
 
 async function runExpandCategories(tab, site) {
   if (!site.categoryLinks || !site.categoryLinks.length) {
@@ -1242,24 +1268,56 @@ async function runExpandCategories(tab, site) {
     const expandedByIndex = new Array(categoryLinks.length)
     let cursor = 0
     let doneCount = 0
+    let blockedCount = 0
+    // 차단이 감지되면 남은 카테고리 전체를 1탭으로 낮춰 계속 두드리지 않는다 — 이 실행 안에서는 다시
+    // 안 올린다(카테고리 개수가 보통 수십 개 안팎이라, lib/scraper.ts의 상품 스크랩 AIMD처럼 서서히
+    // 회복시키면 처리량 대부분이 낮은 동시성에 갇혀 정상 상황에서도 매번 느려진다 — 펫토리 실사용
+    // 확인, 2026-08-29). 처음부터 1로 시작하지 않는 것도 같은 이유: 대부분의 몰은 차단이 아예 없으므로
+    // 기본은 그대로 4탭 병렬로 빠르게 처리한다.
+    let activeLimit = workerTabIds.length
     await reportProfileProgress(site.id, `카테고리 하위구조 확인 중 (0/${categoryLinks.length})`)
-    async function worker(workerTabId) {
+
+    /** 카테고리 1건 확인 — 봇 차단 인터스티셜을 만나면 포기 전에 점점 길게 쉬며 재시도한다(IS_BLOCK_PAGE_EXPR
+     *  참고). 재시도 후에도 안 풀리면 원래 항목을 미확장인 채로 남기고 blocked:true를 돌려준다 — 호출부가
+     *  이걸로 남은 워커들의 동시성을 낮춘다. */
+    async function expandOne(workerTabId, c) {
+      for (let attempt = 0; attempt <= EXPAND_BLOCK_RETRY_COUNT; attempt++) {
+        await navigate(workerTabId, c.href)
+        const blocked = await evalInTab(workerTabId, IS_BLOCK_PAGE_EXPR).catch(() => false)
+        if (blocked) {
+          if (attempt < EXPAND_BLOCK_RETRY_COUNT) { await delay(5_000 * (attempt + 1)); continue }
+          return { links: [c], blocked: true }
+        }
+        const probe = await evalInTab(workerTabId, COLLECT_LINKS_EXPR).catch(() => ({ links: [] }))
+        if (probe.links.length > 0) return { links: [c], blocked: false }
+        const sub = await evalInTab(workerTabId, buildScanSubmenuExpr(topLevelHrefs)).catch(() => ({ links: [] }))
+        if (sub.links.length) {
+          return { links: sub.links.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href })), blocked: false }
+        }
+        // 상품도 하위 메뉴도 못 찾은 빈 허브 — lib/scraper.ts의 expandCategoryHubs와 같은 이유(2026-08-30,
+        // 소꿉노리 — 공지/문의 게시판 글이 "빈 허브"로 오인돼 카테고리에 계속 남던 사고)로, 이 페이지에
+        // 정렬 UI 키워드조차 하나도 안 보이면 상품 목록 페이지가 아닐 가능성이 높다고 보고 통째로 뺀다.
+        // 상품이 실제로 있는 카테고리는 위(probe.links.length > 0)에서 이미 걸러져 이 분기를 안 타므로,
+        // 진짜 카테고리를 오탐할 위험은 "상품 0개 + 하위메뉴 0개"인 경우로 좁혀져 있다.
+        const sortTexts = await evalInTab(workerTabId, COLLECT_SORT_KEYWORD_TEXTS_EXPR).catch(() => [])
+        return { links: sortTexts.length ? [c] : [], blocked: false }
+      }
+      return { links: [c], blocked: false } // 도달하지 않음(루프가 항상 return으로 끝남)
+    }
+
+    async function worker(workerTabId, workerIndex) {
       while (true) {
+        while (workerIndex >= activeLimit) {
+          if (cursor >= categoryLinks.length) return
+          await delay(500)
+        }
         const i = cursor++
         if (i >= categoryLinks.length) return
         const c = categoryLinks[i]
         try {
-          await navigate(workerTabId, c.href)
-          const probe = await evalInTab(workerTabId, COLLECT_LINKS_EXPR).catch(() => ({ links: [] }))
-          if (probe.links.length > 0) {
-            expandedByIndex[i] = [c]
-          } else {
-            const sub = await evalInTab(workerTabId, buildScanSubmenuExpr(topLevelHrefs)).catch(() => ({ links: [] }))
-            // 하위 메뉴도 못 찾으면(진짜로 빈 카테고리일 수도 있음) 원래 항목을 그대로 남긴다.
-            expandedByIndex[i] = sub.links.length
-              ? sub.links.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
-              : [c]
-          }
+          const { links, blocked } = await expandOne(workerTabId, c)
+          expandedByIndex[i] = links
+          if (blocked) { blockedCount++; activeLimit = 1 }
         } catch {
           expandedByIndex[i] = [c] // 이 워커 탭에서 일시적으로 실패해도 그 카테고리 하나만 미확장으로 남기고 계속 진행
         }
@@ -1269,7 +1327,7 @@ async function runExpandCategories(tab, site) {
         await throttle()
       }
     }
-    await Promise.all(workerTabIds.map(worker))
+    await Promise.all(workerTabIds.map((id, idx) => worker(id, idx)))
 
     const expanded = expandedByIndex.flat()
     const seenHrefs = new Set()
@@ -1281,7 +1339,7 @@ async function runExpandCategories(tab, site) {
     })
     const data = await res.json().catch(() => ({}))
     if (!res.ok) return { ok: false, error: data.error || String(res.status) }
-    return { ok: true, count: deduped.length }
+    return { ok: true, count: deduped.length, blockedCount: blockedCount || undefined }
   } catch (e) {
     return { ok: false, error: e.message }
   } finally {
@@ -1891,7 +1949,13 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const hostname = new URL(tab.url).hostname
   const site = await resolveSite(hostname).catch(() => null)
   if (!site) {
-    console.log(`[PTP] "${hostname}"은 PTP Mall 관리에 "크롬익스텐션-개발자모드"로 등록돼 있지 않습니다.`)
+    console.log(`[PTP] "${hostname}"은 PTP Mall 관리에 등록된 URL과 일치하지 않습니다.`)
+    return
+  }
+  // 팝업 경로(chrome.runtime.onMessage)와 같은 이유로, 일반모드 몰에서는 "몰 구조분석" 외 액션을 막는다
+  // — 미리보기/피커는 여기서 다루지 않으므로 사실상 이 리스너 전체가 비활성화된다.
+  if (site.mode === 'normal') {
+    console.log(`[PTP] "${hostname}"은 일반모드 몰입니다 — 확장에서는 몰 구조분석만 지원합니다.`)
     return
   }
   if (info.menuItemId === 'ptp-preview') await runPreview(tab, site, site.aiPreviewMode)
@@ -1965,6 +2029,13 @@ async function runFullMallProfile(tab, site) {
   // 잘못 보고되는 문제가 생긴다.
   const coreFailureCount = failures.length
 
+  // 봇 차단 인터스티셜 때문에 재시도 후에도 하위구조를 못 펼친 카테고리가 있으면 알려준다 — 카테고리
+  // 하위구조 확인 자체는 (남은 항목을 미확장인 채로 남기고) 성공으로 끝났으므로 coreFailureCount에는
+  // 안 섞는다(페이지네이션 경고와 같은 이유).
+  if (expandRes.ok && expandRes.blockedCount) {
+    failures.push(`⚠ 접속 차단으로 ${expandRes.blockedCount}개 카테고리는 하위구조를 확인하지 못했습니다 — 잠시 후 "몰 구조분석"을 다시 실행해보세요.`)
+  }
+
   // 방금 하위구조를 확인한 대분류 중 하나로 페이지네이션 "다음" 감지를 검증한다 — site.categoryLinks가
   // 비어있으면(카테고리 불러오기를 아직 안 한 몰) 건너뛴다.
   if (site.categoryLinks?.length) {
@@ -2000,13 +2071,21 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     const hostname = new URL(tab.url).hostname
     const site = await resolveSite(hostname).catch(() => null)
-    if (!site) { sendResponse({ ok: false, error: `"${hostname}"은 PTP Mall 관리에 "크롬익스텐션-개발자모드"로 등록돼 있지 않습니다` }); return }
+    if (!site) { sendResponse({ ok: false, error: `"${hostname}"은 PTP Mall 관리에 등록된 URL과 일치하지 않습니다(Mall 정보의 URL을 확인하세요)` }); return }
+    // 일반모드 몰은 서버가 이미 정규 스크랩 파이프라인(Playwright)을 돌리므로, 확장이 같은 몰에 별도
+    // 파이프라인(scrape_staging_items)을 동시에 만들면 안 된다 — "몰 구조분석"(카테고리 하위구조/정렬
+    // 옵션/페이지네이션 검증까지 포함)만 예외로 허용한다(2026-08-29, 일반모드에서도 이 검증이 필요해
+    // resolve 대상을 넓히며 같이 추가한 안전장치).
+    if (site.mode === 'normal' && msg.action !== PTP_ACTIONS.PROFILE) {
+      sendResponse({ ok: false, error: '이 몰은 일반모드입니다 — 확장에서는 "몰 구조분석"만 지원합니다. 스크랩 시작/미리보기 등은 PTP 화면에서 진행하세요.' })
+      return
+    }
 
-    if (msg.action === 'start') sendResponse(await startScrape(tab, site))
-    else if (msg.action === 'preview') sendResponse(await runPreview(tab, site, site.aiPreviewMode))
-    else if (msg.action === 'picker') sendResponse(await runPicker(tab, site))
-    else if (msg.action === 'profile') sendResponse(await runFullMallProfile(tab, site))
-    else if (msg.action === 'current-category') sendResponse(await runCaptureCurrentCategory(tab, site))
+    if (msg.action === PTP_ACTIONS.START) sendResponse(await startScrape(tab, site))
+    else if (msg.action === PTP_ACTIONS.PREVIEW) sendResponse(await runPreview(tab, site, site.aiPreviewMode))
+    else if (msg.action === PTP_ACTIONS.PICKER) sendResponse(await runPicker(tab, site))
+    else if (msg.action === PTP_ACTIONS.PROFILE) sendResponse(await runFullMallProfile(tab, site))
+    else if (msg.action === PTP_ACTIONS.CURRENT_CATEGORY) sendResponse(await runCaptureCurrentCategory(tab, site))
     else sendResponse({ ok: false, error: `알 수 없는 action: ${msg.action}` })
   })()
   return true // 비동기 sendResponse를 쓰겠다는 표시

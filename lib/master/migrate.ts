@@ -130,3 +130,25 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
 
   return { migrated: masterIds.length, masterIds }
 }
+
+/** siteId에 아직 거래처가 없을 때 "확정"(mergeStagingItems)이 상품마스터 반영을 건너뛴 mall_products —
+ *  master_product_id가 비어있는 것으로 판별한다(사용자 요청, 2026-08-27: "거래처가 나중에 지정되면
+ *  소급 반영"). Mall 상세관리(SiteDetailPanel)가 거래처 옆에 이 개수를 보여주는 데 쓴다. */
+export async function countUnmigratedForSite(siteId: number): Promise<number> {
+  const res = await pool.query<{ count: string }>(
+    `SELECT COUNT(*) FROM mall_products WHERE site_id=$1 AND master_product_id IS NULL`, [siteId],
+  )
+  return Number(res.rows[0].count)
+}
+
+/** countUnmigratedForSite가 찾아낸 항목 전부를 한꺼번에 migrateToMaster에 넘긴다 — 거래처를 나중에
+ *  지정한 뒤(또는 저장 시 자동으로) 소급 반영하는 통로. migrateToMaster는 이미 ON CONFLICT 업서트라
+ *  여러 번 불러도 안전하므로, 여기서는 "아직 master_product_id가 없는 것"만 골라 그대로 넘기면 된다 —
+ *  재스크랩 등으로 이미 반영된 상품이 섞여 있어도 애초에 대상에서 빠진다. */
+export async function migrateUnmigratedForSite(siteId: number, clientId: number): Promise<MigrateResult> {
+  const res = await pool.query<{ id: number }>(
+    `SELECT id FROM mall_products WHERE site_id=$1 AND master_product_id IS NULL`, [siteId],
+  )
+  if (!res.rows.length) return { migrated: 0, masterIds: [] }
+  return migrateToMaster(res.rows.map(r => r.id), clientId)
+}

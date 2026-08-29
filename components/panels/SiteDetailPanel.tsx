@@ -56,6 +56,10 @@ export function SiteDetailPanel({ params }: Props) {
   const [loginPw, setLoginPw] = useState('')
   const [clientId, setClientId] = useState<number | ''>((params?.clientId as number | undefined) ?? '')
   const [clients, setClients] = useState<ClientOption[]>([])
+  // 거래처가 없어 상품마스터 반영이 건너뛰어진 상품 개수 — "확정은 확정대로 하고, 나중에 거래처를
+  // 지정해서 후속 작업"이 가능하도록(사용자 요청, 2026-08-27) 거래처 선택 옆에 보여준다.
+  const [unmigratedCount, setUnmigratedCount] = useState(0)
+  const [backfilling, setBackfilling] = useState(false)
   const [nameSelector, setNameSelector] = useState('')
   const [priceSelector, setPriceSelector] = useState('')
   const [thumbnailSelector, setThumbnailSelector] = useState('')
@@ -78,6 +82,7 @@ export function SiteDetailPanel({ params }: Props) {
     if (isNew) return
     fetch(`/api/sites/${siteId}`).then(r => r.json()).then((d: {
       name: string | null; url: string; login_url: string | null; login_id: string | null; login_pw: string | null; client_id: number | null
+      unmigrated_count: number
       custom_name_selector: string | null; custom_price_selector: string | null; custom_thumbnail_selector: string | null
       auto_scrape_enabled: boolean; auto_scrape_hour: number | null; manual_login_required: boolean | null; main_items: string | null
       mall_report: MallReport | null; mall_report_updated_at: string | null; memo: string | null
@@ -85,6 +90,7 @@ export function SiteDetailPanel({ params }: Props) {
     }) => {
       setName(d.name || ''); setMainItems(d.main_items || ''); setUrl(d.url); setLoginUrl(d.login_url || ''); setLoginId(d.login_id || ''); setLoginPw(d.login_pw || '')
       setClientId(d.client_id ?? '')
+      setUnmigratedCount(d.unmigrated_count || 0)
       setNameSelector(d.custom_name_selector || ''); setPriceSelector(d.custom_price_selector || '')
       setThumbnailSelector(d.custom_thumbnail_selector || '')
       setAutoScrapeEnabled(!!d.auto_scrape_enabled); setAutoScrapeHour(d.auto_scrape_hour ?? 3)
@@ -94,6 +100,24 @@ export function SiteDetailPanel({ params }: Props) {
       setLatestMemo(d.latest_memo)
     }).finally(() => setLoading(false))
   }, [siteId, isNew])
+
+  /** 거래처가 없어 상품마스터 반영을 건너뛴 mall_products를 소급 반영한다 — handleSave가 거래처 지정
+   *  직후 조용히(silent) 자동으로 부르고, 아래 "지금 반영" 버튼으로도 언제든 수동 재시도할 수 있다
+   *  (사용자 요청, 2026-08-27). */
+  async function handleBackfillMigrate(silent = false) {
+    if (isNew || clientId === '') return
+    setBackfilling(true)
+    try {
+      const res = await fetch(`/api/sites/${siteId}/migrate-unmigrated`, { method: 'POST' })
+      const d = await res.json() as { migrated?: number; remaining?: number; error?: string }
+      if (!res.ok) throw new Error(d.error || `서버 오류 (${res.status})`)
+      setUnmigratedCount(d.remaining ?? 0)
+    } catch (e) {
+      if (!silent) alert(`상품마스터 반영에 실패했습니다: ${e instanceof Error ? e.message : e}`)
+    } finally {
+      setBackfilling(false)
+    }
+  }
 
   async function handleSave() {
     if (!name) return alert('Mall 이름을 입력하세요.')
@@ -121,6 +145,11 @@ export function SiteDetailPanel({ params }: Props) {
         // 옆에 열려있던 다른 탭(예: 새 Mall 등록)으로 튀어버려 방금 수정한 결과를 확인할 수 없었다.
         setJustSaved(true)
         setTimeout(() => setJustSaved(false), 2000)
+        // 거래처를 지정(또는 이미 있는 채로 저장)하고 미반영 상품이 남아있으면 바로 소급 반영을 시도한다
+        // — "거래처를 설정해서 후속 작업을 할 수 있도록" 별도 클릭 없이도 되게 하기 위함(사용자 요청,
+        // 2026-08-27). 실패해도(예: 이번 저장에서 거래처를 오히려 지웠거나 일시적 오류) 조용히 넘어가고
+        // "지금 반영" 버튼으로 언제든 다시 시도할 수 있다.
+        if (clientId !== '' && unmigratedCount > 0) handleBackfillMigrate(true)
       }
     } catch (e) {
       alert(`저장에 실패했습니다: ${e instanceof Error ? e.message : e}\nDB 연결 상태를 확인해주세요.`)
@@ -179,6 +208,22 @@ export function SiteDetailPanel({ params }: Props) {
               <option value="">(선택 안 함)</option>
               {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
+            {/* 확정(mergeStagingItems)은 거래처가 없어도 되지만 상품마스터 반영은 거래처가 있어야 한다 —
+                그때 건너뛴 상품이 있으면 여기서 바로 알려주고, 거래처가 있으면 즉시 소급 반영할 수 있게
+                한다(사용자 요청, 2026-08-27: "확정은 확정대로 할 수 있게 하고, 나중에 거래처를 설정해서
+                후속 작업을 할 수 있도록"). */}
+            {!isNew && unmigratedCount > 0 && (
+              <p className="mt-1 text-xs text-amber-600 flex items-center gap-2 flex-wrap">
+                <span>거래처가 없어 상품마스터에 반영되지 않은 상품이 {unmigratedCount}건 있습니다.</span>
+                {clientId !== '' && (
+                  <button type="button" onClick={() => handleBackfillMigrate(false)} disabled={backfilling}
+                    className="font-semibold text-teal-600 hover:underline disabled:opacity-50">
+                    {backfilling ? '반영 중...' : '지금 반영'}
+                  </button>
+                )}
+                {clientId === '' && <span className="text-gray-400">거래처를 지정하고 저장하면 자동으로 반영됩니다.</span>}
+              </p>
+            )}
           </label>
           <label className="block">
             <span className="block text-xs text-gray-500 mb-1">Mall 이름 *</span>

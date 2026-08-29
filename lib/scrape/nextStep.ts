@@ -34,7 +34,7 @@ export async function getNextStepForSite(siteId: number): Promise<NextStep | nul
   const row = res.rows[0]
   if (!row) return null
 
-  if (!row.has_profile) return { key: 'profile', label: '스크래핑 화면에서 "몰 구조분석" 버튼을 클릭하세요' }
+  if (!row.has_profile) return { key: 'profile', label: '스크래핑 화면에서 "몰 구조분석" 버튼을 클릭하거나, 몰 탭에서 확장으로 실행하세요' }
   if (!row.has_rules) return { key: 'rules', label: '스크래핑 화면에서 "몰 구조분석" 버튼을 다시 클릭하세요 (추출규칙 생성)' }
   if (Number(row.session_count) === 0) return { key: 'scrape', label: '스크래핑 화면에서 "스크래핑 시작" 버튼을 클릭하세요' }
   if (Number(row.pending_count) > 0) return { key: 'confirm', label: `"스크랩 Raw 확인" 화면에서 "확정 (스크랩검수 후)" 버튼을 클릭하세요 (${row.pending_count}건)` }

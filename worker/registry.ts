@@ -38,11 +38,13 @@ export function registerAll() {
   reg('isAnySiteBusy', scraper.isAnySiteBusy)
   reg('getPreviewProgress', scraper.getPreviewProgress)
   reg('stopProfileAnalysis', scraper.stopProfileAnalysis)
+  reg('stopCategoryDiscovery', scraper.stopCategoryDiscovery)
 
   // 로그인 창 — 실제 개인 브라우저를 띄우는 것이라 취소 개념이 없다.
   reg('openLoginWindow', scraper.openLoginWindow)
   reg('openManualLoginWindow', scraper.openManualLoginWindow)
   reg('openUrlInLoginWindow', scraper.openUrlInLoginWindow)
+  reg('focusManualLoginChrome', scraper.focusManualLoginChrome)
 
   // 단발 스크랩/추출 — 상품 1건 단위라 중지 개념이 없다(금방 끝남).
   reg('scrapeSingleProduct', scraper.scrapeSingleProduct)
@@ -54,7 +56,8 @@ export function registerAll() {
   reg('runMallStructureReport', runMallStructureReport)
   reg('runMallProfileCheckForScrape', runMallProfileCheckForScrape)
 
-  // 카테고리/재확인 — opts.sessionId+isStopRequested로 중지(기존 방식 그대로, 별도 신호 주입 불필요).
+  // 카테고리/재확인 — discoverCategoryLinks 자체는 stopCategoryDiscovery(siteId)로 별도 취소(위에
+  // 이미 등록, 2026-08-26). 나머지는 opts.sessionId+isStopRequested로 중지(기존 방식 그대로).
   reg('discoverCategoryLinks', scraper.discoverCategoryLinks)
   reg('expandCategoryChildren', scraper.expandCategoryChildren)
   reg('detectSortOptionsForCategory', scraper.detectSortOptionsForCategory)

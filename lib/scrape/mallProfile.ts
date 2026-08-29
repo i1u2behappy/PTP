@@ -1,6 +1,7 @@
 import pool from '../db'
 import { profileMallStructure, profileMallStructureForScrape, type MallProfileSignals, type ScrapeOptions } from '../scraper'
 import { runAutoAnalysis } from './adjustment'
+import { checkCategoryAnomaly } from './categoryAnomalyCheck'
 
 function summarizeProfile(p: MallProfileSignals): string {
   return [
@@ -87,6 +88,12 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
     next.categoryLinks = prev.categoryLinks
     next.categoryMenuNames = prev.categoryMenuNames
     next.categoryLinksAiUsed = prev.categoryLinksAiUsed
+    // categoryUrlPattern은 이번 회차에 새로 감지된(품질이 나빠 방금 버려진) categoryLinks에서 역산된
+    // 값이라 위에서 되돌린 categoryLinks와 짝이 안 맞을 수 있다 — "카테고리 불러오기"는 이 패턴을 최우선
+    // 지름길로 쓰므로(discoverTopLevelCategoryLinks), 어긋난 패턴이 남으면 되돌린 categoryLinks와 전혀
+    // 다른(엉뚱한 게시판 등) 링크를 찾아오게 된다. categoryLinks를 되돌릴 땐 패턴도 같이 되돌린다
+    // (오토카필 몰 실사용 확인, 2026-08-29 — "몰 구조분석"과 "카테고리 불러오기" 결과가 전혀 다름).
+    next.categoryUrlPattern = prev.categoryUrlPattern
   } else if (!deep && prev?.categoryLinks?.length && next.categoryLinks.length < prev.categoryLinks.length) {
     // categoryLinks는 deep=false("구조 변화 감지", 로그인 확인/스크랩 시작마다 자동으로 돎)에서도 매번
     // 다시(얕게) 계산된다 — 개발자모드 확장의 "카테고리 하위구조 자동확인"(runExpandCategories)이 펼쳐둔
@@ -95,7 +102,23 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
     // 반영할 수 있어야 하므로 건드리지 않는다.
     next.categoryLinks = prev.categoryLinks
     next.categoryMenuNames = prev.categoryMenuNames
+    next.categoryUrlPattern = prev.categoryUrlPattern
   }
+
+  // "몰 구조분석"(deep=true)일 때만 새 카테고리 구조가 검증된 과거 카테고리와 비교해 터무니없는지 AI로
+  // 한 번 더 확인한다 — deep=false("구조 변화 감지")는 로그인 확인/스크랩 시작마다 자동으로 도는 가벼운
+  // 경로라 매번 AI를 부르면 비용/지연만 늘고, 그 경로의 categoryLinks는 이미 위 가드로 "얕아지면 무시"
+  // 처리돼 있어 이 검사의 효용도 낮다. 실행 안 했거나(과거 증거 부족) 검사를 안 돌린 경우엔
+  // categoryCounts/excludedCategoryHrefs와 같은 이유로 이전 경고를 그대로 이어받는다 — 안 그러면 이
+  // UPDATE가 scrape_profile을 통째로 갈아치우므로 있던 경고가 조용히 사라진다.
+  let categoryAnomalyWarning = prev?.categoryAnomalyWarning ?? null
+  if (deep && next.categoryLinks.length) {
+    const siteRow = await pool.query<{ name: string | null }>('SELECT name FROM sites WHERE id = $1', [siteId])
+    const mallName = siteRow.rows[0]?.name || `site-${siteId}`
+    const anomaly = await checkCategoryAnomaly(siteId, mallName, next.categoryLinks.map(c => ({ name: c.name, href: c.href })))
+    categoryAnomalyWarning = anomaly ? { reason: anomaly.reason, checkedAt: new Date().toISOString(), source: anomaly.source } : null
+  }
+  next.categoryAnomalyWarning = categoryAnomalyWarning
 
   // sampleProductPageText는 아래(runMallStructureReport)에서 추출규칙 자동생성에만 쓰는 임시 값 —
   // 원문 그대로라 용량이 커 기준정보로 영구 저장하지 않는다. categoryCounts/excludedCategoryHrefs는

@@ -9,6 +9,11 @@ function isChromeBrowser(): boolean {
   return /Chrome\//.test(ua) && !/Edg\//.test(ua) && !/OPR\//.test(ua) && !/Brave\//.test(ua)
 }
 
+// "확인"을 눌러도 그 선택이 어디에도 안 남아, 페이지를 새로고침할 때마다(자동화 테스트로 반복
+// 새로고침한 경우 포함) 매번 다시 떴다 — 사용자 지적, 2026-08-27: "이 창이 또 떠 있는데, 수정한거
+// 아니야?". "확인"을 누르면 이 브라우저에서는 다시 안 띄우도록 localStorage에 남긴다.
+const DISMISSED_KEY = 'ptp.chromeWarningDismissed'
+
 /** 엣지가 설치돼 있으면 Windows가 등록해두는 microsoft-edge: 프로토콜 핸들러로 현재 페이지를 그대로
  * 엣지에서 열게 한다 (엣지 설치 시 OS가 기본 제공하는 공식 방식 — 별도 설치/확장 불필요). */
 function openInEdge() {
@@ -20,10 +25,15 @@ export function ChromeWarning() {
 
   useEffect(() => {
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
-    if (isChromeBrowser()) setShow(true)
+    if (isChromeBrowser() && localStorage.getItem(DISMISSED_KEY) !== '1') setShow(true)
   }, [])
 
   if (!show) return null
+
+  function dismiss() {
+    localStorage.setItem(DISMISSED_KEY, '1')
+    setShow(false)
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
@@ -35,7 +45,7 @@ export function ChromeWarning() {
           남겨두는 것이 좋습니다. PTP 자체는 엣지 등 다른 브라우저에서 사용해주세요.
         </p>
         <div className="flex items-center justify-center gap-2">
-          <button onClick={() => setShow(false)}
+          <button onClick={dismiss}
             className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-semibold rounded-full transition-colors">
             확인
           </button>

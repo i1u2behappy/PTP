@@ -178,6 +178,21 @@ async function checkSessionCompletion(sessionId: number) {
   }
 }
 
+declare global {
+  var __activeMergeBatch: { ids: number[]; startedAt: number } | undefined
+}
+
+/** "확정" 진행 중 화면을 새로고침(또는 나갔다 돌아옴)해도 진행률을 이어서 보여주기 위한 최소 상태 —
+ *  mergeStagingItems 자체는 서버에서 계속 실행되는데 화면(React state)만 새로고침으로 사라지는 문제를
+ *  고친다(실사용 확인, 2026-08-27: 5분 넘게 진행률이 0%로 안 움직여 멈춘 줄 알았는데 실제로는 서버에서
+ *  계속 진행 중이었음). 이 앱은 한 번에 한 사람이 한 배치를 확정하는 게 보통이라 슬롯 하나로 충분하고,
+ *  lib/scraper.ts의 profileAbortControllers 등과 같은 이유로 globalThis에 저장해 dev 서버 핫리로드에도
+ *  살아남게 한다. 진행률(done) 자체는 별도로 안 들고 scrape_staging_items.status를 그때그때 세므로
+ *  (merge/progress 라우트와 같은 방식) 여기엔 "지금 어떤 ids를 언제부터 처리 중인지"만 있으면 된다. */
+export function getActiveMergeBatch(): { ids: number[]; startedAt: number } | null {
+  return globalThis.__activeMergeBatch ?? null
+}
+
 // 한 건씩 순서대로 기다리면(예전 for await) 상품마다 여러 번의 DB 왕복 + 이미지 다운로드가 곱으로 쌓여
 // 확정 건수가 많을수록 그만큼 느려진다(실사용 확인: 스크래핑만큼 확정도 오래 걸림) — 서로 다른 상품은
 // 독립적인 작업이라 몇 건씩 묶어 동시에 처리한다. 너무 크게 잡으면 DB 커넥션 풀(기본 10개)이 부족해져
@@ -190,6 +205,15 @@ const MERGE_CONCURRENCY = 6
  * 오작동시키지 않는다.
  */
 export async function mergeStagingItems(ids: number[], opts: { force?: boolean } = {}): Promise<MergeResult> {
+  globalThis.__activeMergeBatch = { ids, startedAt: Date.now() }
+  try {
+    return await mergeStagingItemsInner(ids, opts)
+  } finally {
+    if (globalThis.__activeMergeBatch?.ids === ids) globalThis.__activeMergeBatch = undefined
+  }
+}
+
+async function mergeStagingItemsInner(ids: number[], opts: { force?: boolean }): Promise<MergeResult> {
   const merged: number[] = []
   const skipped: { id: number; reason: string }[] = []
   const noClient: number[] = []

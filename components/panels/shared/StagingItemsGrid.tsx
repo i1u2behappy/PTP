@@ -366,6 +366,47 @@ export function StagingItemsGrid({ sessionId }: {
   useEffect(() => { setSelected(new Set()) }, [scopeQuery])
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  /** 확정 진행률 폴링 — handleMerge(이 화면이 직접 보낸 POST)와, 마운트 시 이어받는 재연결 두 경우 모두
+   *  이 함수 하나를 쓴다. selfManaged가 true면(재연결 — 이 화면엔 기다릴 원본 POST가 없음) 100%에 닿는
+   *  순간 스스로 폴링을 멈추고 화면을 정리한다. false면(직접 보낸 경우) handleMerge의 원래 POST가 끝날 때
+   *  자기 finally에서 정리하므로 여기서는 진행률 갱신만 한다(기존 동작 그대로 유지). */
+  function pollMergeProgress(idsParam: string, total: number, startedAtMs: number, opts: { selfManaged: boolean }) {
+    mergeStartedAtRef.current = startedAtMs
+    setMerging(true)
+    setMergeProgress({ total, done: 0, elapsedSec: Math.floor((Date.now() - startedAtMs) / 1000) })
+    if (mergeProgressPollRef.current) clearInterval(mergeProgressPollRef.current)
+    mergeProgressPollRef.current = setInterval(async () => {
+      const res = await fetch(`/api/scrape-staging/merge/progress?ids=${idsParam}`).catch(() => null)
+      const d = await res?.json().catch(() => null) as { total: number; done: number } | null
+      const elapsedSec = Math.floor((Date.now() - mergeStartedAtRef.current) / 1000)
+      setMergeProgress(d
+        ? { total: d.total, done: d.done, elapsedSec }
+        : prev => prev && { ...prev, elapsedSec })
+      if (opts.selfManaged && d && d.total > 0 && d.done >= d.total) {
+        if (mergeProgressPollRef.current) { clearInterval(mergeProgressPollRef.current); mergeProgressPollRef.current = null }
+        setMerging(false)
+        setMergeProgress(null)
+        bumpRefresh('products')
+        bumpRefresh('staging')
+        loadItems()
+      }
+    }, 800)
+  }
+
+  // 마운트 시(새로고침 포함) 다른 데서(또는 새로고침 전 이 화면 자신이) 이미 시작해둔 확정 배치가 서버에서
+  // 여전히 진행 중인지 확인한다 — "5분 넘게 진행률이 0%"로 보이던 문제(실사용 확인, 2026-08-27)는 실제로는
+  // 서버가 계속 일하고 있는데 화면(React state)만 새로고침으로 사라졌던 것이라, 여기서 이어붙인다.
+  useEffect(() => {
+    fetch('/api/scrape-staging/merge/active').then(r => r.json()).then((d: {
+      active: boolean; ids?: number[]; total?: number; startedAtMs?: number
+    }) => {
+      if (d.active && d.ids?.length) {
+        pollMergeProgress(d.ids.join(','), d.ids.length, d.startedAtMs ?? Date.now(), { selfManaged: true })
+      }
+    }).catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const filteredItems = items.filter(p => columns.every(col => {
     const f = filters[col.key]
     if (!f) return true
@@ -483,22 +524,12 @@ export function StagingItemsGrid({ sessionId }: {
 
   async function handleMerge() {
     if (!selectedPendingIds.length) return
-    setMerging(true)
+    const idsParam = selectedPendingIds.join(',')
     // 경과시간 표시용 타이머 — setInterval로 주기적으로 다시 계산해 state에 반영하는 것 자체는 React가
     // 공식적으로 안내하는 시계/타이머 패턴이지만, react-hooks/purity가 Date.now() 값이 결국 state로
     // 흘러간다는 이유만으로 오탐한다.
     /* eslint-disable-next-line react-hooks/purity */
-    mergeStartedAtRef.current = Date.now()
-    const idsParam = selectedPendingIds.join(',')
-    setMergeProgress({ total: selectedPendingIds.length, done: 0, elapsedSec: 0 })
-    mergeProgressPollRef.current = setInterval(async () => {
-      const res = await fetch(`/api/scrape-staging/merge/progress?ids=${idsParam}`).catch(() => null)
-      const d = await res?.json().catch(() => null) as { total: number; done: number } | null
-      const elapsedSec = Math.floor((Date.now() - mergeStartedAtRef.current) / 1000)
-      setMergeProgress(d
-        ? { total: d.total, done: d.done, elapsedSec }
-        : prev => prev && { ...prev, elapsedSec })
-    }, 800)
+    pollMergeProgress(idsParam, selectedPendingIds.length, Date.now(), { selfManaged: false })
     try {
       // force: true — 이 화면은 스크랩 건(세션) 단위로 확정하는 화면이라, 예전에 이미 상품마스터로
       // 확정된 적 있는 상품(is_already_migrated)이라도 이번에 새로 스크랩한 값 기준으로 다시 확정한다.

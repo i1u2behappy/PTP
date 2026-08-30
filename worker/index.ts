@@ -45,19 +45,27 @@ async function checkMemoryAndAutoRestart() {
 // 등) initDb()가 ECONNREFUSED로 실패해 그대로 process.exit(1)— 누가 다시 띄워주지 않는 한 이후로
 // "로그인 창 열기"를 포함한 모든 기능이 "워커 프로세스에 연결할 수 없습니다"로 계속 실패한다(실사용
 // 확인, 2026-08-24 — DB는 몇 초 뒤 정상이었는데 워커만 그 짧은 창에 걸려 죽은 채로 남아있었다).
-// initDb() 자체는 실패하면 캐시를 비워 재호출 시 처음부터 다시 시도하게 돼 있으므로(lib/db.ts 주석
-// 참고), 여기서 몇 번 더 불러주기만 하면 된다 — Docker 컨테이너가 보통 몇 초 안에 다시 응답하는 걸
-// 감안해 2초부터 시작해 매번 두 배로 늘려가며 5번(총 최대 62초) 시도하고, 그래도 안 되면 진짜 DB
-// 문제로 보고 포기한다(무한 재시도로 조용히 멈춰있는 것보다 로그로 드러나는 게 낫다).
+// 처음엔 5번(총 최대 62초)만 재시도하고 포기했는데, "PC 재부팅 직후" 시나리오에서 이 창이 너무
+// 짧다는 게 드러났다(실사용 확인, 2026-08-30 — 재부팅하면 Docker Desktop 자체가 WSL2 가상머신부터
+// 새로 켜져야 해서 훨씬 오래 걸리는데, dev 서버 자동시작 스크립트(scripts/start-dev-server.cmd)는
+// Postgres 응답까지 최대 90초를 기다리도록 이미 튼튼하게 짜여 있는 반면 이 워커는 그 절반도 안 되는
+// 시간에 포기해버렸다 — 그 결과 dev 서버는 살아났는데 워커만 죽은 채로 남아, 이걸 되살려줄 감시자가
+// 없어 사용자가 재부팅해도 "PTP가 안 된다"가 계속됐다). initDb() 자체는 실패하면 캐시를 비워 재호출
+// 시 처음부터 다시 시도하게 돼 있으므로(lib/db.ts 주석 참고), 여기서 총 대기시간을 dev 서버의 90초
+// 창보다 넉넉히 웃돌게 늘린다 — 2초부터 시작해 두 배씩 늘리되 30초에서 멈추고(그 이상은 늘려봐야
+// 의미 없음), 최대 20번(총 약 8분)까지 시도한다. 무한 재시도 대신 결국 포기하고 로그를 남기는 기존
+// 방침(무한 재시도로 조용히 멈춰있는 것보다 로그로 드러나는 게 낫다)은 그대로 유지 — DB가 진짜
+// 8분 넘게 안 뜨는 상황이면 재시도 창을 더 늘리는 게 아니라 실제 DB 문제로 봐야 한다.
 async function initDbWithRetry() {
-  const maxAttempts = 5
+  const maxAttempts = 20
+  const maxDelayMs = 30_000
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       await initDb()
       return
     } catch (e) {
       if (attempt === maxAttempts) throw e
-      const delayMs = 2_000 * 2 ** (attempt - 1)
+      const delayMs = Math.min(2_000 * 2 ** (attempt - 1), maxDelayMs)
       console.error(`[worker] DB 연결 실패(${attempt}/${maxAttempts}) — ${delayMs / 1000}초 뒤 재시도:`, e instanceof Error ? e.message : e)
       await new Promise(resolve => setTimeout(resolve, delayMs))
     }

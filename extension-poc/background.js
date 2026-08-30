@@ -381,6 +381,25 @@ const COLLECT_SORT_KEYWORD_TEXTS_EXPR = `(() => {
   return result
 })()`
 
+// expandOne의 "빈 허브 배제"(2026-08-30, 도매토피아 실사용 확인) 전용 — 위 COLLECT_SORT_KEYWORD_TEXTS_EXPR은
+// 클릭+URL변화 검증까지 거치는 runDetectSortOptions에서만 안전하다. 클릭 없이 텍스트만 보고 "정렬 있음"을
+// 판단하면, 이 몰의 사이트 공통 헤더에 있는 "신상품"(신상 매칭)/"주문배송조회"(조회 매칭) 같은 무관한
+// 전역 내비게이션 링크가 키워드에 우연히 걸려 모든 페이지에서 오탐했다(lib/scraper.ts의 diffQueryParams와
+// 같은 이유) — href의 pathname이 지금 페이지와 같고(=쿼리파라미터만 다른 진짜 "같은 목록의 다른 정렬"
+// 링크) 텍스트도 정렬 키워드에 맞는 것만 인정한다.
+const HAS_SORT_LINK_ON_PAGE_EXPR = `(() => {
+  const re = new RegExp(${JSON.stringify(SORT_KEYWORD_PATTERN)})
+  const here = location.pathname
+  for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+    const text = (a.textContent || '').trim()
+    if (!text || text.length > 12 || !re.test(text)) continue
+    let href
+    try { href = new URL(a.getAttribute('href'), location.href) } catch { continue }
+    if (href.pathname === here && href.href !== location.href) return true
+  }
+  return false
+})()`
+
 // 위에서 모은 후보 텍스트 하나를 실제로 클릭한다 — 정확히 그 텍스트를 직접 담은(자식이 아닌) 요소만
 // 찾아 클릭하고, 성공 여부만 boolean으로 돌려준다(클릭 이후 페이지 이동 여부는 호출부가
 // chrome.tabs.onUpdated로 별도 확인).
@@ -1299,8 +1318,8 @@ async function runExpandCategories(tab, site) {
         // 정렬 UI 키워드조차 하나도 안 보이면 상품 목록 페이지가 아닐 가능성이 높다고 보고 통째로 뺀다.
         // 상품이 실제로 있는 카테고리는 위(probe.links.length > 0)에서 이미 걸러져 이 분기를 안 타므로,
         // 진짜 카테고리를 오탐할 위험은 "상품 0개 + 하위메뉴 0개"인 경우로 좁혀져 있다.
-        const sortTexts = await evalInTab(workerTabId, COLLECT_SORT_KEYWORD_TEXTS_EXPR).catch(() => [])
-        return { links: sortTexts.length ? [c] : [], blocked: false }
+        const hasSort = await evalInTab(workerTabId, HAS_SORT_LINK_ON_PAGE_EXPR).catch(() => false)
+        return { links: hasSort ? [c] : [], blocked: false }
       }
       return { links: [c], blocked: false } // 도달하지 않음(루프가 항상 return으로 끝남)
     }

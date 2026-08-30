@@ -25,8 +25,23 @@ const nextConfig: NextConfig = {
   // 묶어 그 경합 구간 자체를 줄인다 — dev 전용, 빌드/운영에는 영향 없음. 1000ms에서도 파일을 아주 많이
   // 연달아 고치는 세션(예: 크롬 확장 디버깅처럼 수십 번 연속 Edit)에서는 여전히 재현돼 3000ms로 더
   // 늘렸다(2026-08-22) — 코드 수정 후 화면 반영이 그만큼 느려지는 트레이드오프를 감수한다.
+  // 위 두 설정(onDemandEntries/aggregateTimeout)은 "소스 코드가 많이/자주 바뀌는" 경합만 다룬다 —
+  // 그런데 "몰 구조분석"/스크랩이 도는 동안엔 소스 코드가 전혀 안 바뀌어도 로고 화면(Fast Refresh 강제
+  // 새로고침)이 계속 떴다(2026-08-30 실사용 확인). 원인은 watchOptions.ignored가 아예 없어서(webpack
+  // 기본값은 node_modules/.git/.next만 제외) — Playwright가 띄우는 실제 크롬(.playwright-profiles/,
+  // syncManualLoginProfileCopy의 프로필 사본)이 자동화 도중 캐시/IndexedDB 파일을 초당 수십~수백 개씩
+  // 계속 쓰고, 상품 이미지 다운로드(lib/images.ts의 public/scraped/)도 같은 방식으로 파일을 쏟아낸다 —
+  // 둘 다 이 프로젝트 폴더 "안"이라 watcher가 전부 "소스 변경"으로 착각해 재컴파일을 계속 유발한다.
+  // .gitignore에 이미 있는 경로들이지만 .gitignore는 watcher와 무관하다(별개 메커니즘) — 여기서
+  // 명시적으로 빼줘야 한다. dev 전용, 빌드/운영에는 영향 없음.
   webpack: (config, { dev }) => {
-    if (dev) config.watchOptions = { ...config.watchOptions, aggregateTimeout: 3000 }
+    if (dev) {
+      config.watchOptions = {
+        ...config.watchOptions,
+        aggregateTimeout: 3000,
+        ignored: ['**/node_modules/**', '**/.git/**', '**/.playwright-profiles/**', '**/public/scraped/**', '**/.playwright-mcp/**'],
+      }
+    }
     return config
   },
 }

@@ -2105,7 +2105,7 @@ async function sampleMallProfile(
   // 잘못 섞여 들어오는 문제를 겪었다). deep=false(구조 변화 감지)면 무거운 방문 폴백은 건너뛴다.
   step('카테고리 구조 확인 중...')
   let { links: categoryLinks, aiUsed: categoryLinksAiUsed } = await discoverTopLevelCategoryLinks(
-    context, page, mallName, deep, signal, useAi, categoryUrlPattern, knownCategoryExamples, startUrl,
+    context, page, mallName, deep, signal, useAi, categoryUrlPattern, knownCategoryExamples, startUrl, platform,
   )
   // 이번에 카테고리를 찾았으면(어느 방법으로든) URL 패턴을 다시 역산해 "기억"을 최신 상태로 갱신한다 —
   // 카테고리 구성이 바뀐 몰도 계속 정확한 패턴을 유지하기 위함. 이번엔 하나도 못 찾았으면 새로 역산할
@@ -2593,6 +2593,13 @@ const NON_CATEGORY_TEXT_RE = /로그인|회원가입|로그아웃|장바구니|�
 // 스스로 강화되며 영구화될 수 있어, 이 경로 필터를 학습/재사용 두 지점 모두에 넣어 다음 실행이 스스로
 // 회복(구조 스캔/AI로 다시 폴백)할 수 있게 한다.
 const BOARD_PATH_RE = /\/(board|bbs)\//i
+
+/** BOARD_PATH_RE 검사용 — AI가 돌려준 href는 형식이 보장되지 않아(상대경로, 빈 문자열 등) new URL()이
+ *  던질 수 있다. 파싱 실패하면 board 경로가 아니라고 본다(모르는 걸 의심해서 지우기보단, 확실한
+ *  신호가 있을 때만 배제한다는 이 필터들의 기본 원칙과 같다). */
+function safePathname(href: string): string {
+  try { return new URL(href).pathname } catch { return '' }
+}
 
 export interface CategoryMenuScanResult {
   links: CategoryMenuLink[]
@@ -3332,16 +3339,65 @@ async function scanByKnownUrlPattern(page: Page, patternSrc: string): Promise<Ca
  *      프롬프트에 근거로 얹어 판단을 돕는다.
  * visitTextlessFallback이 false면(가벼운 구조 변화 감지 전용) 페이지를 추가로 방문해야 하는
  * 이미지전용 메뉴 폴백은 건너뛴다(sampleMallProfile의 deep=false와 동일한 이유 — 무거운 작업이라
- * "몰 구조분석" 버튼에서만 한다). */
+ * "몰 구조분석" 버튼에서만 한다).
+ *
+ * 0~3단계 전부, 후보를 반환하면 그 즉시 신뢰하고 멈춘다 — 그런데 "그럴듯해 보이는 것을 가장 먼저
+ * 찾은 단계"가 실제로 맞다는 보장이 전혀 없다(사용자 지적, 2026-08-30: "순차적으로 진행하는 한계가
+ * 있는 것 같다"). 소꿉노리(0단계가 학습해둔 bdId= 패턴을 무검증으로 재사용) · 도매토피아(0단계가
+ * tpl= 패턴을, 그것도 안 되면 AI가 사이트 정보페이지를 그대로 채택) 둘 다 이 패턴으로 반복됐다 —
+ * 뒤 단계가 진짜 카테고리를 찾았을 수도 있는데 시도조차 안 된 것. 그래서 각 단계가 후보를 반환해도
+ * looksLikeRealCategoryBatch로 대표 표본만 빠르게 교차검증하고, 실패하면 "이 단계는 못 찾은 것"으로
+ * 치고 다음 단계로 넘어간다 — expandCategoryHubs가 각 항목을 펼칠 때 이미 하는 검증(상품/하위메뉴/
+ * 정렬)과 같은 기준이라, 나중에 어차피 할 확인을 앞당겨 하는 것뿐이다(지금까지의 사고는 전부 "그
+ * 단계가 찾은 것 전부가 가짜"였지 일부만 가짜인 적은 없어서, 전수 검증 없이 표본만으로 충분하다). */
+async function looksLikeRealCategoryBatch(
+  context: BrowserContext, links: CategoryMenuLink[], platform: MallPlatform, productLinkSelector?: string | null,
+): Promise<boolean> {
+  if (!links.length) return false
+  const profile = PLATFORM_PROFILES[platform]
+  const detailPatternSrc = profile.detailUrlPattern?.source
+  const sampleCount = Math.min(3, links.length)
+  const step = Math.max(1, Math.floor(links.length / sampleCount))
+  const sampleLinks = Array.from({ length: sampleCount }, (_, i) => links[Math.min(i * step, links.length - 1)])
+  const topLevelHrefSet = new Set(links.map(l => l.href))
+  const page = await context.newPage()
+  try {
+    // 표본 중 단 하나도 못 열었으면(사이트 일시 장애/네트워크 문제 등, 실사용 확인 2026-08-30 —
+    // 신우가 검증 도중 실제로 접속 자체가 안 됐음) "가짜라서 못 찾은 것"인지 "확인 자체가 안 된 것"인지
+    // 구분할 수 없다 — 이런 경우까지 배제하면 무관한 네트워크 문제로 멀쩡한 카테고리를 통째로 날리는
+    // 게 더 큰 사고다. 최소 한 페이지라도 실제로 열어 확인해봤을 때만 "증거 없음=가짜"로 판단한다.
+    let anyPageLoaded = false
+    for (const link of sampleLinks) {
+      const moved = await page.goto(link.href, { waitUntil: 'domcontentloaded', timeout: 15_000 }).then(() => true).catch(() => false)
+      if (!moved) continue
+      anyPageLoaded = true
+      const probe = await countProductsOnPage(page, productLinkSelector || null, profile.productLinkSelector, detailPatternSrc, link.href).catch(() => ({ count: 0 }))
+      if (probe.count > 0) return true
+      const sub = await scanCategoryMenuRobust(page).catch(() => ({ links: [] as CategoryMenuLink[], textlessHrefs: [] as string[] }))
+      if (sub.links.some(s => !topLevelHrefSet.has(s.href))) return true
+      const hubUrl = page.url()
+      const sortCandidates = await collectSortCandidates(page).catch(() => [])
+      if (sortCandidates.some(sc => looksLikeSortLabel(sc.text) && diffQueryParams(hubUrl, sc.href))) return true
+    }
+    return !anyPageLoaded
+  } finally {
+    await page.close().catch(() => {})
+  }
+}
+
 async function discoverTopLevelCategoryLinks(
   context: BrowserContext, page: Page, mallName: string, visitTextlessFallback: boolean, signal?: AbortSignal, useAi = true,
   categoryUrlPattern?: string | null, knownCategoryExamples?: string[], baseUrl?: string,
+  platform: MallPlatform = 'unknown', productLinkSelector?: string | null,
 ): Promise<{ links: CategoryMenuLink[]; textlessHrefs: string[]; aiUsed: boolean }> {
   if (categoryUrlPattern) {
     const patternLinks = await scanByKnownUrlPattern(page, categoryUrlPattern)
-    if (patternLinks.length >= 2) {
-      console.log(`[카테고리탐지:진단:${mallName}] 기억해둔 URL 패턴(${categoryUrlPattern})으로 ${patternLinks.length}개 찾음`)
+    if (patternLinks.length >= 2 && await looksLikeRealCategoryBatch(context, patternLinks, platform, productLinkSelector)) {
+      console.log(`[카테고리탐지:진단:${mallName}] 기억해둔 URL 패턴(${categoryUrlPattern})으로 ${patternLinks.length}개 찾음(표본검증 통과)`)
       return { links: patternLinks, textlessHrefs: [], aiUsed: false }
+    }
+    if (patternLinks.length >= 2) {
+      console.log(`[카테고리탐지:진단:${mallName}] 기억해둔 URL 패턴(${categoryUrlPattern})으로 ${patternLinks.length}개 찾았지만 표본검증 실패 — 다음 단계로`)
     }
   }
 
@@ -3357,8 +3413,8 @@ async function discoverTopLevelCategoryLinks(
   // 방금 이런 페이지로 이동시켰을 가능성이 높고, scanCategoryMenuRobust(클래스명 기반)가 못 찾는
   // 마크업(신우처럼 cat/lnb/gnb류 클래스가 아예 없는 몰)에서도 통한다.
   const overviewLinks = await scanCategoryOverviewPage(page)
-  if (overviewLinks.length) {
-    console.log(`[카테고리탐지:진단:${mallName}] "제목+목록" 구조로 ${overviewLinks.length}개 찾음`)
+  if (overviewLinks.length && await looksLikeRealCategoryBatch(context, overviewLinks, platform, productLinkSelector)) {
+    console.log(`[카테고리탐지:진단:${mallName}] "제목+목록" 구조로 ${overviewLinks.length}개 찾음(표본검증 통과)`)
     return { links: overviewLinks, textlessHrefs: [], aiUsed: false }
   }
 
@@ -3374,18 +3430,35 @@ async function discoverTopLevelCategoryLinks(
       links = [...links, ...extra]
     }
   }
-  if (links.length) return { links, textlessHrefs, aiUsed: false }
+  if (links.length && await looksLikeRealCategoryBatch(context, links, platform, productLinkSelector)) {
+    return { links, textlessHrefs, aiUsed: false }
+  }
 
   // 규칙 기반이 전부 실패했을 때만 AI로 넘어간다 — 마지막 수단이라 시간을 넉넉히 준다.
   if (useAi) {
     const aiCandidates = await collectAllPageLinks(page, baseUrl ? new URL(baseUrl).origin : undefined)
     console.log(`[카테고리탐지:진단:${mallName}] 규칙 기반 실패 → AI 시도(후보 ${aiCandidates.length}개)`)
-    const aiLinks = await detectCategoryLinksWithAI(mallName, aiCandidates, undefined, signal, knownCategoryExamples).catch(() => [])
+    // 규칙 기반 스캔(scanCategoryMenu 등)은 NON_CATEGORY_TEXT_RE/BOARD_PATH_RE로 공지/문의 게시판을
+    // 걸러내지만, AI 결과에는 그 필터가 전혀 안 걸려 있었다 — 실사용 확인(2026-08-30, 소꿉노리):
+    // 구조 스캔이 이 몰의 진짜 카테고리 메뉴를 못 찾아 AI로 넘어갔는데, AI가 홈페이지 푸터의 "NOTICE"
+    // 공지 위젯(href가 board/list.php)을 카테고리로 잘못 골라, 그 뒤 expandCategoryHubs가 그 "카테고리"를
+    // 펼치며 진짜 상품 카테고리들까지 전부 "NOTICE > ..." 접두어로 오염시켰다. AI 결과에도 규칙 기반과
+    // 같은 필터를 반드시 거치게 한다.
+    const aiLinks = (await detectCategoryLinksWithAI(mallName, aiCandidates, undefined, signal, knownCategoryExamples).catch(() => []))
+      .filter(l => !NON_CATEGORY_TEXT_RE.test(l.name) && !BOARD_PATH_RE.test(safePathname(l.href)))
     console.log(`[카테고리탐지:진단:${mallName}] AI 결과 ${aiLinks.length}개`)
-    if (aiLinks.length) return { links: aiLinks, textlessHrefs, aiUsed: true }
+    if (aiLinks.length && await looksLikeRealCategoryBatch(context, aiLinks, platform, productLinkSelector)) {
+      return { links: aiLinks, textlessHrefs, aiUsed: true }
+    }
+    if (aiLinks.length) {
+      console.log(`[카테고리탐지:진단:${mallName}] AI 결과 ${aiLinks.length}개 찾았지만 표본검증 실패`)
+    }
   }
 
-  return { links, textlessHrefs, aiUsed: false }
+  // 모든 단계가 후보를 못 찾았거나 표본검증을 통과 못 했다 — 검증 안 된 결과(도매토피아의 "판촉물인쇄"류)를
+  // 자신 있게 돌려주는 것보다, 못 찾았다고 정직하게 빈 목록을 반환하는 편이 낫다. links가 남아있어도
+  // (규칙 기반 결과가 검증에 실패한 경우) 여기까지 왔다는 건 이미 못 미더운 상태라는 뜻이라 비운다.
+  return { links: [], textlessHrefs, aiUsed: false }
 }
 
 interface CategoryLabel {
@@ -5307,8 +5380,12 @@ async function expandCategoryHubs(
       realChildren = sub.links.filter(s => !topLevelHrefSet.has(s.href))
       if (!realChildren.length) {
         const aiSubCandidates = await collectAllPageLinks(workerPage, baseUrl)
+        // discoverTopLevelCategoryLinks의 AI 폴백과 같은 이유(위 NON_CATEGORY_TEXT_RE/BOARD_PATH_RE
+        // 주석 참고, 2026-08-30 소꿉노리) — 규칙 기반(scanCategoryMenuRobust)엔 이 필터가 있지만 AI
+        // 결과엔 없어서, 이 허브의 진짜 하위 카테고리를 찾다가 오히려 공지/문의 게시글을 "하위
+        // 카테고리"로 잘못 채택하는 사고가 여기서도 그대로 났다.
         realChildren = (await detectCategoryLinksWithAI(mallName, aiSubCandidates, c.name, signal).catch(() => []))
-          .filter(s => !topLevelHrefSet.has(s.href))
+          .filter(s => !topLevelHrefSet.has(s.href) && !NON_CATEGORY_TEXT_RE.test(s.name) && !BOARD_PATH_RE.test(safePathname(s.href)))
         if (realChildren.length) aiUsed = true
       }
       if (realChildren.length) {
@@ -5322,8 +5399,15 @@ async function expandCategoryHubs(
       // 계속 카테고리 목록에 남던 사고(2026-08-30, 소꿉노리)를 막는 안전장치(사용자 승인, 2026-08-30 —
       // 상품이 실제로 있는 카테고리는 위에서 이미 걸러져 이 분기 자체를 안 타므로, 정렬 UI가 없어서
       // 생기는 진짜 카테고리 오탐 위험은 "상품 0개 + 하위메뉴 0개"인 경우로 좁혀져 있다).
+      // looksLikeSortLabel만으론 부족했다(실사용 확인, 2026-08-30, 도매토피아) — collectSortCandidates는
+      // 페이지 전체 링크를 훑는데, 사이트 공통 헤더의 "신상품"(신상 매칭)/"주문배송조회"(조회 매칭) 같은
+      // 무관한 사이트 전역 내비게이션 링크가 키워드에 우연히 걸려 모든 페이지에서 "정렬 있음"으로 오판됐다
+      // — 위 "정렬 옵션 확인"(2155-2172행 근처)과 똑같이, diffQueryParams로 "지금 이 허브 페이지와 같은
+      // 경로에서 쿼리파라미터만 다른 링크"만 진짜 정렬 후보로 인정해야 다른 페이지로 튀는 내비게이션
+      // 링크를 걸러낼 수 있다.
+      const hubUrl = workerPage.url()
       const sortCandidates = await collectSortCandidates(workerPage).catch(() => [])
-      const hasSort = sortCandidates.some(sc => looksLikeSortLabel(sc.text))
+      const hasSort = sortCandidates.some(sc => looksLikeSortLabel(sc.text) && diffQueryParams(hubUrl, sc.href))
       expandedByIndex[i] = hasSort ? [c] : []
     }
   }
@@ -5360,6 +5444,7 @@ async function discoverCategoryLinksInner(opts: ScrapeOptions, signal: AbortSign
         ? await getCategoryMemory(opts.siteId) : { pattern: null, manualSamples: [] }
       const { links: topLevelLinks, aiUsed: topLevelAiUsed } = await discoverTopLevelCategoryLinks(
         context, scanPage, mallName, true, signal, true, categoryUrlPattern, knownCategoryExamples, url,
+        platform, opts.productLinkSelector,
       )
       // 대분류=상품목록인 카테고리와 대분류=중분류허브(그 자체엔 상품이 없고 하위 메뉴로만 이어짐)인
       // 카테고리가 섞여 있는 몰이 있다(모자사러 실사용 확인, 2026-08-17) — expandCategoryHubs가 각
@@ -5403,7 +5488,10 @@ export async function expandCategoryChildren(
       const platform = await detectMallPlatform(scanPage)
       const mallName = opts.siteId ? (await siteInfo(opts.siteId)).name : new URL(parentUrl).hostname
       const aiCandidates = await collectAllPageLinks(scanPage, new URL(parentUrl).origin)
-      let children = await detectCategoryLinksWithAI(mallName, aiCandidates, parentName || '지금 보고 있는 카테고리').catch(() => [])
+      // 위 discoverTopLevelCategoryLinks/expandCategoryHubs의 AI 폴백과 같은 이유(2026-08-30 소꿉노리) —
+      // AI 결과에 공지/문의 게시판 링크가 섞여 나와도 걸러낼 필터가 없었다.
+      let children = (await detectCategoryLinksWithAI(mallName, aiCandidates, parentName || '지금 보고 있는 카테고리').catch(() => []))
+        .filter(c => !NON_CATEGORY_TEXT_RE.test(c.name) && !BOARD_PATH_RE.test(safePathname(c.href)))
       const aiUsed = children.length > 0
       // 실사용 중 "하위 메뉴가 없는 카테고리를 체크했더니 무관한 대분류가 잔뜩 딸려왔다"는 문제가 있었는데
       // (오토카필, 2026-08-27), 이 함수 자체엔 진단 로그가 전혀 없어 서버 로그만으로 원인(정말 하위

@@ -71,6 +71,7 @@ Ctrl(⌘)+클릭하면 바로 이동하고, 그 문서를 열어두면 오른쪽
 - [[scrape-memory-orphan-cleanup-and-concurrency-mode]] — orphan Chrome 정리 + 동시 처리 전환
 - [[sharp-duplicate-version-dll-conflict]] — sharp 중복 버전 Windows DLL 충돌
 - [[back-navigation-trap-no-longer-forces-dashboard]] — 뒤로가기 트랩이 화면 강제 이동시키던 문제
+- [[external-service-readiness]] — 대외 서비스화(범용 솔루션) 준비 검토(인프라/소스/운영)
 
 ## UI 공통 · 기타
 

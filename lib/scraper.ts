@@ -18,6 +18,7 @@ import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
 import { runAutoAnalysis } from './scrape/adjustment'
 import pool, { decryptSecret } from './db'
+import { acquireKeepAwake, releaseKeepAwake } from './keepAwake'
 
 const execFileAsync = promisify(execFile)
 
@@ -372,11 +373,17 @@ export async function withSiteLock<T>(key: number | string | undefined, label: s
   siteLocks.set(key, myTail)
   try {
     await prevTail
+    // withSiteLock으로 잠기는 작업(몰 구조분석/카테고리 불러오기/스크랩 시작 등 전부)이 하나라도 진행
+    // 중인 동안 PC가 절전모드로 빠지지 않게 한다(사용자 요청, 2026-08-30 — lib/keepAwake.ts 참고) —
+    // siteLockStatus가 비어있었다가(0개) 지금 처음 하나가 생기는 순간에만 켜면 되므로, 이 Map의 크기로
+    // "지금 이 프로세스 안에 진행 중인 작업이 하나라도 있는지"를 그대로 판단한다.
+    if (siteLockStatus.size === 0) acquireKeepAwake()
     siteLockStatus.set(key, { label, since: Date.now() })
     return await fn()
   } finally {
     siteLockStatus.delete(key)
     siteLockDetail.delete(key)
+    if (siteLockStatus.size === 0) releaseKeepAwake()
     releaseTail()
     if (siteLocks.get(key) === myTail) siteLocks.delete(key)
   }

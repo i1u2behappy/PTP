@@ -2126,7 +2126,7 @@ async function sampleMallProfile(
     // platform이 아직 'unknown'이면(collectProductUrls가 목록 인식에 실패한 경우) 여기서 먼저 확인한다 —
     // countProductsOnPage가 플랫폼별 셀렉터를 골라 쓰므로, 'unknown'인 채로 넘기면 정확도가 떨어진다.
     const expandPlatform = platform === 'unknown' ? await detectMallPlatform(page).catch(() => 'unknown' as MallPlatform) : platform
-    const expansion = await expandCategoryHubs(context, categoryLinks, mallName, expandPlatform, new URL(startUrl).origin, {}, signal)
+    const expansion = await expandCategoryHubs(context, categoryLinks, mallName, expandPlatform, new URL(startUrl).origin, {}, signal, siteId)
     categoryLinks = expansion.links
     categoryLinksAiUsed = categoryLinksAiUsed || expansion.aiUsed
   }
@@ -5307,9 +5307,21 @@ async function isBotBlockPage(page: Page): Promise<boolean> {
  *  보여주게 한다). 카테고리 수만큼 페이지를 열어야 해 시간이 걸리므로, 자주 도는 "구조 변화 감지"
  *  (deep=false, 로그인 확인/스크랩 시작마다 자동으로 돎)에서는 호출하지 않는다 — 그쪽까지 이 무거운
  *  단계를 넣으면 원래 목적(가벼운 변화 감지)을 해친다. */
+// expandCategoryHubs가 허브 하나당 반복 호출하는 detectCategoryLinksWithAI 전용 — 최상위 탐지(몰 전체에
+// 한 번뿐)는 CATEGORY_AI_TIMEOUT_MS(60초)를 그대로 쓰지만, 허브 펼치기는 카테고리 개수만큼 반복되고
+// 실패해도 바로 아래 정렬체크 안전망이 있어 상대적으로 저부담이다 — 실패시 대기시간을 절반 이하로
+// 줄인다(도매토피아 실사용 확인, 2026-08-30: 규칙기반이 실패하는 몰에서 60초씩 여러 번 쌓여 20분 넘게
+// 걸림).
+const HUB_EXPANSION_AI_TIMEOUT_MS = 20_000
+// 이번 몰 구조분석 실행 "전체"에서 허브 펼치기 AI 폴백을 시도할 최대 횟수 — Ollama 호출이 전역 대기열
+// (withOllamaQueue)로 직렬화돼 있어, 허브가 아무리 많아도 이 상한을 넘기면 그 뒤로는 AI 없이 정렬/상품
+// 체크만으로 판단한다. 최악의 소요시간 자체를 예측 가능한 범위로 묶어두기 위함 — 도매토피아처럼 AI가
+// 별 도움이 안 되는 몰(정적 페이지라 하위메뉴 자체가 없음)에서는 정확도 손실이 거의 없다.
+const MAX_HUB_AI_ATTEMPTS_PER_RUN = 5
+
 async function expandCategoryHubs(
   context: BrowserContext, categoryLinks: CategoryMenuLink[], mallName: string, platform: MallPlatform,
-  baseUrl: string, concurrencyOpts: ScrapeOptions, signal?: AbortSignal,
+  baseUrl: string, concurrencyOpts: ScrapeOptions, signal?: AbortSignal, siteId?: number,
 ): Promise<CategoryExpansionResult> {
   let aiUsed = false
   const profile = PLATFORM_PROFILES[platform]
@@ -5325,6 +5337,7 @@ async function expandCategoryHubs(
   const topLevelHrefSet = new Set(categoryLinks.map(c => c.href))
   let cursor = 0
   let loginBlockedExpansion = false
+  let hubAiAttempts = 0
   // 차단이 감지되면 남은 카테고리 전체를 워커 1개로 낮춰 계속 두드리지 않는다 — 이 실행 안에서는 다시
   // 안 올린다(카테고리 개수가 보통 수십 개 안팎이라, lib/scraper.ts의 상품 스크랩 AIMD처럼 서서히
   // 회복시키면 처리량 대부분이 낮은 동시성에 갇혀 정상 상황(차단이 아예 없는 대다수 몰)에서도 매번
@@ -5335,6 +5348,114 @@ async function expandCategoryHubs(
     return workerPage.goto(href, { waitUntil: 'domcontentloaded', timeout: 20_000 })
       .then(() => countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl))
       .catch(() => ({ count: 0, isLoginPage: false, fingerprint: '', hrefs: [] }))
+  }
+  /** 카테고리 하나를 확장한다 — 상품/하위메뉴/정렬 중 뭘 근거로 판단했든 결과(빈 배열이면 "카테고리
+   *  아님")만 돌려준다. 진행률 보고(doneCount 증가)를 호출부 한 곳에만 두기 위해 이 함수 안에서는
+   *  early return만 하고 expandedByIndex에 직접 쓰지 않는다. */
+  async function expandOne(workerPage: Page, c: CategoryMenuLink): Promise<CategoryMenuLink[]> {
+    // 카테고리 하나당 시간이 어디서 새는지(순수 페이지 로딩인지, 봇차단 재시도 슬립인지, AI인지) 사후에
+    // 되짚어볼 방법이 전혀 없었다(2026-08-30, 도매토피아 339개 실행 — 전체 소요시간은 보여도 항목별
+    // 내역이 안 보여 추측에 의존해야 했음) — 단계별 소요시간을 재서, 이 항목 하나가 느렸으면(8초 이상)
+    // 그 이유와 함께 남긴다. 매번 로그를 남기면 카테고리 수만큼 줄이 쌓이니 "느린 것만" 남긴다.
+    const itemStart = Date.now()
+    let probeMs = 0
+    let blockRetryMs = 0
+    let probe = await (async () => { const t = Date.now(); const r = await probeOnce(workerPage, c.href); probeMs += Date.now() - t; return r })()
+    // isLoginPage(로그인 폼)와는 별개 신호 — 봇 차단 인터스티셜은 count===0인데 로그인 폼도 없다.
+    // 재시도 전에 확인해 진짜 빈 페이지에 매번 isBotBlockPage를 낭비하지 않는다.
+    let botBlocked = !probe.isLoginPage && probe.count === 0 && await isBotBlockPage(workerPage)
+    let blockRetries = 0
+    for (let attempt = 0; botBlocked && attempt < BLOCK_RETRY_COUNT; attempt++) {
+      blockRetries++
+      const tSleep = Date.now()
+      await sleep(5_000 * (attempt + 1))
+      blockRetryMs += Date.now() - tSleep
+      const tProbe = Date.now()
+      probe = await probeOnce(workerPage, c.href)
+      probeMs += Date.now() - tProbe
+      botBlocked = !probe.isLoginPage && probe.count === 0 && await isBotBlockPage(workerPage)
+    }
+    const logIfSlow = (outcome: string) => {
+      const totalMs = Date.now() - itemStart
+      if (totalMs >= 8_000) {
+        console.log(`[허브확장:진단:${mallName}] ${c.href} — ${totalMs}ms(페이지방문 ${probeMs}ms, 차단재시도 ${blockRetryMs}ms, 재시도 ${blockRetries}회) → ${outcome}`)
+      }
+    }
+    if (botBlocked) {
+      // 재시도해도 안 풀림 — 원래 항목을 미확장인 채로 남기고, 하위구조 확인 자체가 로그인 벽에 막힌
+      // 것과 같은 방식으로 취급한다(shouldKeepPreviousCategoryLinks가 이 신호로 부실한 결과의 캐시
+      // 덮어쓰기를 막아준다 — lib/scrape/categoryCachePolicy.ts 참고).
+      loginBlockedExpansion = true
+      activeLimit = 1
+      logIfSlow('차단 지속(그대로 유지)')
+      return [c]
+    }
+    if (probe.isLoginPage) loginBlockedExpansion = true
+    if (probe.count > 0 || probe.isLoginPage) { logIfSlow(`상품 ${probe.count}개`); return [c] }
+    // 하위 메뉴 탐지도 최상위 탐지와 같은 이유로 규칙 기반(scanCategoryMenuRobust)을 먼저 시도하고,
+    // 실패해야 AI로 폴백한다(discoverTopLevelCategoryLinks 순서 변경, 사용자 요청 2026-08-26과 같은
+    // 패턴을 여기도 맞춘다 — 이 함수가 안 맞춰져 있던 게 실제로 "펫토리 몰구조분석 수십 분" 원인이었다,
+    // 2026-08-29: 허브 카테고리가 많은 몰은 그 개수만큼 Ollama 전역 대기열에 최대 60초씩 직렬로 쌓여
+    // AI를 먼저 타면 몇십 분까지 걸릴 수 있는데, 규칙 기반은 페이지당 즉시 끝난다).
+    let realChildren: CategoryMenuLink[]
+    const subStart = Date.now()
+    const sub = await scanCategoryMenuRobust(workerPage)
+    const subMs = Date.now() - subStart
+    realChildren = sub.links.filter(s => !topLevelHrefSet.has(s.href))
+    let aiMs = 0
+    if (!realChildren.length && hubAiAttempts < MAX_HUB_AI_ATTEMPTS_PER_RUN) {
+      hubAiAttempts++
+      const aiSubCandidates = await collectAllPageLinks(workerPage, baseUrl)
+      // discoverTopLevelCategoryLinks의 AI 폴백과 같은 이유(위 NON_CATEGORY_TEXT_RE/BOARD_PATH_RE
+      // 주석 참고, 2026-08-30 소꿉노리) — 규칙 기반(scanCategoryMenuRobust)엔 이 필터가 있지만 AI
+      // 결과엔 없어서, 이 허브의 진짜 하위 카테고리를 찾다가 오히려 공지/문의 게시글을 "하위
+      // 카테고리"로 잘못 채택하는 사고가 여기서도 그대로 났다.
+      const aiStart = Date.now()
+      realChildren = (await detectCategoryLinksWithAI(mallName, aiSubCandidates, c.name, signal, undefined, HUB_EXPANSION_AI_TIMEOUT_MS).catch(() => []))
+        .filter(s => !topLevelHrefSet.has(s.href) && !NON_CATEGORY_TEXT_RE.test(s.name) && !BOARD_PATH_RE.test(safePathname(s.href)))
+      aiMs = Date.now() - aiStart
+      if (realChildren.length) aiUsed = true
+    }
+    if (realChildren.length) {
+      const totalMs = Date.now() - itemStart
+      if (totalMs >= 8_000) {
+        console.log(`[허브확장:진단:${mallName}] ${c.href} — ${totalMs}ms(페이지방문 ${probeMs}ms, 하위메뉴스캔 ${subMs}ms, AI ${aiMs}ms) → 하위카테고리 ${realChildren.length}개`)
+      }
+      return realChildren.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
+    }
+    // 상품도 하위 메뉴도 못 찾은 빈 허브 — 진짜로 상품이 없는 카테고리일 수도 있으니 기본은 그대로
+    // 남긴다. 다만 이 페이지에 정렬 옵션조차 하나도 안 보이면(collectSortCandidates — 위 몰 전체 정렬
+    // 확인과 같은 가벼운 DOM 판정만, 클릭 검증까지는 안 해 비용이 낮다) 애초에 상품 목록 페이지가
+    // 아닐 가능성이 높다고 보고 통째로 뺀다 — 공지/문의 게시판 글이 "상품 0개짜리 빈 허브"로 오인돼
+    // 계속 카테고리 목록에 남던 사고(2026-08-30, 소꿉노리)를 막는 안전장치(사용자 승인, 2026-08-30 —
+    // 상품이 실제로 있는 카테고리는 위에서 이미 걸러져 이 분기 자체를 안 타므로, 정렬 UI가 없어서
+    // 생기는 진짜 카테고리 오탐 위험은 "상품 0개 + 하위메뉴 0개"인 경우로 좁혀져 있다).
+    // looksLikeSortLabel만으론 부족했다(실사용 확인, 2026-08-30, 도매토피아) — collectSortCandidates는
+    // 페이지 전체 링크를 훑는데, 사이트 공통 헤더의 "신상품"(신상 매칭)/"주문배송조회"(조회 매칭) 같은
+    // 무관한 사이트 전역 내비게이션 링크가 키워드에 우연히 걸려 모든 페이지에서 "정렬 있음"으로 오판됐다
+    // — 위 "정렬 옵션 확인"(2155-2172행 근처)과 똑같이, diffQueryParams로 "지금 이 허브 페이지와 같은
+    // 경로에서 쿼리파라미터만 다른 링크"만 진짜 정렬 후보로 인정해야 다른 페이지로 튀는 내비게이션
+    // 링크를 걸러낼 수 있다.
+    const hubUrl = workerPage.url()
+    const sortCandidates = await collectSortCandidates(workerPage).catch(() => [])
+    const hasSort = sortCandidates.some(sc => looksLikeSortLabel(sc.text) && diffQueryParams(hubUrl, sc.href))
+    logIfSlow(hasSort ? '정렬 있음(유지)' : '빈 허브(배제)')
+    return hasSort ? [c] : []
+  }
+  // 서버 쪽엔 개발자모드 확장(extension-poc/background.js의 runExpandCategories)에 이미 있던 카테고리별
+  // 진행률 보고가 빠져있었다(2026-08-30 발견 — 도매토피아가 20분 넘게 걸리는 동안 지금 몇 번째를 처리
+  // 중인지조차 볼 방법이 없었음). 완료 개수 기준으로 평균 소요시간을 내 남은 개수에 곱하는 식으로 예상
+  // 잔여시간도 같이 보여준다 — 사전에 정확히 예측하긴 불가능하니(몇 개가 AI까지 가야 할지는 실제로 돌려
+  //봐야 앎), 진행하면서 점점 정확해지는 방식을 택했다.
+  const expandStartedAt = Date.now()
+  let doneCount = 0
+  function reportExpandProgress() {
+    if (siteId == null) return
+    const elapsedMs = Date.now() - expandStartedAt
+    const avgMs = doneCount > 0 ? elapsedMs / doneCount : 0
+    const remaining = categoryLinks.length - doneCount
+    const etaText = avgMs > 0 && remaining > 0 ? ` — 남은 예상 ${Math.round(avgMs * remaining / 1000)}초` : ''
+    setSiteLockDetail(siteId, `카테고리 하위구조 확인 중 (${doneCount}/${categoryLinks.length})${etaText}`)
   }
   async function expandWorker(workerPage: Page, workerIndex: number) {
     while (true) {
@@ -5350,68 +5471,15 @@ async function expandCategoryHubs(
       const i = cursor++
       if (i >= categoryLinks.length) return
       const c = categoryLinks[i]
-      let probe = await probeOnce(workerPage, c.href)
-      // isLoginPage(로그인 폼)와는 별개 신호 — 봇 차단 인터스티셜은 count===0인데 로그인 폼도 없다.
-      // 재시도 전에 확인해 진짜 빈 페이지에 매번 isBotBlockPage를 낭비하지 않는다.
-      let botBlocked = !probe.isLoginPage && probe.count === 0 && await isBotBlockPage(workerPage)
-      for (let attempt = 0; botBlocked && attempt < BLOCK_RETRY_COUNT; attempt++) {
-        await sleep(5_000 * (attempt + 1))
-        probe = await probeOnce(workerPage, c.href)
-        botBlocked = !probe.isLoginPage && probe.count === 0 && await isBotBlockPage(workerPage)
-      }
-      if (botBlocked) {
-        // 재시도해도 안 풀림 — 원래 항목을 미확장인 채로 남기고, 하위구조 확인 자체가 로그인 벽에 막힌
-        // 것과 같은 방식으로 취급한다(shouldKeepPreviousCategoryLinks가 이 신호로 부실한 결과의 캐시
-        // 덮어쓰기를 막아준다 — lib/scrape/categoryCachePolicy.ts 참고).
-        expandedByIndex[i] = [c]
-        loginBlockedExpansion = true
-        activeLimit = 1
-        continue
-      }
-      if (probe.isLoginPage) loginBlockedExpansion = true
-      if (probe.count > 0 || probe.isLoginPage) { expandedByIndex[i] = [c]; continue }
-      // 하위 메뉴 탐지도 최상위 탐지와 같은 이유로 규칙 기반(scanCategoryMenuRobust)을 먼저 시도하고,
-      // 실패해야 AI로 폴백한다(discoverTopLevelCategoryLinks 순서 변경, 사용자 요청 2026-08-26과 같은
-      // 패턴을 여기도 맞춘다 — 이 함수가 안 맞춰져 있던 게 실제로 "펫토리 몰구조분석 수십 분" 원인이었다,
-      // 2026-08-29: 허브 카테고리가 많은 몰은 그 개수만큼 Ollama 전역 대기열에 최대 60초씩 직렬로 쌓여
-      // AI를 먼저 타면 몇십 분까지 걸릴 수 있는데, 규칙 기반은 페이지당 즉시 끝난다).
-      let realChildren: CategoryMenuLink[]
-      const sub = await scanCategoryMenuRobust(workerPage)
-      realChildren = sub.links.filter(s => !topLevelHrefSet.has(s.href))
-      if (!realChildren.length) {
-        const aiSubCandidates = await collectAllPageLinks(workerPage, baseUrl)
-        // discoverTopLevelCategoryLinks의 AI 폴백과 같은 이유(위 NON_CATEGORY_TEXT_RE/BOARD_PATH_RE
-        // 주석 참고, 2026-08-30 소꿉노리) — 규칙 기반(scanCategoryMenuRobust)엔 이 필터가 있지만 AI
-        // 결과엔 없어서, 이 허브의 진짜 하위 카테고리를 찾다가 오히려 공지/문의 게시글을 "하위
-        // 카테고리"로 잘못 채택하는 사고가 여기서도 그대로 났다.
-        realChildren = (await detectCategoryLinksWithAI(mallName, aiSubCandidates, c.name, signal).catch(() => []))
-          .filter(s => !topLevelHrefSet.has(s.href) && !NON_CATEGORY_TEXT_RE.test(s.name) && !BOARD_PATH_RE.test(safePathname(s.href)))
-        if (realChildren.length) aiUsed = true
-      }
-      if (realChildren.length) {
-        expandedByIndex[i] = realChildren.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
-        continue
-      }
-      // 상품도 하위 메뉴도 못 찾은 빈 허브 — 진짜로 상품이 없는 카테고리일 수도 있으니 기본은 그대로
-      // 남긴다. 다만 이 페이지에 정렬 옵션조차 하나도 안 보이면(collectSortCandidates — 위 몰 전체 정렬
-      // 확인과 같은 가벼운 DOM 판정만, 클릭 검증까지는 안 해 비용이 낮다) 애초에 상품 목록 페이지가
-      // 아닐 가능성이 높다고 보고 통째로 뺀다 — 공지/문의 게시판 글이 "상품 0개짜리 빈 허브"로 오인돼
-      // 계속 카테고리 목록에 남던 사고(2026-08-30, 소꿉노리)를 막는 안전장치(사용자 승인, 2026-08-30 —
-      // 상품이 실제로 있는 카테고리는 위에서 이미 걸러져 이 분기 자체를 안 타므로, 정렬 UI가 없어서
-      // 생기는 진짜 카테고리 오탐 위험은 "상품 0개 + 하위메뉴 0개"인 경우로 좁혀져 있다).
-      // looksLikeSortLabel만으론 부족했다(실사용 확인, 2026-08-30, 도매토피아) — collectSortCandidates는
-      // 페이지 전체 링크를 훑는데, 사이트 공통 헤더의 "신상품"(신상 매칭)/"주문배송조회"(조회 매칭) 같은
-      // 무관한 사이트 전역 내비게이션 링크가 키워드에 우연히 걸려 모든 페이지에서 "정렬 있음"으로 오판됐다
-      // — 위 "정렬 옵션 확인"(2155-2172행 근처)과 똑같이, diffQueryParams로 "지금 이 허브 페이지와 같은
-      // 경로에서 쿼리파라미터만 다른 링크"만 진짜 정렬 후보로 인정해야 다른 페이지로 튀는 내비게이션
-      // 링크를 걸러낼 수 있다.
-      const hubUrl = workerPage.url()
-      const sortCandidates = await collectSortCandidates(workerPage).catch(() => [])
-      const hasSort = sortCandidates.some(sc => looksLikeSortLabel(sc.text) && diffQueryParams(hubUrl, sc.href))
-      expandedByIndex[i] = hasSort ? [c] : []
+      expandedByIndex[i] = await expandOne(workerPage, c)
+      // 여러 워커가 동시에 완료를 셀 수 있지만(경쟁), 진행률/ETA 표시 용도라 순서가 살짝 뒤바뀌어도
+      // 무해하다(await 없는 동기 구간이라 doneCount++ 자체는 원자적).
+      doneCount++
+      reportExpandProgress()
     }
   }
   if (categoryLinks.length) {
+    reportExpandProgress()
     const workerPages = await Promise.all(Array.from({ length: EXPAND_CONCURRENCY }, () => context.newPage()))
     await Promise.all(workerPages.map((p, idx) => expandWorker(p, idx)))
     await Promise.all(workerPages.map(p => p.close().catch(() => {})))
@@ -5452,7 +5520,7 @@ async function discoverCategoryLinksInner(opts: ScrapeOptions, signal: AbortSign
       // ("몰 구조분석")과 공유하는 함수다(2026-08-27, 절충안 — 몰 구조분석도 어차피 몰에 들어간 김에
       // 같은 캐시를 최신화해둔다).
       const baseUrl = new URL(url).origin
-      const expansion = await expandCategoryHubs(context, topLevelLinks, mallName, platform, baseUrl, opts, signal)
+      const expansion = await expandCategoryHubs(context, topLevelLinks, mallName, platform, baseUrl, opts, signal, opts.siteId)
       // 화면에 "AI가 실제로 이번 결과에 기여했는지"를 작게 표시해주기 위한 신호(사용자 요청, 2026-08-18) —
       // 최상위 탐지든 허브 하위메뉴 탐지든 AI 결과를 하나라도 그대로 채택했으면 true.
       const aiUsed = topLevelAiUsed || expansion.aiUsed

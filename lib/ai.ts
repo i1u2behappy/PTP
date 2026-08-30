@@ -542,6 +542,11 @@ export async function detectCategoryLinksWithAI(
    *  카테고리다"라는 구체적인 기준을 주면 후보가 많아도 판단이 쉬워진다(사용자 요청, 2026-08-26: "수동
    *  선택 작업한 내용을 참고하여 AI가 참고해서 분석 가능하도록"). */
   knownExamples?: string[],
+  /** 기본은 CATEGORY_AI_TIMEOUT_MS(60초, 몰 전체에서 한 번뿐인 최상위 탐지용) — expandCategoryHubs가
+   *  허브마다 반복 호출할 땐(도매토피아 실사용 확인, 2026-08-30: 규칙기반이 실패하는 몰에서 허브 개수만큼
+   *  최대 60초씩 전역 Ollama 대기열에 쌓여 몰 구조분석이 20분 넘게 걸림) 실패해도 정렬체크 안전망이
+   *  있으니 더 짧은 타임아웃을 넘겨 최악의 소요시간 자체를 줄인다. */
+  timeoutMs: number = CATEGORY_AI_TIMEOUT_MS,
 ): Promise<CategoryLinkCandidate[]> {
   if (!linkCandidates.length) return []
   // 후보가 많을수록(실사용 확인: 몰 하나에 100개 넘는 링크도 흔함) 프롬프트가 길어져 CPU 전용 로컬
@@ -571,7 +576,7 @@ ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
   const indices = await pickIndicesWithOllama(
     prompt, 'set_category_link_indices',
     '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
-    signal, CATEGORY_AI_TIMEOUT_MS,
+    signal, timeoutMs,
   )
   const seen = new Set<number>()
   return indices

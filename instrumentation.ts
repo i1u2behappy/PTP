@@ -23,16 +23,34 @@ export function register() {
   // 이 서버가 시작될 때 워커가 이미 떠 있는지 확인하고 없으면 자동으로 띄운다 — "그냥 npm run dev만
   // 실행하면 된다"는 기존 경험을 그대로 유지하기 위함.
   ensureWorkerRunning().catch(e => console.error('[worker] 자동 기동 실패 — npm run worker로 직접 띄워주세요:', e))
+
+  // 워커가 "운영 중에" 죽는 경우(예상 못한 크래시, DB 8분 재시도도 다 실패 등)를 아무도 못 살려주는
+  // 공백이 있었다(2026-08-30 실사용 확인 — lib/workerRestart.ts의 자동재시작은 워커 자신의 setInterval에
+  // 기대는데, 워커가 완전히 죽으면 그 감시 코드도 같이 죽어 스스로는 못 살아난다). 이 dev 서버 프로세스는
+  // 워커와 별개 프로세스라 워커가 죽어도 계속 살아있으니, 여기서 30초마다 다시 확인해 죽어있으면
+  // 되살리는 감시자 역할까지 겸한다 — ensureWorkerRunning 자체가 이미 "떠 있으면 그냥 둔다"는 멱등
+  // 로직이라 그대로 반복 호출하면 된다.
+  setInterval(() => {
+    ensureWorkerRunning().catch(e => console.error('[worker] 주기 확인 중 재기동 실패:', e))
+  }, 30_000)
 }
+
+// 워커 자신의 DB 연결 재시도가 최대 8분까지 걸릴 수 있다(worker/index.ts의 initDbWithRetry) — 그동안은
+// /health가 응답하지 않으므로, 그 8분 내내 30초마다 "아직도 안 떴네" 하고 또 다른 워커를 새로 띄우면
+// 같은 포트를 두고 여러 프로세스가 경쟁하는 낭비가 생긴다. 마지막으로 새로 띄운 시각을 기억해뒀다가,
+// 워커의 최대 재시도 시간보다 넉넉히 긴 쿨다운(10분) 안에는 재시도하지 않는다.
+let lastSpawnAt = 0
+const SPAWN_COOLDOWN_MS = 10 * 60 * 1000
 
 async function ensureWorkerRunning() {
   if (process.env.NEXT_RUNTIME === 'edge') return
   const port = Number(process.env.WORKER_PORT) || 4801
-  const alreadyRunning = await fetch(`http://127.0.0.1:${port}/health`).then(r => r.ok).catch(() => false)
-  if (alreadyRunning) {
-    console.log('[worker] 이미 실행 중인 워커를 재사용합니다')
-    return
-  }
+  // 30초마다 반복 호출되므로, 정상일 때마다("이미 실행 중") 매번 로그를 남기면 .dev-server.log가
+  // 이 문구로만 가득 찬다 — 실제로 다시 띄워야 했을 때(아래)만 로그를 남기고, 정상 확인은 조용히 넘어간다.
+  const alreadyRunning = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(5_000) }).then(r => r.ok).catch(() => false)
+  if (alreadyRunning) return
+  if (Date.now() - lastSpawnAt < SPAWN_COOLDOWN_MS) return
+  lastSpawnAt = Date.now()
   // instrumentation.ts는 webpack이 "instrument" 레이어(엣지 런타임과 호환되게 리졸브 규칙을 제한한
   // 특수 레이어)로 번들링해서, import('child_process')처럼 정적으로 보이는 요청은 위의 edge 체크로
   // 걸러내도(코드 자체는 살아있는 채로 번들에 들어가) "Module not found: Can't resolve 'child_process'"로

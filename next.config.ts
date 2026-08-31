@@ -34,12 +34,38 @@ const nextConfig: NextConfig = {
   // 둘 다 이 프로젝트 폴더 "안"이라 watcher가 전부 "소스 변경"으로 착각해 재컴파일을 계속 유발한다.
   // .gitignore에 이미 있는 경로들이지만 .gitignore는 watcher와 무관하다(별개 메커니즘) — 여기서
   // 명시적으로 빼줘야 한다. dev 전용, 빌드/운영에는 영향 없음.
+  //
+  // 위 목록에 없던 재발원인 하나를 2026-08-31에 추가로 찾았다: .dev-server.log/.worker.log(모든 요청마다
+  // 로그 한 줄씩 계속 추가됨, scripts/start-dev-server.cmd가 dev 서버 stdout 전체를 리다이렉트)와
+  // tsconfig.tsbuildinfo(tsc 실행마다 갱신)도 프로젝트 루트 "안"의 파일이라 watcher가 계속 "소스 변경"으로
+  // 착각한다 — 특히 로그 파일은 요청이 있을 때마다 계속 바뀌므로, "recompile → 응답 지연/reload → 재요청
+  // → 로그 갱신 → 다시 recompile"로 스스로 되먹임될 소지가 있었다. 사용자가 "아무것도 안 하고 있는데도
+  // 로고 화면(강제 새로고침)이 계속 뜬다"고 보고한 시점의 실제 로그(GET / 가 반복적으로 3.5~3.7초씩 걸림)를
+  // 근거로 추가.
+  //
+  // 같은 날 바로 이어서 더 넓게 재점검 — "이 프로젝트 폴더 안에서 소스 아닌데 실행 중 계속 쓰기가
+  // 일어나는 경로"를 빠짐없이 잡으려면 이 목록을 매번 따로 유지하는 대신 .gitignore를 참고하는 게
+  // 맞다(그쪽이 이미 "런타임 데이터라 커밋 대상 아님"의 기준 목록 역할을 하고 있다 — 위 주석들도 실제로
+  // 그렇게 하나씩 찾아왔다). .gitignore를 다시 훑어 아직 안 빠져있던 나머지를 마저 추가한다:
+  // public/client-docs(거래처 사업자등록증 업로드, public/scraped와 같은 성격), test-results/
+  // playwright-report/blob-report(Playwright E2E 테스트 산출물 — 실사용 확인: VS Code Playwright
+  // 확장이 띄워두는 test-server 프로세스가 떠 있으면 test-results/.last-run.json이 수시로 갱신됨),
+  // coverage(테스트 커버리지 산출물), .claude/settings.local.json(세션 중 권한 허용목록이 바뀌면 갱신).
+  // *.tsbuildinfo도 기존엔 tsconfig.tsbuildinfo 파일명만 정확히 매칭했는데 .gitignore는 더 넓은 글롭이라
+  // 맞춰 넓혔다. (반대로 .next/는 여기 없어도 된다 — webpack 자체 기본값이 이미 제외한다.)
+  // 앞으로 이 프로젝트에 새로운 런타임 쓰기 경로가 생기면, 먼저 .gitignore에 추가하는 게 관례이니(커밋
+  // 방지 목적) 그때 이 목록도 같이 훑어보면 이 종류의 재발을 막을 수 있다.
   webpack: (config, { dev }) => {
     if (dev) {
       config.watchOptions = {
         ...config.watchOptions,
         aggregateTimeout: 3000,
-        ignored: ['**/node_modules/**', '**/.git/**', '**/.playwright-profiles/**', '**/public/scraped/**', '**/.playwright-mcp/**'],
+        ignored: [
+          '**/node_modules/**', '**/.git/**', '**/.playwright-profiles/**', '**/public/scraped/**', '**/.playwright-mcp/**',
+          '**/.dev-server.log', '**/.worker.log', '**/*.tsbuildinfo',
+          '**/public/client-docs/**', '**/test-results/**', '**/playwright-report/**', '**/blob-report/**', '**/coverage/**',
+          '**/.claude/settings.local.json',
+        ],
       }
     }
     return config

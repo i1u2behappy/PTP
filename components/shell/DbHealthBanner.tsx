@@ -78,11 +78,17 @@ export function DbHealthBanner() {
     <div className="fixed top-0 inset-x-0 z-[60] bg-rose-600 text-white text-sm px-4 py-2 flex items-center justify-center gap-3 shadow-md">
       {health === 'db-down' ? (
         <>
-          <span>⚠ DB 연결 실패 — Docker가 꺼져있을 수 있습니다.</span>
+          {/* 실사용 확인(2026-08-31): 이 배너가 뜬 순간에도 postgres 컨테이너는 재시작된 적 없이(RestartCount:0)
+              계속 떠있던 경우가 실제로 있었다 — "Docker가 꺼짐"은 재현되는 원인이 아니라, 버튼 옆 주석에
+              적힌 진짜 흔한 원인(Docker Desktop은 떠 있는데 WSL2 네트워킹만 일시적으로 끊김)이 더 정확하다.
+              사용자가 "Docker를 왜 꺼놨지?" 하고 엉뚱한 데서 원인을 찾지 않도록, 확인된 두 원인을 함께
+              보여주고 버튼이 실제로 뭘 하는지·얼마나 걸리는지까지 미리 알려준다. */}
+          <span>⚠ DB 연결 실패 — Docker Desktop이 꺼져있거나, WSL2 네트워킹이 일시적으로 끊겼을 수 있습니다.</span>
           {restartError && <span className="text-rose-200">({restartError})</span>}
           <button onClick={() => handleRestart('/api/system/restart-docker')} disabled={restarting}
+            title="WSL2를 재시작해 Docker 백엔드를 다시 띄웁니다 — 보통 몇 초 안에, 길면 최대 60초까지 걸릴 수 있습니다. 끝나면 이 배너는 자동으로 사라집니다."
             className="px-3 py-1 bg-white text-rose-600 rounded-full text-xs font-semibold hover:bg-rose-50 disabled:opacity-60 transition-colors">
-            {restarting ? '재시작 중... (20~60초 소요)' : '🐳 도커 재시작'}
+            {restarting ? 'WSL 재시작 중... (보통 수 초, 길면 최대 60초 — 끝나면 자동으로 사라집니다)' : '🐳 Docker/WSL 재시작'}
           </button>
         </>
       ) : (

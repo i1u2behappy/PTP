@@ -616,6 +616,9 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 뒀는데, 몰 탭으로 직접 가서 확장을 실행해야 한다는(자동 실행이 안 되는 지금 상태에서는 매번 필요한)
   // 안내를 5초 안에 못 보고 놓쳤다는 지적(2026-08-22)으로 8초로 늘렸다.
   const [devHint, setDevHint] = useState<string | null>(null)
+  // Mall 선택 그리드에서 지금 선택된 행을 찾아 스크롤·하이라이트해주기 위한 참조(선택이 드롭다운/다른
+  // 화면에서의 이동 등 그리드 클릭이 아닌 경로로 바뀌어도, 그리드 안에서 어떤 행인지 눈에 보이게 한다).
+  const selectedSiteRowRef = useRef<HTMLTableRowElement | null>(null)
   const devHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   function showDevHint(text: string) {
     setDevHint(text)
@@ -1162,6 +1165,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const timer = setInterval(poll, 1500)
     return () => clearInterval(timer)
   }, [selectedSite])
+
+  // 몰 선택이 그리드 클릭이 아닌 경로(위 "몰" 드롭다운, 다른 화면에서 특정 몰을 지정해 들어온 경우 등)로
+  // 바뀌어도, 그리드 안에서 지금 선택된 행이 어디인지 스크롤해서 보여준다(사용자 요청, 2026-08-31).
+  // mallSelectCollapsed도 의존성에 넣는 이유: 접힌 상태에서 선택이 바뀌면 행 자체가 안 그려져 있어(ref가
+  // null) 그때는 스크롤할 수 없고, 나중에 펼쳤을 때 다시 시도해야 한다.
+  useEffect(() => {
+    if (!selectedSite || mallSelectCollapsed) return
+    selectedSiteRowRef.current?.scrollIntoView({ block: 'nearest' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- selectedSite 객체 자체가 갱신마다 새로 생성돼도 siteId만 같으면 다시 스크롤할 필요 없음
+  }, [selectedSite?.id, mallSelectCollapsed])
 
   const failedItems = itemLog.filter(r => r.status === 'failed')
   const successItems = itemLog.filter(r => r.status === 'success')
@@ -2730,16 +2743,19 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       )}
                     </thead>
                     <tbody>
-                      {visibleSites.map(s => (
-                        <tr key={s.id} onClick={() => selectSite(s.id)}
-                          className="group border-b border-gray-100 last:border-0 hover:bg-gray-50 cursor-pointer transition-colors">
-                          {siteOrderedColumns.map((col, colIdx) => (
-                            <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''} ${colIdx === 0 ? 'sticky left-0 z-10 bg-white group-hover:bg-gray-50' : ''}`} title={col.key === 'url' || col.key === 'main_items' ? col.getValue(s) : undefined}>
-                              {col.render(s)}
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
+                      {visibleSites.map(s => {
+                        const isSelected = s.id === selectedSite?.id
+                        return (
+                          <tr key={s.id} ref={isSelected ? selectedSiteRowRef : undefined} onClick={() => selectSite(s.id)}
+                            className={`group border-b border-gray-100 last:border-0 cursor-pointer transition-colors ${isSelected ? 'bg-teal-50' : 'hover:bg-gray-50'}`}>
+                            {siteOrderedColumns.map((col, colIdx) => (
+                              <td key={col.key} className={`px-3 py-2 truncate ${col.className ?? ''} ${colIdx === 0 ? `sticky left-0 z-10 ${isSelected ? 'bg-teal-50' : 'bg-white group-hover:bg-gray-50'}` : ''}`} title={col.key === 'url' || col.key === 'main_items' ? col.getValue(s) : undefined}>
+                                {col.render(s)}
+                              </td>
+                            ))}
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 )}

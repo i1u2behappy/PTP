@@ -62,7 +62,7 @@ const nextConfig: NextConfig = {
         aggregateTimeout: 3000,
         ignored: [
           '**/node_modules/**', '**/.git/**', '**/.playwright-profiles/**', '**/public/scraped/**', '**/.playwright-mcp/**',
-          '**/.dev-server.log', '**/.worker.log', '**/*.tsbuildinfo',
+          '**/.dev-server.log', '**/.worker.log', '**/.worker-boot-status.json', '**/*.tsbuildinfo',
           '**/public/client-docs/**', '**/test-results/**', '**/playwright-report/**', '**/blob-report/**', '**/coverage/**',
           '**/.claude/settings.local.json',
         ],

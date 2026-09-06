@@ -113,9 +113,34 @@ function dismiss(id: number) {
   notify()
 }
 
+// DbHealthBanner가 배너로 원인(DB/서버/워커 다운)을 설명하는 중인지 — 이 모듈 스코프 플래그를
+// DbHealthBanner가 자신의 상태 폴링 결과에 맞춰 setSystemOutageActive로 갱신한다.
+let outageActive = false
+
+function isSystemOutageActive() {
+  return outageActive
+}
+
+/** DbHealthBanner가 배너를 새로 띄우기/내리기 시작할 때마다 호출한다. 단순히 플래그만 바꾸는 게
+ *  아니라 — 배너가 뜨기 "직전"에 이미 개별 요청 실패로 addFailure가 먼저 불려버리는 경우가 실제로
+ *  있었다(2026-08-31, 재부팅 직후 실사용 확인: DB가 안 닿는 순간 대시보드의 여러 화면이 거의 동시에
+ *  각자 API를 호출해 500을 받는데, 그 실패 하나하나가 배너의 두 번의 상태확인 fetch보다 먼저 끝나버려
+ *  addFailure가 outage 플래그보다 먼저 실행됐다). 그렇게 이미 유예시간 중(pending)이거나 이미 화면에
+ *  드러난(failures) 항목은 새로 실패가 들어오는 걸 막는 것만으로는 안 사라지므로, 배너가 새로 원인을
+ *  설명하기 시작하는 이 시점에 지금 있는 것들도 함께 정리한다. */
+export function setSystemOutageActive(active: boolean) {
+  const wasActive = outageActive
+  outageActive = active
+  if (!active || wasActive) return
+  for (const url of pending.keys()) { clearRetryTimer(url); clearRevealTimer(url) }
+  pending.clear()
+  for (const f of failures) clearRetryTimer(f.url)
+  if (failures.length) { failures = []; notify() }
+}
+
 // DbHealthBanner가 이미 전담하는 엔드포인트는 제외한다 — 서버/DB가 죽으면 이 요청들도 같이 실패해
 // 화면 위(DbHealthBanner)와 아래(이 토스트)에 같은 내용이 중복으로 뜨게 된다.
-const EXCLUDED_PREFIXES = ['/api/health/db', '/api/system/restart-docker', '/api/system/restart-server']
+const EXCLUDED_PREFIXES = ['/api/health/db', '/api/health/worker-boot', '/api/system/restart-docker', '/api/system/restart-server']
 
 function patchFetch() {
   if (patched || typeof window === 'undefined') return
@@ -125,7 +150,9 @@ function patchFetch() {
   window.fetch = async (...args: Parameters<typeof fetch>) => {
     const [input] = args
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
-    const excluded = EXCLUDED_PREFIXES.some(p => url.includes(p))
+    // DbHealthBanner가 이미 같은 원인(DB/서버/워커 다운)을 배너로 설명하는 중이면, 그 원인으로 실패하는
+    // 개별 요청마다 또 토스트를 띄우지 않는다 — systemOutageSignal.ts 주석 참고.
+    const excluded = EXCLUDED_PREFIXES.some(p => url.includes(p)) || isSystemOutageActive()
     try {
       const res = await originalFetch(...args)
       if (!excluded) {

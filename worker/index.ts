@@ -1,3 +1,5 @@
+import fs from 'fs'
+import path from 'path'
 import { initDb } from '../lib/db'
 import { isAnySiteBusy } from '../lib/scraper'
 import { restartWorker, isWorkerRestartInFlight } from '../lib/workerRestart'
@@ -56,16 +58,46 @@ async function checkMemoryAndAutoRestart() {
 // 의미 없음), 최대 20번(총 약 8분)까지 시도한다. 무한 재시도 대신 결국 포기하고 로그를 남기는 기존
 // 방침(무한 재시도로 조용히 멈춰있는 것보다 로그로 드러나는 게 낫다)은 그대로 유지 — DB가 진짜
 // 8분 넘게 안 뜨는 상황이면 재시도 창을 더 늘리는 게 아니라 실제 DB 문제로 봐야 한다.
+// RPC 서버(startRpcServer)는 이 함수가 끝난 뒤에야 뜨므로, 최대 8분에 이르는 재시도 동안은 포트 자체가
+// 안 열려 있어 /health로는 "재부팅 직후라 DB 재연결 중"과 "워커가 아예 안 뜬 것"을 구분할 방법이 없다
+// (2026-08-31, 재부팅 직후 DbHealthBanner/GlobalErrorNet이 "DB 연결 실패"/"요청 실패" 여러 개를 한꺼번에
+// 보여줘 실제로는 자동 복구 중인데도 사용자가 놀란 게 계기). 그래서 재시도 진행 상황을 파일로 남기고,
+// app/api/health/worker-boot/route.ts가 이 파일을 읽어 화면에 "N/20회 시도 중, 다음 시도까지 M초" 같은
+// 안내를 띄울 수 있게 한다.
+const BOOT_STATUS_PATH = path.join(process.cwd(), '.worker-boot-status.json')
+
+type BootStatus =
+  | { status: 'connecting-db'; attempt: number; maxAttempts: number; startedAt: number; nextRetryAt: number }
+  | { status: 'ready'; readyAt: number }
+  | { status: 'failed'; attempt: number; maxAttempts: number; startedAt: number; failedAt: number; error: string }
+
+function writeBootStatus(status: BootStatus) {
+  try {
+    fs.writeFileSync(BOOT_STATUS_PATH, JSON.stringify(status))
+  } catch (e) {
+    console.error('[worker] 부팅 상태 파일 기록 실패(치명적이지 않음, 무시):', e)
+  }
+}
+
 async function initDbWithRetry() {
   const maxAttempts = 20
   const maxDelayMs = 30_000
+  const startedAt = Date.now()
+  // 이전 실행이 남긴 파일(예: 'ready')이 이번 실행에서 그대로 남아있으면, 이번엔 재시도 한 번 없이
+  // 바로 성공했는데도 화면엔 지난 실행의 상태가 그대로 보이는 착시가 생긴다 — 매 실행 시작 시 지운다.
+  try { fs.unlinkSync(BOOT_STATUS_PATH) } catch { /* 없으면 무시 */ }
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       await initDb()
+      writeBootStatus({ status: 'ready', readyAt: Date.now() })
       return
     } catch (e) {
-      if (attempt === maxAttempts) throw e
+      if (attempt === maxAttempts) {
+        writeBootStatus({ status: 'failed', attempt, maxAttempts, startedAt, failedAt: Date.now(), error: e instanceof Error ? e.message : String(e) })
+        throw e
+      }
       const delayMs = Math.min(2_000 * 2 ** (attempt - 1), maxDelayMs)
+      writeBootStatus({ status: 'connecting-db', attempt, maxAttempts, startedAt, nextRetryAt: Date.now() + delayMs })
       console.error(`[worker] DB 연결 실패(${attempt}/${maxAttempts}) — ${delayMs / 1000}초 뒤 재시도:`, e instanceof Error ? e.message : e)
       await new Promise(resolve => setTimeout(resolve, delayMs))
     }

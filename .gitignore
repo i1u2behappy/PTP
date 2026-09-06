@@ -31,6 +31,7 @@ yarn-error.log*
 .pnpm-debug.log*
 .dev-server.log
 .worker.log
+.worker-boot-status.json
 
 # env files (can opt-in for committing if needed)
 .env*

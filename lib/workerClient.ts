@@ -5,7 +5,8 @@ import type {
 } from './scraper'
 import type { ProfileCheckResult } from './scrape/mallProfile'
 import type { RunScrapingOpts } from './scrape/run'
-import type { ExtractedProduct, ExtractionRule } from './ai'
+import type { ExtractedProduct, ExtractionRule, AiProviderId } from './ai'
+import { ALL_AI_PROVIDERS } from './ai'
 
 // Next.js 서버 프로세스에서 부르는 쪽 — 실제 실행은 전부 별도 워커 프로세스(worker/index.ts)에서
 // 일어난다(2026-08-23, Fast Refresh 강제 새로고침 원인이었던 CPU 경합을 없애기 위한 분리). 여기 있는
@@ -46,20 +47,25 @@ async function callWorker<T>(fn: string, args: unknown[], opts?: { signal?: Abor
     } catch (e) {
       // 호출부(브라우저)가 스스로 중지시킨 경우는 재시도하지 않고 그대로 전파한다.
       if (e instanceof Error && e.name === 'AbortError') throw e
-      // fetch가 워커 프로세스에 연결 자체를 못 한 경우(막 기동 중)만 재시도 — 그 외(워커가 응답했지만
-      // 함수 실행이 실패한 경우)는 바로 던진다.
-      const isConnectError = e instanceof TypeError || (e as { cause?: { code?: string } })?.cause?.code === 'ECONNREFUSED'
+      // fetch가 워커 프로세스에 연결 자체를 못 한 경우(막 기동 중)거나, 연결은 됐지만 응답 바디가
+      // 불완전해 JSON 파싱이 깨진 경우만 재시도 — 그 외(워커가 정상 응답했지만 함수 실행 자체가 실패한
+      // 경우)는 바로 던진다. SyntaxError도 일시적 문제로 보고 재시도 대상에 넣은 이유: 워커가 "몰
+      // 구조분석"처럼 탭 여러 개로 동시에 무거운 작업을 하느라 바쁠 때, 연결은 됐는데 응답 바디가
+      // 잘려서 와 res.json()이 "Unexpected end of JSON input"으로 죽는 게 실사용에서 확인됐다
+      // (2026-09-01, /api/scrape/site-lock-status가 500으로 튀어 화면에 노출됨) — 이런 경우도 조금
+      // 기다렸다 다시 물어보면 대개 풀린다.
+      const isConnectError = e instanceof TypeError || e instanceof SyntaxError || (e as { cause?: { code?: string } })?.cause?.code === 'ECONNREFUSED'
       if (!isConnectError) throw e
       lastConnectError = e
       await new Promise(r => setTimeout(r, 250))
     }
   }
-  throw new Error(`워커 프로세스에 연결할 수 없습니다(worker/index.ts가 실행 중인지 확인하세요): ${lastConnectError instanceof Error ? lastConnectError.message : String(lastConnectError)}`)
+  throw new Error(`워커 프로세스에 연결할 수 없거나 응답을 읽지 못했습니다(worker/index.ts가 실행 중인지, 과부하 상태는 아닌지 확인하세요): ${lastConnectError instanceof Error ? lastConnectError.message : String(lastConnectError)}`)
 }
 
 // ── 상태 조회/기록 ──────────────────────────────────────────────────────────
 export const getOpenPageUrl = (siteId: number) => callWorker<string | null>('getOpenPageUrl', [siteId])
-export const navigateOpenPageTo = (siteId: number, url: string) => callWorker<string | null>('navigateOpenPageTo', [siteId, url])
+export const navigateOpenPageTo = (siteId: number, url: string) => callWorker<{ url: string; loggedIn: boolean | null } | null>('navigateOpenPageTo', [siteId, url])
 export const requestStop = (sessionId: number) => callWorker<void>('requestStop', [sessionId])
 export const isStopRequested = (sessionId?: number) => callWorker<boolean>('isStopRequested', [sessionId])
 export const clearStopRequest = (sessionId: number) => callWorker<void>('clearStopRequest', [sessionId])
@@ -86,7 +92,7 @@ export const startElementPicker = (siteId: number, previewProduct?: Record<strin
   callWorker<boolean>('startElementPicker', [siteId, previewProduct, targetUrl])
 
 // ── 몰 구조분석 ───────────────────────────────────────────────────────────
-export const runMallStructureReport = (siteId: number, useAi = true) => callWorker<ProfileCheckResult | null>('runMallStructureReport', [siteId, useAi])
+export const runMallStructureReport = (siteId: number, aiProviders: AiProviderId[] = ALL_AI_PROVIDERS) => callWorker<ProfileCheckResult | null>('runMallStructureReport', [siteId, aiProviders])
 export const runMallProfileCheckForScrape = (opts: ScrapeOptions) => callWorker<ProfileCheckResult | null>('runMallProfileCheckForScrape', [opts])
 
 // ── 카테고리/재확인/재추출 ─────────────────────────────────────────────────

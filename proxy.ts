@@ -12,11 +12,16 @@ const PUBLIC_PATHS = ['/login', '/logo.jpg', '/icon.jpg']
 // 로그인이 막힌 상황에서 배너/재시작 버튼이 무용지물이 된다.
 const PUBLIC_API_PREFIXES = [
   '/api/auth/', '/api/scrape/extension-ingest', '/api/sites/resolve', '/api/scrape/stop-requested',
-  '/api/health/db', '/api/system/restart-docker', '/api/system/restart-server',
+  '/api/health/db', '/api/health/worker-boot', '/api/system/restart-docker', '/api/system/restart-server',
   // extension-progress: 개발자모드 스크랩 진행률("카테고리 N/M") 보고 — 위와 같은 이유로 세션 쿠키 없이
   // 확장이 부른다. 여기 빠뜨렸다가 조용히 401로 매번 실패해, "진행 상황이 안 보인다"는 지적으로 뒤늦게
   // 발견됐다(2026-08-22) — 위 profile 라우트 때와 똑같은 실수라 다시 반복하지 않도록 주석을 남긴다.
   '/api/scrape/extension-progress',
+  // detect-last-page: 확장의 페이지네이션 규칙 기반 지름길 3개가 다 실패했을 때 로컬 AI에게 마지막
+  // 페이지를 물어보는 라우트(2026-09-06) — 위 extension-progress와 정확히 같은 이유·같은 실수 클래스라
+  // 처음부터 여기 같이 넣는다. 빠뜨리면 매번 조용히 401로 실패해(background.js가 .catch(()=>null)로
+  // 삼킴) AI 지름길이 있는 줄도 모른 채 항상 완전탐색으로만 폴백하는, 알아채기 아주 어려운 버그가 된다.
+  '/api/scrape/detect-last-page',
 ]
 // 몰 id가 경로 중간에 끼어 있어(/api/sites/{id}/...) 단순 prefix로 못 걸러 정규식으로 따로 둔다 — 개발자모드
 // 크롬 확장이 세션 쿠키 없이 호출하는 엔드포인트들. preview-capture(스크래핑 전 단건 미리보기),
@@ -32,6 +37,11 @@ const PUBLIC_API_PATTERNS = [
   // profile-progress: "몰 구조분석"의 확장 담당 단계(카테고리 하위구조/정렬 옵션) 진행률 보고 —
   // extension-progress와 같은 이유로 빠뜨렸었다(2026-08-22).
   /^\/api\/sites\/\d+\/profile-progress$/,
+  // preview-progress: "스크랩 미리보기"의 확장 쪽 캡처 시작 신호(POST) — 위 profile-progress/
+  // extension-progress와 같은 실수를 반복하지 않으려고 처음부터 여기 같이 넣는다(2026-09-05). GET도
+  // 같은 경로라 같이 공개되는데, current-category와 같은 이유로 문제없다 — PTP 자체 화면도 인증된
+  // 세션으로 이 GET을 부른다.
+  /^\/api\/sites\/\d+\/preview-progress$/,
 ]
 
 export function proxy(request: NextRequest) {

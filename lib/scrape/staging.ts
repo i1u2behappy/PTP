@@ -188,7 +188,8 @@ declare global {
  *  계속 진행 중이었음). 이 앱은 한 번에 한 사람이 한 배치를 확정하는 게 보통이라 슬롯 하나로 충분하고,
  *  lib/scraper.ts의 profileAbortControllers 등과 같은 이유로 globalThis에 저장해 dev 서버 핫리로드에도
  *  살아남게 한다. 진행률(done) 자체는 별도로 안 들고 scrape_staging_items.status를 그때그때 세므로
- *  (merge/progress 라우트와 같은 방식) 여기엔 "지금 어떤 ids를 언제부터 처리 중인지"만 있으면 된다. */
+ *  (app/api/scrape-staging/merge/active/route.ts) 여기엔 "지금 어떤 ids를 언제부터 처리 중인지"만
+ *  있으면 된다. */
 export function getActiveMergeBatch(): { ids: number[]; startedAt: number } | null {
   return globalThis.__activeMergeBatch ?? null
 }

@@ -36,6 +36,14 @@ export function registerAll() {
   reg('getSiteLockStatus', scraper.getSiteLockStatus)
   reg('setSiteLockDetail', scraper.setSiteLockDetail)
   reg('isAnySiteBusy', scraper.isAnySiteBusy)
+  // scripts/restart-dev-server.ps1이 워커를 강제종료하기 전에 이 RPC로 먼저 불러 열린 로그인 세션을
+  // 정상 종료시킨다(2026-09-01) — lib/workerRestart.ts의 restartWorker()는 이미 이 함수를 같은 프로세스
+  // 안에서 직접 호출하지만, 외부 PowerShell 스크립트는 그 경로를 안 타므로 RPC로 노출해야 닿을 수 있다.
+  // dispatch가 실제 인자들 뒤에 REQUEST_SIGNAL 객체를 하나 더 붙여 부르는데(rpc-server.ts 참고), 이
+  // 스크립트는 args를 빈 배열로 보내므로 그 객체가 그대로 timeoutMs 자리로 들어가 버린다(숫자가 아닌
+  // 객체가 setTimeout 지연시간으로 쓰여 사실상 유예시간 없이 즉시 닫힘) — 인자를 받지 않는 얇은
+  // 래퍼로 감싸 항상 함수 자신의 기본값(3초)을 쓰게 한다.
+  reg('closeAllOpenSessionsGracefully', () => scraper.closeAllOpenSessionsGracefully())
   reg('getPreviewProgress', scraper.getPreviewProgress)
   reg('stopProfileAnalysis', scraper.stopProfileAnalysis)
   reg('stopCategoryDiscovery', scraper.stopCategoryDiscovery)

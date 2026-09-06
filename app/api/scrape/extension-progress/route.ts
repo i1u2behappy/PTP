@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { setCollectProgress } from '@/lib/workerClient'
 import { clearStalePendingIfConfigChanged } from '@/lib/scrape/staging'
+import { ensureDevKeepAwakeWatcherStarted } from '@/lib/devKeepAwake'
 import type { ExtractionRule } from '@/lib/ai'
 
 // extension-ingest와 같은 이유(chrome-extension:// 출처, 사설망 주소) — CORS 프리플라이트를 직접 응답하고
@@ -38,6 +39,10 @@ export async function POST(req: NextRequest) {
   const body = await req.json() as ProgressBody
   if (!body.siteId) return NextResponse.json({ error: 'siteId required' }, { status: 400, headers: corsHeaders() })
 
+  // 개발자모드 실제 스크랩도 withSiteLock을 안 거쳐 절전방지가 안 걸려 있었다(lib/devKeepAwake.ts 참고,
+  // 사용자 지적 2026-09-06) — PTP 패널을 안 열어둔 채로 확장만 써도(preview-progress GET 폴링 없이도)
+  // 감시가 켜지도록 여기서도 깨워둔다.
+  ensureDevKeepAwakeWatcherStarted()
   let sessionId = body.sessionId
   if (!sessionId) {
     const siteRow = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(

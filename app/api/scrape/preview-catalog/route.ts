@@ -31,9 +31,14 @@ export async function POST(req: NextRequest) {
       extractionRules = res.rows[0]?.extraction_rules || undefined
       knownNoPaginationWidget = res.rows[0]?.scrape_profile?.hasPaginationWidget === false
     }
-    // 사용자가 미리보기 도중 "중지"를 누르면 클라이언트가 이 요청 자체를 abort한다 — 그 신호를 그대로
-    // previewCatalog에 넘겨 카테고리 개수 집계 루프가 다음 페이지를 열기 전에 스스로 멈추게 한다.
-    const result = await previewCatalog({ ...body, extractionRules, knownNoPaginationWidget, stopSignal: req.signal })
+    // 사용자가 미리보기 도중 "중지"를 누르거나 PTP 탭 자체를 닫으면 클라이언트/브라우저가 이 요청의
+    // 연결을 끊는다 — req.signal이 그 신호다. previewCatalog의 두 번째 인자(signal)로 넘겨야 workerClient의
+    // callWorker가 워커로 보낸 fetch 자체를 같이 끊고, 그래야 워커 쪽 rpc-server.ts가 req.on('close')로
+    // 이 연결 종료를 감지해 opts.stopSignal(REQUEST_SIGNAL)을 abort한다 — opts 안에 stopSignal 필드로
+    // 얹어 보내는 건 아무 효과가 없다(registry.ts의 withStopSignal이 opts.stopSignal을 그 REQUEST_SIGNAL로
+    // 덮어써버리고, AbortSignal 자체는 JSON으로 직렬화도 안 된다). 이 인자를 빠뜨렸던 탓에 "PTP를 닫아도
+    // 미리보기가 안 멈춘다"는 문제가 있었다(2026-09-06, 사용자 지적).
+    const result = await previewCatalog({ ...body, extractionRules, knownNoPaginationWidget }, req.signal)
     // 체크리스트가 카테고리별 개수/확인일시를 보여줄 수 있게 저장해둔다 — 실패해도 미리보기 결과 자체는
     // 그대로 보여줘야 하니 응답을 막지 않는다.
     if (body.siteId && result.categoryCounts?.length) {

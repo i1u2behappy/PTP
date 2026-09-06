@@ -13,13 +13,28 @@ import { spawn, type ChildProcess } from 'child_process'
  * 되고 시스템 절전만 막으면 된다(노트북이라면 화면은 꺼진 채 계속 동작).
  *
  * 워커 프로세스(worker/index.ts)는 Next dev 서버처럼 핫리로드되지 않는 일반 장기실행 프로세스라
- * globalThis에 담아둘 필요 없이 모듈 스코프 변수로 충분하다 — lib/scraper.ts의 실제 브라우저 작업은
- * 전부 이 워커 프로세스 안에서 실행되기 때문(Playwright 분리 이후 이 프로젝트의 확립된 구조).
- */
-let keepAwakeProcess: ChildProcess | null = null
+ * globalThis 없이도 괜찮지만, 이 파일은 일반모드의 워커 프로세스뿐 아니라 lib/devKeepAwake.ts를 통해
+ * Next.js 서버 프로세스(app/api/** 라우트)에서도 그대로 쓰인다 — 그쪽은 dev 서버가 파일 저장마다 이
+ * 모듈을 다시 평가하므로(siteLocks/devPreviewStatus 등 다른 인메모리 상태와 같은 이유), 모듈 스코프
+ * 변수로 두면 그 순간 변수만 초기화되고 이미 띄워둔 PowerShell 프로세스는 참조를 잃어버린 채 고아로
+ * 계속 살아있는다(2026-09-06 실사용 확인 — 이 파일과 무관한 lib/devKeepAwake.ts만 고쳤는데도 재현됨).
+ * globalThis에 담아 이 문제를 원천적으로 피한다.
+ *
+ * 참조 카운트를 두는 이유: withSiteLock(일반모드) 말고도 lib/devKeepAwake.ts(개발자모드 미리보기/실제
+ * 스크랩, "확정" 병합)가 독립적으로 이 acquire/release를 부른다 — 서로 다른 두 출처가 "지금 내 일은
+ * 끝났다"고 각자 releaseKeepAwake()를 부를 수 있으므로, 한쪽이 아직 진행 중인데 다른 쪽이 먼저 끝나
+ * releaseKeepAwake()를 부르면 그 즉시 절전방지가 꺼져버리면 안 된다 — 정말로 아무도 안 쥐고 있을
+ * 때만(refCount가 0으로 떨어질 때만) 실제로 끈다. */
+declare global {
+  var __keepAwakeProcess: ChildProcess | null | undefined
+  var __keepAwakeRefCount: number | undefined
+}
+function getRefCount(): number { return globalThis.__keepAwakeRefCount ?? 0 }
+function setRefCount(n: number): void { globalThis.__keepAwakeRefCount = n }
 
 export function acquireKeepAwake(): void {
-  if (keepAwakeProcess) return
+  setRefCount(getRefCount() + 1)
+  if (globalThis.__keepAwakeProcess) return
   // 부호 최상위 비트가 켜진 16진 리터럴(0x80000000)을 PowerShell이 [uint32]로 직접 캐스팅하면
   // "Value was either too large or too small for a UInt32" 에러를 내며 조용히 실패한다(2026-08-30
   // 직접 테스트로 확인 — $ES_CONTINUOUS가 $null이 돼 ES_CONTINUOUS 없이 ES_SYSTEM_REQUIRED만 호출되고,
@@ -35,15 +50,17 @@ while ($true) { Start-Sleep -Seconds 30 }
   const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
     stdio: 'ignore', windowsHide: true,
   })
-  keepAwakeProcess = child
-  child.on('exit', () => { if (keepAwakeProcess === child) keepAwakeProcess = null })
-  child.on('error', () => { if (keepAwakeProcess === child) keepAwakeProcess = null })
+  globalThis.__keepAwakeProcess = child
+  child.on('exit', () => { if (globalThis.__keepAwakeProcess === child) globalThis.__keepAwakeProcess = null })
+  child.on('error', () => { if (globalThis.__keepAwakeProcess === child) globalThis.__keepAwakeProcess = null })
   console.log('[keepAwake] 진행 중인 작업이 있어 절전모드 방지 시작')
 }
 
 export function releaseKeepAwake(): void {
-  if (!keepAwakeProcess) return
-  keepAwakeProcess.kill()
-  keepAwakeProcess = null
+  setRefCount(Math.max(0, getRefCount() - 1))
+  if (getRefCount() > 0) return
+  if (!globalThis.__keepAwakeProcess) return
+  globalThis.__keepAwakeProcess.kill()
+  globalThis.__keepAwakeProcess = null
   console.log('[keepAwake] 남은 작업 없음 — 절전모드 방지 해제')
 }

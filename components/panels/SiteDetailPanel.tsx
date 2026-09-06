@@ -20,7 +20,7 @@ interface MallReport {
   companyContact: string
   bankName: string
   accountNumber: string
-  generatedBy: 'ai' | 'heuristic'
+  generatedBy: 'ai' | 'heuristic' | 'ollama' | 'groq'
 }
 
 function formatMallReport(r: MallReport): string {
@@ -348,8 +348,20 @@ export function SiteDetailPanel({ params }: Props) {
             <h2 className="text-sm font-semibold text-gray-700">🔍 몰 구조 분석 (참고용, 최근 1건)</h2>
             {mallReport.generatedBy === 'heuristic' && (
               <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700"
-                title="AI 호출이 실패해(크레딧 부족 등) 정규식/키워드 매칭으로 대신 채운 결과입니다 — AI 분석보다 정확도가 낮을 수 있습니다.">
+                title="AI 호출이 전부 실패해(크레딧 부족·Ollama 미실행 등) 정규식/키워드 매칭으로 대신 채운 결과입니다 — AI 분석보다 정확도가 낮을 수 있습니다.">
                 ⚠ 규칙 기반 (AI 아님)
+              </span>
+            )}
+            {mallReport.generatedBy === 'groq' && (
+              <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-violet-100 text-violet-700"
+                title="Anthropic/Gemini 호출이 모두 실패해 무료 Groq(Llama 3.3 70B)로 대신 분석했습니다 — 도입 초기라 정확도가 아직 충분히 검증되지 않았습니다.">
+                🚀 Groq 분석
+              </span>
+            )}
+            {mallReport.generatedBy === 'ollama' && (
+              <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-sky-100 text-sky-700"
+                title="Anthropic/Gemini/Groq 호출이 모두 실패해 로컬 Ollama로 대신 분석했습니다 — 클라우드 AI보다 정확도가 낮을 수 있습니다.">
+                🖥️ 로컬 AI(Ollama) 분석
               </span>
             )}
           </div>

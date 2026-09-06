@@ -33,6 +33,34 @@ describe('diffQueryParams', () => {
     expect(diff).toBeNull()
   })
 
+  // 실제 재발 사고(모자사러, 2026-09-04): pathname이 같아도(카페24 product/list.html은 모든 카테고리가
+  // 같은 경로) cate_no만 다르면 정렬이 아니라 완전히 다른 카테고리다. "신상품" 카테고리 메뉴 링크가
+  // SORT_KEYWORD_PATTERN(신상)에 걸려 정렬 후보로 들어왔을 때, 이 가드가 없으면 {cate_no:'51'}을 정렬
+  // 옵션으로 잘못 저장해 실제 스크랩 시 정렬 대신 엉뚱한 카테고리로 튕겨나가는 문제가 있었다.
+  it('cate_no(카테고리 식별자)만 다르면 다른 카테고리로 보고 null을 반환한다', () => {
+    const diff = diffQueryParams(
+      'https://mall.com/product/list.html?cate_no=24',
+      'https://mall.com/product/list.html?cate_no=51',
+    )
+    expect(diff).toBeNull()
+  })
+
+  it('category 파라미터도 같은 이유로 정렬 차이에서 제외한다', () => {
+    const diff = diffQueryParams(
+      'https://mall.com/goods_list.php?category=031001',
+      'https://mall.com/goods_list.php?category=031002&sort=price',
+    )
+    expect(diff).toEqual({ sort: 'price' })
+  })
+
+  it('cate_no와 진짜 정렬 파라미터가 함께 다르면 정렬 파라미터만 남긴다', () => {
+    const diff = diffQueryParams(
+      'https://mall.com/product/list.html?cate_no=24',
+      'https://mall.com/product/list.html?cate_no=51&sort_method=5',
+    )
+    expect(diff).toEqual({ sort_method: '5' })
+  })
+
   it('쿼리파라미터가 완전히 같으면(변화 없음) null을 반환한다', () => {
     const diff = diffQueryParams('https://mall.com/list.php?cate_no=1', 'https://mall.com/list.php?cate_no=1')
     expect(diff).toBeNull()

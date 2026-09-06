@@ -2,6 +2,37 @@ import pool from '../db'
 import { profileMallStructure, profileMallStructureForScrape, type MallProfileSignals, type ScrapeOptions } from '../scraper'
 import { runAutoAnalysis } from './adjustment'
 import { checkCategoryAnomaly } from './categoryAnomalyCheck'
+import type { MallStructureReport, AiProviderId } from '../ai'
+import { ALL_AI_PROVIDERS } from '../ai'
+
+/** primary를 기준으로 하되, primary가 놓친(undefined 또는 "확인 안됨") 항목만 secondary 값으로
+ *  채운다 — "어느 쪽을 기준으로 삼을지"(품질 좋은 쪽)와 "그 기준에 빠진 항목을 다른 쪽에서 보강"을
+ *  분리하지 않고 한 번에 처리한다. 예전엔 이 둘을 별개 분기로 나눠서, 기준으로 정한 리포트를 통째로
+ *  가져다 쓰는 분기를 타면 그 리포트 자체가 이미 항목 하나(sortStructure)를 통째로 잃어버린 상태여도
+ *  보강 없이 그 "없음"이 그대로 영구히 이어져 내려가는 결함이 있었다(걸스굽 몰 실사용 확인, 2026-09-01
+ *  — 정렬 구조 필드가 몇 주째 계속 비어있었음, AI 리포트 자체는 매번 통째로 교체되니 한 번 빠지면
+ *  스스로 못 채움). Object.keys(primary)만 훑으면 secondary에만 있는 키(primary에서 아예 빠진 키)를
+ *  놓치므로, 두 객체의 키를 합쳐서 훑는다. */
+export function mergeReports(primary: MallStructureReport, secondary: MallStructureReport | null | undefined): MallStructureReport {
+  if (!secondary) return primary
+  const merged: MallStructureReport = { ...primary }
+  const keys = new Set([...Object.keys(primary), ...Object.keys(secondary)]) as Set<keyof MallStructureReport>
+  for (const key of keys) {
+    // generatedBy처럼 scrapingNeeds도 "이 몰의 실제 데이터"가 아니라 리포트 출처에 묶인 메타 정보다 —
+    // buildHeuristicMallReport(lib/ai.ts)가 채우는 값은 이 몰의 진짜 스크래핑 유의사항이 아니라 "AI
+    // 미사용(규칙 기반) 리포트 — 정확도가 낮을 수 있음"이라는 경고문 그 자체라, secondary가 heuristic
+    // 리포트일 때 이 필드를 여기서처럼 그냥 채워 넣으면 merged.generatedBy는 'ai'인데 그 안의
+    // scrapingNeeds엔 "AI 미사용" 경고가 섞여 들어가는 자기모순이 생긴다(사용자 실사용 확인, 2026-09-03
+    // — 시즌백에서 Anthropic/Gemini가 예전에 만든 'ai' 리포트에 방금 실패한 heuristic 실행의 경고문이
+    // 병합돼 "AI 성공"이라 떠 있는데 내용은 "AI 미사용"이라고 나옴). primary 쪽 값을 그대로 쓴다 —
+    // primary가 heuristic 자체면(다른 리포트가 없을 때) 그 경고문이 정상적으로 그대로 보인다.
+    if (key === 'generatedBy' || key === 'scrapingNeeds') continue
+    const v = merged[key]
+    const sv = secondary[key]
+    if ((v === undefined || v === '확인 안됨') && sv && sv !== '확인 안됨') merged[key] = sv as never
+  }
+  return merged
+}
 
 function summarizeProfile(p: MallProfileSignals): string {
   return [
@@ -56,6 +87,11 @@ export interface ProfileCheckResult {
   /** "몰 구조분석" 직후 자동으로 채워진 추출규칙 필드명 — 미리보기/스크랩이 이제 이 몰의 구조를
    *  실제로 참조한다는 것을 사용자가 확인할 수 있도록. deep=false(구조 변화 감지)에서는 항상 빈 배열. */
   autoRuleFields: string[]
+  /** 이번 실행에서 거래정보 리포트(report)를 실제로 새로 만들었는지 — 'ai'/'ollama'/'heuristic'는 이번
+   *  실행이 직접 만든 결과, null은 이번 실행이 report를 아예 안 만들었다는 뜻(deep=false 등). 화면에
+   *  최종 저장된 report.generatedBy만 보여주면 "AI 실패 시 예전 리포트를 그대로 이어받는" 안전장치 때문에
+   *  이번 실행이 실패했다는 사실 자체가 안 보이므로 별도로 둔다. */
+  thisRunReportSource: 'ai' | 'heuristic' | 'ollama' | 'groq' | null
 }
 
 /** 새로 샘플링한 프로파일을 기준정보와 비교해 DB에 반영한다. 기준정보가 없으면 이번 결과를 기준으로
@@ -68,11 +104,34 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
     scrape_profile: (MallProfileSignals & { categoryCounts?: unknown; excludedCategoryHrefs?: string[] }) | null
   }>(`SELECT scrape_profile FROM sites WHERE id = $1`, [siteId])
   const prev = res.rows[0]?.scrape_profile || null
+
+  // 화면에 "이번 실행에서 AI가 실제로 성공했는지"를 알려주기 위해, 아래에서 next.report를 병합/치환하기
+  // 전(이번 실행이 실제로 만든 그대로) 값을 따로 남겨둔다 — 병합 후엔 next.report.generatedBy가 최종
+  // 채택된 리포트의 출처(대개 'ai', 예전 리포트를 그대로 이어받았을 때도)를 가리키게 되어 "이번 실행
+  // 자체는 실패했다"는 사실이 가려진다(2026-09-01, Anthropic 크레딧 소진+Gemini 과부하가 겹쳤을 때
+  // 화면엔 아무 신호 없이 예전 리포트가 계속 보여 사용자가 원인을 알 방법이 없었다는 지적).
+  const thisRunReportSource: 'ai' | 'heuristic' | 'ollama' | 'groq' | null = next.report?.generatedBy ?? null
+  // DB에도 그대로 남겨 개발자모드(확장이 직접 이 함수를 호출해 화면이 응답을 못 받음)가 나중에 GET으로
+  // 같은 값을 읽어갈 수 있게 한다 — MallProfileSignals.lastRunReportSource 주석 참고.
+  next.lastRunReportSource = thisRunReportSource
+
+  // AI 크레딧이 없어 규칙 기반/로컬 Ollama로 떨어진 결과가, 이전에 실제 클라우드 AI가 만들어둔 더 정확한
+  // 리포트를 조용히 덮어써버리면 안 된다 — "몰 구조분석"을 다시 눌렀는데 그 사이 AI 호출이 실패했다면
+  // 기존 AI 리포트를 기준으로 삼는다(사용자가 화면에서 이유도 모른 채 리포트 품질이 나빠지는 것을 방지).
+  // 'heuristic'과 'ollama' 둘 다 'ai'(클라우드)보다 약한 결과로 취급한다 — Ollama가 이런 종합 추출에
+  // 클라우드보다 약하다는 게 실측으로 확인돼 있어(generateMallProfileReportOllama 주석 참고), 규칙
+  // 기반과 똑같이 "예전 클라우드 AI 결과를 우선"한다. 반대로 이번 실행을 기준으로 삼는 경우(둘 다
+  // ai거나 둘 다 heuristic 등)에도, 기준 리포트에 항목 하나가 빠져있으면(예: 정렬 옵션 샘플로 시도한
+  // 카테고리 5개가 하필 전부 로그인/도매인증이 필요한 페이지였던 경우) 다른 쪽에서라도 채운다 — 안
+  // 그러면 "기준 리포트를 통째로 쓴다"는 규칙 때문에 그 리포트가 예전에 한 번 놓친 항목이 스스로 못
+  // 채운 채 영원히 이어져 내려간다(걸스굽 몰 실사용 확인, 2026-08-31→2026-09-01 — sortOptions 자체는
+  // 아래(사이 근처) 가드로 안 지워지는데, report.sortStructure는 그 보호가 없어 혼자 "확인 안됨"이
+  // 아니라 키 자체가 통째로 빠진 채 몇 주째 복구가 안 됐다). 자세한 병합 규칙은 mergeReports 참고.
   if (!next.report && prev?.report) next.report = prev.report
-  // AI 크레딧이 없어 규칙 기반으로 떨어진 결과가, 이전에 실제 AI가 만들어둔 더 정확한 리포트를 조용히
-  // 덮어써버리면 안 된다 — "몰 구조분석"을 다시 눌렀는데 그 사이 AI 호출이 실패했다면 기존 AI 리포트를
-  // 그대로 유지한다(사용자가 화면에서 이유도 모른 채 리포트 품질이 나빠지는 것을 방지).
-  else if (next.report?.generatedBy === 'heuristic' && prev?.report?.generatedBy === 'ai') next.report = prev.report
+  else if (next.report && prev?.report) {
+    const preferPrev = next.report.generatedBy !== 'ai' && prev.report.generatedBy === 'ai'
+    next.report = preferPrev ? mergeReports(prev.report, next.report) : mergeReports(next.report, prev.report)
+  }
 
   // sortOptions는 deep=false거나 로그인 필요 몰이면 항상 []이다(성공적으로 "더 적게" 나올 일이 없음) —
   // 개발자모드 확장(runDetectSortOptions)이 채워둔 값을 이 얕은/실패 경로가 조용히 지우지 못하게 한다
@@ -111,14 +170,23 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
   // 처리돼 있어 이 검사의 효용도 낮다. 실행 안 했거나(과거 증거 부족) 검사를 안 돌린 경우엔
   // categoryCounts/excludedCategoryHrefs와 같은 이유로 이전 경고를 그대로 이어받는다 — 안 그러면 이
   // UPDATE가 scrape_profile을 통째로 갈아치우므로 있던 경고가 조용히 사라진다.
-  let categoryAnomalyWarning = prev?.categoryAnomalyWarning ?? null
-  if (deep && next.categoryLinks.length) {
-    const siteRow = await pool.query<{ name: string | null }>('SELECT name FROM sites WHERE id = $1', [siteId])
-    const mallName = siteRow.rows[0]?.name || `site-${siteId}`
-    const anomaly = await checkCategoryAnomaly(siteId, mallName, next.categoryLinks.map(c => ({ name: c.name, href: c.href })))
-    categoryAnomalyWarning = anomaly ? { reason: anomaly.reason, checkedAt: new Date().toISOString(), source: anomaly.source } : null
-  }
+  // 이번 응답엔 일단 이전 경고를 그대로 이어받는다 — 실제 검사는 아래(메인 UPDATE 이후)에서 백그라운드로
+  // 돌린다. checkCategoryAnomaly가 Anthropic/Gemini 둘 다 실패해 로컬 Ollama까지 가면(detectCategoryAnomalyOllama
+  // 주석 참고) 180초 가까이 걸릴 수 있는데, 여기서 그대로 기다리면 "몰 구조분석" 결과 자체는 이미 다
+  // 끝났는데도 화면 전체가 그 검사 하나 때문에 3분 넘게 안 뜨는 문제가 있었다(걸스굽 실사용 확인,
+  // 2026-09-02 — Gemini가 불안정한 밤엔 거의 매번 재현됨). 이 검사는 원래도 "오탐이면 그냥 경고 없음"인
+  // fail-open 안전망이라, 이번 응답에 안 실려도(다음에 이 몰을 다시 볼 때 반영) 치명적이지 않다.
+  const categoryAnomalyWarning = prev?.categoryAnomalyWarning ?? null
   next.categoryAnomalyWarning = categoryAnomalyWarning
+
+  // "카테고리 불러오기" 체크리스트가 "발견된 카테고리 N개" 옆에 "몰 구조분석 이후 새로 생긴 카테고리가
+  // 몇 개인지"를 보여줄 수 있게, 위 가드들이 최종 확정한 categoryLinks를 이 실행 전(prev) 목록과 비교해
+  // 새로 나타난 href만 남긴다(사용자 요청, 2026-09-05). 위에서 품질 저하를 막느라 prev.categoryLinks로
+  // 되돌린 경우(146행 근처)엔 자연히 빈 배열이 된다 — 실제로 아무것도 안 바뀌었으니 "새 카테고리"도
+  // 없는 게 맞다. deep 여부와 무관하게 계산한다 — categoryLinks 자체가 deep=false에서도 매번 다시 계산돼
+  // 이 시점에 이미 최신 상태이기 때문이다.
+  const prevCategoryHrefs = new Set((prev?.categoryLinks || []).map(c => c.href))
+  const newCategoryHrefs = (next.categoryLinks || []).filter(c => !prevCategoryHrefs.has(c.href)).map(c => c.href)
 
   // sampleProductPageText는 아래(runMallStructureReport)에서 추출규칙 자동생성에만 쓰는 임시 값 —
   // 원문 그대로라 용량이 커 기준정보로 영구 저장하지 않는다. categoryCounts/excludedCategoryHrefs는
@@ -129,23 +197,46 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
   await pool.query(
     `UPDATE sites SET scrape_profile = $1, scrape_profile_updated_at = NOW() WHERE id = $2`,
     [JSON.stringify({
-      ...next, sampleProductPageText: undefined,
+      // sessionLostDuringAnalysis: undefined — 이번 실행 한정 신호라 저장 안 함(MallProfileSignals 주석
+      // 참고) — 안 그러면 다음에 이 몰을 선택했을 때(캐시 복원) 이미 지난 경고가 계속 남아있게 된다.
+      ...next, sampleProductPageText: undefined, sessionLostDuringAnalysis: undefined,
       categoryCounts: prev?.categoryCounts, excludedCategoryHrefs: prev?.excludedCategoryHrefs,
+      newCategoryHrefs,
     }), siteId],
   )
+
+  // 카테고리 이상탐지는 위 categoryAnomalyWarning 주석 참고 — 메인 UPDATE가 이미 끝난 뒤에, 응답을
+  // 기다리게 하지 않고 백그라운드로 돌린다. 끝나면 그 결과만 scrape_profile.categoryAnomalyWarning에
+  // 따로 반영한다(jsonb_set — 그 사이 다른 실행이 scrape_profile의 다른 필드를 갈아치웠어도 이 한
+  // 필드만 건드리므로 서로 덮어쓰지 않는다). await 없이 그냥 발사한다 — 이 함수(applyProfileResult)의
+  // 반환을 막으면 안 되므로 실패해도 여기서 조용히 삼킨다.
+  if (deep && next.categoryLinks.length) {
+    void (async () => {
+      try {
+        const siteRow = await pool.query<{ name: string | null }>('SELECT name FROM sites WHERE id = $1', [siteId])
+        const mallName = siteRow.rows[0]?.name || `site-${siteId}`
+        const anomaly = await checkCategoryAnomaly(siteId, mallName, next.categoryLinks.map(c => ({ name: c.name, href: c.href })))
+        const warning = anomaly ? { reason: anomaly.reason, checkedAt: new Date().toISOString(), source: anomaly.source } : null
+        await pool.query(
+          `UPDATE sites SET scrape_profile = jsonb_set(COALESCE(scrape_profile, '{}'::jsonb), '{categoryAnomalyWarning}', $1::jsonb) WHERE id = $2`,
+          [JSON.stringify(warning), siteId],
+        )
+      } catch { /* 백그라운드 안전망일 뿐이라 실패해도 몰 구조분석 결과 자체엔 영향 없음 */ }
+    })()
+  }
 
   // "몰 구조분석"(deep)은 site_memos("운영 메모")에 아무것도 쓰지 않는다 — 운영 메모는 사용자가 직접
   // 기록·수정하는 공간으로 두고, 이 결과는 SiteDetailPanel이 sites.scrape_profile에서 직접 읽어 운영
   // 메모 아래에 "최근 1건"짜리 참고용 표시로만 보여준다(사용자가 그 내용을 보고 필요한 걸 운영 메모에
   // 직접 옮겨 적는 용도). 로그인 확인 전용 "구조 변경 감지" 메모와도 완전히 분리된다.
-  if (deep) return { signals: next, diffs: [], isFirstTime: !prev, autoRuleFields: [] }
+  if (deep) return { signals: next, diffs: [], isFirstTime: !prev, autoRuleFields: [], thisRunReportSource }
 
   if (!prev) {
     await pool.query(
       `INSERT INTO site_memos (site_id, content) VALUES ($1, $2)`,
       [siteId, `🔍 상품페이지 구조 파악 완료 (샘플 ${next.sampleCount}건): ${summarizeProfile(next)}`],
     )
-    return { signals: next, diffs: [], isFirstTime: true, autoRuleFields: [] }
+    return { signals: next, diffs: [], isFirstTime: true, autoRuleFields: [], thisRunReportSource }
   }
 
   const diffs = describeDiff(prev, next)
@@ -155,7 +246,7 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
       [siteId, `⚠ 상품페이지 구조 변경 감지: ${diffs.join(' / ')}`],
     )
   }
-  return { signals: next, diffs, isFirstTime: false, autoRuleFields: [] }
+  return { signals: next, diffs, isFirstTime: false, autoRuleFields: [], thisRunReportSource }
 }
 
 /**
@@ -169,8 +260,8 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
  * 것을, 몰 구조분석 직후 자동으로 runAutoAnalysis(기존 값이 있는 필드는 덮어쓰지 않음)를 돌려
  * sites.extraction_rules를 즉시 채운다 — 이후 모든 미리보기/스크랩이 자동으로 이 규칙을 쓴다.
  */
-export async function runMallStructureReport(siteId: number, useAi = true): Promise<ProfileCheckResult | null> {
-  const next = await profileMallStructure(siteId, true, useAi)
+export async function runMallStructureReport(siteId: number, aiProviders: AiProviderId[] = ALL_AI_PROVIDERS): Promise<ProfileCheckResult | null> {
+  const next = await profileMallStructure(siteId, true, aiProviders)
   if (!next) return null
   const result = await applyProfileResult(siteId, next, true)
 

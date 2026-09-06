@@ -33,6 +33,18 @@ input[type='checkbox'], input[type='radio'] {
   animation: pulse-glow 1.2s ease-in-out infinite;
 }
 
+/* pulse-glow의 amber 버전 — "사용자가 다른 창(예: 몰 로그인 창)에서 대신 액션을 취해야 대기가 풀리는"
+   버튼 강조용(예: ScraperPanel.tsx의 "🔍 몰 구조분석" 버튼, 2026-09-05) — emerald(진행 중/정상)와
+   구분해 "당신이 할 일이 남았다"는 신호를 다른 색으로 준다. */
+@keyframes pulse-glow-amber {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.55); }
+  50% { box-shadow: 0 0 0 10px rgba(217, 119, 6, 0); }
+}
+
+.animate-pulse-glow-amber {
+  animation: pulse-glow-amber 1.2s ease-in-out infinite;
+}
+
 /* 깜빡임 간격이 점점 좁아지다가(느림→빠름) 한 사이클 끝에서 다시 느리게 리셋되는 강조 효과 */
 @keyframes blink-accelerate {
   0%, 9% { opacity: 1; }

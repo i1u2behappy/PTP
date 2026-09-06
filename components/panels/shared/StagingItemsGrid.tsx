@@ -367,22 +367,29 @@ export function StagingItemsGrid({ sessionId }: {
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /** 확정 진행률 폴링 — handleMerge(이 화면이 직접 보낸 POST)와, 마운트 시 이어받는 재연결 두 경우 모두
-   *  이 함수 하나를 쓴다. selfManaged가 true면(재연결 — 이 화면엔 기다릴 원본 POST가 없음) 100%에 닿는
-   *  순간 스스로 폴링을 멈추고 화면을 정리한다. false면(직접 보낸 경우) handleMerge의 원래 POST가 끝날 때
-   *  자기 finally에서 정리하므로 여기서는 진행률 갱신만 한다(기존 동작 그대로 유지). */
-  function pollMergeProgress(idsParam: string, total: number, startedAtMs: number, opts: { selfManaged: boolean }) {
+   *  이 함수 하나를 쓴다. selfManaged가 true면(재연결 — 이 화면엔 기다릴 원본 POST가 없음) 배치가 끝나는
+   *  순간(active:false) 스스로 폴링을 멈추고 화면을 정리한다. false면(직접 보낸 경우) handleMerge의 원래
+   *  POST가 끝날 때 자기 finally에서 정리하므로 여기서는 진행률 갱신만 한다(기존 동작 그대로 유지).
+   *
+   *  ids를 쿼리스트링으로 보내던 예전 방식(/merge/progress?ids=...)은 선택한 상품이 수천 개면 URL
+   *  길이가 2만 자를 넘어 Node가 요청 자체를 431(Request Header Fields Too Large)로 거절했다 — 화면은
+   *  이 실패를 조용히 삼켜서(catch(() => null)) 진행률이 0%에서 안 움직이는 것처럼 보였다(사용자 실사용
+   *  확인, 2026-09-06 — 확정 자체는 서버에서 정상 진행 중이었는데 화면만 그렇게 보였음). /merge/active는
+   *  ids를 요청에 실을 필요 없이 서버가 기억해둔 진행 중인 배치(getActiveMergeBatch)를 그대로 돌려주므로
+   *  이 문제 자체가 생기지 않는다 — 재연결 경로가 이미 이 라우트를 쓰고 있던 것과 같은 이유. */
+  function pollMergeProgress(total: number, startedAtMs: number, opts: { selfManaged: boolean }) {
     mergeStartedAtRef.current = startedAtMs
     setMerging(true)
     setMergeProgress({ total, done: 0, elapsedSec: Math.floor((Date.now() - startedAtMs) / 1000) })
     if (mergeProgressPollRef.current) clearInterval(mergeProgressPollRef.current)
     mergeProgressPollRef.current = setInterval(async () => {
-      const res = await fetch(`/api/scrape-staging/merge/progress?ids=${idsParam}`).catch(() => null)
-      const d = await res?.json().catch(() => null) as { total: number; done: number } | null
+      const res = await fetch('/api/scrape-staging/merge/active').catch(() => null)
+      const d = await res?.json().catch(() => null) as { active: boolean; total?: number; done?: number } | null
       const elapsedSec = Math.floor((Date.now() - mergeStartedAtRef.current) / 1000)
-      setMergeProgress(d
-        ? { total: d.total, done: d.done, elapsedSec }
+      setMergeProgress(d?.active
+        ? { total: d.total ?? total, done: d.done ?? 0, elapsedSec }
         : prev => prev && { ...prev, elapsedSec })
-      if (opts.selfManaged && d && d.total > 0 && d.done >= d.total) {
+      if (opts.selfManaged && d && !d.active) {
         if (mergeProgressPollRef.current) { clearInterval(mergeProgressPollRef.current); mergeProgressPollRef.current = null }
         setMerging(false)
         setMergeProgress(null)
@@ -401,7 +408,7 @@ export function StagingItemsGrid({ sessionId }: {
       active: boolean; ids?: number[]; total?: number; startedAtMs?: number
     }) => {
       if (d.active && d.ids?.length) {
-        pollMergeProgress(d.ids.join(','), d.ids.length, d.startedAtMs ?? Date.now(), { selfManaged: true })
+        pollMergeProgress(d.ids.length, d.startedAtMs ?? Date.now(), { selfManaged: true })
       }
     }).catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -524,12 +531,11 @@ export function StagingItemsGrid({ sessionId }: {
 
   async function handleMerge() {
     if (!selectedPendingIds.length) return
-    const idsParam = selectedPendingIds.join(',')
     // 경과시간 표시용 타이머 — setInterval로 주기적으로 다시 계산해 state에 반영하는 것 자체는 React가
     // 공식적으로 안내하는 시계/타이머 패턴이지만, react-hooks/purity가 Date.now() 값이 결국 state로
     // 흘러간다는 이유만으로 오탐한다.
     /* eslint-disable-next-line react-hooks/purity */
-    pollMergeProgress(idsParam, selectedPendingIds.length, Date.now(), { selfManaged: false })
+    pollMergeProgress(selectedPendingIds.length, Date.now(), { selfManaged: false })
     try {
       // force: true — 이 화면은 스크랩 건(세션) 단위로 확정하는 화면이라, 예전에 이미 상품마스터로
       // 확정된 적 있는 상품(is_already_migrated)이라도 이번에 새로 스크랩한 값 기준으로 다시 확정한다.

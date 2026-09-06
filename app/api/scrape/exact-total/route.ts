@@ -33,9 +33,11 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    // 미리보기 "중지"와 같은 방식 — 클라이언트가 이 요청을 abort하면 그 신호를 그대로 넘겨 목록 수집이
-    // 다음 페이지를 열기 전에 스스로 멈추게 한다.
-    const result = await countDedupedProductUrls({ ...parsed.data, stopSignal: req.signal })
+    // 미리보기 "중지"와 같은 방식 — 클라이언트가 이 요청을 abort하거나(중지 버튼) PTP 탭을 닫으면(연결
+    // 종료) 그 신호를 두 번째 인자(signal)로 넘겨야 callWorker가 워커로 보낸 fetch도 같이 끊는다 —
+    // opts 안에 stopSignal로 얹으면 AbortSignal이 JSON 직렬화가 안 돼 아무 효과가 없다(preview-catalog/
+    // route.ts와 같은 버그, 2026-09-06 발견).
+    const result = await countDedupedProductUrls(parsed.data, req.signal)
     return NextResponse.json(result)
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 })

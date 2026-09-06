@@ -1,6 +1,16 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { GoogleGenAI, FunctionCallingConfigMode, Type, type Schema } from '@google/genai'
 
+/** "몰 구조분석" 리포트(generateMallProfileReport)가 시도할 수 있는 AI 공급자 — 사용자가 화면에서
+ *  체크박스로 켜고 끌 수 있다(2026-09-02, 사용자 요청: "엔트로픽/제미나이/올라마 체크해서 쓰게 해달라,
+ *  나중에 다른 AI도 더 붙일 수 있게"). 새 공급자를 추가하려면: 1) 여기 AiProviderId에 id 추가, 2) 이
+ *  파일에 XxxYyy(mallName, ...) 형태의 생성 함수 추가, 3) generateMallProfileReport의 providers 배열에
+ *  { id, label, fn } 한 줄 추가 — 그러면 이 순서가 그대로 화면 체크박스 순서 및 폴백 순서가 된다.
+ *  components/panels/ScraperPanel.tsx가 같은 목록을 (서버 전용 SDK를 클라이언트 번들에 안 실으려고)
+ *  별도로 들고 있으니, 공급자를 추가/삭제하면 그쪽 AI_PROVIDER_OPTIONS도 같이 맞춰야 한다. */
+export type AiProviderId = 'anthropic' | 'gemini' | 'groq' | 'ollama'
+export const ALL_AI_PROVIDERS: AiProviderId[] = ['anthropic', 'gemini', 'groq', 'ollama']
+
 // 매 호출마다 새로 생성 — 모듈 로드 시점에 키를 고정하면 .env 값을 나중에 바꿔도
 // (dev 서버가 모듈을 재평가하지 않는 한) 예전 키가 계속 쓰이는 문제가 있었다.
 function getClient() {
@@ -199,7 +209,10 @@ export async function generateProductName(
           },
         ],
       }],
-    })
+      // generateAutoExtractionRules(lib/ai.ts)와 같은 이유로 추가(2026-09-02) — Anthropic은 지금까지
+      // 대부분 크레딧 부족으로 즉시 실패했지만, 응답이 느려지는 다른 장애 모드에서도 이 호출 하나 때문에
+      // 상품명 생성(대량 반복 호출 가능)이 무한정 멈추지 않게 방어적으로 맞춘다.
+    }, { signal: AbortSignal.timeout(MALL_REPORT_TIMEOUT_MS) })
 
     return (response.content[0] as { type: string; text: string }).text.trim().slice(0, maxLength)
   } catch {
@@ -260,7 +273,9 @@ ${columns.map(c => `- ${c.name}: ${c.instruction || '(지시문 없음, 예시 �
       }],
       tool_choice: { type: 'tool', name: 'set_columns' },
       messages: [{ role: 'user', content: prompt }],
-    })
+      // generateAutoExtractionRules와 같은 이유로 추가(2026-09-02) — 이 함수는 이름 그대로 대량 배치
+      // 처리(신규 상품마다 반복 호출)라 타임아웃 없이 걸리면 그 배치 전체가 멈춘다.
+    }, { signal: AbortSignal.timeout(MALL_REPORT_TIMEOUT_MS) })
     const toolUse = response.content.find(b => b.type === 'tool_use')
     if (!toolUse || toolUse.type !== 'tool_use') return {}
     return toolUse.input as Record<string, string>
@@ -363,6 +378,9 @@ origin)에 없는 완전히 새로운 종류의 정보라도 상관없다. 그 �
           parameters: { type: Type.OBJECT, properties: { rules: { type: Type.OBJECT, properties } }, required: ['rules'] },
         }] }],
         toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_extraction_rules'] } },
+        // generateAutoExtractionRules와 같은 이유로 추가(2026-09-02) — Gemini가 응답 없이 걸리면 이
+        // 호출 하나 때문에 "스크랩 조정" 버튼이 무한정 멈춘다.
+        abortSignal: AbortSignal.timeout(MALL_REPORT_TIMEOUT_MS),
       },
     })
     const call = response.functionCalls?.[0]
@@ -442,6 +460,12 @@ type='selector'로 답하라. 라벨의 값에 다른 정보가 섞여 있어(�
           parameters: { type: Type.OBJECT, properties: { rules: { type: Type.OBJECT, properties } }, required: ['rules'] },
         }] }],
         toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_extraction_rules'] } },
+        // 다른 Gemini 호출들(generateMallProfileReportGemini의 MALL_REPORT_TIMEOUT_MS 등)엔 다 있는
+        // abortSignal이 여기만 빠져 있었다 — 이 함수는 "몰 구조분석" 마지막 단계(runAutoAnalysis)에서
+        // 자동으로 도는데, Gemini가 응답 없이 걸리면 그 시그널 없는 호출 하나 때문에 몰 구조분석 전체가
+        // 화면에서 무한정 "분석 중"으로 멈춘다(2026-09-02 실사용 확인 — Gemini 쿼터/과부하가 겹친 밤에
+        // 재현). 다른 곳과 같은 20초로 맞춘다.
+        abortSignal: AbortSignal.timeout(MALL_REPORT_TIMEOUT_MS),
       },
     })
     const call = response.functionCalls?.[0]
@@ -450,7 +474,9 @@ type='selector'로 답하라. 라벨의 값에 다른 정보가 섞여 있어(�
     return args.rules || {}
   } catch (e) {
     // generateExtractionRules(스크랩 조정)와 같은 이유로 그대로 던진다 — 조용히 삼키면 "AI가 확신을
-    // 못 해서 규칙을 안 만든 것"과 "API 호출 자체가 실패한 것"(크레딧/네트워크 등)을 구분할 수 없다.
+    // 못 해서 규칙을 안 만든 것"과 "API 호출 자체가 실패한 것"(크레딧/네트워크/타임아웃 등)을 구분할 수
+    // 없다. 호출부(runAutoAnalysis)는 이미 이 예외를 잡아 "몰 구조분석 자체는 성공했으니 결과를 막지
+    // 않는다"는 정책이라, 여기서 안전하게 그대로 던져도 된다.
     throw new Error(`Gemini 호출 실패: ${e instanceof Error ? e.message : String(e)}`)
   }
 }
@@ -498,6 +524,9 @@ ${pageText.slice(0, 20_000)}`
           },
         }] }],
         toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_real_options'] } },
+        // generateAutoExtractionRules와 같은 이유로 추가(2026-09-02) — 이건 "AI모드 스크래핑"이 상품마다
+        // 반복 호출할 수 있어, 타임아웃 없이 Gemini가 걸리면 대량 스크랩 전체가 멈출 위험이 더 크다.
+        abortSignal: AbortSignal.timeout(MALL_REPORT_TIMEOUT_MS),
       },
     })
     const call = response.functionCalls?.[0]
@@ -584,6 +613,95 @@ ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
     .map(i => ({ name: candidates[i].text, href: candidates[i].href }))
 }
 
+function buildLastPagePrompt(mallName: string, baseUrl: string, candidates: { text: string; href: string }[]): string {
+  return `이 링크들은 '${mallName}' 몰의 상품 목록(카테고리) 페이지(${baseUrl})의 페이지네이션(페이지 이동)
+영역에 있던 것이다. 이 중 "마지막 페이지"로 이동하는 링크가 있으면 그 인덱스 하나만 골라라 — 숫자로 표시된
+페이지 번호 중 가장 큰 값, "마지막"/"끝"/"last" 같은 문구, 또는 구조상 명백히 가장 뒤쪽 페이지를 가리키는
+링크 등 근거가 있으면 고른다. 페이지 번호 링크만 쭉 나열돼 있고 어디까지가 진짜 마지막인지 이 목록만으로는
+알 수 없으면(화면에 일부 번호만 보이는 경우 등) 무리해서 고르지 말고 아무것도 고르지 마라 — 확신 없는
+추측보다는 고르지 않는 게 낫다.
+
+[링크 목록 (인덱스. "링크텍스트" → URL)]
+${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
+}
+
+const LAST_PAGE_TOOL_DESCRIPTION = '마지막 페이지로 이동하는 링크라고 확신하는 항목의 인덱스 하나만 반환한다(배열에 최대 1개). 확신 없으면 빈 배열.'
+
+/** Groq(빠름, 무료지만 분당 8,000토큰 한도) 경로 — 응답 형식은 generateMallProfileReportGroq와 동일
+ *  (OpenAI 호환 tool_choice 강제, max_tokens 명시 필수: 안 주면 이 모델의 기본 출력 한도가 그대로
+ *  "요청한 출력 크기"로 잡혀 분당 출력 토큰 한도를 넘겨 시작도 못 하고 거절된다 — 위 GROQ_MAX_OUTPUT_TOKENS
+ *  주석 참고). 인덱스 하나(또는 빈 배열)만 반환하는 아주 짧은 답이라 50이면 충분하다. 키가 없거나 실패하면
+ *  조용히 null — 호출부가 로컬 Ollama로 넘어간다. */
+async function pickLastPageIndexWithGroq(prompt: string, signal?: AbortSignal): Promise<number[] | null> {
+  if (!process.env.GROQ_API_KEY) return null
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(OLLAMA_TIMEOUT_MS)]) : AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        max_tokens: 50,
+        messages: [{ role: 'user', content: prompt }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_last_page_link_index',
+            description: LAST_PAGE_TOOL_DESCRIPTION,
+            parameters: {
+              type: 'object',
+              required: ['indices'],
+              properties: { indices: { type: 'array', items: { type: 'integer' }, description: '고른 항목들의 0-based 인덱스 목록' } },
+            },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_last_page_link_index' } },
+      }),
+    })
+    if (!res.ok) return null
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) return null
+    const args = JSON.parse(call.function.arguments) as { indices?: unknown }
+    return Array.isArray(args.indices) ? args.indices.filter((i): i is number => Number.isInteger(i)) : []
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 확장(개발자모드)의 규칙 기반 페이지네이션 지름길 3개("총 N개" 문구 / "마지막 페이지" 버튼 / 화면에
+ * 보이는 페이지 번호 최댓값)가 전부 실패했을 때 쓰는 최후의 지름길 — 최후수단(최대 150페이지 완전탐색,
+ * 카테고리 하나당 몇 분씩 걸릴 수 있음)으로 떨어지기 전에, 페이지네이션 영역에서 발견한 링크 후보를
+ * AI에게 보여주고 "마지막 페이지로 가는 링크가 있으면 그 인덱스"만 고르게 한다(2026-09-06, 사용자 요청 —
+ * 모자사러 실사용 확인: 규칙 기반 3개가 전부 실패하는 카테고리가 46개 중 다수 있어 카테고리 하나당 5~6분
+ * 걸렸다). detectSortOptionsWithAI와 완전히 같은 이유·같은 패턴(href를 AI가 다시 타이핑하지 않고 인덱스로만
+ * 반환 — 할루시네이션 방지)을 쓰되, 공급자는 Groq(빠름) 먼저 시도하고 실패하면 로컬 Ollama로 폴백한다.
+ * "몰 구조분석"의 Anthropic→Gemini→Groq→Ollama 체인과 같은 발상이지만, 이 호출은 몰 구조분석과 달리
+ * "미리보기 1회당 최대 카테고리 수만큼"(예: 46번) 반복될 수 있어 Groq 무료 등급의 분당 8,000토큰 한도에
+ * 카테고리 여러 개가 몰리면 걸릴 수 있다 — 그래서 로컬 Ollama를 완전히 대체하지 않고 그대로 안전망으로
+ * 남긴다(사용자 요청, 2026-09-06). 둘 다 실패하거나 확신이 없으면 null — 호출부가 기존 완전탐색으로
+ * 그대로 폴백한다. */
+export async function detectLastPageLinkWithAI(
+  mallName: string,
+  linkCandidates: { text: string; href: string }[],
+  baseUrl: string,
+  signal?: AbortSignal,
+): Promise<{ href: string } | null> {
+  if (!linkCandidates.length) return null
+  const candidates = linkCandidates.slice(0, OLLAMA_MAX_CANDIDATES)
+  const prompt = buildLastPagePrompt(mallName, baseUrl, candidates)
+
+  let indices = await pickLastPageIndexWithGroq(prompt, signal)
+  if (indices === null) {
+    // Groq가 키 없음/한도 초과/오류로 실패했을 때만 로컬 Ollama를 시도한다 — Groq가 "성공적으로 빈 배열"을
+    // 반환했을 때(확신 없어 안 고름)는 이미 유효한 답이므로 Ollama로 다시 물어보지 않는다.
+    indices = await pickIndicesWithOllama(prompt, 'set_last_page_link_index', LAST_PAGE_TOOL_DESCRIPTION, signal)
+  }
+  const i = indices[0]
+  return (i != null && i >= 0 && i < candidates.length) ? { href: candidates[i].href } : null
+}
+
 export interface SortOptionCandidate { label: string; href: string }
 
 /**
@@ -651,8 +769,13 @@ export interface MallStructureReport {
   companyContact: string
   productPageStructure: string
   scrapingNeeds: string
-  /** 이 리포트가 AI 분석인지 API 실패 시의 규칙 기반 대체 결과인지 — 화면에서 신뢰도를 구분해 보여주는 용도. */
-  generatedBy: 'ai' | 'heuristic'
+  /** 이 리포트가 (검증된 클라우드) AI 분석인지, Groq/로컬 Ollama 분석인지, API 실패 시의 규칙 기반 대체
+   *  결과인지 — 화면에서 신뢰도를 구분해 보여주는 용도. 'ollama'는 CategoryAnomalyVerdict의 source와
+   *  같은 이유로 'ai'와 분리했다 — 로컬 소형 모델은 이런 종합 추론(12개 항목 동시 추출)에 클라우드보다
+   *  약하다는 게 실측으로 확인돼 있어(detectCategoryAnomalyOllama 주석 참고), 신뢰도를 다르게 표시해야
+   *  한다. 'groq'도 같은 이유로 분리했다 — Llama 3.3 70B가 이 추출 작업에 얼마나 정확한지 아직 실사용
+   *  검증이 없다(도입 첫날, 2026-09-02). */
+  generatedBy: 'ai' | 'heuristic' | 'ollama' | 'groq'
 }
 
 const MALL_REPORT_FIELDS: { key: keyof MallStructureReport; label: string; hint: string }[] = [
@@ -720,8 +843,17 @@ ${contextText.slice(0, 20_000)}`
 // pickIndicesWithOllamaOnce의 OLLAMA_TIMEOUT_MS와 같은 이유로, 여기도 짧게 끊고 폴백으로 넘어가게 한다.
 const MALL_REPORT_TIMEOUT_MS = 20_000
 
+/** 이 리포트 4개 공급자 함수가 전부 "자체 타임아웃 + 몰구조분석 중지/PTP 탭 종료로 걸리는 외부 signal"을
+ *  같이 봐야 해서 한 곳으로 모았다(2026-09-06 — stopProfileAnalysis가 지금까지 이 AI 호출 단계에는 전혀
+ *  전달되지 않아, "중지"를 눌러도/탭을 닫아도 이 호출만은 끝까지 그대로 돌던 문제의 수정). AbortSignal.any는
+ *  둘 중 먼저 발생하는 쪽으로 그대로 abort된다. */
+function reportAiSignal(timeoutMs: number, signal?: AbortSignal): AbortSignal {
+  return signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs)
+}
+
 async function generateMallProfileReportAnthropic(
   mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
+  signal?: AbortSignal,
 ): Promise<MallStructureReport | null> {
   if (!process.env.ANTHROPIC_API_KEY || !contextText.trim()) return null
 
@@ -742,7 +874,7 @@ async function generateMallProfileReportAnthropic(
       }],
       tool_choice: { type: 'tool', name: 'set_mall_report' },
       messages: [{ role: 'user', content: prompt }],
-    }, { signal: AbortSignal.timeout(MALL_REPORT_TIMEOUT_MS) })
+    }, { signal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal) })
     const toolUse = response.content.find(b => b.type === 'tool_use')
     if (!toolUse || toolUse.type !== 'tool_use') return null
     return { ...(toolUse.input as Omit<MallStructureReport, 'generatedBy'>), generatedBy: 'ai' }
@@ -756,6 +888,7 @@ async function generateMallProfileReportAnthropic(
  *  같은 GEMINI_API_KEY를 재사용. GEMINI_API_KEY가 없거나 원문이 없으면 null(호출부가 규칙 기반으로 대체). */
 async function generateMallProfileReportGemini(
   mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
+  signal?: AbortSignal,
 ): Promise<MallStructureReport | null> {
   if (!process.env.GEMINI_API_KEY || !contextText.trim()) return null
 
@@ -776,7 +909,7 @@ async function generateMallProfileReportGemini(
           parameters: { type: Type.OBJECT, properties, required: MALL_REPORT_FIELDS.map(f => f.key) },
         }] }],
         toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_mall_report'] } },
-        abortSignal: AbortSignal.timeout(MALL_REPORT_TIMEOUT_MS),
+        abortSignal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal),
       },
     })
     const call = response.functionCalls?.[0]
@@ -788,13 +921,219 @@ async function generateMallProfileReportGemini(
   }
 }
 
+// detectCategoryAnomalyOllama와 같은 이유로 여유 있게 잡는다 — 이 리포트는 12개 항목을 한 번에 뽑아야 해
+// 그 이분판정(180초 실측)보다도 더 오래 걸릴 수 있다. Anthropic/Gemini가 둘 다 안 될 때만 타는 마지막
+// 폴백이라 무거워도 감수한다(사용자 요청, 2026-09-02 — "Anthropic/Gemini 빼고 Ollama로 하면 되잖아").
+// 240초로 시작했다가 실측(걸스굽, 2026-09-02)에서 240초를 꽉 채우고도 못 끝내는 걸 확인해 480초(8분)로
+// 늘렸다 — 그래도 안 끝나면 이 이상 늘리기보단 "이 리포트는 로컬 모델엔 원래 무리"로 보고 규칙 기반
+// 폴백을 받아들이는 쪽을 권한다(파일 상단 generatedBy 주석 참고).
+const MALL_REPORT_OLLAMA_TIMEOUT_MS = 480_000
+
+// https://console.groq.com 무료 API(2026-09-02 사용자 발급, 카드 등록 불필요) — 전용 LPU 하드웨어로
+// 돌려 Ollama(이 PC에서 CPU 전용이라 이 리포트 하나에 480초를 줘도 못 끝낸 적 있음, 위 주석 참고)보다
+// 훨씬 빠르다. API가 OpenAI 호환(/chat/completions, tools 스키마)이라 Anthropic/Gemini/Ollama와 같은
+// 셋 중 하나를 골라 붙이면 됐다. 무료 한도가 하루 1,000회 안팎(모델별로 다름)이라 Ollama보다 먼저,
+// 그러나 유료인 Anthropic/Gemini보다는 뒤에 시도한다(아래 generateMallProfileReport 순서 참고).
+const GROQ_BASE_URL = 'https://api.groq.com/openai/v1'
+// llama-3.3-70b-versatile로 시작했다가 실제 이 계정의 /v1/models 응답엔 없어(단종/개명, 404
+// model_not_found로 실측 확인, 2026-09-02) 이 계정에서 실제로 쓸 수 있는 모델 목록을 /v1/models로 직접
+// 조회해 골랐다 — 추측으로 고르지 않았다. gpt-oss-120b/20b, qwen3.8-27b 셋 다 무료 등급 TPM 한도(아래
+// 주석)에 똑같이 걸려 모델 선택보다 컨텍스트 크기 쪽이 병목이다. qwen3.8-27b(270억)와 gpt-oss-120b
+// (1200억, 계정에서 가장 큰 모델)를 직접 나란히 비교(걸스굽, 2026-09-02)했더니, 파라미터 수가 4배 이상
+// 큰 gpt-oss-120b가 오히려 애매하면 "확인 안됨"으로 쉽게 포기하는 경향이 뚜렷했다(업체연락처/반품주소/
+// URL계층/스크래핑유의사항 넷 다 qwen이 더 상세하고 정확했음, gpt-oss-120b는 그 중 절반을 아예
+// "확인 안됨"으로 답함) — 크기가 아니라 이 작업(한국어 원문에서 도구 호출로 구조화 추출)과의 궁합
+// 문제로 보인다. 그래서 qwen3.8-27b를 기본으로 둔다(이 프로젝트가 Ollama에서도 Qwen 계열을 한국어
+// 정확도 이유로 검증해둔 전례가 있다 — OLLAMA_MODEL 주석 — 와도 일관됨).
+const GROQ_MODEL = process.env.GROQ_MODEL || 'qwen/qwen3.8-27b'
+const MALL_REPORT_GROQ_TIMEOUT_MS = 20_000
+
+// 무료 등급 계정 공통 분당 토큰(TPM) 한도가 8,000인 게 실측으로 확인됐다(2026-09-02 — 모델을
+// gpt-oss-120b/20b/qwen3.8-27b로 바꿔봐도 셋 다 똑같이 8,000에 걸림, 조직 단위 한도라 모델과 무관).
+// 다른 공급자(Anthropic/Gemini)는 buildMallReportPrompt가 contextText를 20,000자까지 쓰는데, 그대로
+// 쓰면 13,000~14,000토큰이 필요해 항상 실패한다 — Groq 전용으로 훨씬 짧게 자른다. 8,000토큰 한도에
+// 여유를 두려고 원문을 5,000자로 줄인다(고정 프롬프트/스키마 설명 오버헤드까지 감안).
+// 실측 품질(2026-09-02, 걸스굽): 계좌번호/업체연락처/반품주소/택배사/정렬구조는 정확했지만, 은행명은
+// "기업"이 기업은행 약칭인 걸 못 알아채 놓쳤고(실제 오답), 상품페이지 구조/배송비/재고관리 방식은
+// "확인 안됨"으로 나왔다(이건 모델 실력 문제가 아니라 5,000자로 잘리면서 그 정보가 담긴 샘플 상품
+// 텍스트 자체가 안 보였기 때문 — Anthropic/Gemini/Ollama는 20,000자를 다 보므로 이 문제가 없다).
+// 즉 Groq는 "완전한 대안"이 아니라 "느린 Ollama보다는 빠르게, 규칙 기반보다는 낫게" 채워주는 중간
+// 단계로 보는 게 정확하다.
+const GROQ_CONTEXT_CHAR_LIMIT = 5_000
+
+// contextText는 위에서 이미 자르는데 categoryHints/sortHints는 그대로 프롬프트에 다 넣고 있었다 —
+// 카테고리가 많은 몰(신우: 328개)은 이 목록만으로도 5,000자 넘게 나가 ITPM 7,000 한도를 넘겨버렸다
+// (2026-09-06 실사용 확인: "Requested 12137" — contextText 5,000자와 별개로 카테고리 힌트 목록 자체가
+// 병목이었음). 처음엔 앞쪽 40개만 잘라 보냈는데, 그러면 qwen이 잘린 뒤의 대분류는 아예 못 보고
+// "나머지는 다수"로 뭉뚱그려 "카테고리 불러오기"(discoverCategoryLinks, 이런 한도 없이 전체를 그대로
+// 보여줌)가 찾은 상세 구조와 딴판인 리포트가 나왔다(2026-09-06 실사용 확인, 사용자 지적 — "카테고리
+// 불러오기 하면 159개를 상세히 찾는데 왜 groq 리포트는 대분류만 대충 찾았냐"). 단순히 앞부분만 자르는
+// 대신 대분류별로 묶어 "대분류(하위 몇 개 중 대표 예시)"로 압축하면, 카테고리가 아무리 많아도 대분류
+// 개수만큼만 늘어나 훨씬 적은 토큰으로 "실제로 몇 개 대분류에 하위가 각각 몇 개씩 있는지"까지 정확히
+// 전달할 수 있다 — buildCategoryHintSummary 참고.
+const GROQ_CATEGORY_HINT_EXAMPLES_PER_GROUP = 3
+
+// max_tokens을 안 넘겨주면(기존 코드) Groq가 이 모델의 기본 최대 출력치를 그대로 "요청한 출력 크기"로
+// 잡아 분당 출력 토큰(OTPM) 한도 자체를 넘겨버려 요청이 시작도 못 하고 거절된다(실사용 확인, 2026-09-05
+// — 모자사러: "Request too large ... on output tokens per minute (OTPM): Limit 1000, Requested 1413",
+// 이 계정 무료 등급의 OTPM 한도가 1,000인데 기본값만으로 1,413을 "요청"한 것으로 잡힘). 위 8,000
+// TPM(입력 컨텍스트) 한도와는 별개의 한도라 컨텍스트를 더 줄여도 해결이 안 되고, Groq 에러 메시지가
+// 직접 권하는 대로 max_tokens을 한도 아래로 명시해야 한다. 12개 필드 각각 "확인 안됨" 또는 한두 문장
+// 짧은 답이라 900이면 정상적으로는 다 채우고도 여유가 있다 — 그래도 실제 답이 이보다 길어 잘리면
+// JSON.parse가 실패해 아래 catch로 떨어지는데, 이는 기존에도 있던 안전한 폴백 경로와 같다(이 함수가
+// null을 반환하면 호출부가 로컬 Ollama/규칙 기반으로 넘어감).
+const GROQ_MAX_OUTPUT_TOKENS = 900
+
+/** categoryHints("대분류 > 소분류" 문자열 배열, 최대 수백 개)를 대분류별로 묶어 "대분류(대표 소분류
+ *  예시 몇 개 · 총 N개)" 형태로 압축한다 — 원본을 앞에서부터 그냥 자르면(이전 방식) 잘린 뒤의 대분류
+ *  자체를 AI가 아예 못 보게 돼 "나머지는 다수"로 뭉뚱그리는 부정확한 리포트가 나온다. 대분류 단위로
+ *  묶으면 카테고리가 아무리 많아도 프롬프트 길이는 "대분류 개수"에만 비례해서 늘어나고, 그 안에서도
+ *  "이 대분류 밑에 정확히 몇 개가 있다"는 사실은 그대로 보존된다. */
+function buildCategoryHintSummary(categoryHints: string[]): string {
+  const groups = new Map<string, string[]>()
+  for (const hint of categoryHints) {
+    const sepIdx = hint.indexOf(' > ')
+    const top = sepIdx === -1 ? hint : hint.slice(0, sepIdx)
+    const sub = sepIdx === -1 ? '' : hint.slice(sepIdx + 3)
+    if (!groups.has(top)) groups.set(top, [])
+    if (sub) groups.get(top)!.push(sub)
+  }
+  return [...groups.entries()].map(([top, subs]) => {
+    if (!subs.length) return top
+    const examples = subs.slice(0, GROQ_CATEGORY_HINT_EXAMPLES_PER_GROUP).join(', ')
+    return subs.length > GROQ_CATEGORY_HINT_EXAMPLES_PER_GROUP ? `${top}(${examples} 등 총 ${subs.length}개)` : `${top}(${examples})`
+  }).join(', ')
+}
+
+/** Anthropic·Gemini가 둘 다 안 되면 Groq(무료, 빠름)로 시도하고, 그것도 안 되면(키 없음, 한도 초과 등)
+ *  로컬 Ollama로 넘어간다. generatedBy를 'ai'가 아니라 'groq'로 따로 표시한다 — 이런 종합 추출에 얼마나
+ *  정확한지 아직 실사용으로 검증된 적이 없어(도입 첫날, 2026-09-02), 클라우드 검증된 결과('ai')와는
+ *  신뢰도를 구분해두는 편이 안전하다.
+ *
+ *  2026-09-06 실사용 확인(가방쟁이, 신우): 카테고리가 많은 몰일수록 categoryStructure를 하위 카테고리까지
+ *  전부 나열하려 들어 GROQ_MAX_OUTPUT_TOKENS(900 — 계정 OTPM 한도 1,000 아래로 맞춘 값이라 더 못 올림)를
+ *  다 쓰고도 못 끝내, Groq가 도구 호출 자체를 400 tool_use_failed로 거절했다(failed_generation을 보면
+ *  qwen이 답 자체는 정확하게 만들고 있었다 — 그냥 다 쓰기엔 토큰이 모자랐을 뿐). "간결하게 답하라"는
+ *  지시를 tool 함수 설명(딱 한 곳)에만 추가했다 — 이 계정은 입력 토큰(ITPM)도 분당 7,000으로 빠듯해서,
+ *  같은 문구를 12개 필드 설명마다 반복하면 그만큼 입력 쪽에서 429/413을 더 유발한다(처음엔 필드마다
+ *  반복했다가 이 문제로 다시 한 곳으로 합침). */
+async function generateMallProfileReportGroq(
+  mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
+  signal?: AbortSignal,
+): Promise<MallStructureReport | null> {
+  if (!process.env.GROQ_API_KEY || !contextText.trim()) return null
+  const properties: Record<string, { type: string; description: string }> = {}
+  MALL_REPORT_FIELDS.forEach(f => {
+    properties[f.key] = { type: 'string', description: `${f.label} — ${f.hint}. 확인 못하면 "확인 안됨"만 답한다(추측 금지).` }
+  })
+  const prompt = buildMallReportPrompt(
+    mallName, platform, categoryHints.length ? [buildCategoryHintSummary(categoryHints)] : [], sortHints, sampleProductUrl,
+    contextText.slice(0, GROQ_CONTEXT_CHAR_LIMIT),
+  )
+
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: reportAiSignal(MALL_REPORT_GROQ_TIMEOUT_MS, signal),
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        max_tokens: GROQ_MAX_OUTPUT_TOKENS,
+        messages: [{ role: 'user', content: prompt }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_mall_report',
+            description: `조사한 ${MALL_REPORT_FIELDS.length}개 항목을 각각 문자열로 채운다. 원문에서 확인 못한 항목은 반드시 "확인 안됨"으로 채운다. `
+              + `출력 예산이 작으니 항목마다 한두 문장, 100자 이내로 간결히 — 나열할 게 많아도 대표 몇 개만 들고 "등"으로 줄인다(categoryStructure는 특히 대분류 위주로만, 하위까지 다 나열하지 않는다).`,
+            parameters: { type: 'object', required: MALL_REPORT_FIELDS.map(f => f.key), properties },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_mall_report' } },
+      }),
+    })
+    if (!res.ok) {
+      console.error(`[generateMallProfileReportGroq] API call failed: ${res.status} ${await res.text().catch(() => '')}`)
+      return null
+    }
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { name: string; arguments: string } }[] }, finish_reason?: string }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) return null
+    if (data.choices?.[0]?.finish_reason === 'length') {
+      // GROQ_MAX_OUTPUT_TOKENS 안에 다 못 채웠다는 뜻 — 실제로 이 몰의 답변이 예상보다 길었던 경우다.
+      // arguments가 잘린 JSON일 가능성이 높아 아래 JSON.parse가 대개 실패하지만, 혹시 우연히 필드
+      // 경계에서 끊겨 파싱에 성공하더라도 일부 필드가 통째로 빠졌을 수 있다는 걸 로그로 남겨둔다.
+      console.error('[generateMallProfileReportGroq] 응답이 max_tokens에 걸려 잘렸을 수 있음(finish_reason=length)')
+    }
+    const args = JSON.parse(call.function.arguments)
+    if (!args || typeof args !== 'object') return null
+    return { ...(args as Omit<MallStructureReport, 'generatedBy'>), generatedBy: 'groq' }
+  } catch (e) {
+    console.error('[generateMallProfileReportGroq] API call failed:', e instanceof Error ? e.message : e)
+    return null
+  }
+}
+
+/** Anthropic·Gemini가 둘 다 안 되면(크레딧 소진, 쿼터 초과 등) 로컬 Ollama로 마지막 시도한다.
+ *  detectCategoryAnomalyOllama와 같은 큐/타임아웃 관행을 따른다 — 다만 이 리포트는 12개 항목을 동시에
+ *  뽑는 훨씬 복잡한 종합 추론이라, 로컬 소형 모델이 그 이분판정(suspicious/reason)보다도 더 약할 수
+ *  있다는 걸 감안해야 한다(원래 이 함수에 Ollama 폴백을 안 넣어뒀던 이유이기도 함) — 그래도 "클라우드가
+ *  둘 다 막혔을 때 규칙 기반으로 완전히 떨어지는 것"보다는 낫다고 보고 마지막 폴백으로만 둔다.
+ *  generatedBy를 'ai'가 아니라 'ollama'로 따로 표시해 화면에서 신뢰도를 구분한다. */
+async function generateMallProfileReportOllama(
+  mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
+  signal?: AbortSignal,
+): Promise<MallStructureReport | null> {
+  if (!contextText.trim()) return null
+  const properties: Record<string, { type: string; description: string }> = {}
+  MALL_REPORT_FIELDS.forEach(f => {
+    properties[f.key] = { type: 'string', description: `${f.label} — ${f.hint}. 아래 원문에서 확인할 수 없으면 반드시 "확인 안됨"이라고만 답한다(추측 금지).` }
+  })
+  const prompt = buildMallReportPrompt(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText)
+
+  return withOllamaQueue(async () => {
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: reportAiSignal(MALL_REPORT_OLLAMA_TIMEOUT_MS, signal),
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          stream: false,
+          think: false,
+          keep_alive: '30m',
+          messages: [{ role: 'user', content: prompt }],
+          tools: [{
+            type: 'function',
+            function: {
+              name: 'set_mall_report',
+              description: `조사한 ${MALL_REPORT_FIELDS.length}개 항목을 각각 문자열로 채운다. 원문에서 확인 못한 항목은 반드시 "확인 안됨"으로 채운다.`,
+              parameters: { type: 'object', required: MALL_REPORT_FIELDS.map(f => f.key), properties },
+            },
+          }],
+        }),
+      })
+      if (!res.ok) return null
+      const data = await res.json() as { message?: { tool_calls?: { function: { name: string; arguments: unknown } }[] } }
+      const call = data.message?.tool_calls?.[0]
+      if (!call) return null
+      const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments
+      if (!args || typeof args !== 'object') return null
+      return { ...(args as Omit<MallStructureReport, 'generatedBy'>), generatedBy: 'ollama' }
+    } catch {
+      return null
+    }
+  })
+}
+
 /**
  * "몰 구조분석" 기능 — 실제로 수집한 원문(홈/게시판/상품페이지 텍스트)만 근거로 사용자가 알고 싶어하는
  * 12개 항목(URL 계층/카테고리/정렬/은행명/계좌번호/택배사/택배비/반품주소/재고관리/연락처/상품페이지 구조/
  * 스크래핑 유의사항)을 채운다. 원문에 없는 내용을 추측하지 않도록 프롬프트에서 명시적으로 금지하고,
- * 확인 못한 항목은 "확인 안됨"으로 답하게 한다. Anthropic을 먼저 시도하고, 크레딧 부족 등으로 실패하면
- * Gemini로 재시도한다(둘 다 실패하거나 원문을 하나도 못 모았으면 null — 호출부가 규칙 기반으로 대체).
- */
+ * 확인 못한 항목은 "확인 안됨"으로 답하게 한다. enabledProviders에 있는 공급자만, ALL_AI_PROVIDERS 순서
+ * (Anthropic → Gemini → Groq → 로컬 Ollama — 유료 둘을 먼저, 그다음 무료 중 빠른 Groq, 느린 로컬
+ * Ollama는 맨 마지막)대로 하나씩 시도해 처음 성공한 결과를 쓴다 — 전부 실패하거나 enabledProviders가
+ * 비었거나 원문을 하나도 못 모았으면 null(호출부가 규칙 기반으로 대체). */
 export async function generateMallProfileReport(
   mallName: string,
   platform: string,
@@ -802,12 +1141,27 @@ export async function generateMallProfileReport(
   sortHints: string[],
   sampleProductUrl: string,
   contextText: string,
+  enabledProviders: AiProviderId[] = ALL_AI_PROVIDERS,
+  signal?: AbortSignal,
 ): Promise<MallStructureReport | null> {
-  return await generateMallProfileReportAnthropic(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText).catch(() => null)
-    ?? await generateMallProfileReportGemini(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText).catch(() => null)
+  const providers: { id: AiProviderId; fn: () => Promise<MallStructureReport | null> }[] = [
+    { id: 'anthropic', fn: () => generateMallProfileReportAnthropic(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText, signal) },
+    { id: 'gemini', fn: () => generateMallProfileReportGemini(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText, signal) },
+    { id: 'groq', fn: () => generateMallProfileReportGroq(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText, signal) },
+    { id: 'ollama', fn: () => generateMallProfileReportOllama(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText, signal) },
+  ]
+  for (const p of providers) {
+    // 몰구조분석 중지/PTP 탭 종료로 이미 취소됐으면 다음 공급자로 폴백을 계속 시도할 이유가 없다 —
+    // 어차피 그 결과도 곧 버려질 것이므로 남은 API 호출(과금/무료한도 소모)을 아낀다.
+    if (signal?.aborted) return null
+    if (!enabledProviders.includes(p.id)) continue
+    const result = await p.fn().catch(() => null)
+    if (result) return result
+  }
+  return null
 }
 
-export interface CategoryAnomalyVerdict { suspicious: boolean; reason: string; source: 'anthropic' | 'gemini' | 'ollama' }
+export interface CategoryAnomalyVerdict { suspicious: boolean; reason: string; source: 'anthropic' | 'gemini' }
 
 const CATEGORY_ANOMALY_TIMEOUT_MS = 20_000
 
@@ -914,92 +1268,22 @@ async function detectCategoryAnomalyGemini(
   }
 }
 
-// 실측(2026-08-29~30, CPU 전용): qwen3:8b는 짧은 프롬프트도 20초, qwen3:14b는 실제 봇차단 사고
-//재현 프롬프트에 87~125초까지 걸렸다(같은 프롬프트인데도 실행마다 변동 폭이 큼) — 8b는 이 사고를
-// suspicious:false로 놓쳤고 14b는 정확히 잡아내(실사용 비교 확인) 기본 모델을 14b로 교체했다
-// (.env.local의 OLLAMA_MODEL). 이 검사는 "카테고리 불러오기"/"몰 구조분석" 자체가 이미 몇 분씩
-// 걸리는 걸 사용자가 감수하는 무거운 작업의 마지막 단계일 뿐이라(사용자 판단: "정상적으로 분석
-// 진행된다 싶으면 시간을 늘려도 된다"), 다른 Ollama 호출(25초, 반복 호출이라 짧게 끊어야 함)과 달리
-// 여유 있게 잡는다 — 125초 실측치에 여유를 더해 180초. 그래도 무한정은 아니다 — 정말 응답이 없는
-// 경우(Ollama 다운 등) 이 검사 하나 때문에 전체 작업이 무한히 멈춰있으면 안 되므로 상한은 둔다.
-const CATEGORY_ANOMALY_OLLAMA_TIMEOUT_MS = 180_000
-const CATEGORY_ANOMALY_OLLAMA_MAX_ITEMS = 30
-
-/** Anthropic·Gemini가 둘 다 안 되면(크레딧 소진, 과부하 등 — 실사용 확인, 2026-08-29: Anthropic 크레딧
- *  부족 + Gemini 타임아웃이 동시에 겹쳐 이 검사 자체가 조용히 무력화됨) 로컬 Ollama로 마지막 시도한다.
- *  다른 Ollama 호출(pickIndicesWithOllama)과 같은 큐 관행을 따르되, 그쪽은 "인덱스 선택" 스키마가
- *  고정이라 이 종합 판단(suspicious/reason)에는 못 쓰므로 별도 함수로 둔다.
- *
- *  실측 경고(2026-08-29): qwen3:8b로 직접 테스트해보니 "새 카테고리가 과거 카테고리와 겹친다"를
- *  거꾸로 "중복이라 의심스럽다"고 판단하는 등, 이 비교·부정 추론 자체를 안정적으로 못 할 때가 있었다
- *  (원래 이 함수가 클라우드 모델을 우선하는 이유 — generateMallProfileReport와 같은 판단: 종합 추론은
- *  로컬 소형 모델에 안 맞음, 단순 분류(pickIndicesWithOllama류)만 로컬로 돌림). 그래도 "클라우드가 둘 다
- *  막혔을 때 아예 검사를 못 하는 것"보다는 낫다고 보고 마지막 폴백으로만 둔다 — 화면에 뜨는 경고 문구가
- *  Ollama발이면 그만큼 신뢰도가 더 낮을 수 있다는 걸 감안해야 한다. */
-async function detectCategoryAnomalyOllama(
-  mallName: string, freshLinks: { name: string; href: string }[], migratedLabels: string[], manualCategoryUrls: string[],
-): Promise<CategoryAnomalyVerdict | null> {
-  if (!freshLinks.length) return null
-  const prompt = buildCategoryAnomalyPrompt(
-    mallName,
-    freshLinks.slice(0, CATEGORY_ANOMALY_OLLAMA_MAX_ITEMS),
-    migratedLabels.slice(0, CATEGORY_ANOMALY_OLLAMA_MAX_ITEMS),
-    manualCategoryUrls.slice(0, CATEGORY_ANOMALY_OLLAMA_MAX_ITEMS),
-  )
-  return withOllamaQueue(async () => {
-    try {
-      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(CATEGORY_ANOMALY_OLLAMA_TIMEOUT_MS),
-        body: JSON.stringify({
-          model: OLLAMA_MODEL,
-          stream: false,
-          think: false,
-          keep_alive: '30m',
-          messages: [{ role: 'user', content: prompt }],
-          tools: [{
-            type: 'function',
-            function: {
-              name: 'set_category_anomaly_verdict',
-              description: '새로 찾은 카테고리 목록이 의심스러운지 판정한다.',
-              parameters: {
-                type: 'object',
-                required: ['suspicious', 'reason'],
-                properties: {
-                  suspicious: { type: 'boolean', description: '터무니없어 보이면 true' },
-                  reason: { type: 'string', description: '판단 근거를 한두 문장으로. suspicious가 false여도 간단히 채운다.' },
-                },
-              },
-            },
-          }],
-        }),
-      })
-      if (!res.ok) return null
-      const data = await res.json() as { message?: { tool_calls?: { function: { name: string; arguments: unknown } }[] } }
-      const call = data.message?.tool_calls?.[0]
-      if (!call) return null
-      const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments
-      const verdict = args as { suspicious?: unknown; reason?: unknown } | null
-      if (typeof verdict?.suspicious !== 'boolean') return null
-      return { suspicious: verdict.suspicious, reason: typeof verdict.reason === 'string' ? verdict.reason : '', source: 'ollama' }
-    } catch {
-      return null
-    }
-  })
-}
-
 /** "카테고리 불러오기"/"몰 구조분석"이 새로 찾은 카테고리 구조가 터무니없는지 AI로 한 번 더 확인한다 —
  *  검증된 과거 카테고리(마이그레이션 확정분 + 사용자가 직접 확인한 URL)와 비교해 판단한다. Anthropic →
- *  Gemini → 로컬 Ollama 순으로 시도하고, 셋 다 실패하면 null(판단 불가 = 경고 안 함, 오탐으로 정상
- *  결과를 막지 않기 위해 fail-open). 호출부(lib/scrape/categoryAnomalyCheck.ts)가 애초에 비교할 과거
- *  증거가 충분할 때만 이 함수를 부른다. */
+ *  Gemini 순으로 시도하고, 둘 다 실패하면 null(판단 불가 = 경고 안 함, 오탐으로 정상 결과를 막지 않기
+ *  위해 fail-open). 호출부(lib/scrape/categoryAnomalyCheck.ts)가 애초에 비교할 과거 증거가 충분할 때만
+ *  이 함수를 부른다.
+ *  로컬 Ollama(detectCategoryAnomalyOllama)는 예전엔 세 번째 폴백이었는데 뺐다(2026-09-03) — 이 검사는
+ *  applyProfileResult가 응답을 기다리지 않고 항상 백그라운드로 돌리는 데다(mallProfile.ts 주석 참고),
+ *  "몰 구조분석" 화면의 AI 공급자 체크박스와 전혀 무관하게 실행돼, 사용자가 화면에서 Ollama를 꺼놔도
+ *  Anthropic/Gemini가 실패할 때마다(이 세션 내내 그랬음) 조용히 Ollama를 불러 CPU를 오래 붙잡았다 —
+ *  체크박스를 꺼도 왜 `llama-server.exe`가 계속 메모리에 남아있는지 사용자가 작업관리자로 직접 확인해
+ *  지적함. 이 검사 자체가 fail-open(못 하면 그냥 경고 없이 넘어감)이라 완전히 꺼도 손실이 적다. */
 export async function detectCategoryAnomaly(
   mallName: string, freshLinks: { name: string; href: string }[], migratedLabels: string[], manualCategoryUrls: string[],
 ): Promise<CategoryAnomalyVerdict | null> {
   return await detectCategoryAnomalyAnthropic(mallName, freshLinks, migratedLabels, manualCategoryUrls).catch(() => null)
     ?? await detectCategoryAnomalyGemini(mallName, freshLinks, migratedLabels, manualCategoryUrls).catch(() => null)
-    ?? await detectCategoryAnomalyOllama(mallName, freshLinks, migratedLabels, manualCategoryUrls).catch(() => null)
 }
 
 const COURIER_NAMES = ['CJ대한통운', '한진택배', '로젠택배', '우체국택배', '롯데택배', '경동택배', '대신택배', '합동택배', '일양로지스', 'CU편의점택배', 'GS Postbox']
@@ -1119,7 +1403,9 @@ export async function extractProductFieldsWithAI(pageText: string): Promise<AiEx
         role: 'user',
         content: `다음은 쇼핑몰 상품 상세페이지에서 눈에 보이는 텍스트를 그대로 가져온 것입니다. 상품명과 판매가격(원, 숫자만)을 찾아 JSON으로만 답해주세요. 못 찾으면 null로 표시하세요.\n형식: {"name": "...", "price": 12345}\n\n${pageText.slice(0, 4000)}`,
       }],
-    })
+      // generateAutoExtractionRules와 같은 이유로 추가(2026-09-02) — 규칙 기반 추출이 전부 실패했을 때
+      // 상품마다 반복될 수 있는 마지막 폴백이라, 타임아웃 없이 걸리면 스크랩 전체가 멈춘다.
+    }, { signal: AbortSignal.timeout(MALL_REPORT_TIMEOUT_MS) })
     const text = (response.content[0] as { type: string; text: string }).text
     const match = text.match(/\{[\s\S]*\}/)
     if (!match) return { name: null, price: null }

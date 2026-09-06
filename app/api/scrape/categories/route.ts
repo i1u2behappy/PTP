@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
 import { getCategoryScrapeHistory, deriveCategoryUrlPattern, type CategoryLink, type MallPlatform } from '@/lib/scraper'
-import { discoverCategoryLinks } from '@/lib/workerClient'
+import { discoverCategoryLinks, stopCategoryDiscovery } from '@/lib/workerClient'
 import { shouldKeepPreviousCategoryLinks } from '@/lib/scrape/categoryCachePolicy'
 import { checkCategoryAnomaly } from '@/lib/scrape/categoryAnomalyCheck'
 
@@ -22,6 +22,10 @@ interface CachedProfile {
   /** checkCategoryAnomaly가 이 categoryLinks를 검증된 과거 카테고리와 비교해 의심스럽다고 판단했을 때만
    *  채워진다(2026-08-29) — lib/scrape/categoryAnomalyCheck.ts 참고. */
   categoryAnomalyWarning?: { reason: string; checkedAt: string; source: 'anthropic' | 'gemini' | 'ollama' } | null
+  /** 지난번 categoryLinks 갱신(몰 구조분석/이 라우트의 "다시 확인" 둘 다) 때 새로 나타난 href만 남긴
+   *  목록 — "발견된 카테고리 N개" 배지 옆에 "새 카테고리 M개"를 보여주는 용도(사용자 요청, 2026-09-05,
+   *  lib/scrape/mallProfile.ts의 applyProfileResult와 아래 계산이 같은 방식을 쓴다). */
+  newCategoryHrefs?: string[]
 }
 
 /** 체크리스트의 "상품개수"/"확인일시"/"최근 스크랩"/"업체" 컬럼용 — previewCatalog가 저장해둔
@@ -102,6 +106,7 @@ export async function POST(req: NextRequest) {
         categoryCounts, categoryScrapeHistory,
         aiUsed: !!profile.categoryLinksAiUsed,
         categoryAnomalyWarning: profile.categoryAnomalyWarning || null,
+        newCategoryHrefs: profile.newCategoryHrefs || [],
       })
     }
   }
@@ -110,6 +115,10 @@ export async function POST(req: NextRequest) {
   // 미리보기 직후 이어서 이 버튼을 누르는 경우), 그 크롬의 세션 파일이 잠긴 채 복사돼도(robocopy 일부
   // 실패) 진행한다 — 안 그러면 개발자모드에서는 캐시가 없는 몰/"다시 확인"이 사실상 항상 실패한다
   // (몰 구조분석에서 이미 같은 이유로 적용한 것과 동일, 2026-08-16).
+  // PTP 탭을 닫으면(또는 이 요청 자체가 abort되면) "카테고리 불러오기 중지" 버튼과 같은 stopCategoryDiscovery를
+  // 그대로 호출해, 허브 펼치기 루프가 새 카테고리를 더 꺼내지 않고 지금까지 찾은 부분 결과로 곧장 끝내게
+  // 한다(profile/route.ts와 같은 이유, 2026-09-06 — "탭을 닫아도 안 멈춘다" 사용자 지적).
+  if (siteId) req.signal.addEventListener('abort', () => { stopCategoryDiscovery(siteId).catch(() => {}) })
   const result = await discoverCategoryLinks({ url, siteId, loginId, loginPw, allowStaleManualLoginProfile: true })
   // "다시 확인"(force)이 새로 훑은 결과로 캐시를 덮어써도 되는지는 shouldKeepPreviousCategoryLinks(순수
   // 함수, 유닛테스트로 검증됨) 참고 — AI 결과 보호 + 로그인 벽에 막힌 부실한 결과로부터 확장이 저장해둔
@@ -120,6 +129,10 @@ export async function POST(req: NextRequest) {
   let responseAiUsed = result.aiUsed
   let responseLoginBlockedExpansion = result.loginBlockedExpansion
   let responseCategoryAnomalyWarning: { reason: string; checkedAt: string; source: 'anthropic' | 'gemini' | 'ollama' } | null = null
+  // "새 카테고리 M개" 배지용 — lib/scrape/mallProfile.ts의 applyProfileResult와 같은 방식(이전 categoryLinks와
+  // 비교해 새로 나타난 href만 남김). keepPrevious면 실제로 아무것도 안 바뀐 것이라 이전 값을 그대로
+  // 이어받는다(사용자 요청, 2026-09-05).
+  let responseNewCategoryHrefs: string[] = []
   if (siteId && result.links.length) {
     const prevRes = await pool.query<{ scrape_profile: CachedProfile | null; name: string | null }>(
       `SELECT scrape_profile, name FROM sites WHERE id=$1`, [siteId],
@@ -139,8 +152,11 @@ export async function POST(req: NextRequest) {
       // 이전 캐시를 그대로 지키는 거라 그 캐시에 이미 붙어있던 이상탐지 경고(있었다면)도 그대로 보여준다
       // — 새로 검사하지 않는다(이미 검증됐거나 검사 대상이 아니었던 데이터이므로).
       responseCategoryAnomalyWarning = prevProfile?.categoryAnomalyWarning || null
+      responseNewCategoryHrefs = prevProfile?.newCategoryHrefs || []
     } else {
       const categoryLinks = result.links.map(l => ({ name: l.text, href: l.href }))
+      const prevCategoryHrefSet = new Set((prevCategoryLinks || []).map(c => c.href))
+      responseNewCategoryHrefs = categoryLinks.filter(c => !prevCategoryHrefSet.has(c.href)).map(c => c.href)
       // 이번에 찾은 카테고리로 URL 패턴도 다시 역산해 "기억"을 갱신한다(사용자 요청, 2026-08-26) —
       // 다음 탐지(규칙 기반이든 AI든) 때 discoverTopLevelCategoryLinks가 이 패턴으로 즉시 재확인한다.
       const categoryUrlPattern = deriveCategoryUrlPattern(result.links.map(l => l.href))
@@ -158,12 +174,13 @@ export async function POST(req: NextRequest) {
              || jsonb_build_object(
                   'platform', $1::text, 'categoryLinks', $2::jsonb, 'categoryMenuNames', $3::jsonb,
                   'categoryLinksAiUsed', $4::boolean, 'categoryUrlPattern', $5::jsonb,
-                  'categoryAnomalyWarning', $6::jsonb),
+                  'categoryAnomalyWarning', $6::jsonb, 'newCategoryHrefs', $8::jsonb),
            scrape_profile_updated_at = NOW()
          WHERE id=$7`,
         [
           result.platform, JSON.stringify(categoryLinks), JSON.stringify(categoryLinks.map(c => c.name)),
           !!result.aiUsed, JSON.stringify(categoryUrlPattern), JSON.stringify(responseCategoryAnomalyWarning), siteId,
+          JSON.stringify(responseNewCategoryHrefs),
         ],
       )
     }
@@ -177,5 +194,6 @@ export async function POST(req: NextRequest) {
     scrapedHrefs, allScraped, excludedCategoryHrefs, categoryCounts, categoryScrapeHistory,
     loginBlockedExpansion: !!responseLoginBlockedExpansion,
     categoryAnomalyWarning: responseCategoryAnomalyWarning,
+    newCategoryHrefs: responseNewCategoryHrefs,
   })
 }

@@ -24,6 +24,13 @@ export function register() {
   // 실행하면 된다"는 기존 경험을 그대로 유지하기 위함.
   ensureWorkerRunning().catch(e => console.error('[worker] 자동 기동 실패 — npm run worker로 직접 띄워주세요:', e))
 
+  // dev:clean이 재시작마다 .next 캐시를 통째로 지우고 시작하다 보니(taskkill로 강제종료되면 캐시가
+  // 손상되는 문제, 2c9c703의 대응) 재부팅 직후 사용자가 처음 여는 화면/API마다 webpack이 그 자리에서
+  // 컴파일하느라 매번 10초 넘게 걸린다(실사용 확인, 2026-08-31 — /api/auth/me, /api/products 등이 각각
+  // 10~14초). 서버가 뜨자마자 백그라운드로 같은 라우트들을 미리 한 번 불러 컴파일을 끝내두면, 사용자가
+  // 실제로 브라우저를 열 때는 이미 컴파일이 끝나있어 체감 대기시간이 크게 줄어든다.
+  warmUpRoutes().catch(e => console.error('[warmup] 예열 실패(치명적이지 않음 — 사용자가 처음 열 때 그만큼 느릴 뿐):', e))
+
   // 워커가 "운영 중에" 죽는 경우(예상 못한 크래시, DB 8분 재시도도 다 실패 등)를 아무도 못 살려주는
   // 공백이 있었다(2026-08-30 실사용 확인 — lib/workerRestart.ts의 자동재시작은 워커 자신의 setInterval에
   // 기대는데, 워커가 완전히 죽으면 그 감시 코드도 같이 죽어 스스로는 못 살아난다). 이 dev 서버 프로세스는
@@ -79,4 +86,50 @@ async function ensureWorkerRunning() {
   })
   child.unref()
   console.log(`[worker] 새로 시작함 (pid=${child.pid}) — 로그: .worker.log`)
+}
+
+const WARMUP_TOTAL_TIMEOUT_MS = 30_000
+
+/** 로그인이 있어야만 실제 코드에 닿는 화면/API('/', '/api/auth/me' 등)는 proxy.ts가 세션 쿠키 없이는
+ *  라우트 코드를 아예 실행하지 않고 리다이렉트/401만 돌려준다 — 그러면 컴파일도 안 일어나 예열 효과가
+ *  없다. 그래서 이 프로세스 안에서만 쓰고 버리는 내부 전용 세션 쿠키를 lib/auth.ts의 signSessionToken과
+ *  똑같은 방식(HMAC-SHA256)으로 직접 만든다. lib/auth.ts를 그대로 import하지 않고 로직을 복사한 이유는
+ *  위 ensureWorkerRunning 주석과 같다 — 이 파일은 webpack의 "instrument" 레이어로 번들링돼 상대경로
+ *  모듈 import가 이 레이어의 제한된 리졸브 규칙에 걸릴 수 있고, crypto 같은 Node 내장 모듈만
+ *  eval('require')로 안전하게 우회되는 게 이미 검증돼 있어 그 방식만 재사용한다. */
+function buildWarmupSessionCookie(nodeRequire: NodeJS.Require): string | null {
+  const key = process.env.CREDENTIALS_ENCRYPTION_KEY
+  if (!key) return null
+  const crypto = nodeRequire('crypto') as typeof import('crypto')
+  // lib/auth.ts의 SESSION_COOKIE('ptp_session')와 페이로드 형태(username/role/exp)를 그대로 맞춰야
+  // verifySessionToken이 유효한 토큰으로 인정한다 — role이 없으면 옛 토큰으로 보고 무효 처리하므로
+  // (lib/auth.ts 주석 참고) 반드시 role까지 채워 보낸다.
+  const payload = Buffer.from(JSON.stringify({ username: '__warmup__', role: 'admin', exp: Date.now() + 60_000 })).toString('base64url')
+  const sig = crypto.createHmac('sha256', Buffer.from(key, 'hex')).update(payload).digest('base64url')
+  return `ptp_session=${payload}.${sig}`
+}
+
+async function warmUpRoutes() {
+  if (process.env.NEXT_RUNTIME === 'edge' || process.env.NODE_ENV === 'production') return
+  const nodeRequire = eval('require') as NodeJS.Require
+  const base = process.env.PTP_BASE_URL || 'http://localhost:3000'
+  const startedAt = Date.now()
+
+  // register()가 이 프로세스 자신의 HTTP 리스너가 열리기 전에 불릴 수 있다 — 열릴 때까지 짧게 재시도한다.
+  while (Date.now() - startedAt < WARMUP_TOTAL_TIMEOUT_MS) {
+    const up = await fetch(`${base}/api/health/db`, { signal: AbortSignal.timeout(2_000) }).then(() => true).catch(() => false)
+    if (up) break
+    await new Promise(r => setTimeout(r, 500))
+  }
+
+  const cookie = buildWarmupSessionCookie(nodeRequire)
+  // 재부팅 직후 실사용에서 10초 넘게 걸린 걸로 확인된 화면/API만 우선 예열한다(2026-08-31) — 앱의 모든
+  // 라우트를 다 도는 건 아니라서, 다른 화면에서 같은 콜드 컴파일 지연이 새로 확인되면 여기 추가한다.
+  // clientId=1은 실사용 확인 당시의 실제 값 — 다르더라도 컴파일 자체는 똑같이 예열된다.
+  const routes = ['/', '/api/health/db', '/api/health/worker-boot', '/api/auth/me', '/api/products', '/api/scrape-staging?status=pending', '/api/master?clientId=1']
+  const results = await Promise.allSettled(routes.map(path =>
+    fetch(`${base}${path}`, { headers: cookie ? { Cookie: cookie } : {}, signal: AbortSignal.timeout(60_000) }),
+  ))
+  const failed = results.filter(r => r.status === 'rejected').length
+  console.log(`[warmup] 주요 화면/API ${routes.length}개 예열 완료(${failed > 0 ? `${failed}개 실패, ` : ''}${Date.now() - startedAt}ms)`)
 }

@@ -28,7 +28,9 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = await countCategoryOverlap({ ...parsed.data, stopSignal: req.signal })
+    // exact-total/route.ts와 같은 이유로 signal은 두 번째 인자로 넘긴다(opts.stopSignal은 효과 없음,
+    // 2026-09-06 발견).
+    const result = await countCategoryOverlap(parsed.data, req.signal)
     return NextResponse.json(result)
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 })

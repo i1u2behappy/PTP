@@ -77,6 +77,23 @@ async function checkStopRequested(sid) {
   }
 }
 
+/** "스크랩 미리보기"(runPreview) 전용 — 위 checkStopRequested와 같은 이유·같은 구조지만, 미리보기는
+ *  실제 스크랩 세션(sessionId)이 없어 siteId로 대신 묻는다(lib/devPreviewStatus.ts의
+ *  isDevPreviewStopRequested 참고, 2026-09-06 — "중지를 누르면 그 순간 멈추라"는 요청). 카테고리 진행
+ *  신호(preview-progress POST)에 이미 stop 필드가 같이 오므로 카테고리 경계에서는 그 값을 그대로 쓰고,
+ *  카테고리 하나 안에서 여러 페이지를 도는 완전탐색/이분탐색처럼 더 자주 확인해야 하는 자리에서만
+ *  이 함수로 별도 조회한다. */
+async function checkDevPreviewStopRequested(siteId) {
+  if (!siteId) return false
+  try {
+    const res = await fetch(`${SITE_API_BASE}/${siteId}/preview-progress`)
+    const data = await res.json()
+    return !!data.stop
+  } catch {
+    return false
+  }
+}
+
 function delay(ms) { return new Promise(r => setTimeout(r, ms)) }
 function throttle() { return delay(1200 + Math.random() * 1200) }
 
@@ -209,18 +226,34 @@ const IS_BLOCK_PAGE_EXPR = `(() => {
 // - 카페24 SEO: /product/상품명/번호/category/분류/display/순서/
 // - 카페24 고전: /product/detail.html?product_no=...
 // - 구형 자체 솔루션(신우 등): detail.htm?brandcode=... 처럼 detail.htm(l) + 알려진 코드 파라미터
-// - 고도몰(펫투비 등): goods_view.php?goodsno=...
+// - 고도몰(펫투비 등, 구형): goods_view.php?goodsno=...
+// - 고도몰5(신형, 도매토피아 등): /goods/view?no=... (lib/scraper.ts의 PLATFORM_PROFILES.godomall.
+//   detailUrlPattern에 2026-08-19 추가 — 이쪽엔 안 옮겨져 있던 걸 2026-09-05 전수조사로 발견)
 const COLLECT_LINKS_EXPR = `(() => {
   const isProductLink = (href) => {
     if (/\\/product\\/.+\\/\\d+\\/category\\/\\d+\\/display\\/\\d+/.test(href)) return true
     if (/detail\\.html?/i.test(href) && /[?&](product_no|branduid|goodsno|goods_no|brandcode)=/i.test(href)) return true
     if (/goods_view\\.php/i.test(href) && /[?&]goodsno=/i.test(href)) return true
+    if (/\\/goods\\/view\\?no=\\d+/i.test(href)) return true
+    // 도매의신(domesin.com) — lib/scraper.ts의 PLATFORM_PROFILES.domesin과 같은 패턴(2026-09-05
+    // 전수조사로 발견: 이 확장 쪽 앵커 사전필터에 이 URL 형태가 아예 없어 상품 링크를 0개로 잡았다).
+    if (/p=view\\.html/i.test(href) && /[?&]iid=/i.test(href)) return true
+    return false
+  }
+  // "최근 본 상품"/"추천 상품" 위젯이 상품 카드와 같은 URL 패턴을 공유해 실제로는 끝난 카테고리에서
+  // 계속 새 상품이 나오는 것처럼 보이는 문제 — lib/scraper.ts의 WIDGET_CLASS_EXCLUDE_SRC와 같은 기준
+  // (2026-09-05 전수조사로 발견: 서버 쪽엔 이미 있는 이 제외 로직이 확장에는 아예 없었다).
+  const widgetRe = /productrecent|recent-?list|recent-?view|recently-?viewed|recommend/i
+  const inWidget = (el) => {
+    for (let cur = el; cur; cur = cur.parentElement) {
+      if (widgetRe.test(cur.className || '')) return true
+    }
     return false
   }
   // 목록(카테고리) 페이지에서 "미리보기"의 나머지 목록에 쓸 상품명/썸네일도 같이 모은다 — lib/scraper.ts의
   // collectProductUrls(scanCurrentPage)와 같은 방식(썸네일 img의 alt, 없으면 링크 텍스트).
-  const anchors = Array.from(document.querySelectorAll('a[href*="/product/"], a[href*="detail.htm"], a[href*="goods_view"]'))
-    .filter(a => a.href && isProductLink(a.href))
+  const anchors = Array.from(document.querySelectorAll('a[href*="/product/"], a[href*="detail.htm"], a[href*="goods_view"], a[href*="/goods/view"], a[href*="view.html"]'))
+    .filter(a => a.href && isProductLink(a.href) && !inWidget(a))
   const linkInfo = new Map()
   anchors.forEach(a => {
     if (linkInfo.has(a.href)) return
@@ -309,7 +342,10 @@ const COLLECT_LINKS_EXPR = `(() => {
     if (category || brandFromCategory) break
   }
 
-  return { links: uniqueLinks, linkInfo: Object.fromEntries(linkInfo), nextUrl, category, brandFromCategory }
+  // 로그인 필요 판정 — lib/scraper.ts의 countProductsOnPage/isLoginPage(비밀번호 입력창 유무)와 같은
+  // 신호. 위 IS_BLOCK_PAGE_EXPR(봇/과속요청 차단)과는 다른 원인이라 따로 둔다.
+  const isLoginPage = !!document.querySelector('input[type="password"]')
+  return { links: uniqueLinks, linkInfo: Object.fromEntries(linkInfo), nextUrl, category, brandFromCategory, isLoginPage }
 })()`
 
 // "🧭 정렬 옵션 감지"(runDetectSortOptions)가 카테고리 페이지의 모든 같은 출처 링크를 서버로 보내 AI 판정을
@@ -333,7 +369,7 @@ const COLLECT_ALL_LINKS_EXPR = `(() => {
   for (const a of Array.from(document.querySelectorAll('a[href]'))) {
     if (result.length >= 120) break
     const href = a.href
-    if (!href.startsWith(origin)) continue
+    if (!href.startsWith(origin) || href.endsWith('#')) continue
     const norm = href.replace(/\\/+$/, '')
     if (norm === current || norm === origin || seen.has(norm)) continue
     const text = (a.textContent || '').trim() || (a.querySelector('img[alt]')?.alt || '').trim()
@@ -346,7 +382,7 @@ const COLLECT_ALL_LINKS_EXPR = `(() => {
     if (!opt.value) continue
     let href
     try { href = new URL(opt.value, location.href).href } catch { continue }
-    if (!href.startsWith(origin)) continue
+    if (!href.startsWith(origin) || href.endsWith('#')) continue
     const norm = href.replace(/\\/+$/, '')
     if (norm === current || norm === origin || seen.has(norm)) continue
     const text = (opt.textContent || '').trim()
@@ -445,25 +481,31 @@ function waitForTabSettled(tabId, timeoutMs) {
 // 페이지네이션의 "마지막 페이지로" 이동 버튼 href에 인코딩된 번호를 읽는다 — 이 버튼은 지금 몰이 보여주는
 // 페이지가 몇 번이든 항상 진짜 마지막 페이지를 가리켜야 하는 구조라 신뢰도가 높다(Node쪽에서 이미
 // 여러 카페24 몰로 검증됨). 텍스트로 보이는 페이지 번호 중 최댓값을 읽는 방식(readMaxPageNumber)은
-// "화면에 보이는 번호 묶음의 끝"일 뿐일 수 있어 추가 확인이 필요해 여기서는 포팅하지 않았다 — 못 찾으면
-// 그냥 기존 순회로 폴백한다(정확도가 최우선이라 이쪽이 더 안전하다).
+// "화면에 보이는 번호 묶음의 끝"일 뿐일 수 있어 정확도가 살짝 떨어질 수 있다는 이유로 2026-08-17엔 일부러
+// 안 넣었었다 — 그런데 "총 N개" 문구도 "마지막 페이지" 버튼도 없는 몰(모자사러 실사용 확인, 2026-09-05
+// — 두 지름길이 다 실패해 카테고리 하나가 150페이지 완전탐색으로 떨어져 5분 넘게 걸림)에서는 근사치라도
+// 있는 게 그 최후수단보다 훨씬 낫다는 사용자 판단으로 이제 세 번째 지름길로 추가한다(아래 함수 참고).
 // leafLabel(카테고리 경로의 마지막 구간)로 "총 N개" 문구 주변을 검증하는 이유: document.body 전체를
 // 무작정 훑으면 이 카테고리와 무관한 사이트 전체 배지 숫자를 잘못 집을 위험이 있다 — Node쪽에서 실제로
 // 겪은 문제(펫투비: 21개짜리 카테고리가 무관한 숫자 때문에 16,363개로 잘못 확정)와 같은 사고를 막는다.
 function buildPaginationSignalExpr(leafLabel) {
   return `(() => {
   const leafLabel = ${JSON.stringify(leafLabel || '')}
-  const bodyText = document.body.innerText
-  const totalRe = /(총|전체)\\s*([\\d,]+)\\s*(개|건)/g
-  let m
-  while ((m = totalRe.exec(bodyText))) {
-    const n = Number(m[2].replace(/,/g, ''))
-    if (!Number.isInteger(n) || n <= 0 || n >= 1000000) continue
-    if (leafLabel) {
+  // leafLabel(카테고리 라벨 탐지 실패 등)이 없으면 "총 N개" 문구가 진짜 이 카테고리를 가리키는지 검증할
+  // 방법이 없다 — lib/scraper.ts의 readStatedTotalCount와 같은 안전장치(2026-09-05 전수조사로 발견: 이
+  // 확장 쪽엔 leafLabel이 없을 때 검증 없이 페이지의 첫 "총/전체 N개" 문구를 그냥 정답으로 채택하던
+  // 구멍이 있었다 — 펫투비류 사고(무관한 배지 숫자를 카테고리 개수로 오채택)가 재현될 수 있었다).
+  if (leafLabel) {
+    const bodyText = document.body.innerText
+    const totalRe = /(총|전체)\\s*([\\d,]+)\\s*(개|건)/g
+    let m
+    while ((m = totalRe.exec(bodyText))) {
+      const n = Number(m[2].replace(/,/g, ''))
+      if (!Number.isInteger(n) || n <= 0 || n >= 1000000) continue
       const contextStart = Math.max(0, m.index - 30)
       if (!bodyText.slice(contextStart, m.index + m[0].length).includes(leafLabel)) continue
+      return { statedTotal: n, lastPage: null }
     }
-    return { statedTotal: n, lastPage: null }
   }
 
   const roots = Array.from(document.querySelectorAll('[class*="paging" i], [class*="pagination" i]'))
@@ -481,7 +523,33 @@ function buildPaginationSignalExpr(leafLabel) {
       } catch {}
     }
   }
-  return { statedTotal: null, lastPage: null }
+  // "총 N개" 문구도, "마지막 페이지로" 버튼도 없는 몰(2026-09-05, 모자사러 실사용 확인 — 카테고리 하나가
+  // 5분 넘게 걸림: 두 지름길이 다 실패해 한 페이지씩 최대 150페이지까지 직접 세는 최후수단으로 떨어짐)을
+  // 위한 세 번째 지름길 — lib/scraper.ts의 readMaxPageNumber와 같은 방식으로, 화면에 보이는 페이지 번호
+  // 링크 중 가장 큰 값을 "총 페이지 수"로 본다. 스킨에 따라 "1 2 3 ... 10"처럼 번호 일부만 보여줄 수 있어
+  // 100% 정확하진 않다는 걸 알면서도(원래 2026-08-17에 이 이유로 일부러 안 넣었었음), 앞의 두 지름길이
+  // 전부 없는 몰에서 최후수단(150페이지 완전탐색)보다는 이쪽이 훨씬 낫다는 사용자 판단(2026-09-05)으로
+  // 이제 추가한다 — 같은 필드(lastPage)로 반환해 호출부(collectCategoryLinks)는 출처를 구분할 필요 없다.
+  let maxVisiblePage = 0
+  for (const el of roots) {
+    Array.from(el.querySelectorAll('a[href]')).forEach(a => {
+      const n = Number((a.textContent || '').trim())
+      if (Number.isInteger(n) && n > 0 && n < 100000 && n > maxVisiblePage) maxVisiblePage = n
+    })
+  }
+  if (maxVisiblePage > 0) return { statedTotal: null, lastPage: maxVisiblePage }
+  // 세 지름길이 다 실패했다 — 호출부가 AI(로컬 Ollama, lib/ai.ts의 detectLastPageLinkWithAI)에게 마지막
+  // 판단을 맡길 수 있도록, 페이지네이션 영역 안의 링크 후보(숫자가 아닌 텍스트도 포함 — "다음"/"더보기"
+  // 등 규칙 기반이 못 잡는 표현일 수 있음)를 그대로 실어 보낸다. 후보 자체가 없으면(페이지네이션 영역이
+  // 아예 없는 몰) AI에 물어봐도 의미가 없으니 빈 배열.
+  const candidates = []
+  for (const el of roots) {
+    Array.from(el.querySelectorAll('a[href]')).forEach(a => {
+      const text = (a.textContent || '').trim() || (a.querySelector('img')?.getAttribute('alt') || '').trim()
+      if (text && candidates.length < 60) candidates.push({ text, href: a.href })
+    })
+  }
+  return { statedTotal: null, lastPage: null, candidates, hostname: location.hostname, currentUrl: location.href }
 })()`
 }
 
@@ -707,9 +775,24 @@ function buildExtractExpr(rules) {
     brand: brandFromCategoryDetail || brand, manufacturer: '', origin: '', category: categoryFromDetail || '', description,
     options, option_combinations: optionCombinations, thumbnail_urls: mainImages, thumbnail_names: [], detail_image_urls: detailImages, detail_image_names: [],
     detail_text: (detailContainer?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 3000),
-    summary_info: '', english_name: '', extra_info: [], stock_status: stockStatus, stock_qty: null,
+    // lib/extract.ts와 같은 방식(2026-09-05 전수조사로 발견: 이 확장은 infoRows를 도매가/배송비 등
+    // 정해진 라벨 조회에만 쓰고 요약정보/영문상품명/그 외 라벨은 전부 빈 값으로 버리고 있었다 — 상품정보
+    // 고시 표에 있는 소재/색상/치수 등 부가정보가 개발자모드 Raw 데이터에서만 통째로 빠짐).
+    summary_info: infoValue(/상품요약정보/i), english_name: infoValue(/영문상품명/i),
+    extra_info: infoRows.filter(([, value]) => value).map(([label, value]) => ({ label, value })),
+    stock_status: stockStatus, stock_qty: null,
     stock_by_option: [], mall_product_code: code, custom_fields: {},
   }
+
+  // 유통기한/소비기한은 라벨이 어느 몰이든 거의 항상 같아 몰별 규칙 없이도 일반화해 뽑을 수 있다(lib/
+  // extract.ts와 동일). "상품필수정보" 표의 나머지 라벨(소재/색상/치수 등)도 이미 전용 필드로 뽑아낸
+  // 라벨과 겹치지 않는 것만 custom_fields에 각각 담아 Raw 확인 화면에서 바로 구분해 볼 수 있게 한다.
+  const expiry = infoValue(/유통기한|소비기한/i)
+  if (expiry) result.custom_fields['유통기한'] = expiry
+  const CLAIMED_INFO_LABEL_RE = /브랜드|제조사|제조자|원산지|제조국|상품요약정보|영문상품명|유통기한|소비기한|상품코드|정가|판매가|소비자가|시중가|정상가|공급가|도매가|배송비|택배비/i
+  infoRows.forEach(([label, value]) => {
+    if (value && !CLAIMED_INFO_LABEL_RE.test(label)) result.custom_fields[label] = value
+  })
 
   // 라벨/셀렉터/고정값 규칙 하나를 실제 텍스트로 풀어낸다 — 단일 규칙과 'multi' 규칙의 각 조각이
   // 공유하는 로직(lib/extract.ts의 resolveLabelOrSelector와 같은 규칙 형식을 그대로 옮김).
@@ -721,6 +804,55 @@ function buildExtractExpr(rules) {
   }
   const extractionRules = ${JSON.stringify(rules)}
   for (const [field, rule] of Object.entries(extractionRules)) {
+    // "스크랩 대상 직접지정"에서 ✕(삭제)를 누르면 규칙을 아예 없애는 대신 빈 고정값을 남겨둔다(lib/scraper.ts
+    // 참고) — 사용자가 "이 필드는 값이 없어야 한다"고 명시적으로 확정한 것이므로, 위에서 이미 채워둔
+    // 자동/휴리스틱 추출값을 여기서 강제로 지운다. lib/extract.ts와 동일한 분기(2026-09-05 전수조사로
+    // 발견: 이 분기가 없어 그냥 continue로 넘어가버려, 규칙을 지워도 예전 자동추출 값이 계속 남아있었다).
+    if (rule.type === 'fixed' && rule.value === '') {
+      if (field === 'price') { result.price = null; result.sale_price = null }
+      else if (field === 'cost_price') result.cost_price = null
+      else if (field === 'shipping_fee') result.shipping_fee = null
+      else if (field === 'stock_qty') result.stock_qty = null
+      else if (field === 'thumbnail_urls') { result.thumbnail_urls = []; result.thumbnail_names = [] }
+      else if (field === 'detail_image_urls') { result.detail_image_urls = []; result.detail_image_names = [] }
+      else if (field === 'name' || field === 'brand' || field === 'manufacturer' || field === 'origin' || field === 'category'
+        || field === 'stock_status' || field === 'english_name' || field === 'summary_info') {
+        result[field] = ''
+      } else {
+        delete result.custom_fields[field]
+      }
+      continue
+    }
+    // 대표/상세이미지는 값 하나가 아니라 URL 배열이라 아래 텍스트 기반(resolvePart) 처리와 다르게 다룬다
+    // — lib/extract.ts의 같은 분기와 동일(2026-09-05 전수조사로 발견: 이 분기가 없어 selector 규칙은
+    // el.textContent가 비어 조용히 무시되고, fixed 규칙은 이미지 URL 문자열이 custom_fields에 잘못
+    // 들어갔다 — 사용자가 "스크랩 대상 직접지정"으로 대표/상세이미지를 커스텀 지정해도 전혀 반영 안 됨).
+    if (field === 'thumbnail_urls' || field === 'detail_image_urls') {
+      let urls = []
+      if (rule.type === 'fixed') {
+        urls = rule.value.split(/[,\\n]/).map(s => s.trim()).filter(Boolean)
+      } else if (rule.type === 'multi') {
+        let parts = []
+        try { parts = JSON.parse(rule.value) } catch { parts = [] }
+        const collected = []
+        for (const part of parts) {
+          if (part.type === 'fixed') {
+            collected.push(...part.value.split(/[,\\n]/).map(s => s.trim()).filter(Boolean))
+          } else {
+            collected.push(...Array.from(document.querySelectorAll(part.value)).map(el => el.src).filter(Boolean))
+          }
+        }
+        urls = [...new Set(collected)]
+      } else {
+        urls = Array.from(document.querySelectorAll(rule.value)).map(el => el.src).filter(Boolean)
+      }
+      if (urls.length) {
+        const names = urls.map(u => { try { return decodeURIComponent(u.split('/').pop() || '') } catch { return u } })
+        if (field === 'thumbnail_urls') { result.thumbnail_urls = urls; result.thumbnail_names = names }
+        else { result.detail_image_urls = urls; result.detail_image_names = names }
+      }
+      continue
+    }
     let text = null
     if (rule.type === 'multi') {
       // "스크랩 대상 직접지정"에서 값 하나를 여러 조각(라벨+셀렉터 등)으로 나눠 저장한 규칙 —
@@ -745,7 +877,11 @@ function buildExtractExpr(rules) {
       if (field === 'price') { result.price = n; result.sale_price = n }
       else if (field === 'cost_price') result.cost_price = n
       else result.shipping_fee = n
-    } else if (field === 'name' || field === 'brand' || field === 'manufacturer' || field === 'origin' || field === 'category') {
+    } else if (field === 'stock_qty') {
+      const m = trimmed.match(/[\\d,]+/)
+      if (m) result.stock_qty = Number(m[0].replace(/,/g, ''))
+    } else if (field === 'name' || field === 'brand' || field === 'manufacturer' || field === 'origin' || field === 'category'
+      || field === 'stock_status' || field === 'english_name' || field === 'summary_info') {
       result[field] = trimmed
     } else {
       result.custom_fields[field] = trimmed
@@ -812,10 +948,12 @@ async function reportDone(stopped, concurrencyLog) {
 // 몇 분에서 수십 분 걸릴 수 있는 긴 작업이라, 탭을 추가로 열지 못하면(브라우저 제한 등) 원래 탭
 // 하나만으로 조용히 낮은 동시 개수로 이어가고(안 그러면 몇 분 진행된 스크랩이 통째로 실패로 끝난다),
 // runExpandCategories처럼 실패를 그대로 던지지 않는다.
-// 일반모드(lib/scraper.ts의 scrapeCatalogPage)와 같은 최대치(8)까지 열어두되, 실제로 동시에 일을 시키는
+// 일반모드(lib/scraper.ts의 scrapeCatalogPage)와 같은 최대치까지 열어두되, 실제로 동시에 일을 시키는
 // 개수(activeLimit, 아래)는 적응형으로 따로 조절한다 — "일반모드처럼 8까지 올리되 문제 생기면 적응형
 // 로직을 태우면 되지 않냐"는 요청(2026-08-22)으로, 무작정 8개 고정 대신 그 알고리즘(AIMD)을 그대로 옮겼다.
-const SCRAPE_TAB_CONCURRENCY = 8
+// 2026-09-05 전수조사로 발견: 일반모드는 2026-08-24에 리소스 실측 후 8→16으로 올렸는데(lib/scraper.ts
+// resolveConcurrency 주석), 이 상수는 그때 안 따라와 8에 남아 있었다 — 여기도 16으로 맞춘다.
+const SCRAPE_TAB_CONCURRENCY = 16
 
 async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions, excludeUrls) {
   running = true
@@ -854,26 +992,42 @@ async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions,
   let okStreak = 0
   const concurrencyLog = []
 
-  /** 상품 1건 방문·추출·보고 — 성공/실패 모두 여기서 끝낸다(호출부는 카운터만 올리면 됨). 반환값의
-   *  blocked는 lib/scraper.ts의 scrapeOne과 같은 휴리스틱(가격/원가/대표이미지가 전부 없으면 정상 상품
-   *  페이지가 아니라 봇 차단/오류 안내 페이지일 가능성이 높음)으로 판정한다. */
+  // lib/scraper.ts의 scrapeOne과 같은 값(RETRY_COUNT=2) — 차단으로 추정되면 저장 전에 몇 번 더 방문해본다.
+  const PRODUCT_BLOCK_RETRY_COUNT = 2
+
+  /** 상품 1건 방문·추출·보고 — 성공/실패 모두 여기서 끝낸다(호출부는 카운터만 올리면 됨). blocked는
+   *  lib/scraper.ts의 scrapeOne과 같은 휴리스틱(가격/원가/대표이미지가 전부 없으면 정상 상품 페이지가
+   *  아니라 봇 차단/오류 안내 페이지일 가능성이 높음)으로 판정한다.
+   *  2026-09-05 전수조사로 발견: 이 함수는 원래 blocked여도 그 "빈 상품"을 그대로 저장했다(재시도도,
+   *  차단 확정 시 저장 건너뛰기도 없었음) — 서버(scrapeOne)는 최대 PRODUCT_BLOCK_RETRY_COUNT번 재시도
+   *  후에도 안 풀리면 저장하지 않고 실패로만 남긴다. AI 폴백(tryAiFallback)은 서버에서만 가능한 별도
+   *  기능이라(Node가 직접 AI API를 부르는 구조) 여기엔 포팅하지 않았다 — 재시도+저장보류까지만 맞춘다. */
   async function processProduct(workerTabId, link, category, brandFromCategory) {
-    await navigate(workerTabId, link)
-    try {
-      const product = await evalInTab(workerTabId, buildExtractExpr(extractionRules))
-      // 카테고리는 상품 상세페이지가 아니라 방금 있던 목록(카테고리) 페이지에서만 알 수 있으므로,
-      // 상세페이지 추출 결과 위에 덮어씌운다.
-      if (category) product.category = category
-      if (brandFromCategory) product.brand = brandFromCategory
-      const blocked = product.price == null && product.cost_price == null && !product.thumbnail_urls.length
-      const result = await report(link, product)
-      console.log('[PTP] 저장:', product.name, result)
-      return { blocked }
-    } catch (e) {
-      console.log('[PTP] 추출 실패:', link, e.message)
-      await reportFailure(link, e.message).catch(() => {})
-      return { blocked: false }
+    let lastError = null
+    let blocked = false
+    for (let attempt = 0; attempt <= PRODUCT_BLOCK_RETRY_COUNT; attempt++) {
+      try {
+        await navigate(workerTabId, link)
+        const product = await evalInTab(workerTabId, buildExtractExpr(extractionRules))
+        // 카테고리는 상품 상세페이지가 아니라 방금 있던 목록(카테고리) 페이지에서만 알 수 있으므로,
+        // 상세페이지 추출 결과 위에 덮어씌운다.
+        if (category) product.category = category
+        if (brandFromCategory) product.brand = brandFromCategory
+        if (product.price == null && product.cost_price == null && !product.thumbnail_urls.length) {
+          blocked = true
+          throw new Error('가격/이미지를 모두 찾지 못함 (차단 또는 일시 오류로 추정)')
+        }
+        const result = await report(link, product)
+        console.log('[PTP] 저장:', product.name, result)
+        return { blocked: false }
+      } catch (e) {
+        lastError = e
+        if (attempt < PRODUCT_BLOCK_RETRY_COUNT) { await delay(2_000 * (attempt + 1) + Math.random() * 2_000); continue }
+      }
     }
+    console.log('[PTP] 추출 실패:', link, lastError?.message)
+    await reportFailure(link, lastError?.message || '알 수 없는 오류').catch(() => {})
+    return { blocked }
   }
 
   /** lib/scraper.ts의 worker() 안 AIMD 조정과 동일한 규칙 — 차단이면 즉시 1로 낮추고 5초 쉬며, 연속
@@ -1037,6 +1191,63 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({ id: 'ptp-picker', title: 'PTP 스크랩 대상 직접지정', contexts: ['page'] }, () => void chrome.runtime.lastError)
 })
 
+/** 지수 확장(1,2,4,8...페이지씩 건너뛰며 빈/반복 페이지를 찾음) + 그 사이를 이분탐색 — lib/scraper.ts의
+ *  findRealLastPage와 같은 알고리즘의 핵심만 이식했다(2026-09-06, 사용자 요청 — AI 추측 대신 결정론적인
+ *  방법이 더 낫다는 판단: "몰별로 다양한 경우가 있을 수 있는 거라, 지금 문제가 없었다고 확신할 수 없다").
+ *  서버 쪽의 HTTP 경량화·현재페이지 위젯 판독 등 부가 최적화는 이식하지 않았지만, 실제 버그를 낳았던
+ *  핵심 안전장치 두 가지는 그대로 가져왔다: (1) "끝처럼 보임"(개수 0 또는 반복 콘텐츠)은 반드시 같은
+ *  페이지를 한 번 더 확인해야 믿는다(confirmedEnd) — 일시적 빈 응답 하나만 보고 끝으로 확정하면 실제
+ *  더 있는데 일찍 멈춘다(걸스굽/진짜양말 실사용 버그). (2) 페이지 번호가 범위를 벗어나도 에러 대신 마지막
+ *  유효 페이지를 그대로 반복해서 돌려주는 몰(clamp)이 있어, 콘텐츠 핑거프린트(링크 목록을 정렬해 이어붙인
+ *  문자열)가 직전과 같으면 "새 페이지"가 아니라 반복으로 본다(seasonbag.co.kr 실사용 확인). 로그인 벽에
+ *  걸리면 그 즉시 지금까지 확인한 값으로 멈춘다. bound까지도 끝을 못 찾으면 null — 호출부가 기존 완전
+ *  탐색(느리지만 URL 파라미터 대신 실제 "다음" 링크를 따라가므로, page= 파라미터 자체가 안 먹는 몰에서도
+ *  안전한 최후의 보루)으로 폴백한다. */
+async function findLastPageBinarySearch(tabId, firstPageUrl, knownNonEmptyCount, bound, siteId) {
+  async function probeAt(pageNum) {
+    await navigate(tabId, withPageParam(firstPageUrl, pageNum))
+    await throttle()
+    const r = await evalInTab(tabId, COLLECT_LINKS_EXPR)
+    return { count: r.links.length, fingerprint: r.links.slice().sort().join('|'), isLoginPage: !!r.isLoginPage }
+  }
+  async function confirmedEnd(pageNum, dupFingerprint) {
+    const r = await probeAt(pageNum)
+    return r.count === 0 || r.fingerprint === dupFingerprint
+  }
+
+  let lo = 1
+  let loCount = knownNonEmptyCount
+  let loFingerprint = null
+  let hi = null
+  let step = 1
+
+  while (hi === null) {
+    // "중지" 버튼 요청 — 완전탐색만큼 오래는 아니어도 이분탐색도 대형 카테고리에서는 여러 페이지를
+    // 도니, 여기서도 매 probe 전에 확인해야 그 순간 멈춘다(2026-09-06).
+    if (await checkDevPreviewStopRequested(siteId)) return { page: lo, count: loCount }
+    const probe = lo + step
+    if (probe > bound) return null
+    const r = await probeAt(probe)
+    if (r.isLoginPage) return { page: lo, count: loCount }
+    const looksLikeEnd = r.count === 0 || r.fingerprint === loFingerprint
+    if (looksLikeEnd && await confirmedEnd(probe, loFingerprint)) { hi = probe; continue }
+    const next = await probeAt(probe + 1)
+    if (next.isLoginPage) return { page: lo, count: loCount }
+    if (next.count > 0 && next.fingerprint === r.fingerprint) { hi = probe; continue }
+    lo = probe; loCount = r.count; loFingerprint = r.fingerprint; step *= 2
+  }
+  while (hi - lo > 1) {
+    if (await checkDevPreviewStopRequested(siteId)) return { page: lo, count: loCount }
+    const mid = Math.floor((lo + hi) / 2)
+    const r = await probeAt(mid)
+    if (r.isLoginPage) return { page: lo, count: loCount }
+    const looksLikeEnd = r.count === 0 || r.fingerprint === loFingerprint
+    if (looksLikeEnd && await confirmedEnd(mid, loFingerprint)) hi = mid
+    else { lo = mid; loCount = r.count; loFingerprint = r.fingerprint }
+  }
+  return { page: lo, count: loCount }
+}
+
 /** 카테고리(목록) 페이지부터 다음 페이지까지 따라가며 상품 링크 전체를 모은다 — "스크랩 미리보기 실행"이
  *  일반모드의 previewCatalog처럼 정확한 총 개수를 보여줄 수 있게 끝까지 페이징한다. 개수만 세는 용도라
  *  run()의 MAX_PRODUCTS(실제 상세페이지를 방문·추출하는 세션 하나당 상품 수 제한, 그래서 300개씩
@@ -1050,7 +1261,7 @@ chrome.runtime.onInstalled.addListener(() => {
  *  1페이지에서 buildPaginationSignalExpr로 "총 N개"/"마지막 페이지" 신호를 먼저 찾아보고, 있으면
  *  최대 2페이지(1페이지 + 마지막 페이지)만 열어 정확한 개수를 곧바로 확정한다 — 못 찾으면(위젯이 없는
  *  스킨 등) 기존처럼 한 페이지씩 순회한다. */
-async function collectCategoryLinks(tabId, fastCountOk) {
+async function collectCategoryLinks(tabId, fastCountOk, siteId) {
   const linkOrder = []
   const linkInfo = {}
   const categoryByUrl = {}
@@ -1066,25 +1277,86 @@ async function collectCategoryLinks(tabId, fastCountOk) {
   const first = await evalInTab(tabId, COLLECT_LINKS_EXPR)
   addPage(first)
   const perPage = first.links.length
+  // 지수+이분 탐색(아래)이 매 probe마다 이 페이지(1페이지)로 기준을 삼아 page= 파라미터를 갈아끼우므로,
+  // 다른 지름길이 먼저 tab.url을 바꿔버리기 전에(예: lastPage 버튼 시도) 지금 이 시점의 URL을 미리 남겨둔다.
+  const categoryFirstPageUrl = (await chrome.tabs.get(tabId)).url
+  // 링크가 하나도 없는 게 "이 카테고리엔 원래 상품이 없어서"인지 "로그인이 안 돼 있어서"인지 구분한다
+  // — lib/scraper.ts의 countProductsOnPage/isLoginPage와 같은 신호(2026-09-05 전수조사로 발견: 이 확장
+  // 쪽 "스크랩 미리보기"는 이 구분이 아예 없어, 로그인이 끊긴 채 미리보기를 돌리면 모든 선택 카테고리가
+  // 조용히 "0건"으로 보이고 categoryCounts가 통째로 비어 "미확인"만 남았다 — 개수 문제처럼 보였지만
+  // 실제 원인은 로그인 상태였다).
+  const needsLogin = perPage === 0 && !!first.isLoginPage
 
   if (fastCountOk && perPage > 0) {
     const leafLabel = (first.category || '').split(' > ').pop()?.trim() || ''
     const signal = await evalInTab(tabId, buildPaginationSignalExpr(leafLabel)).catch(() => null)
-    if (signal?.statedTotal) return { links: linkOrder, linkInfo, categoryByUrl, truncated: false, count: signal.statedTotal }
-    if (signal?.lastPage === 1) return { links: linkOrder, linkInfo, categoryByUrl, truncated: false, count: perPage }
+    if (signal?.statedTotal) return { links: linkOrder, linkInfo, categoryByUrl, truncated: false, count: signal.statedTotal, needsLogin }
+    if (signal?.lastPage === 1) return { links: linkOrder, linkInfo, categoryByUrl, truncated: false, count: perPage, needsLogin }
     if (signal?.lastPage && signal.lastPage > 1) {
       const tab = await chrome.tabs.get(tabId)
       await navigate(tabId, withPageParam(tab.url, signal.lastPage))
       await throttle()
       const last = await evalInTab(tabId, COLLECT_LINKS_EXPR)
       addPage(last)
-      return { links: linkOrder, linkInfo, categoryByUrl, truncated: false, count: perPage * (signal.lastPage - 1) + last.links.length }
+      return { links: linkOrder, linkInfo, categoryByUrl, truncated: false, count: perPage * (signal.lastPage - 1) + last.links.length, needsLogin }
+    }
+    // 규칙 기반 지름길 3개("총 N개"/"마지막 페이지" 버튼/화면 속 페이지번호 최댓값)가 다 실패했다 —
+    // 150페이지 완전탐색(카테고리당 몇 분씩 걸릴 수 있음)으로 곧장 떨어지기 전에, 결정론적인 지수+이분
+    // 탐색을 먼저 시도한다(2026-09-06, 사용자 요청 — "몰별로 다양한 경우가 있을 수 있는 거라, AI 추측에
+    // 기대는 대신 더 나은 방법으로 개선해달라"). AI(로컬/Groq)에만 기대는 것보다 신뢰도가 높다 — 외부
+    // 서비스 가용성/한도/할루시네이션에 의존하지 않고, page= 파라미터가 실제로 페이지를 넘겨주는 몰이면
+    // 항상 O(log n)번 안에 정확한 답을 찾는다. bound(=MAX_PREVIEW_PAGES)까지 못 찾으면(예: page=
+    // 파라미터가 이 몰에서 아예 안 먹힘) null — 그때만 AI로 한 번 더 시도해보고, 그것도 안 되면 기존
+    // 완전탐색(URL 파라미터 대신 실제 "다음" 링크를 따라가므로 이 경우에도 여전히 안전한 최후 수단)으로
+    // 폴백한다.
+    const binarySearchResult = await findLastPageBinarySearch(tabId, categoryFirstPageUrl, perPage, MAX_PREVIEW_PAGES, siteId).catch(() => null)
+    if (binarySearchResult && binarySearchResult.page > 1) {
+      return { links: linkOrder, linkInfo, categoryByUrl, truncated: false, count: perPage * (binarySearchResult.page - 1) + binarySearchResult.count, needsLogin }
+    }
+    // 이분탐색도 실패했을 때만 AI에게 마지막으로 물어본다 — 이 호출 자체가 느리거나 실패해도(Groq/Ollama
+    // 둘 다 안 됨 등) 절대 전체 흐름을 막지 않는다.
+    if (signal?.candidates?.length) {
+      const aiResult = await fetch(`${PTP_ORIGIN}/api/scrape/detect-last-page`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mallName: signal.hostname, candidates: signal.candidates, baseUrl: signal.currentUrl }),
+      }).then(r => r.json()).catch(() => null)
+      const aiHref = aiResult?.href
+      if (aiHref) {
+        try {
+          const n = Number(new URL(aiHref, signal.currentUrl).searchParams.get('page'))
+          // 이분탐색과 같은 신뢰 기준을 AI 결과에도 그대로 적용한다(2026-09-06, 재검토로 발견 — AI 경로만
+          // 검증 없이 결과를 그대로 믿고 있었다): (1) 상한(bound) 없이 AI가 주는 숫자를 무한정 신뢰하지
+          // 않는다 — 이분탐색의 bound와 같은 기준(MAX_PREVIEW_PAGES)을 넘으면 거부한다. (2) "여기가
+          // 끝"이라는 이분탐색의 confirmedEnd와 똑같이, AI가 고른 페이지 바로 다음(n+1)을 한 번 더 확인해
+          // 실제로 비어있거나(정직한 종료) AI가 고른 페이지와 콘텐츠가 같아야만(clamp) 진짜로 믿는다 —
+          // AI가 "마지막"을 "다음 페이지" 링크와 착각했을 경우, 이 재확인에서 n+1에 새 상품이 나와 걸러진다.
+          if (Number.isInteger(n) && n > 1 && n <= MAX_PREVIEW_PAGES) {
+            await navigate(tabId, aiHref)
+            await throttle()
+            const last = await evalInTab(tabId, COLLECT_LINKS_EXPR)
+            const lastFingerprint = last.links.slice().sort().join('|')
+            await navigate(tabId, withPageParam(aiHref, n + 1))
+            await throttle()
+            const peekNext = await evalInTab(tabId, COLLECT_LINKS_EXPR)
+            const peekFingerprint = peekNext.links.slice().sort().join('|')
+            const confirmedEnd = peekNext.links.length === 0 || peekFingerprint === lastFingerprint
+            if (confirmedEnd) {
+              addPage(last)
+              return { links: linkOrder, linkInfo, categoryByUrl, truncated: false, count: perPage * (n - 1) + last.links.length, needsLogin }
+            }
+            console.log(`[PTP] AI가 고른 마지막 페이지(${n})가 재확인에서 끝이 아닌 것으로 나와(다음 페이지에 새 콘텐츠 있음) 신뢰하지 않고 폴백합니다.`)
+          }
+        } catch {}
+      }
     }
   }
 
   let pages = 1
   let nextUrl = first.nextUrl
   while (nextUrl && pages < MAX_PREVIEW_PAGES) {
+    // 최후수단(완전탐색)은 대형 카테고리에서 몇 분씩 걸릴 수 있는 만큼, 중지 요청을 가장 자주 확인해야
+    // 하는 자리다(2026-09-06 — "중지를 누르면 그 순간 멈추라"는 요청이 나온 바로 그 느린 경로).
+    if (await checkDevPreviewStopRequested(siteId)) break
     await navigate(tabId, nextUrl)
     await throttle()
     const result = await evalInTab(tabId, COLLECT_LINKS_EXPR)
@@ -1093,7 +1365,7 @@ async function collectCategoryLinks(tabId, fastCountOk) {
     nextUrl = result.nextUrl
   }
   const truncated = !!nextUrl && pages >= MAX_PREVIEW_PAGES
-  return { links: linkOrder, linkInfo, categoryByUrl, truncated, count: linkOrder.length }
+  return { links: linkOrder, linkInfo, categoryByUrl, truncated, count: linkOrder.length, needsLogin }
 }
 
 /** "스크랩 미리보기 실행" — 일반모드의 "스크랩 미리보기"(previewCatalog)와 같은 절차. PTP에서 카테고리를
@@ -1112,6 +1384,11 @@ async function runPreview(tab, site, aiMode) {
     console.log('[PTP] 미리보기 실패(디버거 연결 안 됨):', e.message)
     return { ok: false, error: `디버거 연결 실패: ${e.message}` }
   }
+  // 디버거 연결에 성공한 이 시점이 "실제로 캡처를 시작함"이다 — PTP 화면이 이 신호를 폴링해 "대기 중"
+  // (정적 아이콘)과 "실제로 도는 중"(스피너)을 구분해 보여준다(사용자 요청, 2026-09-05). 이 결과 자체는
+  // 끝나야만 한 번에 오므로(아래 preview-capture), 그전까진 이 신호가 유일한 진행 표시다. 실패해도
+  // 무시 — 순수 표시용이라 캡처 자체를 막으면 안 된다.
+  fetch(`${SITE_API_BASE}/${site.id}/preview-progress`, { method: 'POST' }).catch(() => {})
   const startUrl = tab.url
   try {
     const listingStarts = site.categoryUrls && site.categoryUrls.length ? site.categoryUrls : [null]
@@ -1119,12 +1396,31 @@ async function runPreview(tab, site, aiMode) {
     let firstUrl = null
     let firstCat = null
     let items = []
+    // 선택한 카테고리 중 하나라도 로그인 벽에 막혀 링크를 못 찾았으면 표시한다 — 개수가 0이라 그런 건지
+    // 로그인이 끊겨서인지 구분 못 하면 사용자가 "왜 개수가 안 나오냐"고 매번 다시 물어야 한다(2026-09-05
+    // 전수조사, 실사용 확인: 모자사러에서 로그인이 끊긴 채 46개 카테고리를 미리보기했더니 전부 0건으로
+    // 나오고 categoryCounts가 통째로 비어 로그인 페이지 자체가 상품 1건인 것처럼 캡처됐다).
+    let needsLogin = false
 
-    for (const listingStart of listingStarts) {
+    let stoppedByUser = false
+    for (const [listingIdx, listingStart] of listingStarts.entries()) {
+      // "중지" — 카테고리 경계에서도 확인한다(2026-09-06). 카테고리를 하나만 볼 때(진행 신호 자체를 안
+      // 보내는 경우)는 collectCategoryLinks 안쪽 루프들이 각자 확인하므로 여기선 건너뛴다.
+      if (listingStarts.length > 1) {
+        // 카테고리를 여러 개 선택했을 때만 의미 있는 진행 표시 — 하나만 볼 때는 어차피 몇 초 안에 끝난다.
+        // 이 응답에 stop 여부도 같이 오므로(2026-09-06), 진행 신호를 보내는 김에 중지 요청도 확인한다 —
+        // 별도 왕복 없이 "중지를 누르면 그 순간 멈추라"는 요청을 카테고리 경계마다 확인할 수 있다.
+        const progressRes = await fetch(`${SITE_API_BASE}/${site.id}/preview-progress`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ done: listingIdx, total: listingStarts.length }),
+        }).then(r => r.json()).catch(() => null)
+        if (progressRes?.stop) { stoppedByUser = true; break }
+      }
       if (listingStart) { await navigate(tab.id, listingStart); await throttle() }
       // 카테고리를 여러 개 선택했을 때만(fastCountOk) collectCategoryLinks가 "총 N개"/"마지막 페이지"
       // 지름길을 시도한다 — 하나만 볼 때는 items(나머지 목록)가 필요해 어차피 전부 순회해야 한다.
-      const { links, linkInfo, categoryByUrl, truncated, count } = await collectCategoryLinks(tab.id, listingStarts.length > 1)
+      const { links, linkInfo, categoryByUrl, truncated, count, needsLogin: catNeedsLogin } = await collectCategoryLinks(tab.id, listingStarts.length > 1, site.id)
+      if (catNeedsLogin) needsLogin = true
       if (!links.length) continue
       const cat = categoryByUrl[links[0]]
       categoryCounts.push({ url: listingStart || startUrl, label: cat?.category || listingStart || startUrl, count, truncated })
@@ -1136,17 +1432,33 @@ async function runPreview(tab, site, aiMode) {
         if (listingStarts.length === 1) items = links.slice(1).map(href => ({ url: href, name: linkInfo[href]?.name || '', thumbnail: linkInfo[href]?.thumbnail || '' }))
       }
     }
-    if (!firstUrl) firstUrl = startUrl // 링크가 하나도 없으면 지금 페이지 자체를 상품 1건으로 캡처
+    if (stoppedByUser) console.log(`[PTP] 미리보기 중지됨 — 지금까지 확인한 ${categoryCounts.length}개 카테고리만 보고합니다.`)
+    const total = categoryCounts.length ? categoryCounts.reduce((sum, c) => sum + c.count, 0) : undefined
+    // 선택한 카테고리 전부에서 상품 링크를 하나도 못 찾았으면(로그인 벽이든, 진짜 상품이 없는 카테고리든,
+    // 이 몰만의 다른 접근제한 문구든) 지금 탭이 보고 있는 페이지(카테고리 목록 그 자체, 심지어 회원전용
+    // 안내 스크립트만 있는 빈 페이지일 수도 있음)를 "상품 1건"으로 둔갑시켜 캡처하지 않는다 — needsLogin
+    // 신호(비밀번호 입력창)로 못 잡는 다른 접근제한 방식(예: 카페24 "회원만 접근권한이 있습니다" alert+
+    // redirect — 화면에 보이는 텍스트가 아니라 <script> 안에만 있어 innerText 기반 판정으로도 못 잡음)이
+    // 있으면 이 케이스로 빠진다(2026-09-05, 모자사러 실사용 확인 — "캡모자 캡모자"라는 뜻모를 상품명과
+    // 대표이미지 자리에 alt 텍스트 문자열이 그대로 들어간 가짜 결과가 저장됐었다). 정직하게 "못 찾음"만
+    // 보고하고, 화면(ScraperPanel.tsx)이 이 상황을 안내하게 한다.
+    if (!firstUrl) {
+      await fetch(`${SITE_API_BASE}/${site.id}/preview-capture`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ noProductsFound: true, total: total ?? 0, categoryCounts: categoryCounts.length ? categoryCounts : undefined, needsLogin }),
+      }).catch(() => {})
+      return { ok: true, preview: null }
+    }
 
     if (firstUrl !== tab.url) await navigate(tab.id, firstUrl)
     const html = await evalInTab(tab.id, '(() => document.documentElement.outerHTML.slice(0, 200000))()')
-    const total = categoryCounts.length ? categoryCounts.reduce((sum, c) => sum + c.count, 0) : undefined
     const res = await fetch(`${SITE_API_BASE}/${site.id}/preview-capture`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         url: firstUrl, html, aiMode: !!aiMode, total, items,
         categoryCounts: categoryCounts.length ? categoryCounts : undefined,
         category: firstCat?.category || '', brandFromCategory: firstCat?.brandFromCategory || '',
+        needsLogin,
       }),
     })
     const data = await res.json()
@@ -1163,8 +1475,10 @@ async function runPreview(tab, site, aiMode) {
 }
 
 // lib/scraper.ts의 NON_CATEGORY_TEXT_RE와 반드시 같은 값을 유지한다(같은 코드를 두 곳에 두는 이유는
-// buildExtractExpr과 동일 — Node 서버↔크롬 확장이 서로 import를 못 함).
-const NON_CATEGORY_TEXT_SRC = '로그인|회원가입|로그아웃|장바구니|마이페이지|고객센터|검색어?|주문|배송조회|결제|사이트맵|관리자|촬영명령|입고대?기|입고대령|단가\\s*(인상|조정)|재진행|색상?\\s*(별)?\\s*분류|공지사항|공지\\b|납품\\s*사례|제작\\s*문의|도매\\s*인증|상품\\s*문의|notice|cart|login|logout|mypage|search|sitemap'
+// buildExtractExpr과 동일 — Node 서버↔크롬 확장이 서로 import를 못 함). 2026-09-05 전수조사에서 서버
+// 쪽에 지난 2주간 추가된 8개 대안(회원정보/적립금/관심상품/최근본상품/위시리스트 계열 + wishlist)이
+// 이쪽엔 반영 안 돼 있던 걸 발견 — 그대로 옮겼다.
+const NON_CATEGORY_TEXT_SRC = '로그인|회원가입|로그아웃|장바구니|마이페이지|고객센터|검색어?|주문|배송조회|결제|사이트맵|관리자|촬영명령|입고대?기|입고대령|단가\\s*(인상|조정)|재진행|색상?\\s*(별)?\\s*분류|공지사항|공지\\b|납품\\s*사례|제작\\s*문의|도매\\s*인증|상품\\s*문의|회원\\s*정보|정보\\s*수정|적립금|관심\\s*상품|최근\\s*본\\s*상품|위시\\s*리스트|찜\\s*(목록)?|notice|cart|login|logout|mypage|search|sitemap|wishlist'
 
 /** discoverCategoryLinks(lib/scraper.ts)의 대분류 허브 자동 펼치기(대분류 페이지에 상품이 없으면 그
  *  페이지의 하위 메뉴로 대신 펼침)와 같은 판정을 한다 — 다만 그 서버 쪽 버전은 로그인 필요 몰에서
@@ -1193,11 +1507,24 @@ function buildScanSubmenuExpr(topLevelHrefs) {
     clone.querySelectorAll('ul, ol').forEach(n => n.remove())
     return (clone.textContent || '').trim()
   }
+  // 도매의신 실사용 확인(2026-08-26, lib/scraper.ts와 동일): 카테고리 메뉴가 <li onclick="location.href=
+  // '...'"> 처럼 <a> 태그 없이 JS onclick만으로 이동하는 몰이 있다 — li 자신에 없으면 안쪽 자손도 한 번
+  // 더 살펴본다(라벨이 span 등 다른 태그에 onclick을 다는 몰 대비).
+  function hrefFromOnclick(el) {
+    const raw = el.getAttribute('onclick') || el.querySelector('[onclick]')?.getAttribute('onclick') || ''
+    const m = raw.match(/location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/)
+    if (!m) return ''
+    try { return new URL(m[1], location.href).href } catch { return '' }
+  }
   function ownHref(li) {
     const clone = li.cloneNode(true)
     clone.querySelectorAll('ul, ol').forEach(n => n.remove())
-    const a = clone.querySelector('a[href]')
-    return a ? a.href : ''
+    const href = clone.querySelector('a[href]')?.href || ''
+    // href="#"(빈 프래그먼트만 있는 장식용 링크)는 .href로 읽으면 "현재 페이지 URL + #"으로 resolve되어,
+    // 그 페이지 자체가 상품 목록이기도 한 몰에서는 가짜 카테고리 하나가 다른 진짜 카테고리와 중복 집계된다
+    // (가방쟁이 실사용 확인, 2026-08-25 — lib/scraper.ts와 동일 이슈, 2026-09-05 전수조사로 확장에도 이식).
+    if (href) return href.endsWith('#') ? '' : href
+    return hrefFromOnclick(clone)
   }
   function buildPaths(li, prefix, depth, out) {
     if (depth > 3 || out.length > 200) return
@@ -1308,16 +1635,29 @@ async function runExpandCategories(tab, site) {
           return { links: [c], blocked: true }
         }
         const probe = await evalInTab(workerTabId, COLLECT_LINKS_EXPR).catch(() => ({ links: [] }))
-        if (probe.links.length > 0) return { links: [c], blocked: false }
+        // 로그인 벽(비밀번호 입력창)에 막힌 것도 "빈 허브"로 오판하면 안 된다 — lib/scraper.ts의
+        // expandOne과 같은 우선순위(isLoginPage를 먼저 확인). 이 분기가 없으면(2026-09-05 전수조사로
+        // 발견) 세션이 끊긴 채로 실행됐을 때 로그인 페이지를 "상품도 하위메뉴도 없는 빈 허브"로 오인해
+        // 해당 카테고리를 통째로 삭제해버렸다 — 봇 차단(IS_BLOCK_PAGE_EXPR)과는 원인이 다른 별도
+        // 신호라 blocked:true로 같이 표시해 호출부의 blockedCount/"접속 차단으로 하위구조를 확인 못
+        // 함" 경고를 그대로 재사용한다.
+        if (probe.isLoginPage) return { links: [c], blocked: true }
+        // count>0(이 카테고리 자체에도 상품이 있음)이어도 예전엔 여기서 곧장 반환해 하위 메뉴 자체를
+        // 아예 확인 안 했다 — "대분류만 나오고 하위 메뉴가 안 나온다"의 실제 원인이었다(lib/scraper.ts
+        // 쪽과 같은 사고, 진짜양말 실사용 확인 — 2026-09-06). 하위 메뉴가 실제로 있으면 부모(이미 유효한
+        // 스크랩 대상)에 얹어 같이 돌려준다(사용자 요청 — "가급적 하위 메뉴 리스트까지 리스트업").
+        const hasOwnProducts = probe.links.length > 0
         const sub = await evalInTab(workerTabId, buildScanSubmenuExpr(topLevelHrefs)).catch(() => ({ links: [] }))
         if (sub.links.length) {
-          return { links: sub.links.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href })), blocked: false }
+          const childLinks = sub.links.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
+          return { links: hasOwnProducts ? [c, ...childLinks] : childLinks, blocked: false }
         }
+        if (hasOwnProducts) return { links: [c], blocked: false }
         // 상품도 하위 메뉴도 못 찾은 빈 허브 — lib/scraper.ts의 expandCategoryHubs와 같은 이유(2026-08-30,
         // 소꿉노리 — 공지/문의 게시판 글이 "빈 허브"로 오인돼 카테고리에 계속 남던 사고)로, 이 페이지에
         // 정렬 UI 키워드조차 하나도 안 보이면 상품 목록 페이지가 아닐 가능성이 높다고 보고 통째로 뺀다.
-        // 상품이 실제로 있는 카테고리는 위(probe.links.length > 0)에서 이미 걸러져 이 분기를 안 타므로,
-        // 진짜 카테고리를 오탐할 위험은 "상품 0개 + 하위메뉴 0개"인 경우로 좁혀져 있다.
+        // 상품이 실제로 있는 카테고리는 위(hasOwnProducts)에서 이미 걸러져 이 분기를 안 타므로, 진짜
+        // 카테고리를 오탐할 위험은 "상품 0개 + 하위메뉴 0개"인 경우로 좁혀져 있다.
         const hasSort = await evalInTab(workerTabId, HAS_SORT_LINK_ON_PAGE_EXPR).catch(() => false)
         return { links: hasSort ? [c] : [], blocked: false }
       }
@@ -1352,9 +1692,14 @@ async function runExpandCategories(tab, site) {
     const seenHrefs = new Set()
     const deduped = expanded.filter(c => (seenHrefs.has(c.href) ? false : (seenHrefs.add(c.href), true)))
 
+    // blocked: 서버 쪽(app/api/scrape/categories/route.ts)의 shouldKeepPreviousCategoryLinks와 같은
+    // 판단을 이 저장 라우트에도 적용하려면(2026-09-05 전수조사에서 발견 — 이 라우트만 그 보호가 빠져
+    // 있었음), 이번 실행 중 접속 차단으로 하위구조를 못 펼친 카테고리가 있었는지를 서버에 같이 알려야
+    // 한다 — blockedCount는 이미 계산해뒀는데 지금까지 응답(runFullMallProfile 쪽 UI 경고문)에만 쓰고
+    // 정작 저장 요청 자체엔 실어 보내지 않고 있었다.
     const res = await fetch(`${SITE_API_BASE}/${site.id}/categories/expand`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ links: deduped }),
+      body: JSON.stringify({ links: deduped, blocked: blockedCount > 0 }),
     })
     const data = await res.json().catch(() => ({}))
     if (!res.ok) return { ok: false, error: data.error || String(res.status) }

@@ -34,6 +34,14 @@ const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
 // 삭제하고 qwen3:14b로 교체했다(.env.local의 OLLAMA_MODEL) — 이 하드코드 기본값도 실제 설치된 모델과
 // 맞춰둔다(env var가 없는 환경에서 이미 지운 8b를 다시 찾는 걸 방지).
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:14b'
+// 정렬 UI 화면 인식(detectSortOptionsFromScreenshot) 전용 — OLLAMA_MODEL(qwen3, 텍스트 전용)은 이미지
+// 입력 자체를 못 받는다. 신규 설치(2026-09-08, 사용자 지시로 pull) — Ollama가 "does not support tools"로
+// 거부해 함수 호출은 못 쓰고 텍스트로 JSON 배열만 답하게 프롬프트로 강제한다(detectSortLabelsWithOllamaVision
+// 참고). CPU 전용 추론이라 느리고(7B 기준 실측 약 40초/장) 정확도도 아래 GROQ_VISION_MODEL보다 낮아
+// (같은 화면에서 Groq는 6개, 이 모델은 1개만 찾음, 2026-09-08 직접 비교), Groq가 실패했을 때만 쓰는
+// 안전망이다.
+const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || 'qwen2.5vl:7b'
+const OLLAMA_VISION_TIMEOUT_MS = 60_000
 
 /** Ollama는 이 PC에서 GPU 없이 CPU로만 추론한다(`ollama ps`의 `size_vram: 0`로 확인) — CPU 연산 자체인
  *  추론은 요청이 동시에 여러 개 들어오면 서로 CPU를 나눠 쓰며 배로(경우에 따라 수십 배까지, think 모드
@@ -602,11 +610,22 @@ export async function detectCategoryLinksWithAI(
 [링크 목록 (인덱스. "링크텍스트" → URL)]
 ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
 
-  const indices = await pickIndicesWithOllama(
+  let indices = await pickIndicesWithGroq(
     prompt, 'set_category_link_indices',
     '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
-    signal, timeoutMs,
+    signal,
   )
+  if (indices === null) {
+    // Groq가 키 없음/한도 초과/오류로 실패했을 때만 로컬 Ollama를 시도한다 — Groq가 "성공적으로 빈
+    // 배열"을 반환했을 때(확신 없어 안 고름)는 이미 유효한 답이므로 Ollama로 다시 물어보지 않는다
+    // (detectLastPageLinkWithAI와 같은 패턴, 2026-09-07 — 사용자 요청으로 카테고리/정렬 판별에도 Qwen을
+    // 우선 시도하도록 확장. Ollama만 쓰던 이전 결정은 "어떤 외부 서비스에도 의존하지 않겠다"는 취지였는데,
+    // Groq를 완전히 대체가 아니라 "더 빠르고 품질 좋은 1차 시도"로 앞에 두고 Ollama를 그대로 안전망으로
+    // 남겨 그 취지를 지킨다 — 키 없음/한도초과/장애 어떤 이유로든 Groq가 안 되면 자동으로 Ollama로 넘어감).
+    indices = await pickIndicesWithOllama(prompt, 'set_category_link_indices',
+      '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
+      signal, timeoutMs)
+  }
   const seen = new Set<number>()
   return indices
     .filter(i => i >= 0 && i < candidates.length && !seen.has(i) && seen.add(i))
@@ -630,9 +649,17 @@ const LAST_PAGE_TOOL_DESCRIPTION = '마지막 페이지로 이동하는 링크�
 /** Groq(빠름, 무료지만 분당 8,000토큰 한도) 경로 — 응답 형식은 generateMallProfileReportGroq와 동일
  *  (OpenAI 호환 tool_choice 강제, max_tokens 명시 필수: 안 주면 이 모델의 기본 출력 한도가 그대로
  *  "요청한 출력 크기"로 잡혀 분당 출력 토큰 한도를 넘겨 시작도 못 하고 거절된다 — 위 GROQ_MAX_OUTPUT_TOKENS
- *  주석 참고). 인덱스 하나(또는 빈 배열)만 반환하는 아주 짧은 답이라 50이면 충분하다. 키가 없거나 실패하면
- *  조용히 null — 호출부가 로컬 Ollama로 넘어간다. */
-async function pickLastPageIndexWithGroq(prompt: string, signal?: AbortSignal): Promise<number[] | null> {
+ *  주석 참고). 인덱스 몇 개(또는 빈 배열)만 반환하는 아주 짧은 답이라 500이면 충분하다. 키가 없거나
+ *  실패하면 조용히 null — 호출부가 로컬 Ollama로 넘어간다.
+ *
+ *  detectCategoryLinksWithAI/detectSortOptionsWithAI/detectLastPageLinkWithAI가 전부 "후보 목록에서
+ *  조건에 맞는 인덱스만 고르기"라는 같은 패턴이라 이 헬퍼 하나를 공유한다(2026-09-07, 사용자 요청 —
+ *  펫토리 카테고리 하위구조 판별에 Qwen을 실제로 붙여보니 품질이 좋아서 "카테고리/정렬 등 다른 판별에도
+ *  Qwen을 써서 결과물 품질을 높여달라") — 원래는 detectLastPageLinkWithAI 하나만 이 Groq 경로를 썼는데
+ *  (last-page 전용 하드코딩), toolName/toolDescription을 인자로 받도록 일반화했다. */
+async function pickIndicesWithGroq(
+  prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal,
+): Promise<number[] | null> {
   if (!process.env.GROQ_API_KEY) return null
   try {
     const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
@@ -641,13 +668,13 @@ async function pickLastPageIndexWithGroq(prompt: string, signal?: AbortSignal): 
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(OLLAMA_TIMEOUT_MS)]) : AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
       body: JSON.stringify({
         model: GROQ_MODEL,
-        max_tokens: 50,
+        max_tokens: 500,
         messages: [{ role: 'user', content: prompt }],
         tools: [{
           type: 'function',
           function: {
-            name: 'set_last_page_link_index',
-            description: LAST_PAGE_TOOL_DESCRIPTION,
+            name: toolName,
+            description: toolDescription,
             parameters: {
               type: 'object',
               required: ['indices'],
@@ -655,7 +682,7 @@ async function pickLastPageIndexWithGroq(prompt: string, signal?: AbortSignal): 
             },
           },
         }],
-        tool_choice: { type: 'function', function: { name: 'set_last_page_link_index' } },
+        tool_choice: { type: 'function', function: { name: toolName } },
       }),
     })
     if (!res.ok) return null
@@ -692,7 +719,7 @@ export async function detectLastPageLinkWithAI(
   const candidates = linkCandidates.slice(0, OLLAMA_MAX_CANDIDATES)
   const prompt = buildLastPagePrompt(mallName, baseUrl, candidates)
 
-  let indices = await pickLastPageIndexWithGroq(prompt, signal)
+  let indices = await pickIndicesWithGroq(prompt, 'set_last_page_link_index', LAST_PAGE_TOOL_DESCRIPTION, signal)
   if (indices === null) {
     // Groq가 키 없음/한도 초과/오류로 실패했을 때만 로컬 Ollama를 시도한다 — Groq가 "성공적으로 빈 배열"을
     // 반환했을 때(확신 없어 안 고름)는 이미 유효한 답이므로 Ollama로 다시 물어보지 않는다.
@@ -712,8 +739,9 @@ export interface SortOptionCandidate { label: string; href: string }
  * 그대로 노출해야 한다는 사용자 판단(2026-08-22) — 몰마다 표현이 정말 제각각이라(예: 어떤 몰은
  * "인기순", 어떤 몰은 "사용후기") 하나의 고정된 라벨 집합으로는 다 담을 수 없다는 게 실사용으로
  * 확인됨. detectCategoryLinksWithAI와 완전히 같은 이유·같은 패턴(href를 AI가 다시 타이핑하지 않고
- * 인덱스로만 반환 — 할루시네이션 방지)으로 로컬 Ollama(pickIndicesWithOllama)를 쓴다. 실패하면 조용히
- * 빈 배열 — 호출부가 "정렬 옵션 없음"으로 처리한다.
+ * 인덱스로만 반환 — 할루시네이션 방지)을 쓰되, 공급자는 Groq(빠름)를 먼저 시도하고 실패하면 로컬
+ * Ollama로 폴백한다(2026-09-07 — 카테고리 하위구조 판별에 Groq/Qwen을 붙여보니 품질이 좋아서 다른
+ * 판별에도 확장). 둘 다 실패하거나 확신이 없으면 빈 배열 — 호출부가 "정렬 옵션 없음"으로 처리한다.
  *
  * baseUrl(지금 보고 있던 목록 페이지 URL)을 프롬프트에 같이 준다 — 2026-08-22 모자사러 실사용 확인:
  * 같은 텍스트("신상품")를 쓰는 링크가 두 개(진짜 정렬 링크 하나, 완전히 다른 카테고리로 가는 메뉴
@@ -745,15 +773,157 @@ export async function detectSortOptionsWithAI(
 [링크 목록 (인덱스. "링크텍스트" → URL)]
 ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
 
-  const indices = await pickIndicesWithOllama(
+  let indices = await pickIndicesWithGroq(
     prompt, 'set_sort_option_indices',
     '정렬 기준 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
     signal,
   )
+  if (indices === null) {
+    // Groq가 키 없음/한도 초과/오류로 실패했을 때만 로컬 Ollama를 시도한다(위 detectCategoryLinksWithAI와
+    // 같은 이유 — Groq가 "성공적으로 빈 배열"을 반환했을 때는 이미 유효한 답이므로 다시 안 물어본다).
+    indices = await pickIndicesWithOllama(
+      prompt, 'set_sort_option_indices',
+      '정렬 기준 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
+      signal,
+    )
+  }
   const seen = new Set<number>()
   return indices
     .filter(i => i >= 0 && i < candidates.length && !seen.has(i) && seen.add(i))
     .map(i => ({ label: candidates[i].text, href: candidates[i].href }))
+}
+
+function buildSortLabelScreenshotPrompt(mallName: string): string {
+  return `이 스크린샷은 한국 쇼핑몰 '${mallName}'의 상품 목록(카테고리) 페이지다. 화면에 상품 정렬 옵션
+(상품이 나열되는 순서를 바꾸는 선택지 — 예: 추천순, 인기순, 낮은가격순, 높은가격순, 신상품순, 리뷰순,
+판매량순, 최신순 등)이 보이면 그 각각의 정확한 화면 텍스트를 그대로 나열하라(줄임/의역 금지, 화면에 적힌
+그대로). 안 보이면 빈 배열을 반환하라. 카테고리 메뉴, 브랜드/가격대 필터, 페이지당 개수(10개씩보기 등)는
+정렬이 아니니 포함하지 마라.`
+}
+
+/** Groq(qwen/qwen3.6-27b, 빠름) 경로 — 실패(키 없음/요청 실패/한도 초과 등)하면 null, 호출부가 로컬
+ *  Ollama vision으로 넘어간다. reasoning_effort:'none' 필수(위 GROQ_VISION_MODEL 주석 참고 — 안 끄면
+ *  <think> 과정만으로 max_tokens를 다 태워 정작 도구 호출까지 못 감). */
+async function detectSortLabelsWithGroqVision(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<string[] | null> {
+  if (!process.env.GROQ_API_KEY) return null
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(OLLAMA_TIMEOUT_MS)]) : AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
+      body: JSON.stringify({
+        model: GROQ_VISION_MODEL,
+        max_tokens: 500,
+        reasoning_effort: 'none',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: buildSortLabelScreenshotPrompt(mallName) },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_sort_labels',
+            description: '화면에서 실제로 보이는 정렬 옵션 라벨 텍스트만 반환한다. 안 보이면 빈 배열.',
+            parameters: {
+              type: 'object',
+              required: ['labels'],
+              properties: { labels: { type: 'array', items: { type: 'string' }, description: '화면에 보이는 정렬 옵션 텍스트 그대로' } },
+            },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_sort_labels' } },
+      }),
+    })
+    if (!res.ok) return null
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) return null
+    const args = JSON.parse(call.function.arguments) as { labels?: unknown }
+    return Array.isArray(args.labels) ? args.labels.filter((l): l is string => typeof l === 'string') : []
+  } catch {
+    return null
+  }
+}
+
+/** 로컬 Ollama vision(qwen2.5vl) 경로 — Groq가 실패했을 때만 쓰는 안전망. Ollama가 이 모델에 대해
+ *  "does not support tools"로 함수 호출 자체를 거부해(2026-09-08 실측 확인), 텍스트로 JSON 배열만
+ *  답하도록 프롬프트로 강제하고 정규식으로 잘라내 파싱한다 — 다른 Ollama 호출(pickIndicesWithOllama)과
+ *  같은 큐(withOllamaQueue)를 거쳐 CPU 경합을 피한다. 이미지 처리 자체가 텍스트보다 훨씬 느려(7B 기준
+ *  실측 약 40초/장) 전용 타임아웃(OLLAMA_VISION_TIMEOUT_MS)을 따로 쓴다. */
+async function detectSortLabelsWithOllamaVision(
+  mallName: string, imageBase64: string, signal?: AbortSignal,
+): Promise<string[] | null> {
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        body: JSON.stringify({
+          model: OLLAMA_VISION_MODEL,
+          stream: false,
+          keep_alive: '30m',
+          messages: [{
+            role: 'user',
+            content: `${buildSortLabelScreenshotPrompt(mallName)}\n\n다른 설명 없이 JSON 배열만 출력해라(예: ["추천순","인기순"]).`,
+            images: [imageBase64],
+          }],
+        }),
+      })
+      if (!res.ok) return null
+      const data = await res.json() as { message?: { content?: string } }
+      const match = (data.message?.content ?? '').match(/\[[\s\S]*\]/)
+      if (!match) return []
+      const parsed = JSON.parse(match[0]) as unknown
+      return Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === 'string') : []
+    } catch {
+      return null
+    }
+  })
+}
+
+/**
+ * 정렬 UI 탐지의 1차 수단 — href/select 마크업이나 텍스트 키워드로 "정렬처럼 생긴 것"을 추측하는 대신,
+ * 카테고리 목록 페이지 스크린샷을 그대로 비전 AI에게 보여주고 "화면에 보이는 정렬 옵션 라벨"을 물어본다
+ * (사용자 지시, 2026-09-08 — "정렬은 어차피 사람 눈으로 화면에서 확인 가능하다, 화면을 먼저 보는 것으로
+ * 설계 기준을 바꿔라"). <a>/<select>/버튼 onclick/커스텀 JS 드롭다운처럼 마크업 형태가 뭐든, 그리고 사이트
+ * 공통 내비게이션 텍스트(예: "신상품")가 정렬 키워드와 우연히 겹치든 말든 화면에 실제로 안 보이면 후보에
+ * 안 들어간다 — 이번 세션에 반복된 마크업 형태별 오탐/누락 사고(2026-09-08, 소꿉노리 다수)가 이 방식
+ * 자체로는 재현되지 않는다.
+ *
+ * 여기서 반환하는 라벨은 "화면에 이렇게 보인다"는 것만 확정한다 — 그 라벨이 실제로 클릭했을 때 진짜
+ * 정렬(같은 목록을 유지한 채 순서만 바뀜)로 동작하는지는 호출부가 실제 클릭 + diffQueryParams(또는
+ * 상품 목록 순서 변화)로 다시 검증해야 한다(detectSortOptionsByClicking/confirmSortCandidatesByClicking
+ * 참고) — 비전 AI도 화면을 잘못 읽을 수 있으니, "화면에 보임"과 "실제로 동작함"이라는 독립된 두 증거를
+ * 요구하는 게 안전하다.
+ *
+ * Anthropic(Claude)도 Gemini도 아니라 Groq(qwen/qwen3.6-27b)를 1차로 쓴다 — 이 프로젝트는 Anthropic API
+ * 크레딧을 충전하지 않기로 이미 확정돼 있어(generateProductName 등 기존 Claude 호출도 대부분 크레딧
+ * 부족으로 실패, 2026-09-08 재확인) Claude vision을 쓸 수 없고, Gemini는 (사용자 지적, 2026-09-08) 이미
+ * 다른 기능에서 무료 티어 일일 한도에 걸린 전례(위 withOllamaQueue 주석)가 있어 새 기능의 1차로 또 얹기엔
+ * 부담스럽다. Groq는 이 계정에서 실제로 qwen3.6-27b라는 멀티모달(텍스트+이미지) 모델을 제공하는 것과
+ * 실제 화면 인식 정확도(직접 비교, 2026-09-08 — 같은 스크린샷에서 Groq 6개 정탐 vs 로컬 qwen2.5vl:7b
+ * 1개만 인식)까지 실측으로 확인했다. 실패하면(한도 초과 등) 과금 없는 로컬 Ollama vision으로,
+ * 그마저 실패하면 null(호출부의 기존 href/키워드 기반 방식 폴백)로 이어진다 — 이 파일의 다른 "인덱스
+ * 고르기" 함수들(detectSortOptionsWithAI 등)과 같은 Groq→Ollama 폴백 체인 패턴.
+ *
+ * null=1차·2차 둘 다 실패(호출부가 기존 href/키워드 기반 방식으로 폴백해야 함) — []=화면에 정렬 UI가 안
+ * 보인다는 확정된 답. 다만 화면 인식이 완벽하지 않을 수 있으니, []가 와도 호출부는 안전하게 기존 방식을
+ * 한 번 더 시도한다(이 함수를 "유일한 진실"로 과신하지 않는다).
+ */
+export async function detectSortOptionsFromScreenshot(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<string[] | null> {
+  const viaGroq = await detectSortLabelsWithGroqVision(mallName, imageBase64, mimeType, signal)
+  if (viaGroq !== null) return viaGroq
+  return await detectSortLabelsWithOllamaVision(mallName, imageBase64, signal)
 }
 
 export interface MallStructureReport {
@@ -947,6 +1117,13 @@ const GROQ_BASE_URL = 'https://api.groq.com/openai/v1'
 // 정확도 이유로 검증해둔 전례가 있다 — OLLAMA_MODEL 주석 — 와도 일관됨).
 const GROQ_MODEL = process.env.GROQ_MODEL || 'qwen/qwen3.8-27b'
 const MALL_REPORT_GROQ_TIMEOUT_MS = 20_000
+// 정렬 UI 화면 인식(detectSortOptionsFromScreenshot) 전용 — 위 GROQ_MODEL(qwen3.8-27b, 순수 텍스트)은
+// 이미지 입력을 못 받는다. qwen3.6-27b는 이 계정 /v1/models에 실제로 존재하고(2026-09-08 확인) 이미지
+// 입력(OpenAI 호환 image_url content)과 함수 호출을 동시에 지원하는 멀티모달 모델 — 실제 화면 스크린샷
+// 1장으로 직접 호출해 정렬 라벨을 정확히 뽑아내는 것까지 확인했다. 기본은 "추론 모델"이라 답 전에 <think>
+// 과정을 전부 토큰으로 생성해(위 OLLAMA_MODEL의 think:false와 같은 문제) 아주 짧은 질문에도 max_tokens를
+// 다 태우는 걸 실측했다 — reasoning_effort:'none'으로 꺼야 즉시 최종 답만 나온다.
+const GROQ_VISION_MODEL = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.6-27b'
 
 // 무료 등급 계정 공통 분당 토큰(TPM) 한도가 8,000인 게 실측으로 확인됐다(2026-09-02 — 모델을
 // gpt-oss-120b/20b/qwen3.8-27b로 바꿔봐도 셋 다 똑같이 8,000에 걸림, 조직 단위 한도라 모델과 무관).

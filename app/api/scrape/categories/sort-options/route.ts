@@ -30,12 +30,17 @@ export async function POST(req: NextRequest) {
   try {
     const sortOptions = await detectSortOptionsForCategory({ siteId }, url)
     if (sortOptions.length) {
+      // report.sortStructure도 같이 맞춘다 — app/api/sites/[id]/sort-options/route.ts와 같은 이유(이전에
+      // "몰 구조분석"이 정렬을 못 찾아 report.sortStructure="확인 안됨"으로 저장해뒀다면, 이 라우트가
+      // 나중에 따로 찾아낸 sortOptions와 화면 문구가 서로 안 맞는 채로 남는다).
+      const sortStructureText = sortOptions.map(o => o.label).join(', ')
       await pool.query(
         `UPDATE sites SET
-           scrape_profile = COALESCE(scrape_profile, '{}'::jsonb) || jsonb_build_object('sortOptions', $1::jsonb),
+           scrape_profile = (COALESCE(scrape_profile, '{}'::jsonb) || jsonb_build_object('sortOptions', $1::jsonb))
+             || jsonb_build_object('report', COALESCE(scrape_profile->'report', '{}'::jsonb) || jsonb_build_object('sortStructure', $2::text)),
            scrape_profile_updated_at = NOW()
-         WHERE id=$2`,
-        [JSON.stringify(sortOptions), siteId],
+         WHERE id=$3`,
+        [JSON.stringify(sortOptions), sortStructureText, siteId],
       )
     }
     return NextResponse.json({ sortOptions, cached: false })

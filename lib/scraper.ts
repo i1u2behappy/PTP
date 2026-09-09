@@ -13,7 +13,7 @@ import { chromium, type BrowserContext, type Page, type APIResponse } from 'play
 import { load as loadHtml } from 'cheerio'
 import iconv from 'iconv-lite'
 import type { ExtractedProduct } from './ai'
-import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, type MallStructureReport, type OptionCandidate, type AiProviderId, ALL_AI_PROVIDERS } from './ai'
+import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsFromScreenshot, type MallStructureReport, type OptionCandidate, type AiProviderId, ALL_AI_PROVIDERS } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
@@ -607,6 +607,20 @@ export async function openManualLoginWindow(siteId: number, url: string): Promis
   })
 }
 
+/** 개발자모드(manual_login_required) 몰의 미리보기 그리드 "열기" 전용 — 이미 로그인해둔 실제 개인 크롬
+ *  창에 새 탭으로 그 URL을 연다. openManualLoginWindow와 달리 기존 창을 먼저 닫지 않는다 — 크롬이 이미
+ *  그 프로필로 떠 있으면 이 커맨드라인은 새 창을 띄우지 않고 기존 프로세스로 그대로 전달돼(위
+ *  openManualLoginWindow 주석 참고, 크롬의 표준 동작) 새 탭 하나만 연다. openUrlInLoginWindow(일반모드,
+ *  openSessions의 Playwright 자동화 창)를 그대로 쓰면 이 몰들은 로그인 자체가 안 되는 창이 새로 뜨는
+ *  문제가 있었다(!specifications/manual-login-required-malls.md의 구조적 한계와 같은 원인) — 이 함수는
+ *  자동화가 전혀 아닌 사용자의 실제 개인 프로필이라 그 한계 자체가 적용되지 않는다. 그 탭은 프로필 첫
+ *  실행 때 붙여둔 확장을 그대로 쓸 수 있어, 열자마자 확장 아이콘 → "🎯 보조 - 스크랩 대상 직접지정"을
+ *  누르면 이 상품 기준으로 바로 지정할 수 있다(사용자 요청, 2026-09-09). */
+export function openUrlInManualLoginChrome(url: string): void {
+  const child = spawn(CHROME_EXE, [`--profile-directory=${PTP_MANUAL_LOGIN_CHROME_PROFILE}`, url], { detached: true, stdio: 'ignore' })
+  child.unref()
+}
+
 /**
  * 이미 로그인해둔 개발자모드 창(위 openManualLoginWindow가 띄운 실제 개인 크롬)을 새 탭/새 창 없이 그대로
  * 화면 앞으로 가져온다 — "몰 구조분석" 버튼을 다시 눌렀다고 openManualLoginWindow를 또 부르면 매번 새 탭이
@@ -653,6 +667,52 @@ exit 1
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
       (err, stdout, stderr) => {
         if (err) console.log(`[focusManualLoginChrome] 실패: ${stdout?.trim()} ${stderr?.trim()} ${err.message}`)
+        resolve(!err)
+      })
+  })
+}
+
+/**
+ * 일반모드 로그인 창(openSessions, launchVisibleWindow가 띄운 이 siteId 전용 프로필)을 화면 앞으로
+ * 가져온다. openUrlInLoginWindow가 그동안 이 용도로 Playwright의 page.bringToFront()(CDP 기반)를 썼는데,
+ * Windows는 포그라운드에 없는 프로세스의 SetForegroundWindow 호출을 대체로 무시한다 — CDP의
+ * "activate"도 결국 이 API를 타므로 같은 제약에 걸려, 실제로는 탭이 그 창에 정상적으로 열렸는데도 화면은
+ * 계속 사용자가 보던 창(다른 개인 브라우저 등)에 머물러 있고, 나중에 보면 "다른 창에서 열렸다"처럼
+ * 보이는 원인이었다(실사용 확인, 2026-09-09 — 가방쟁이/siteId 12).
+ *
+ * focusManualLoginChrome은 정확히 같은 AppActivate 우회를 이미 쓰고 있지만 그쪽은 `.playwright-profiles`
+ * 창을 일부러 후보에서 "제외"한다(실제 개인 크롬만 찾아야 하므로, 611행 근처 주석 참고) — 이 함수는
+ * 반대로 그 시그널로 "포함" 매칭한다: 이 siteId의 profileDir(고유 경로, 마지막 세그먼트가 siteId라 다른
+ * siteId 폴더와 겹칠 일이 없다)가 커맨드라인에 있는 프로세스만 골라 AppActivate한다.
+ */
+export async function focusLoginWindow(siteId: number): Promise<boolean> {
+  if (process.platform !== 'win32') return false
+  // launchVisibleWindow가 실제로 넘기는 커맨드라인은 --user-data-dir=<dir>처럼 따옴표도 구분자도 없이
+  // 그 뒤에 바로 다음 플래그가 공백으로 이어붙는다(2026-09-09, 직접 커맨드라인 덤프로 확인 — 처음엔
+  // 닫는 따옴표나 경로 구분자가 뒤따른다고 잘못 가정해 매칭에 실패했었다). siteId가 자리수 접두어라
+  // profileDir(1)이 profileDir(12) 문자열에 부분포함되는 문제가 있어, -like 단순 와일드카드로는 경계를
+  // 표현할 수 없다 — .NET 정규식의 부정형 전방탐색((?!\d))으로 "이 경로 뒤에 숫자가 더 이어지지 않는다"를
+  // 강제해 다른 siteId와 겹치지 않게 한다.
+  const dir = profileDir(siteId)
+  const dirPattern = dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const script = `
+$ErrorActionPreference = 'SilentlyContinue'
+$procs = Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle }
+if (-not $procs) { Write-Output 'NO_WINDOW'; exit 1 }
+$shell = New-Object -ComObject WScript.Shell
+foreach ($p in $procs) {
+  $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId=$($p.Id)" -ErrorAction SilentlyContinue).CommandLine
+  if (-not $cmdLine) { continue }
+  if (-not ($cmdLine -match '${dirPattern}(?!\\d)')) { continue }
+  if ($shell.AppActivate($p.Id)) { Write-Output "ACTIVATED $($p.Id)"; exit 0 }
+}
+Write-Output 'ACTIVATE_FAILED'
+exit 1
+`
+  return new Promise(resolve => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      (err, stdout, stderr) => {
+        if (err) console.log(`[focusLoginWindow] 실패(siteId=${siteId}): ${stdout?.trim()} ${stderr?.trim()} ${err.message}`)
         resolve(!err)
       })
   })
@@ -739,6 +799,7 @@ export async function openUrlInLoginWindow(siteId: number, url: string): Promise
     const page = await existing.newPage()
     await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     await page.bringToFront().catch(() => {})
+    await focusLoginWindow(siteId)
     return
   }
   // 세션이 없으면 새로 띄워야 하는데, launchVisibleWindow는 같은 몰의 다른 작업(withContext 등)과
@@ -750,11 +811,13 @@ export async function openUrlInLoginWindow(siteId: number, url: string): Promise
       const page = await nowExisting.newPage()
       await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
       await page.bringToFront().catch(() => {})
+      await focusLoginWindow(siteId)
       return
     }
     const context = await launchVisibleWindow(siteId)
     const page = context.pages()[0] || await context.newPage()
     await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+    await focusLoginWindow(siteId)
   })
 }
 
@@ -766,6 +829,20 @@ async function closeLoginWindow(siteId: number) {
     await context.close().catch(() => {})
     openSessions.delete(siteId)
   }
+}
+
+// 회원전용 몰은 로그인 안 된 채로 상품/카테고리 페이지를 열면 리다이렉트 전에 JS
+// alert("회원만 접근권한이 있습니다." 등)부터 띄우는 경우가 있다(펫토리 실사용 확인, 2026-09-06 —
+// 몰구조분석/카테고리 불러오기가 이 몰에서 몇 분씩 걸리다 결과 없이 끝나는 원인을 실제 브라우저로 직접
+// 재현해 특정: page.goto()가 이 네이티브 alert 때문에 멈춰있다가 매번 페이지 타임아웃까지 다 채우고서야
+// "실패"로 넘어갔다 — Playwright는 dialog 이벤트를 명시로 처리해두지 않으면 자동으로 안 닫아준다).
+// 이 프로젝트 어디에도 dialog 핸들러가 없어 이런 몰은 전부 카테고리/상품 후보 하나하나가 이 타임아웃을
+// 그대로 물고 늘어져, 최종적으로는 "규칙 기반 실패 → AI도 실패"로 귀결됐다(AI 폴백도 같은 방식으로
+// 후보를 방문해 검증하므로 똑같이 걸림). 헤드리스로 도는 이 함수가 만드는 컨텍스트 전부에 자동 닫기를
+// 걸어, 그 즉시 새로 뜨는 페이지가(대개 로그인 페이지로) 리다이렉트되게 한다 — 이러면 기존의
+// "비밀번호 입력창 유무"(isLoginPage) 판정이 원래 하던 대로 그 리다이렉트 결과를 정확히 읽는다.
+function installDialogAutoDismiss(context: BrowserContext) {
+  context.on('dialog', dialog => { dialog.dismiss().catch(() => {}) })
 }
 
 // 어디서든 Playwright 번들 Chromium이 아니라 실제 설치된 크롬을 띄운다 — 몰이 자동화 브라우저를
@@ -803,6 +880,7 @@ export async function withContext<T>(
               headless: true, channel: 'chrome', chromiumSandbox: true,
               args: profileDirName !== 'Default' ? [`--profile-directory=${profileDirName}`] : [],
             })
+            installDialogAutoDismiss(context)
             // launchVisibleWindow와 같은 이유 — navigator.webdriver=true는 Playwright로 띄운 크롬임을
             // 드러내는 가장 흔한 신호다. 이 경로는 로그인을 다시 시도하지 않아(이미 유효한 쿠키 재사용)
             // PC인증 자체에 걸릴 일은 없지만, "카테고리 불러오기"/"몰 구조분석"이 헤드리스로 도는 동안
@@ -830,6 +908,7 @@ export async function withContext<T>(
       const context = await chromium.launchPersistentContext(profileDir(siteId), {
         headless: true, channel: 'chrome', chromiumSandbox: true,
       })
+      installDialogAutoDismiss(context)
       await context.addInitScript(polyfillEsbuildNameHelper)
       try {
         const page = context.pages()[0] || await context.newPage()
@@ -843,6 +922,7 @@ export async function withContext<T>(
   const browser = await chromium.launch({ headless: true, channel: 'chrome', chromiumSandbox: true })
   try {
     const ctx  = await browser.newContext()
+    installDialogAutoDismiss(ctx)
     await ctx.addInitScript(polyfillEsbuildNameHelper)
     const page = await ctx.newPage()
     return await fn(page, ctx)
@@ -1334,6 +1414,12 @@ export interface MallProfileSignals {
    *  요청, 2026-09-05). lastRunReportSource와 마찬가지로 DB에도 남겨 개발자모드가 나중에 GET으로 읽어갈
    *  수 있게 한다. */
   aiAnalysisElapsedSec?: number
+  /** sampleMallProfile 전체(목록 페이지 확인 ~ AI 리포트까지 모든 단계)가 걸린 시간(초) — aiAnalysisElapsedSec는
+   *  그중 마지막 AI 리포트 단계 하나만 잰 값이라, 화면에 그것만 보이면 "몰 구조분석 전체가 그만큼 걸렸다"로
+   *  오해하기 쉽다(사용자 지적, 2026-09-09 — "몰구조분석에 소요된 시간이 7초란 말이야?": 실제로는 정렬
+   *  옵션 확인만 152초, 전체 4.1분 걸렸는데 화면엔 AI 리포트 단계의 7초만 보였다). 개발자모드도 읽을 수
+   *  있게 aiAnalysisElapsedSec와 같은 이유로 DB에 남긴다. */
+  totalElapsedSec?: number
   /** deep 호출에서 첫 성공 샘플의 원문(product page innerText) — "몰 구조분석" 직후 자동으로
    *  추출규칙(runAutoAnalysis)을 생성할 때만 쓰고 DB에는 저장하지 않는다(applyProfileResult에서 제외).
    *  가벼운 구조변화감지(deep=false)에서는 항상 undefined. */
@@ -2255,7 +2341,8 @@ async function sampleMallProfile(
   // 펫투비가 10.7분 걸린 사례처럼 "왜 오래 걸렸는지"를 사후에 되짚어볼 방법이 없다는 지적(2026-08-23)
   // 으로, 각 단계가 끝나는 시점에 그 직전 단계가 실제로 몇 초 걸렸는지 .dev-server.log에 그대로 남긴다
   // (새 단계로 넘어갈 때 이전 단계 소요시간을 찍는 방식이라, 마지막 단계는 함수 끝에서 따로 찍는다).
-  let lastStepAt = Date.now()
+  const profileStartedAt = Date.now()
+  let lastStepAt = profileStartedAt
   let lastStepLabel: string | null = null
   const step = (detail: string) => {
     const now = Date.now()
@@ -2373,29 +2460,37 @@ async function sampleMallProfile(
       if (hasProducts) { sampleCategoryUrl = link.href; break }
     }
     if (sampleCategoryUrl) {
-      const sortCandidates = await collectSortCandidates(page)
       const baseUrl = page.url()
-      // 후보 텍스트가 정렬스러운 낱말(looksLikeSortLabel)을 포함하는 것만 먼저 골라내고, diffQueryParams
-      // (같은 경로, 쿼리파라미터만 다름)까지 통과하면 그대로 확정한다 — 로컬 Ollama(detectSortOptionsWithAI)
-      // 에게 판별을 맡기던 걸 없앴다(2026-08-23, 사용자 지시로 재검토): collectSortCandidates가 모아오는
-      // 후보엔 카테고리 사이드바 링크 등 정렬과 전혀 무관한 것도 잔뜩 섞여있는데, 로컬 Ollama가 이걸
-      // 정렬로 잘못 골라 저장한 사고가 이미 있었고, 응답이 느리거나(수십~수백 초) 도구 호출 대신
-      // 텍스트로 새는 문제도 같은 세션에서 반복 확인됐다. "정렬스러운 텍스트"(의미)와 "실제로 다른
-      // 목록으로 이어지는 링크"(구조)라는 독립된 증거 두 개가 이미 있으니, 신뢰도 낮은 세 번째 신호(AI)를
-      // 더할 필요가 없다 — 키워드 매칭만 쓰는 클릭 폴백(detectSortOptionsByClicking)이 오히려 더
-      // 안정적이었던 것과 같은 이유. 개발자모드 확장의 별도 정렬감지 경로(app/api/sites/[id]/sort-options,
-      // detectSortOptionsWithAI 계속 사용)는 호출부가 달라 이번엔 손대지 않았다.
-      const queryBased = sortCandidates
-        .filter(c => looksLikeSortLabel(c.text))
-        .map(c => ({ label: c.text, kind: 'query' as const, paramsToAdd: diffQueryParams(baseUrl, c.href) }))
-        .filter((o): o is { label: string; kind: 'query'; paramsToAdd: Record<string, string> } => !!o.paramsToAdd)
-      if (queryBased.length) {
-        sortOptions = queryBased
-      } else {
-        // 정적 href/select 기반 감지가 후보를 못 찾았거나, 찾았어도 키워드 필터를 통과한 게 하나도
-        // 없을 때 — 화면 텍스트를 후보로 삼아 실제로 클릭해보고 URL/목록 순서 변화로 직접 검증한다
-        // (detectSortOptionsByClicking 주석 참고 — kind:'query'/kind:'click' 둘 다 여기서 나올 수 있다).
-        sortOptions = await detectSortOptionsByClicking(page, baseUrl).catch(() => [])
+      // 1차: 화면(스크린샷)을 먼저 본다(사용자 지시, 2026-09-08 — "정렬은 어차피 사람 눈으로 화면에서
+      // 확인 가능하다"). href/select 마크업 형태나 사이트 공통 내비게이션 텍스트와의 우연한 키워드
+      // 겹침 같은 마크업발 오탐/누락(2026-09-08, 소꿉노리 다수)이 이 경로 자체로는 발생하지 않는다.
+      sortOptions = await detectSortOptionsByScreenshot(page, baseUrl, mallName, signal).catch(() => [])
+      if (!sortOptions.length) {
+        // 2차: 화면 인식이 실패했거나(비전 AI 호출 자체 실패) 화면에서 못 찾았을 때만 기존 href/select
+        // 구조 스캔 → 키워드 기반 클릭 폴백으로 이어간다(기존 로직 그대로 유지 — 안전망).
+        const sortCandidates = await collectSortCandidates(page)
+        // 후보 텍스트가 정렬스러운 낱말(looksLikeSortLabel)을 포함하는 것만 먼저 골라내고, diffQueryParams
+        // (같은 경로, 쿼리파라미터만 다름)까지 통과하면 그대로 확정한다 — 로컬 Ollama(detectSortOptionsWithAI)
+        // 에게 판별을 맡기던 걸 없앴다(2026-08-23, 사용자 지시로 재검토): collectSortCandidates가 모아오는
+        // 후보엔 카테고리 사이드바 링크 등 정렬과 전혀 무관한 것도 잔뜩 섞여있는데, 로컬 Ollama가 이걸
+        // 정렬로 잘못 골라 저장한 사고가 이미 있었고, 응답이 느리거나(수십~수백 초) 도구 호출 대신
+        // 텍스트로 새는 문제도 같은 세션에서 반복 확인됐다. "정렬스러운 텍스트"(의미)와 "실제로 다른
+        // 목록으로 이어지는 링크"(구조)라는 독립된 증거 두 개가 이미 있으니, 신뢰도 낮은 세 번째 신호(AI)를
+        // 더할 필요가 없다 — 키워드 매칭만 쓰는 클릭 폴백(detectSortOptionsByClicking)이 오히려 더
+        // 안정적이었던 것과 같은 이유. 개발자모드 확장의 별도 정렬감지 경로(app/api/sites/[id]/sort-options,
+        // detectSortOptionsWithAI 계속 사용)는 호출부가 달라 이번엔 손대지 않았다.
+        const queryBased = sortCandidates
+          .filter(c => looksLikeSortLabel(c.text))
+          .map(c => ({ label: c.text, kind: 'query' as const, paramsToAdd: diffQueryParams(baseUrl, c.href) }))
+          .filter((o): o is { label: string; kind: 'query'; paramsToAdd: Record<string, string> } => !!o.paramsToAdd)
+        if (queryBased.length) {
+          sortOptions = queryBased
+        } else {
+          // 정적 href/select 기반 감지가 후보를 못 찾았거나, 찾았어도 키워드 필터를 통과한 게 하나도
+          // 없을 때 — 화면 텍스트를 후보로 삼아 실제로 클릭해보고 URL/목록 순서 변화로 직접 검증한다
+          // (detectSortOptionsByClicking 주석 참고 — kind:'query'/kind:'click' 둘 다 여기서 나올 수 있다).
+          sortOptions = await detectSortOptionsByClicking(page, baseUrl).catch(() => [])
+        }
       }
     }
   }
@@ -2584,6 +2679,7 @@ async function sampleMallProfile(
     }
   }
   logFinalStep()
+  signals.totalElapsedSec = (Date.now() - profileStartedAt) / 1000
   return signals.sampleCount > 0 ? signals : null
 }
 
@@ -2880,6 +2976,17 @@ const BOARD_PATH_RE = /\/(board|bbs)\//i
  *  신호가 있을 때만 배제한다는 이 필터들의 기본 원칙과 같다). */
 function safePathname(href: string): string {
   try { return new URL(href).pathname } catch { return '' }
+}
+
+/** "대분류 자신의 href와 겹치면 GNB 재검출로 보고 제외" 판정(topLevelHrefSet)에 쓰는 href 비교 키 —
+ *  같은 카테고리 페이지라도 www 유무만 다른 호스트로 열릴 수 있어(소꿉노리 실사용 확인, 2026-09-08:
+ *  "기타 패브릭" 허브 페이지가 www 없는 호스트로 로드되며, 그 페이지에서 다시 찾은 사이트 전체 GNB
+ *  링크들의 href가 전부 www 없는 형태라 topLevelHrefSet의 www 있는 href와 문자열이 안 맞아 "진짜 하위
+ *  메뉴"로 오판됨 — 그 결과 "기타 패브릭 > 신상품", "기타 패브릭 > 데코소품 > 마블소품"처럼 사이트
+ *  전체 메뉴가 그대로 복제돼 카테고리 개수가 58개에서 115개로 거의 두 배가 됐다), 문자열 그대로
+ *  비교하면 이 케이스를 놓친다. */
+function canonicalizeHref(href: string): string {
+  return href.replace(/^(https?:\/\/)www\./, '$1')
 }
 
 export interface CategoryMenuScanResult {
@@ -3422,24 +3529,22 @@ export function looksLikeSortLabel(text: string): boolean {
  *    (collectFromListing 참고).
  *  후보 하나를 시도할 때마다 baseUrl로 새로 불러와 "정렬 전" 기준을 매번 깨끗하게 다시 잡는다 — 이전
  *  후보 클릭이 남긴 상태가 다음 후보 판정을 오염시킬 수 있어서다(URL 기반이든 AJAX 기반이든 공통). */
-async function detectSortOptionsByClicking(page: Page, baseUrl: string): Promise<MallSortOption[]> {
-  const candidateTexts = await page.evaluate((pattern) => {
-    const re = new RegExp(pattern)
-    const seen = new Set<string>()
-    const result: string[] = []
-    for (const el of Array.from(document.querySelectorAll('a, button, li, span, div, label'))) {
-      if (result.length >= 10) break
-      const text = (el.textContent || '').trim()
-      if (!text || text.length > 12 || !re.test(text) || seen.has(text)) continue
-      // 텍스트를 가진 자식이 이미 있으면(=이 요소는 더 큰 컨테이너일 뿐) 건너뛰고 안쪽 요소를 기다린다.
-      const hasTextChild = Array.from(el.children).some(c => (c.textContent || '').trim() === text)
-      if (hasTextChild) continue
-      seen.add(text)
-      result.push(text)
-    }
-    return result
-  }, SORT_KEYWORD_PATTERN).catch(() => [] as string[])
-
+/** candidateTexts(어디서 얻었든 — 아래 SORT_KEYWORD_PATTERN 정규식 스캔이든, detectSortOptionsByScreenshot의
+ *  화면 인식 라벨이든)를 하나씩 실제로 클릭해보고 검증한다 — "화면에 그렇게 보인다"/"텍스트가 정렬스럽다"는
+ *  둘 다 추측일 뿐이고, 실제로 클릭했을 때 진짜 정렬(같은 목록을 유지한 채 순서만 바뀜)로 동작하는지가
+ *  유일한 확정 증거다. 결과가 두 가지로 나뉜다(2026-08-23 펫투비 실사용 확인 — 처음엔 "URL이 안 바뀌는
+ *  AJAX 정렬"이라고만 봤는데, 같은 몰의 같은 링크가 로그인 상태에 따라 실제로는 URL도 바뀜을 재확인해 한
+ *  함수로 합쳤다):
+ *  - URL이 바뀌고 diffQueryParams가 성공하면(같은 pathname, 쿼리파라미터만 다름) kind:'query'로 확정 —
+ *    엉뚱한 걸 클릭해도(다른 카테고리/상품 상세로 이동) pathname이 달라지면 자동으로 걸러진다.
+ *  - URL이 그대로면(AJAX로만 재정렬되는 경우, 예: 고도몰 일부 스킨의 `javascript:sort(...)`) 클릭
+ *    전후 실제 상품 목록 순서(collectProductUrls가 읽는 것과 같은 링크)가 바뀌었는지로 검증한다 —
+ *    텍스트 추측이 아니라 실제 결과 변화를 확인하는 것이라 AI(로컬 Ollama) 호출이 필요 없다. 확정되면
+ *    clickText만 저장해 실제 스크랩 시점에 그 목록 페이지에 들어간 직후 다시 클릭해 정렬을 적용한다
+ *    (collectFromListing 참고).
+ *  후보 하나를 시도할 때마다 baseUrl로 새로 불러와 "정렬 전" 기준을 매번 깨끗하게 다시 잡는다 — 이전
+ *  후보 클릭이 남긴 상태가 다음 후보 판정을 오염시킬 수 있어서다(URL 기반이든 AJAX 기반이든 공통). */
+async function confirmSortCandidatesByClicking(page: Page, baseUrl: string, candidateTexts: string[]): Promise<MallSortOption[]> {
   const confirmed: MallSortOption[] = []
   for (const text of candidateTexts) {
     try {
@@ -3469,6 +3574,46 @@ async function detectSortOptionsByClicking(page: Page, baseUrl: string): Promise
   return confirmed
 }
 
+/** collectSortCandidates(정적 href/select 값 읽기)로 후보를 못 찾았거나, AI가 골랐어도 전혀 무관한
+ *  링크였을 때(sampleMallProfile의 SORT_KEYWORD_PATTERN 사전 필터 참고)의 폴백 — 버튼 onclick이나
+ *  커스텀 JS 드롭다운처럼 마크업만 봐서는 URL을 알 수 없는 정렬 UI까지 잡기 위해, 화면 텍스트가 정렬
+ *  키워드와 비슷한 요소를 태그 종류 상관없이 후보로 삼아 하나씩 실제로 클릭해본다(confirmSortCandidatesByClicking
+ *  참고). */
+async function detectSortOptionsByClicking(page: Page, baseUrl: string): Promise<MallSortOption[]> {
+  const candidateTexts = await page.evaluate((pattern) => {
+    const re = new RegExp(pattern)
+    const seen = new Set<string>()
+    const result: string[] = []
+    for (const el of Array.from(document.querySelectorAll('a, button, li, span, div, label'))) {
+      if (result.length >= 10) break
+      const text = (el.textContent || '').trim()
+      if (!text || text.length > 12 || !re.test(text) || seen.has(text)) continue
+      // 텍스트를 가진 자식이 이미 있으면(=이 요소는 더 큰 컨테이너일 뿐) 건너뛰고 안쪽 요소를 기다린다.
+      const hasTextChild = Array.from(el.children).some(c => (c.textContent || '').trim() === text)
+      if (hasTextChild) continue
+      seen.add(text)
+      result.push(text)
+    }
+    return result
+  }, SORT_KEYWORD_PATTERN).catch(() => [] as string[])
+  return confirmSortCandidatesByClicking(page, baseUrl, candidateTexts)
+}
+
+/** 정렬 UI 탐지의 1차 수단 — 카테고리 목록 페이지를 스크린샷으로 찍어 비전 AI(lib/ai.ts의
+ *  detectSortOptionsFromScreenshot, Groq qwen3.6-27b→로컬 Ollama vision 순으로 시도)에게 "화면에 보이는
+ *  정렬 라벨"을 물어본 뒤, 그 라벨 텍스트로 confirmSortCandidatesByClicking을 그대로 재사용해 실제
+ *  클릭+검증까지 마친다(사용자 지시, 2026-09-08 — "정렬은 화면으로 확인 가능하니 화면을 먼저 보는 것으로
+ *  설계 기준을 바꿔라"). 화면 인식이 실패하거나(null) 아무 라벨도 못 찾으면([]) 빈 배열을 돌려주고,
+ *  호출부가 기존 href/키워드 기반 방식(collectSortCandidates+SORT_KEYWORD_PATTERN, detectSortOptionsByClicking)
+ *  으로 이어서 시도한다 — 이 함수를 유일한 진실로 과신하지 않는다. */
+async function detectSortOptionsByScreenshot(page: Page, baseUrl: string, mallName: string, signal?: AbortSignal): Promise<MallSortOption[]> {
+  const screenshot = await page.screenshot({ type: 'jpeg', quality: 70 }).catch(() => null)
+  if (!screenshot) return []
+  const labels = await detectSortOptionsFromScreenshot(mallName, screenshot.toString('base64'), 'image/jpeg', signal).catch(() => null)
+  if (!labels?.length) return []
+  return confirmSortCandidatesByClicking(page, baseUrl, labels)
+}
+
 /**
  * "몰 카테고리 선택 가져오기(반복)" 탭 전용 — 사용자가 카테고리를 하나 가져오면 "몰 구조분석"을 따로
  * 돌리지 않아도 그 즉시 "정렬" 드롭다운을 쓸 수 있게, 그 카테고리 페이지에서 바로 정렬 옵션을 찾는다
@@ -3490,6 +3635,12 @@ export async function detectSortOptionsForCategory(opts: ScrapeOptions, category
         await scanPage.goto(categoryUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
       }
       const baseUrl = scanPage.url()
+      // 1차: 화면(스크린샷)을 먼저 본다 — sampleMallProfile의 정렬 옵션 확인과 같은 순서(사용자 지시,
+      // 2026-09-08 — 위 detectSortOptionsByScreenshot 주석 참고).
+      const mallName = opts.siteId ? (await siteInfo(opts.siteId)).name : new URL(categoryUrl).hostname
+      const viaScreenshot = await detectSortOptionsByScreenshot(scanPage, baseUrl, mallName).catch(() => [])
+      if (viaScreenshot.length) return viaScreenshot
+      // 2차: 화면 인식이 실패했거나 못 찾았을 때만 기존 href/select 구조 스캔 → 키워드 기반 클릭 폴백.
       const sortCandidates = await collectSortCandidates(scanPage)
       const queryBased = sortCandidates
         .filter(c => looksLikeSortLabel(c.text))
@@ -3722,7 +3873,7 @@ async function looksLikeRealCategoryBatch(
   const sampleCount = Math.min(3, links.length)
   const step = Math.max(1, Math.floor(links.length / sampleCount))
   const sampleLinks = Array.from({ length: sampleCount }, (_, i) => links[Math.min(i * step, links.length - 1)])
-  const topLevelHrefSet = new Set(links.map(l => l.href))
+  const topLevelHrefSet = new Set(links.map(l => canonicalizeHref(l.href)))
   const page = await context.newPage()
   try {
     // 표본 중 단 하나도 못 열었으면(사이트 일시 장애/네트워크 문제 등, 실사용 확인 2026-08-30 —
@@ -3733,11 +3884,20 @@ async function looksLikeRealCategoryBatch(
     for (const link of sampleLinks) {
       const moved = await page.goto(link.href, { waitUntil: 'domcontentloaded', timeout: 15_000 }).then(() => true).catch(() => false)
       if (!moved) continue
+      const probe = await countProductsOnPage(page, productLinkSelector || null, profile.productLinkSelector, detailPatternSrc, link.href).catch(() => ({ count: 0, isLoginPage: false }))
+      // 로그인 벽에 막힌 방문은 "가짜 카테고리"의 증거가 아니다 — 그냥 확인이 안 된 것뿐이라, 위
+      // anyPageLoaded 주석이 설명하는 "페이지 로드 자체가 실패한 경우"와 같은 방식으로 다룬다: 이
+      // 표본은 건너뛰고, 표본 전부가 로그인 벽이었으면(anyPageLoaded가 끝까지 false) "증거 없음=가짜"로
+      // 몰지 않고 원래 후보를 그대로 인정한다(펫토리 실사용 확인, 2026-09-06 — 로그인 없이도 대분류
+      // 메뉴 자체(class="xans-layout-category")는 보이는데, 검증차 방문하는 각 카테고리 페이지는 전부
+      // 로그인 페이지로 리다이렉트돼 예전엔 이걸 "카테고리 아님"으로 오판해 몰 전체가 카테고리 0개로
+      // 나왔다 — DOM 메뉴 판정(SELECTOR_TIERS+최소 2개+NON_CATEGORY_TEXT_RE 제외) 자체는 이미 충분히
+      // 엄격해, 로그인 벽으로 검증 불가한 몰에서는 이 판정을 그대로 신뢰하는 쪽이 "무조건 빈 결과"보다 낫다).
+      if (probe.isLoginPage) continue
       anyPageLoaded = true
-      const probe = await countProductsOnPage(page, productLinkSelector || null, profile.productLinkSelector, detailPatternSrc, link.href).catch(() => ({ count: 0 }))
       if (probe.count > 0) return true
       const sub = await scanCategoryMenuRobust(page).catch(() => ({ links: [] as CategoryMenuLink[], textlessHrefs: [] as string[] }))
-      if (sub.links.some(s => !topLevelHrefSet.has(s.href))) return true
+      if (sub.links.some(s => !topLevelHrefSet.has(canonicalizeHref(s.href)))) return true
       const hubUrl = page.url()
       const sortCandidates = await collectSortCandidates(page).catch(() => [])
       if (sortCandidates.some(sc => looksLikeSortLabel(sc.text) && diffQueryParams(hubUrl, sc.href))) return true
@@ -5781,7 +5941,7 @@ async function expandCategoryHubs(
   // 항상 그대로 떠 있어, scanCategoryMenuRobust를 그 페이지에서 다시 돌리면 "하위 메뉴"가 아니라 이
   // GNB를 그대로 다시 찾아버릴 수 있다(모자사러 실사용 확인, 2026-08-17). 대분류 자신의 href와 겹치는
   // 항목은 진짜 하위 메뉴가 아니라 그 GNB 재검출이므로 걸러낸다.
-  const topLevelHrefSet = new Set(categoryLinks.map(c => c.href))
+  const topLevelHrefSet = new Set(categoryLinks.map(c => canonicalizeHref(c.href)))
   let cursor = 0
   let loginBlockedExpansion = false
   let hubAiAttempts = 0
@@ -5867,9 +6027,13 @@ async function expandCategoryHubs(
     // 2026-09-06: "남자양말"이 상품 240개를 직접 보여주면서도 "패션 양말"/"발목단목양말" 등 진짜 하위
     // 메뉴 10개를 같이 갖고 있었는데, 상품이 있다는 이유만으로 그 하위 메뉴를 통째로 무시했음). 이제는
     // 상품이 있어도 하위 메뉴를 마저 확인해서, 있으면 부모(이미 상품이 있는 카테고리 자체)에 추가로
-    // 얹어 같이 보여준다(사용자 요청 — "가급적 하위 메뉴 리스트까지 리스트업"). AI 폴백은 상품이 있는
-    // 카테고리에는 안 쓴다 — 이미 유효한 스크랩 대상(부모)이 있어 "못 찾으면 버려야 하는" 절박함이
-    // 없는데, 몰 전체에 이 카테고리가 수십~수백 개면 그만큼 AI 호출이 불필요하게 늘어난다.
+    // 얹어 같이 보여준다(사용자 요청 — "가급적 하위 메뉴 리스트까지 리스트업"). AI 폴백은 원래 상품이
+    // 있는 카테고리엔 안 썼는데(이미 유효한 스크랩 대상이 있어 "못 찾으면 버려야 하는" 절박함이 없다는
+    // 이유), 펫토리 실사용 확인(2026-09-06)으로 이 판단을 재검토했다 — 이 몰은 대분류 페이지 자체에
+    // 상품이 있으면서(hasOwnProducts=true) 동시에 브랜드/재료별 세부분류를 본문 콘텐츠 그리드(사이드바
+    // <ul>/<li>가 아님)로도 갖고 있어, 이 제한 때문에 그 세부분류를 AI로도 영영 못 찾았다. 이미
+    // MAX_HUB_AI_ATTEMPTS_PER_RUN(실행당 상한)으로 비용을 억제하고 있으므로, hasOwnProducts 여부와
+    // 무관하게 규칙 기반이 못 찾았을 때는 AI도 시도한다.
     const hasOwnProducts = probe.count > 0
     if (hasOwnProducts) logIfSlow(`상품 ${probe.count}개(하위 메뉴 확인 중)`)
     // 하위 메뉴 탐지도 최상위 탐지와 같은 이유로 규칙 기반(scanCategoryMenuRobust)을 먼저 시도하고,
@@ -5881,9 +6045,9 @@ async function expandCategoryHubs(
     const subStart = Date.now()
     const sub = await scanCategoryMenuRobust(workerPage)
     const subMs = Date.now() - subStart
-    realChildren = sub.links.filter(s => !topLevelHrefSet.has(s.href))
+    realChildren = sub.links.filter(s => !topLevelHrefSet.has(canonicalizeHref(s.href)))
     let aiMs = 0
-    if (!hasOwnProducts && !realChildren.length && allowOllamaHubAi && hubAiAttempts < MAX_HUB_AI_ATTEMPTS_PER_RUN) {
+    if (!realChildren.length && allowOllamaHubAi && hubAiAttempts < MAX_HUB_AI_ATTEMPTS_PER_RUN) {
       hubAiAttempts++
       const aiSubCandidates = await collectAllPageLinks(workerPage, baseUrl)
       // discoverTopLevelCategoryLinks의 AI 폴백과 같은 이유(위 NON_CATEGORY_TEXT_RE/BOARD_PATH_RE
@@ -5892,7 +6056,7 @@ async function expandCategoryHubs(
       // 카테고리"로 잘못 채택하는 사고가 여기서도 그대로 났다.
       const aiStart = Date.now()
       realChildren = (await detectCategoryLinksWithAI(mallName, aiSubCandidates, c.name, signal, undefined, HUB_EXPANSION_AI_TIMEOUT_MS).catch(() => []))
-        .filter(s => !topLevelHrefSet.has(s.href) && !NON_CATEGORY_TEXT_RE.test(s.name) && !BOARD_PATH_RE.test(safePathname(s.href)))
+        .filter(s => !topLevelHrefSet.has(canonicalizeHref(s.href)) && !NON_CATEGORY_TEXT_RE.test(s.name) && !BOARD_PATH_RE.test(safePathname(s.href)))
       aiMs = Date.now() - aiStart
       if (realChildren.length) aiUsed = true
     }
@@ -5993,7 +6157,10 @@ async function expandCategoryHubs(
   // 서로 다른 대분류 허브가 겹치는 하위 카테고리로 펼쳐지면 같은 href가 두 번 나올 수 있다(모자사러
   // 실사용 확인, 2026-08-18) — 먼저 나온 것을 남기고 뒤에 나온 중복만 제거한다.
   const seenHrefs = new Set<string>()
-  links = links.filter(c => (seenHrefs.has(c.href) ? false : (seenHrefs.add(c.href), true)))
+  links = links.filter(c => {
+    const key = canonicalizeHref(c.href)
+    return seenHrefs.has(key) ? false : (seenHrefs.add(key), true)
+  })
   return { links, aiUsed, loginBlockedExpansion, relevantHrefs: [...relevantHrefsSeen] }
 }
 

@@ -53,6 +53,7 @@ export function registerAll() {
   reg('openManualLoginWindow', scraper.openManualLoginWindow)
   reg('openUrlInLoginWindow', scraper.openUrlInLoginWindow)
   reg('focusManualLoginChrome', scraper.focusManualLoginChrome)
+  reg('openUrlInManualLoginChrome', scraper.openUrlInManualLoginChrome)
 
   // 단발 스크랩/추출 — 상품 1건 단위라 중지 개념이 없다(금방 끝남).
   reg('scrapeSingleProduct', scraper.scrapeSingleProduct)

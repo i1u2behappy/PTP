@@ -1,16 +1,20 @@
 import pool, { decryptSecret } from './db'
 import { runScraping, isAnySiteBusy } from './workerClient'
 import { restartPtpServer, isRestartInFlight } from './systemRestart'
+import { ensureStartedOnce } from './onceGlobally'
 
 // ponytail: 단일 프로세스 in-memory 스케줄러. 여러 서버 인스턴스로 스케일하면 각자 따로 돌아 중복 실행될 수 있음.
-let started = false
-
-/** initDb()에서 호출된다 — 이미 시작됐으면 아무것도 하지 않아 여러 번 호출해도 안전하다. */
+//
+// 예전엔 이 중복 실행 방지를 일반 모듈 스코프 변수(`let started`)로 짰다가 실사용에서 사고가 났다
+// (2026-09-07 실측 — pg_stat_activity에 auto_scrape_hour 조회가 동시에 7~8개씩 떠 있는 걸 발견,
+// checkSchedules() 하나가 60초마다 한 번씩만 돌아야 정상인데 매번 여러 번 겹쳐 돌고 있었다). 원인/일반
+// 해법은 lib/onceGlobally.ts 참고 — 이 프로젝트에서 같은 클래스의 사고가 반복돼(siteLocks/keepAwake/
+// devPreviewStatus/profileAbortControllers 등) 그 파일 하나로 통일했다.
 export function startScheduler() {
-  if (started) return
-  started = true
-  setInterval(() => { checkSchedules().catch(() => {}) }, 60_000)
-  setInterval(() => { checkMemoryAndAutoRestart().catch(() => {}) }, 60_000)
+  ensureStartedOnce('scheduler', () => {
+    setInterval(() => { checkSchedules().catch(() => {}) }, 60_000)
+    setInterval(() => { checkMemoryAndAutoRestart().catch(() => {}) }, 60_000)
+  })
 }
 
 // ponytail: 2026-08-09 실사용 확인 — 평소엔 300~700MB인 이 서버 프로세스가, 스크랩/미리보기를 많이

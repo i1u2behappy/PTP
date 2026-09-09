@@ -2,6 +2,7 @@ import pool from './db'
 import { acquireKeepAwake, releaseKeepAwake } from './keepAwake'
 import { isAnyDevPreviewActive } from './devPreviewStatus'
 import { getActiveMergeBatch } from './scrape/staging'
+import { ensureStartedOnce } from './onceGlobally'
 
 /**
  * lib/keepAwake.ts(절전방지)는 원래 withSiteLock(일반모드, 서버가 직접 Playwright로 여는 모든 작업)만
@@ -22,14 +23,13 @@ import { getActiveMergeBatch } from './scrape/staging'
  * 다음 확인 때 저절로 풀린다(강한 방향으로 자기치유). lib/keepAwake.ts가 참조 카운트를 두고 있어
  * withSiteLock과 이 워처가 서로 몰라도 안전하게 공존한다.
  *
- * started/currentlyActive를 globalThis에 담는 이유(2026-09-06 실사용 확인): 이 파일만 고쳐 저장해도
- * dev 서버가 이 모듈을 다시 평가해 모듈 스코프 변수였다면 그 순간 초기화된다 — started가 false로
- * 되돌아가 setInterval이 하나 더 생기고(구 인스턴스는 옛 클로저를 쥔 채 계속 돎), currentlyActive도
- * false로 리셋돼 실제로는 아직 켜져 있는 keepAwake 프로세스를 "새 인스턴스"가 다시 모른 채 시작하는
- * 등 상태가 꼬인다. siteLocks/devPreviewStatus 등 이 프로젝트의 다른 인메모리 상태와 같은 이유로
- * globalThis에 둔다. */
+ * currentlyActive를 globalThis에 담는 이유(2026-09-06 실사용 확인): 이 파일만 고쳐 저장해도 dev
+ * 서버가 이 모듈을 다시 평가해 모듈 스코프 변수였다면 그 순간 초기화된다 — false로 리셋돼 실제로는
+ * 아직 켜져 있는 keepAwake 프로세스를 "새 인스턴스"가 다시 모른 채 시작하는 등 상태가 꼬인다.
+ * siteLocks/devPreviewStatus 등 이 프로젝트의 다른 인메모리 상태와 같은 이유로 globalThis에 둔다.
+ * "감시 시작" 자체의 중복 방지(같은 이유의 다른 문제 — setInterval이 여러 개 쌓임)는
+ * lib/onceGlobally.ts의 공용 가드를 쓴다(아래 ensureDevKeepAwakeWatcherStarted). */
 declare global {
-  var __devKeepAwakeStarted: boolean | undefined
   var __devKeepAwakeCurrentlyActive: boolean | undefined
 }
 
@@ -62,7 +62,7 @@ async function checkAndToggle() {
  *  이유로 별도 프로세스 없이 이 Next.js 서버 프로세스 안에서 계속 돈다(devPreviewStatus/getActiveMergeBatch
  *  상태 자체가 이 프로세스의 globalThis에만 있으므로 워커 쪽에서는 애초에 볼 수도 없다). */
 export function ensureDevKeepAwakeWatcherStarted(): void {
-  if (globalThis.__devKeepAwakeStarted) return
-  globalThis.__devKeepAwakeStarted = true
-  setInterval(() => { checkAndToggle().catch(() => {}) }, CHECK_INTERVAL_MS)
+  ensureStartedOnce('devKeepAwake', () => {
+    setInterval(() => { checkAndToggle().catch(() => {}) }, CHECK_INTERVAL_MS)
+  })
 }

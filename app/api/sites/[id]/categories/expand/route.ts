@@ -61,6 +61,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const keepPrevious = shouldKeepPreviousCategoryLinks({
     freshAiUsed: false,
     freshLoginBlockedExpansion: !!body.blocked,
+    freshCategoryLinksCount: body.links.length,
     prevAiUsed: !!prevProfile?.categoryLinksAiUsed,
     prevCategoryLinksCount: prevCategoryLinks?.length ?? 0,
   })

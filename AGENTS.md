@@ -24,3 +24,22 @@ This version has breaking changes — APIs, conventions, and file structure may 
   사용자가 매번 되물어야 하는 일이 없게 한다(2026-08-29, 카테고리 캐시 덮어쓰기 버그를 개발자모드 사례로만
   보고 고쳤다가 사용자가 "일반모드는?"이라고 재차 확인해야 했음 — 실제로는 모드 무관 공용 로직이라 이미
   둘 다 적용돼 있었지만, 그걸 스스로 먼저 확인해서 알려줬어야 했다).
+- **모듈 스코프에서 "이 프로세스당 한 번만 실행돼야 하는" 부작용(`setInterval` 등록, 백그라운드 감시자
+  시작 등)은 반드시 `lib/onceGlobally.ts`의 `ensureStartedOnce(key, fn)`를 쓴다 — `let started = false`
+  같은 일반 모듈 변수로 직접 짜지 않는다.** 이유: Next.js dev 서버는 API 라우트를 온디맨드로 따로
+  컴파일하는데, 이 과정에서 공유 서버 모듈이 같은 프로세스 안에서 여러 번 다시 평가될 수 있어, 일반
+  변수 가드는 그때마다 리셋돼 `setInterval`이 계속 쌓인다(2026-09-07, `lib/scheduler.ts`의 60초
+  스케줄러가 여러 개 겹쳐 돌며 DB 커넥션 풀을 소모해 무관한 쿼리까지 타임아웃 내던 사고 — 이 프로젝트에서
+  같은 클래스의 사고가 이미 6번 났었다: siteLocks/keepAwake/devPreviewStatus/profileAbortControllers/
+  categoryDiscoveryAbortControllers/instrumentation.ts). `tests/unit/onceGloballyGuard.test.ts`가 검증
+  루프에서 이걸 자동으로 강제한다 — `setInterval`이 있는 파일에 `ensureStartedOnce`가 같이 없으면
+  테스트가 실패한다(정말 예외가 필요하면 파일에 `// onceGloballyGuard: exempt` 주석과 이유를 남긴다).
+
+# 응답 방식 (2026-09-08 도입)
+
+- 사용자가 수정이 필요해 보이는 부분을 얘기하면, 진단 → 계획 → (코드 수정/명령 실행) → 결과 확인을
+  거치는 동안 중간중간 짧은 진행 메모를 남기는 것과는 별개로, 답변 마지막에는 이번 턴에서 실제로
+  무엇을 확인했고 무엇을 고쳤는지, 다음에 사용자가 뭘 하면 되는지를 전체적으로 한 번에 모아 정리해서
+  보여준다 — 중간에 나온 도구 호출/코드 조각을 사용자가 일일이 따라가며 진행상황과 결과를 스스로
+  재구성하지 않아도 되게 한다(2026-09-08, 중간중간 답을 추적해서 진행사항과 결과를 확인하기 어렵다는
+  피드백).

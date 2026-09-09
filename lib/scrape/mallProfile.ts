@@ -2,6 +2,7 @@ import pool from '../db'
 import { profileMallStructure, profileMallStructureForScrape, type MallProfileSignals, type ScrapeOptions } from '../scraper'
 import { runAutoAnalysis } from './adjustment'
 import { checkCategoryAnomaly } from './categoryAnomalyCheck'
+import { mergeSortOptions } from './categoryCachePolicy'
 import type { MallStructureReport, AiProviderId } from '../ai'
 import { ALL_AI_PROVIDERS } from '../ai'
 
@@ -133,10 +134,13 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
     next.report = preferPrev ? mergeReports(prev.report, next.report) : mergeReports(next.report, prev.report)
   }
 
-  // sortOptions는 deep=false거나 로그인 필요 몰이면 항상 []이다(성공적으로 "더 적게" 나올 일이 없음) —
-  // 개발자모드 확장(runDetectSortOptions)이 채워둔 값을 이 얕은/실패 경로가 조용히 지우지 못하게 한다
-  // (사용자 요청, 2026-08-19 — 위 report 가드와 같은 이유).
-  if (!next.sortOptions?.length && prev?.sortOptions?.length) next.sortOptions = prev.sortOptions
+  // sortOptions는 이 서버 경로(sampleMallProfile)와 개발자모드 확장(runDetectSortOptions)이 "몰 구조분석"
+  // 한 번에 병렬로 각자 독립적으로 찾아 같은 자리에 쓸 수 있다 — 로그인 없이도 서버가 카테고리 페이지를
+  // 열어볼 수 있는 몰에서는 둘 다 진짜로 뭔가를 찾아내는데, 서로 다른 부분집합을 찾고 나중에 쓰는 쪽이
+  // 그대로 덮어써 "정렬 구조"가 실행마다 무작위로 바뀌어 보였다(모자사러 실사용 확인, 2026-09-09).
+  // label 기준으로 합쳐서 둘 다 잃지 않는다(mergeSortOptions 주석 참고) — next가 비어있으면 그냥 prev를
+  // 그대로 쓰는 예전 동작(2026-08-19)도 이 함수 하나로 그대로 커버된다.
+  next.sortOptions = mergeSortOptions(prev?.sortOptions, next.sortOptions)
 
   // 카테고리도 report와 같은 이유로 AI→규칙기반 품질 저하를 막는다: 이번엔 AI(로컬 Ollama)가 실패해
   // 규칙 기반으로 떨어졌는데 예전엔 AI가 성공해 정확한 카테고리를 찾아둔 상태였다면, 그 결과를 그대로
@@ -153,12 +157,21 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
     // 다른(엉뚱한 게시판 등) 링크를 찾아오게 된다. categoryLinks를 되돌릴 땐 패턴도 같이 되돌린다
     // (오토카필 몰 실사용 확인, 2026-08-29 — "몰 구조분석"과 "카테고리 불러오기" 결과가 전혀 다름).
     next.categoryUrlPattern = prev.categoryUrlPattern
-  } else if (!deep && prev?.categoryLinks?.length && next.categoryLinks.length < prev.categoryLinks.length) {
+  } else if (prev?.categoryLinks?.length && next.categoryLinks.length < prev.categoryLinks.length) {
     // categoryLinks는 deep=false("구조 변화 감지", 로그인 확인/스크랩 시작마다 자동으로 돎)에서도 매번
     // 다시(얕게) 계산된다 — 개발자모드 확장의 "카테고리 하위구조 자동확인"(runExpandCategories)이 펼쳐둔
     // 하위 카테고리 목록의 권위 있는 갱신 창구가 아니므로, 그 결과가 이전보다 얕아졌으면(개수가 줄었으면)
-    // 덮어쓰지 않는다. deep=true(사용자가 명시적으로 누른 "몰 구조분석")는 실제 카테고리 구조 축소를
-    // 반영할 수 있어야 하므로 건드리지 않는다.
+    // 덮어쓰지 않는다.
+    // 원래는 deep=true(사용자가 명시적으로 누른 "몰 구조분석")는 실제 카테고리 구조 축소를 반영할 수
+    // 있어야 한다고 보고 이 가드에서 제외했었다 — 그런데 펫토리 실사용으로 이게 실제 사고로 이어지는 걸
+    // 확인했다(2026-09-07): 이 몰은 서버 헤드리스 경로가 구조적으로 절대 로그인을 못 하므로(위 파일
+    // 상단 참고), "몰 구조분석"을 실행할 때마다 그 안의 서버 쪽 카테고리 재탐지 단계가 매번 실패에
+    // 가까운 결과를 내는데, 이 가드가 deep=true를 봐주는 바람에 "카테고리 불러오기"/확장이 어렵게
+    // 찾아둔 정상 결과(17개)를 몰 구조분석 한 번에 조용히 지워버렸다 — 그 직후 확장의 하위구조 자동확인이
+    // 이미 망가진 목록을 이어받아 엉뚱한 부모 아래로 수백 개를 잘못 붙이는 2차 사고로 번졌다. "진짜
+    // 구조 축소"와 "이번 탐지가 실패함"을 이 개수 비교만으로는 구분할 수 없으니, deep 여부와 무관하게
+    // 안전한 쪽(줄었으면 일단 지킨다)을 택한다 — 진짜 축소를 반영하고 싶으면 "카테고리 불러오기 다시
+    // 확인"(shouldKeepPreviousCategoryLinks, 개수가 늘 때만 명확히 덮어씀)을 쓰면 된다.
     next.categoryLinks = prev.categoryLinks
     next.categoryMenuNames = prev.categoryMenuNames
     next.categoryUrlPattern = prev.categoryUrlPattern

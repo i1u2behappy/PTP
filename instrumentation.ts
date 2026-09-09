@@ -1,3 +1,5 @@
+import { ensureStartedOnce } from './lib/onceGlobally'
+
 // Next.js가 서버 시작 시 한 번만 불러주는 표준 훅(instrumentation.ts, 15.0.0부터 안정화 — 별도 플래그
 // 불필요). console.log/warn/error에 타임스탬프를 붙여, .dev-server.log를 나중에 grep해서 "이 로그가
 // 정확히 몇 시에 찍혔나"를 바로 알 수 있게 한다(2026-08-23 — "10초 전에 로고가 보였다"처럼 상대 시간을
@@ -9,37 +11,45 @@ function timestamp(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+// register()는 Next.js가 서버 시작 시 "한 번만" 불러준다는 게 공식 계약이지만, lib/scheduler.ts에서
+// 실측으로 확인한 것과 같은 이유(dev 서버가 라우트를 온디맨드로 컴파일하며 이 모듈이 서로 다른 번들
+// 인스턴스로 여러 번 새로 평가될 수 있음, 2026-09-07)로 이 파일도 안전하지 않다 — register()가 두 번
+// 이상 불리면 아래 setInterval(30초 워커 감시)이 그만큼 쌓여 워커 재기동 시도가 중복되고(예전에 겪은
+// EADDRINUSE 충돌의 원인 후보), lastSpawnAt 쿨다운도 인스턴스마다 따로 놀아 무의미해진다. 원인/일반
+// 해법은 lib/onceGlobally.ts 참고 — 같은 클래스의 사고가 이 프로젝트에서 반복돼 그 파일 하나로 통일했다.
 export function register() {
-  const wrap = (orig: (...args: unknown[]) => void) => (...args: unknown[]) => orig(`[${timestamp()}]`, ...args)
-  console.log = wrap(console.log.bind(console))
-  console.warn = wrap(console.warn.bind(console))
-  console.error = wrap(console.error.bind(console))
+  ensureStartedOnce('instrumentation-register', () => {
+    const wrap = (orig: (...args: unknown[]) => void) => (...args: unknown[]) => orig(`[${timestamp()}]`, ...args)
+    console.log = wrap(console.log.bind(console))
+    console.warn = wrap(console.warn.bind(console))
+    console.error = wrap(console.error.bind(console))
 
-  // Playwright/로컬 Ollama 작업을 이 Next.js 프로세스와 분리된 워커 프로세스로 옮겼다(2026-08-23,
-  // 사용자 요청 — "로고 화면이 계속 나오는" 원인이었던 Fast Refresh 강제 새로고침을 근본적으로 없애기
-  // 위해서다. 원인: 이 프로세스가 스크래핑/AI로 CPU를 많이 쓰면 Next.js가 자기 빌드 매니페스트를
-  // 순간적으로 깨진 상태로 읽어 "Error: Manifest file is empty"가 나고, Fast Refresh가 브라우저 탭을
-  // 강제로 통째로 새로고침시켰다). 개발자가 `npm run worker`를 별도 터미널에서 매번 띄우게 하는 대신,
-  // 이 서버가 시작될 때 워커가 이미 떠 있는지 확인하고 없으면 자동으로 띄운다 — "그냥 npm run dev만
-  // 실행하면 된다"는 기존 경험을 그대로 유지하기 위함.
-  ensureWorkerRunning().catch(e => console.error('[worker] 자동 기동 실패 — npm run worker로 직접 띄워주세요:', e))
+    // Playwright/로컬 Ollama 작업을 이 Next.js 프로세스와 분리된 워커 프로세스로 옮겼다(2026-08-23,
+    // 사용자 요청 — "로고 화면이 계속 나오는" 원인이었던 Fast Refresh 강제 새로고침을 근본적으로 없애기
+    // 위해서다. 원인: 이 프로세스가 스크래핑/AI로 CPU를 많이 쓰면 Next.js가 자기 빌드 매니페스트를
+    // 순간적으로 깨진 상태로 읽어 "Error: Manifest file is empty"가 나고, Fast Refresh가 브라우저 탭을
+    // 강제로 통째로 새로고침시켰다). 개발자가 `npm run worker`를 별도 터미널에서 매번 띄우게 하는 대신,
+    // 이 서버가 시작될 때 워커가 이미 떠 있는지 확인하고 없으면 자동으로 띄운다 — "그냥 npm run dev만
+    // 실행하면 된다"는 기존 경험을 그대로 유지하기 위함.
+    ensureWorkerRunning().catch(e => console.error('[worker] 자동 기동 실패 — npm run worker로 직접 띄워주세요:', e))
 
-  // dev:clean이 재시작마다 .next 캐시를 통째로 지우고 시작하다 보니(taskkill로 강제종료되면 캐시가
-  // 손상되는 문제, 2c9c703의 대응) 재부팅 직후 사용자가 처음 여는 화면/API마다 webpack이 그 자리에서
-  // 컴파일하느라 매번 10초 넘게 걸린다(실사용 확인, 2026-08-31 — /api/auth/me, /api/products 등이 각각
-  // 10~14초). 서버가 뜨자마자 백그라운드로 같은 라우트들을 미리 한 번 불러 컴파일을 끝내두면, 사용자가
-  // 실제로 브라우저를 열 때는 이미 컴파일이 끝나있어 체감 대기시간이 크게 줄어든다.
-  warmUpRoutes().catch(e => console.error('[warmup] 예열 실패(치명적이지 않음 — 사용자가 처음 열 때 그만큼 느릴 뿐):', e))
+    // dev:clean이 재시작마다 .next 캐시를 통째로 지우고 시작하다 보니(taskkill로 강제종료되면 캐시가
+    // 손상되는 문제, 2c9c703의 대응) 재부팅 직후 사용자가 처음 여는 화면/API마다 webpack이 그 자리에서
+    // 컴파일하느라 매번 10초 넘게 걸린다(실사용 확인, 2026-08-31 — /api/auth/me, /api/products 등이 각각
+    // 10~14초). 서버가 뜨자마자 백그라운드로 같은 라우트들을 미리 한 번 불러 컴파일을 끝내두면, 사용자가
+    // 실제로 브라우저를 열 때는 이미 컴파일이 끝나있어 체감 대기시간이 크게 줄어든다.
+    warmUpRoutes().catch(e => console.error('[warmup] 예열 실패(치명적이지 않음 — 사용자가 처음 열 때 그만큼 느릴 뿐):', e))
 
-  // 워커가 "운영 중에" 죽는 경우(예상 못한 크래시, DB 8분 재시도도 다 실패 등)를 아무도 못 살려주는
-  // 공백이 있었다(2026-08-30 실사용 확인 — lib/workerRestart.ts의 자동재시작은 워커 자신의 setInterval에
-  // 기대는데, 워커가 완전히 죽으면 그 감시 코드도 같이 죽어 스스로는 못 살아난다). 이 dev 서버 프로세스는
-  // 워커와 별개 프로세스라 워커가 죽어도 계속 살아있으니, 여기서 30초마다 다시 확인해 죽어있으면
-  // 되살리는 감시자 역할까지 겸한다 — ensureWorkerRunning 자체가 이미 "떠 있으면 그냥 둔다"는 멱등
-  // 로직이라 그대로 반복 호출하면 된다.
-  setInterval(() => {
-    ensureWorkerRunning().catch(e => console.error('[worker] 주기 확인 중 재기동 실패:', e))
-  }, 30_000)
+    // 워커가 "운영 중에" 죽는 경우(예상 못한 크래시, DB 8분 재시도도 다 실패 등)를 아무도 못 살려주는
+    // 공백이 있었다(2026-08-30 실사용 확인 — lib/workerRestart.ts의 자동재시작은 워커 자신의 setInterval에
+    // 기대는데, 워커가 완전히 죽으면 그 감시 코드도 같이 죽어 스스로는 못 살아난다). 이 dev 서버 프로세스는
+    // 워커와 별개 프로세스라 워커가 죽어도 계속 살아있으니, 여기서 30초마다 다시 확인해 죽어있으면
+    // 되살리는 감시자 역할까지 겸한다 — ensureWorkerRunning 자체가 이미 "떠 있으면 그냥 둔다"는 멱등
+    // 로직이라 그대로 반복 호출하면 된다.
+    setInterval(() => {
+      ensureWorkerRunning().catch(e => console.error('[worker] 주기 확인 중 재기동 실패:', e))
+    }, 30_000)
+  })
 }
 
 // 워커 자신의 DB 연결 재시도가 최대 8분까지 걸릴 수 있다(worker/index.ts의 initDbWithRetry) — 그동안은

@@ -17,15 +17,32 @@ const TASK_NAME = 'PTPRestartWorker'
  *  Playwright(chromium.launchPersistentContext)가 이제 이 워커 프로세스에서 돈다 — 강제종료 시 그
  *  chrome.exe들은 이 프로세스의 자식이 아니라 프로필 폴더별 별개 프로세스라 orphan으로 남으므로,
  *  restartPtpServer와 마찬가지로 orphanedChromeCleanupScript()로 같이 정리한다. */
-let restartInFlight = false
+// "재시작 중" 잠금을 in-memory 변수 하나로만 두지 않고 파일로 둔다 — 이 함수는 서로 다른 두 프로세스에서
+// 부를 수 있다(Next.js 서버가 app/api/system/restart-worker/route.ts를 통해, 워커 자신이
+// worker/index.ts의 메모리 임계치 자동 재시작을 통해) — 각자 자기 프로세스 메모리 안의 변수만 봐서는
+// 상대방이 지금 재시작 중인지 전혀 모른다. 게다가 실제 kill+재기동은 이 함수가 반환된 뒤에도 별개
+// 프로세스(schtasks가 띄운 PowerShell)에서 몇 초간 더 이어지는데, 예전엔 이 in-memory 플래그를 schtasks
+// 등록 명령이 끝나자마자 풀어버려서(2026-09-06 사고 — "재시작이 걸린 채 안 풀린다"를 고치다 반대로
+// 너무 일찍 풀어버림) 그 몇 초 사이에 두 번째 재시작 요청이 들어오면 아직 안 끝난 첫 번째 kill+재기동과
+// 포트를 두고 경쟁해 워커가 완전히 죽은 채 방치되는 사고가 났다(2026-09-08 실사용 확인 — 재시작을 짧은
+// 간격으로 여러 번 호출했더니 재현됨). 파일 mtime 기반 TTL로 실제 물리적 재시작 소요 시간(스크립트의
+// Start-Sleep 1초×2 + 죽이기/정리/재기동 오버헤드, 넉넉히 잡음)만큼 잠그고, 프로세스가 도중에 죽어도
+// (예: 강제종료) TTL이 지나면 저절로 풀려 영구히 막히지 않는다 — in-memory 플래그의 "정상 경로에서
+// 못 풀면 영원히 막힘" 문제를 파일 접근 시각 확인만으로 재현하지 않는다.
+const LOCK_PATH = path.join(os.tmpdir(), 'ptp-worker-restart.lock')
+const LOCK_TTL_MS = 15_000
 
 export function isWorkerRestartInFlight(): boolean {
-  return restartInFlight
+  try {
+    return Date.now() - fs.statSync(LOCK_PATH).mtimeMs < LOCK_TTL_MS
+  } catch {
+    return false
+  }
 }
 
 export async function restartWorker(): Promise<void> {
-  if (restartInFlight) throw new Error('이미 재시작이 진행 중입니다')
-  restartInFlight = true
+  if (isWorkerRestartInFlight()) throw new Error('이미 재시작이 진행 중입니다')
+  fs.writeFileSync(LOCK_PATH, String(Date.now()))
   // 아래 스크립트의 Stop-Process -Force(강제종료) 전에 열린 로그인 창들을 정상 종료해 쿠키를 디스크에
   // 반영해둔다 — 안 그러면 재시작마다(특히 메모리 임계치로 자동 재시작될 때마다) 로그인 세션을 잃는다
   // (closeAllOpenSessionsGracefully 주석 참고, 2026-08-31 실사용 확인). 최대 몇 초짜리 안전장치라
@@ -55,14 +72,14 @@ export async function restartWorker(): Promise<void> {
     await execFileAsync('schtasks', ['/Create', '/TN', TASK_NAME, '/TR', taskCmd, '/SC', 'ONCE', '/ST', '23:59', '/F'])
     await execFileAsync('schtasks', ['/Run', '/TN', TASK_NAME])
   } catch (e) {
-    restartInFlight = false
+    // 등록/실행 자체가 실패하면 실제 kill+재기동이 전혀 시작되지 않은 것이므로, TTL을 기다릴 이유 없이
+    // 잠금을 바로 풀어 재시도를 막지 않는다(2026-09-06 실사용 확인 — "재시작 버튼을 눌렀는데 안 되는 것
+    // 같다"의 원인이 바로 이 경로에서 잠금을 안 풀어준 것이었다).
+    fs.rmSync(LOCK_PATH, { force: true })
     throw new Error(`작업 스케줄러 등록/실행 실패: ${e instanceof Error ? e.message : String(e)}`)
   }
-  // 성공 경로에서도 반드시 리셋해야 한다 — 안 그러면 이 함수가 처음 성공한 그 순간부터 이 프로세스가
-  // 살아있는 내내(다음 dev 서버 재시작 전까지) restartInFlight가 true로 박혀, 이후 모든 호출이 실제로는
-  // 아무것도 안 하면서 "이미 재시작이 진행 중입니다"만 반환한다(2026-09-06 실사용 확인 — "재시작 버튼을
-  // 눌렀는데 안 되는 것 같다"의 진짜 원인, catch 쪽 리셋만 있고 성공 경로엔 없었음). 실제 kill+재기동은
-  // 이 시점 이후 별개 프로세스(schtasks가 실행한 PowerShell)에서 일어나므로, 여기서 리셋해도 그 자체를
-  // 방해하지 않는다 — 이 플래그는 오직 "동시에 여러 번 등록/실행 명령이 겹치는 것"만 막으면 된다.
-  restartInFlight = false
+  // 성공 경로에선 잠금을 여기서 풀지 않는다 — 실제 kill+재기동은 이 시점 이후 별개 프로세스(schtasks가
+  // 실행한 PowerShell)에서 몇 초간 더 이어지므로, 그 물리적 재시작이 실제로 끝날 때까지는 잠긴 채로
+  // 둬야 두 번째 요청과 경쟁하지 않는다(위 LOCK_TTL_MS 주석 참고) — TTL이 지나면 isWorkerRestartInFlight가
+  // 저절로 false를 돌려주므로 별도 해제 코드가 필요 없다.
 }

@@ -82,6 +82,7 @@ export const openLoginWindow = (siteId: number, opts: { url: string; loginId?: s
 export const openManualLoginWindow = (siteId: number, url: string) => callWorker<void>('openManualLoginWindow', [siteId, url])
 export const openUrlInLoginWindow = (siteId: number, url: string) => callWorker<void>('openUrlInLoginWindow', [siteId, url])
 export const focusManualLoginChrome = () => callWorker<boolean>('focusManualLoginChrome', [])
+export const openUrlInManualLoginChrome = (url: string) => callWorker<void>('openUrlInManualLoginChrome', [url])
 
 // ── 단발 스크랩/추출 ──────────────────────────────────────────────────────
 export const scrapeSingleProduct = (opts: ScrapeOptions) => callWorker<ScrapeResult>('scrapeSingleProduct', [opts])

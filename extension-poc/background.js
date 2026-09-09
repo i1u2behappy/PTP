@@ -140,6 +140,13 @@ async function attachDebugger(tabId) {
       throw new Error(`${e.message} — 이 탭에서 개발자도구(F12)가 열려있다면 닫고 다시 시도하세요.`)
     }
   }
+  // lib/scraper.ts의 installDialogAutoDismiss(Playwright의 context.on('dialog', ...))와 같은 이유·같은
+  // 문제를 이 확장에도 그대로 적용한다 — 몰이 alert()/confirm()으로 "로그아웃 되었습니다" 같은 네이티브
+  // 다이얼로그를 띄우면 그 탭의 JS 실행 자체가 막혀 evalInTab(Runtime.evaluate)이 응답 없이 멈춘다(2026-09-08
+  // 실사용 확인 — 소꿉노리, 사람이 직접 "확인"을 눌러야만 자동화가 계속됐다). Page 도메인을 켜야
+  // Page.javascriptDialogOpening 이벤트를 받을 수 있어 여기서 같이 켠다 — 실제 처리(로그+자동 닫기)는
+  // 아래 dialogListener(전역, chrome.debugger.onEvent)가 맡는다.
+  await withTimeout(chrome.debugger.sendCommand({ tabId }, 'Page.enable'), 5_000, 'Page.enable').catch(() => {})
 }
 
 async function evalInTab(tabId, expression) {
@@ -153,6 +160,17 @@ async function evalInTab(tabId, expression) {
     throw new Error(detail)
   }
   return res.result.value
+}
+
+// runDetectSortOptions의 화면 인식 1차 수단(vision AI) 전용 — evalInTab과 같은 chrome.debugger 경로로
+// CDP Page.captureScreenshot을 불러 base64 JPEG를 받는다. 이미 attachDebugger로 이 탭에 디버거가 붙어
+//있어야 한다(evalInTab과 동일 전제).
+async function captureScreenshot(tabId) {
+  const res = await withTimeout(
+    chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', { format: 'jpeg', quality: 70 }),
+    15_000, 'Page.captureScreenshot',
+  )
+  return res.data // base64
 }
 
 async function navigate(tabId, url) {
@@ -1480,6 +1498,15 @@ async function runPreview(tab, site, aiMode) {
 // 이쪽엔 반영 안 돼 있던 걸 발견 — 그대로 옮겼다.
 const NON_CATEGORY_TEXT_SRC = '로그인|회원가입|로그아웃|장바구니|마이페이지|고객센터|검색어?|주문|배송조회|결제|사이트맵|관리자|촬영명령|입고대?기|입고대령|단가\\s*(인상|조정)|재진행|색상?\\s*(별)?\\s*분류|공지사항|공지\\b|납품\\s*사례|제작\\s*문의|도매\\s*인증|상품\\s*문의|회원\\s*정보|정보\\s*수정|적립금|관심\\s*상품|최근\\s*본\\s*상품|위시\\s*리스트|찜\\s*(목록)?|notice|cart|login|logout|mypage|search|sitemap|wishlist'
 
+// lib/scraper.ts의 canonicalizeHref와 같은 이유·같은 구현 — 같은 카테고리 페이지라도 www 유무만 다른
+// 호스트로 열릴 수 있어(소꿉노리 실사용 확인, 2026-09-08: "기타 패브릭" 허브가 www 없는 호스트로
+// 로드되며 그 페이지에서 다시 찾은 사이트 전체 GNB 링크의 href가 전부 www 없는 형태라 topLevelHrefs의
+// www 있는 href와 문자열이 안 맞아 "진짜 하위 메뉴"로 오판됨 — 사이트 전체 메뉴가 그대로 복제돼
+// 카테고리 개수가 58개에서 115개로 거의 두 배가 됐다), 문자열 그대로 비교하면 이 케이스를 놓친다.
+function canonicalizeHref(href) {
+  return href.replace(/^(https?:\/\/)www\./, '$1')
+}
+
 /** discoverCategoryLinks(lib/scraper.ts)의 대분류 허브 자동 펼치기(대분류 페이지에 상품이 없으면 그
  *  페이지의 하위 메뉴로 대신 펼침)와 같은 판정을 한다 — 다만 그 서버 쪽 버전은 로그인 필요 몰에서
  *  개인 크롬 프로필을 통째로 복사해도 로그인 세션이 넘어오지 않아(!specifications/
@@ -1492,8 +1519,9 @@ const NON_CATEGORY_TEXT_SRC = '로그인|회원가입|로그아웃|장바구니|
  *  진짜 하위메뉴가 아니므로 제외한다(discoverCategoryLinks의 topLevelHrefSet 필터와 동일). */
 function buildScanSubmenuExpr(topLevelHrefs) {
   return `(() => {
+  const canonHref = (h) => h.replace(/^(https?:\\/\\/)www\\./, '$1')
   const excludeRe = new RegExp(${JSON.stringify(NON_CATEGORY_TEXT_SRC)}, 'i')
-  const topLevelHrefSet = new Set(${JSON.stringify(topLevelHrefs)})
+  const topLevelHrefSet = new Set(${JSON.stringify(topLevelHrefs)}.map(canonHref))
   const isMeaningful = (s) => !!s && /[\\uac00-\\ud7a3a-zA-Z0-9]/.test(s)
   function ownText(li) {
     const ownAnchor = li.querySelector(':scope > a')
@@ -1537,7 +1565,7 @@ function buildScanSubmenuExpr(topLevelHrefs) {
       childLis.forEach(sub => buildPaths(sub, path, depth + 1, out))
     } else {
       const href = ownHref(li)
-      if (href && !topLevelHrefSet.has(href)) out.push({ name: path.join(' > '), href })
+      if (href && !topLevelHrefSet.has(canonHref(href))) out.push({ name: path.join(' > '), href })
     }
   }
   const SELECTOR_TIERS = [
@@ -1591,6 +1619,7 @@ async function runExpandCategories(tab, site) {
   }
   const categoryLinks = site.categoryLinks
   const topLevelHrefs = categoryLinks.map(c => c.href)
+  const topLevelHrefsCanon = new Set(topLevelHrefs.map(canonicalizeHref))
   const startUrl = tab.url
   const concurrency = Math.min(EXPAND_TAB_CONCURRENCY, categoryLinks.length)
 
@@ -1615,6 +1644,11 @@ async function runExpandCategories(tab, site) {
     let cursor = 0
     let doneCount = 0
     let blockedCount = 0
+    // 규칙 기반(buildScanSubmenuExpr)이 하위 메뉴를 못 찾았을 때 AI(Qwen)로 한 번 더 시도하는 횟수 상한 —
+    // lib/scraper.ts의 MAX_HUB_AI_ATTEMPTS_PER_RUN과 같은 값·같은 이유(몰 전체에 이런 시도가 카테고리
+    // 개수만큼 쌓이지 않게 억제).
+    let hubAiAttempts = 0
+    const MAX_HUB_AI_ATTEMPTS = 5
     // 차단이 감지되면 남은 카테고리 전체를 1탭으로 낮춰 계속 두드리지 않는다 — 이 실행 안에서는 다시
     // 안 올린다(카테고리 개수가 보통 수십 개 안팎이라, lib/scraper.ts의 상품 스크랩 AIMD처럼 서서히
     // 회복시키면 처리량 대부분이 낮은 동시성에 갇혀 정상 상황에서도 매번 느려진다 — 펫토리 실사용
@@ -1651,6 +1685,26 @@ async function runExpandCategories(tab, site) {
         if (sub.links.length) {
           const childLinks = sub.links.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
           return { links: hasOwnProducts ? [c, ...childLinks] : childLinks, blocked: false }
+        }
+        // 규칙 기반(buildScanSubmenuExpr)은 <ul>/<li> 메뉴 트리만 찾는다 — 펫토리 실사용 확인(2026-09-06):
+        // 이 몰은 하위 분류가 사이드바 메뉴가 아니라 대분류 페이지 본문에 브랜드/재료별 그리드(일반
+        // <div>/<table> 콘텐츠, cat/lnb/gnb류 class 없음)로 나열돼 있어 이 스캔으로는 원천적으로 못 찾는다.
+        // /api/scrape/detect-sub-categories(lib/ai.ts의 detectCategoryLinksWithAI, 서버 쪽 카테고리
+        // 허브확장이 이미 쓰는 것과 같은 함수)에게 이 페이지의 링크 후보를 통째로 넘겨 직접 판단시킨
+        // 결과, 이런 그리드도 정확히 골라내는 것을 직접 확인했다 — 규칙 기반이 못 찾을 때만, 실행당
+        // 상한(MAX_HUB_AI_ATTEMPTS) 안에서 시도한다.
+        if (hubAiAttempts < MAX_HUB_AI_ATTEMPTS) {
+          hubAiAttempts++
+          const all = await evalInTab(workerTabId, COLLECT_ALL_LINKS_EXPR).catch(() => ({ links: [] }))
+          const aiLinks = await fetch(`${PTP_ORIGIN}/api/scrape/detect-sub-categories`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mallName: site.name, parentCategoryName: c.name, candidates: all.links }),
+          }).then(r => r.json()).then(d => d.links || []).catch(() => [])
+          const realAi = aiLinks.filter(s => !topLevelHrefsCanon.has(canonicalizeHref(s.href)))
+          if (realAi.length) {
+            const childLinks = realAi.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
+            return { links: hasOwnProducts ? [c, ...childLinks] : childLinks, blocked: false }
+          }
         }
         if (hasOwnProducts) return { links: [c], blocked: false }
         // 상품도 하위 메뉴도 못 찾은 빈 허브 — lib/scraper.ts의 expandCategoryHubs와 같은 이유(2026-08-30,
@@ -1690,7 +1744,10 @@ async function runExpandCategories(tab, site) {
 
     const expanded = expandedByIndex.flat()
     const seenHrefs = new Set()
-    const deduped = expanded.filter(c => (seenHrefs.has(c.href) ? false : (seenHrefs.add(c.href), true)))
+    const deduped = expanded.filter(c => {
+      const key = canonicalizeHref(c.href)
+      return seenHrefs.has(key) ? false : (seenHrefs.add(key), true)
+    })
 
     // blocked: 서버 쪽(app/api/scrape/categories/route.ts)의 shouldKeepPreviousCategoryLinks와 같은
     // 판단을 이 저장 라우트에도 적용하려면(2026-09-05 전수조사에서 발견 — 이 라우트만 그 보호가 빠져
@@ -1716,15 +1773,49 @@ async function runExpandCategories(tab, site) {
   }
 }
 
-/** "🧭 정렬 옵션 감지" — site.categoryLinks[0](PTP "카테고리 불러오기"가 찾아둔 대분류 중 첫 번째)를
- *  실제 로그인된 탭에서 열어 그 페이지의 모든 같은 출처 링크를 모아 서버(/api/sites/{id}/sort-options)로
- *  보낸다. 정렬 옵션이 뭔지 AI로 판정하는 것 자체(detectSortOptionsWithAI)는 로그인이 필요 없으므로
- *  서버가 맡고, 이 함수는 runExpandCategories와 같은 이유(로그인 필요 몰은 서버 Playwright가 이 페이지를
- *  볼 수 없음)로 "링크를 모아 보내는 것"만 대신한다.
- *  2026-08-21: <a href>/<select><option> 어느 쪽으로도 못 찾으면(버튼 onclick, 커스텀 JS 드롭다운 등)
- *  클릭 기반 폴백으로 한 번 더 시도한다 — 정렬 키워드와 비슷한 텍스트를 태그 상관없이 후보로 삼아
- *  하나씩 실제로 클릭해보고, 클릭 전후 URL이 달라지면 후보로 채택한다(진짜 정렬인지는 서버의
- *  diffQueryParams가 같은 pathname인지 다시 확인하므로 여기서는 넓게 잡아도 안전하다). */
+/** 대분류 하나가 정렬 옵션 감지에 안 맞는 특수 페이지일 수 있어(아래 MAX_SORT_CATEGORY_ATTEMPTS 주석
+ *  참고) 최대 몇 개까지 순서대로 시도해볼지 — 몰 전체를 순회하면 느려지니 앞쪽 몇 개로 제한한다. */
+const MAX_SORT_CATEGORY_ATTEMPTS = 5
+
+// runDetectSortOptions의 두 후보 소스(비전 AI가 화면에서 읽은 라벨 / COLLECT_SORT_KEYWORD_TEXTS_EXPR의
+// 키워드 기반 후보) 공용 — lib/scraper.ts의 confirmSortCandidatesByClicking과 같은 이유·같은 판정: 텍스트를
+// 하나씩 실제로 클릭해보고 baseUrl과 달라진 URL만 "진짜로 이동했다"는 증거로 인정한다(진짜 정렬인지는
+// 서버의 diffQueryParams가 같은 pathname인지 다시 확인하므로 여기서는 넓게 잡아도 안전하다).
+async function clickCandidatesAndCollectLinks(tabId, baseUrl, texts) {
+  const collected = []
+  for (const text of texts) {
+    const clicked = await evalInTab(tabId, buildClickTextExpr(text)).catch(() => false)
+    if (clicked) {
+      await waitForTabSettled(tabId, 5_000)
+      const afterUrl = await evalInTab(tabId, 'location.href').catch(() => null)
+      if (afterUrl && afterUrl !== baseUrl) collected.push({ text, href: afterUrl })
+    }
+    if ((await evalInTab(tabId, 'location.href').catch(() => null)) !== baseUrl) {
+      await navigate(tabId, baseUrl).catch(() => {})
+    }
+  }
+  return collected
+}
+
+/** "🧭 정렬 옵션 감지" — site.categoryLinks(PTP "카테고리 불러오기"가 찾아둔 대분류 목록)를 앞에서부터
+ *  순서대로 실제 로그인된 탭에서 열어본다. 1차로 화면을 스크린샷으로 찍어 서버(/api/scrape/detect-sort-labels,
+ *  lib/ai.ts의 detectSortOptionsFromScreenshot — Groq qwen3.6-27b 비전→로컬 Ollama vision 순)에게 "화면에
+ *  보이는 정렬 라벨"을 물어보고, 그 라벨 텍스트로 clickCandidatesAndCollectLinks를 돌려 실제 클릭+URL
+ *  변화까지 확인한 것만 후보로 삼는다(사용자 지시, 2026-09-08 — "정렬은 어차피 사람 눈으로 화면에서 확인
+ *  가능하다, 화면을 먼저 보는 것으로 설계 기준을 바꿔라"). href/select 마크업 형태(<a>/<select>/버튼
+ *  onclick/커스텀 JS 드롭다운)나 사이트 공통 내비게이션 텍스트("신상품" 등)와 정렬 키워드의 우연한 겹침
+ *  때문에 반복됐던 사고(2026-09-08, 소꿉노리 다수)가 이 방식 자체로는 재현되지 않는다.
+ *
+ *  화면 인식이 실패했거나(비전 AI 호출 자체 실패) 클릭해도 실제로 확인된 후보가 하나도 없을 때만, 기존
+ *  href/select 구조 스캔(COLLECT_ALL_LINKS_EXPR) → 정렬 키워드 텍스트 클릭 폴백(COLLECT_SORT_KEYWORD_TEXTS_EXPR)
+ *  으로 이어간다(안전망으로 유지 — 이 함수를 유일한 진실로 과신하지 않는다).
+ *
+ *  하나라도 정렬 옵션을 찾으면 그 자리에서 멈춘다. 정렬 옵션이 진짜인지 최종 판정하는 것(detectSortOptionsWithAI,
+ *  diffQueryParams)은 로그인이 필요 없으므로 서버(/api/sites/{id}/sort-options)가 맡고, 이 함수는
+ *  runExpandCategories와 같은 이유(로그인 필요 몰은 서버 Playwright가 이 페이지를 볼 수 없음)로 "화면을
+ *  보고 후보를 모아 보내는 것"만 대신한다. categoryLinks[0]만 확인하고 끝내면 안 되는 이유(특수 집계
+ *  카테고리라 정렬 위젯이 없을 수 있음)는 MAX_SORT_CATEGORY_ATTEMPTS 주석 참고 — 서버가 sortOptions.length
+ *  0이면 DB에 아예 안 써서(기존 좋은 값을 안 지움) 여러 카테고리를 순서대로 시도해도 안전하다. */
 async function runDetectSortOptions(tab, site) {
   if (!site.categoryLinks || !site.categoryLinks.length) {
     return { ok: false, error: 'PTP 화면에서 "카테고리 불러오기"를 먼저 한 번 실행해주세요(대분류 목록이 아직 없습니다).' }
@@ -1736,30 +1827,70 @@ async function runDetectSortOptions(tab, site) {
   }
   const startUrl = tab.url
   try {
-    await reportProfileProgress(site.id, '정렬 옵션 감지 중...')
-    await navigate(tab.id, site.categoryLinks[0].href)
-    let { links, baseUrl } = await evalInTab(tab.id, COLLECT_ALL_LINKS_EXPR)
-    if (!links.length) {
-      const candidateTexts = await evalInTab(tab.id, COLLECT_SORT_KEYWORD_TEXTS_EXPR).catch(() => [])
-      for (const text of candidateTexts) {
-        const clicked = await evalInTab(tab.id, buildClickTextExpr(text)).catch(() => false)
-        if (clicked) {
-          await waitForTabSettled(tab.id, 5_000)
-          const afterUrl = await evalInTab(tab.id, 'location.href').catch(() => null)
-          if (afterUrl && afterUrl !== baseUrl) links.push({ text, href: afterUrl })
-        }
-        if ((await evalInTab(tab.id, 'location.href').catch(() => null)) !== baseUrl) {
-          await navigate(tab.id, baseUrl).catch(() => {})
+    const attempts = site.categoryLinks.slice(0, MAX_SORT_CATEGORY_ATTEMPTS)
+    let lastError = null
+    for (let i = 0; i < attempts.length; i++) {
+      const category = attempts[i]
+      await reportProfileProgress(site.id, `정렬 옵션 감지 중... (${i + 1}/${attempts.length})`)
+      await navigate(tab.id, category.href)
+      const baseUrl = await evalInTab(tab.id, 'location.href').catch(() => category.href)
+
+      // 1차: 화면(스크린샷)을 먼저 본다.
+      let links = []
+      // verified=true는 화면 인식(비전 AI)이 지목한 라벨을 실제로 클릭해 URL 변화까지 확인했다는 뜻 —
+      // 서버가 이 신호를 받으면 detectSortOptionsWithAI 재분류를 건너뛰고 diffQueryParams만으로 최종
+      // 판정한다(app/api/sites/[id]/sort-options/route.ts 주석 참고 — 모자사러 실사용 확인, 2026-09-09:
+      // 화면+클릭으로 이미 확정한 4개 중 AI 재분류가 근거 없이 3개를 걸러버렸다. 화면 인식 실패 시의 2차
+      // 폴백(href/select 원문 스캔, 최대 120개 — 상품/공지 등 무관 링크가 섞여있어 여전히 AI 분류가
+      // 필요함)에서는 verified를 true로 두지 않는다).
+      let verified = false
+      const screenshotBase64 = await captureScreenshot(tab.id).catch(() => null)
+      if (screenshotBase64) {
+        const labels = await fetch(`${PTP_ORIGIN}/api/scrape/detect-sort-labels`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mallName: site.name, imageBase64: screenshotBase64, mimeType: 'image/jpeg' }),
+        }).then(r => r.json()).then(d => d.labels || []).catch(() => [])
+        if (labels.length) {
+          links = await clickCandidatesAndCollectLinks(tab.id, baseUrl, labels)
+          verified = links.length > 0
         }
       }
+
+      // 2차: 화면 인식이 실패했거나 클릭해도 실제로 확인된 후보가 없을 때만 기존 href/select 구조 스캔 →
+      // 키워드 기반 클릭 폴백으로 이어간다. 이 구조 스캔 결과(rawLinks, 최대 120개 — 상품/공지 등 무관한
+      // 링크가 섞여있어 클릭으로 확인된 게 아님)는 verified로 안 둔다 — 클릭 폴백이 후보를 찾아내면 그건
+      // 순수하게 클릭 확인된 것만 verified=true로 따로 보내고(rawLinks와 섞지 않는다 — 섞으면 그 안의
+      // 무관한 링크까지 AI 필터링 없이 그대로 diffQueryParams를 통과할 위험이 있다), 못 찾으면 예전처럼
+      // rawLinks 그대로(unverified) 보내 서버 AI가 걸러내게 한다.
+      if (!links.length) {
+        const all = await evalInTab(tab.id, COLLECT_ALL_LINKS_EXPR).catch(() => ({ links: [] }))
+        const rawLinks = all.links
+        const hasSortLabel = rawLinks.some(l => { const t = l.text.trim(); return t.length <= 10 && /순$/.test(t) })
+        if (!hasSortLabel) {
+          const candidateTexts = await evalInTab(tab.id, COLLECT_SORT_KEYWORD_TEXTS_EXPR).catch(() => [])
+          const clickedFallback = await clickCandidatesAndCollectLinks(tab.id, baseUrl, candidateTexts)
+          if (clickedFallback.length) {
+            links = clickedFallback
+            verified = true
+          } else {
+            links = rawLinks
+          }
+        } else {
+          links = rawLinks
+        }
+      }
+
+      const res = await fetch(`${SITE_API_BASE}/${site.id}/sort-options`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ links, baseUrl, verified }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) { lastError = data.error || String(res.status); continue }
+      if (data.count > 0) return { ok: true, count: data.count }
     }
-    const res = await fetch(`${SITE_API_BASE}/${site.id}/sort-options`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ links, baseUrl }),
-    })
-    const data = await res.json().catch(() => ({}))
-    if (!res.ok) return { ok: false, error: data.error || String(res.status) }
-    return { ok: true, count: data.count || 0 }
+    // 시도한 카테고리 전부 정렬 옵션을 못 찾음 — 그중 서버 요청 자체가 실패한 게 있었으면 그 에러를
+    // 보여주고, 전부 정상 응답인데 그냥 못 찾은 것뿐이면 "정렬 없음"으로 정상 처리한다(실패 아님).
+    return lastError ? { ok: false, error: lastError } : { ok: true, count: 0 }
   } catch (e) {
     return { ok: false, error: e.message }
   } finally {
@@ -1800,6 +1931,21 @@ function pickerBindingListener(source, method, params) {
   }
 }
 chrome.debugger.onEvent.addListener(pickerBindingListener)
+
+/** attachDebugger의 Page.enable과 한 쌍 — 몰이 alert()/confirm()으로 띄우는 네이티브 다이얼로그(예:
+ *  소꿉노리의 "로그아웃 되었습니다")를 그대로 두면 사람이 "확인"을 누를 때까지 그 탭의 자동화 전체가
+ *  멈춘다. 서버로 그 순간의 URL·문구를 남겨(진단 목적 — "정확히 언제/어디서 로그아웃되는지" 파악) 자동
+ *  닫아 자동화가 계속 진행되게 한다. accept:true는 Playwright dismiss()와 달리 confirm()의 "확인"을
+ *  누르는 셈이지만, 이 앱이 다루는 다이얼로그는 전부 정보 전달용 alert()라 실질적 차이가 없다. */
+function dialogListener(source, method, params) {
+  if (method !== 'Page.javascriptDialogOpening') return
+  fetch(`${PTP_ORIGIN}/api/scrape/log-diagnostic`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ detail: `[다이얼로그 감지] tabId=${source.tabId} type=${params.type} url=${params.url} 문구="${params.message}"` }),
+  }).catch(() => {})
+  chrome.debugger.sendCommand({ tabId: source.tabId }, 'Page.handleJavaScriptDialog', { accept: true }).catch(() => {})
+}
+chrome.debugger.onEvent.addListener(dialogListener)
 
 /** 실제 몰 페이지 안에서 실행되는 함수 — lib/scraper.ts의 injectElementPicker와 같은 UI/동작을
  *  그대로 옮긴 것이다(같은 코드를 두 곳에 두는 이유: Next 서버 코드↔크롬 확장은 서로 import를 못 하는

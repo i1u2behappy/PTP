@@ -142,6 +142,7 @@ export async function POST(req: NextRequest) {
     const keepPrevious = shouldKeepPreviousCategoryLinks({
       freshAiUsed: !!result.aiUsed,
       freshLoginBlockedExpansion: !!result.loginBlockedExpansion,
+      freshCategoryLinksCount: result.links.length,
       prevAiUsed: !!prevProfile?.categoryLinksAiUsed,
       prevCategoryLinksCount: prevCategoryLinks?.length ?? 0,
     })

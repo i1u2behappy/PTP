@@ -22,6 +22,17 @@ const PUBLIC_API_PREFIXES = [
   // 처음부터 여기 같이 넣는다. 빠뜨리면 매번 조용히 401로 실패해(background.js가 .catch(()=>null)로
   // 삼킴) AI 지름길이 있는 줄도 모른 채 항상 완전탐색으로만 폴백하는, 알아채기 아주 어려운 버그가 된다.
   '/api/scrape/detect-last-page',
+  // detect-sub-categories: 확장의 카테고리 하위구조 자동확인이 규칙 기반 메뉴 트리를 못 찾았을 때(브랜드/
+  // 재료별 그리드처럼 <ul>/<li> 구조가 아닌 콘텐츠) AI에게 대신 물어보는 라우트(2026-09-06, 펫토리 실사용
+  // 확인) — 위 detect-last-page와 정확히 같은 이유·같은 실수 클래스라 처음부터 여기 같이 넣는다.
+  '/api/scrape/detect-sub-categories',
+  // detect-sort-labels: 확장의 "🧭 정렬 옵션 감지"가 화면 스크린샷을 보내 정렬 라벨을 물어보는 라우트
+  // (2026-09-08, 사용자 지시로 화면 인식을 1차 수단으로 재설계) — 위 detect-last-page/detect-sub-categories와
+  // 정확히 같은 이유·같은 실수 클래스라 처음부터 여기 같이 넣는다.
+  '/api/scrape/detect-sort-labels',
+  // log-diagnostic: 확장이 DB 저장 없이 .dev-server.log에 한 줄만 남기고 싶을 때 쓰는 범용 진단 라우트
+  // (2026-09-08, dialogListener의 alert()/confirm() 감지 등) — 위와 같은 이유·같은 실수 클래스.
+  '/api/scrape/log-diagnostic',
 ]
 // 몰 id가 경로 중간에 끼어 있어(/api/sites/{id}/...) 단순 prefix로 못 걸러 정규식으로 따로 둔다 — 개발자모드
 // 크롬 확장이 세션 쿠키 없이 호출하는 엔드포인트들. preview-capture(스크래핑 전 단건 미리보기),

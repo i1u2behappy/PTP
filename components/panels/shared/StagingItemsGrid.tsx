@@ -232,6 +232,11 @@ export function StagingItemsGrid({ sessionId }: {
   const mergeStartedAtRef = useRef(0)
   useEffect(() => () => { if (mergeProgressPollRef.current) clearInterval(mergeProgressPollRef.current) }, [])
   const [unmerging, setUnmerging] = useState(false)
+  // "확정" 결과 중 거래처 미연결로 상품마스터 반영을 건너뛴 건수 — 거래처는 나중에 지정해도 되는 선택
+  // 항목이라(Mall 상세관리에서 언제든 연결 가능) 브라우저 네이티브 alert()로 막아서는 대신, 화면 안에
+  // 조용히 배너로 알리고 사용자가 직접 닫을 때까지 남겨둔다(사용자 지적, 2026-09-09 — "이 부분은 PTP의
+  // 메시지로 띄워줘야 하는 거 아니야?", "몰에 거래처 지정은 나중에 할 수 있게 했잖아").
+  const [noClientWarning, setNoClientWarning] = useState<string | null>(null)
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [sortKeys, setSortKeys] = useState<SortKey[]>([])
   const [showFilters, setShowFilters] = useState(false)
@@ -531,6 +536,7 @@ export function StagingItemsGrid({ sessionId }: {
 
   async function handleMerge() {
     if (!selectedPendingIds.length) return
+    setNoClientWarning(null)
     // 경과시간 표시용 타이머 — setInterval로 주기적으로 다시 계산해 state에 반영하는 것 자체는 React가
     // 공식적으로 안내하는 시계/타이머 패턴이지만, react-hooks/purity가 Date.now() 값이 결국 state로
     // 흘러간다는 이유만으로 오탐한다.
@@ -546,7 +552,7 @@ export function StagingItemsGrid({ sessionId }: {
       })
       const d = await res.json() as { merged: number[]; skipped: { id: number; reason: string }[]; noClient?: number[] }
       if (d.noClient?.length) {
-        alert(`${d.noClient.length}개는 몰에 거래처가 연결되어 있지 않아 상품마스터로 반영되지 않았습니다. Mall 상세관리에서 거래처를 먼저 지정해주세요.`)
+        setNoClientWarning(`${d.noClient.length}개는 몰에 거래처가 연결되어 있지 않습니다. 상품마스터로 반영되려면 Mall 상세관리에서 거래처를 지정하세요.`)
       }
       setSelected(new Set())
       bumpRefresh('products')
@@ -666,6 +672,12 @@ export function StagingItemsGrid({ sessionId }: {
           </button>
         </div>
       </div>
+      {noClientWarning && (
+        <div className="mx-4 mb-2 flex items-start gap-2 bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-xl px-3 py-2">
+          <p className="flex-1">⚠ {noClientWarning}</p>
+          <button onClick={() => setNoClientWarning(null)} aria-label="닫기" className="text-amber-400 hover:text-amber-600 shrink-0">✕</button>
+        </div>
+      )}
       <div className="overflow-x-auto overflow-y-auto flex-1 min-h-0">
         <table className="text-sm border-collapse" style={{ tableLayout: 'fixed', width: tableWidth }}>
           <colgroup>

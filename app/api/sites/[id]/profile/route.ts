@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { runMallStructureReport, stopProfileAnalysis } from '@/lib/workerClient'
+import { getEnabledAiProviders } from '@/lib/aiProviderConfig'
 
 // 개발자모드 확장은 이 라우트를 바디 없이 POST하므로(기존 동작), aiProviders는 항상 optional — 없으면
 // 기본 공급자 목록을 쓴다. 2026-09-02: 단일 "AI 사용" 켬/끔에서 공급자별(Anthropic/Gemini/Groq/Ollama)
@@ -9,12 +10,13 @@ import { runMallStructureReport, stopProfileAnalysis } from '@/lib/workerClient'
 // (실사용 확인, 2026-09-02 — 화면 체크박스로 Groq를 골라도 실제로는 안 쓰이고 있었음).
 const AiProviderIdSchema = z.enum(['anthropic', 'gemini', 'groq', 'ollama'])
 const RequestSchema = z.object({ aiProviders: z.array(AiProviderIdSchema).optional() })
-// 기본값(바디 없음 — 개발자모드 확장 / aiProviders 생략)엔 Ollama를 안 넣는다 — CPU 전용이라 리포트
-// 하나에 5~8분씩 걸리고, 그동안 이 PC의 Next.js dev 서버까지 CPU를 못 받아 "로고 화면(강제 새로고침)"
-// 으로 이어지는 게 실측으로 확인됐다(components/panels/ScraperPanel.tsx의 profileAiProviders 기본값
-// 주석과 같은 이유 — 일반모드 화면 체크박스 기본값과 이 서버 쪽 기본값을 반드시 맞춰야, 개발자모드도
-// 같은 보호를 받는다).
-const DEFAULT_AI_PROVIDERS = ['anthropic', 'gemini', 'groq'] as const
+// 바디 없이 오는 호출(개발자모드 확장 / aiProviders 생략)은 **사용자가 화면에서 저장해둔 선택**을 쓴다
+// (2026-09-12). 예전엔 여기 하드코딩된 목록을 썼고, 그래서 화면 체크박스와 개발자모드가 서로 다른 AI를
+// 쓰는 일이 구조적으로 가능했다 — 두 곳의 기본값을 사람이 맞춰 적어야 했기 때문. 이제 한 군데(DB)만 본다.
+// 설정을 아직 못 읽었을 때만 이 목록으로 떨어진다 — Ollama를 빼두는 이유는 CPU 전용이라 리포트 하나에
+// 5~8분씩 걸리고, 그동안 이 PC의 Next.js dev 서버까지 CPU를 못 받아 "로고 화면(강제 새로고침)"으로
+// 이어지는 게 실측으로 확인됐기 때문이다.
+const FALLBACK_AI_PROVIDERS = ['anthropic', 'gemini', 'groq'] as const
 
 // 개발자모드 확장(extension-poc/background.js의 runProfile)도 chrome-extension:// 출처에서 이 라우트를
 // 그대로 호출한다 — CORS 프리플라이트(OPTIONS) 응답과 Private Network Access 헤더가 필요하다(다른
@@ -47,7 +49,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   // 개발자모드 확장은 바디 없이 POST한다 — 빈 바디의 req.json()은 예외를 던지므로 그 경우 {}로 본다.
   const parsed = RequestSchema.safeParse(await req.json().catch(() => ({})))
-  const aiProviders = parsed.success ? (parsed.data.aiProviders ?? DEFAULT_AI_PROVIDERS) : DEFAULT_AI_PROVIDERS
+  const saved = await getEnabledAiProviders().catch(() => null)
+  const aiProviders = (parsed.success ? parsed.data.aiProviders : undefined) ?? saved ?? FALLBACK_AI_PROVIDERS
 
   // 이 요청을 보낸 PTP 탭을 사용자가 닫으면(또는 브라우저/네트워크가 끊기면) req.signal이 abort된다 —
   // "몰 구조분석 중지" 버튼이 호출하는 것과 같은 stopProfileAnalysis를 그대로 재사용해, 탭을 닫는 것도

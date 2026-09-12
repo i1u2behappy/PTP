@@ -170,6 +170,14 @@ async function runMigrations() {
   // 동적 import로 지연 로드 — scheduler.ts가 이 파일의 pool/decryptSecret을 정적으로 import하므로
   // 최상단에서 바로 import하면 순환참조가 된다. startScheduler()는 자체적으로 1회만 실행되도록 가드한다.
   import('./scheduler').then(m => m.startScheduler()).catch(() => {})
+  // 사용자가 화면에서 체크한 AI 공급자를 이 프로세스의 관문(lib/aiProviderGate.ts)에 공급하기 시작한다 —
+  // 이게 없으면 그 프로세스의 모든 AI 호출이 "설정을 모르는 상태"(전부 허용)로 동작한다.
+  // **왜 여기인가**: 워커(initDbWithRetry)와 Next.js(라우트들이 initDb를 부름) 양쪽 모두 이 함수를 반드시
+  // 한 번은 거치므로, 시작 파일마다 따로 배선하지 않아도 두 프로세스가 자동으로 덮인다. instrumentation.ts에
+  // 넣었다가 lib/db.ts→scheduler→systemRestart→scraper→playwright 전체가 브라우저 번들로 끌려가
+  // "Can't resolve 'child_process'" 류로 화면이 통째로 500이 났다(2026-09-12) — db.ts는 이미 서버 전용이라
+  // 그 위험이 없다. 순환참조(aiProviderConfig가 이 파일을 import)는 위 scheduler와 같은 이유로 동적 import로 푼다.
+  import('./aiProviderConfig').then(m => m.startAiProviderConfigSync()).catch(() => {})
 
   await runStatements(`
     -- PTP 앱 자체 로그인 계정. 몰 스크래핑 로그인 정보(sites 테이블)와는 별개.
@@ -559,6 +567,18 @@ async function runMigrations() {
       id          SERIAL PRIMARY KEY,
       base_url    TEXT NOT NULL,
       updated_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- 사용자가 화면에서 체크한 AI 공급자(2026-09-12). 예전엔 이 선택이 ScraperPanel의 React state로만
+    -- 존재해 "몰 구조분석" 버튼의 그 요청 하나에만 실려 갔고, 카테고리 불러오기·개발자모드 확장·스케줄러
+    -- 자동실행은 사용자의 선택을 알 방법 자체가 없어 체크를 꺼도 계속 그 AI를 불렀다(사용자 지적:
+    -- "저 체크 기능은 왜 만든건데?"). 서버에 한 줄로 저장해 모든 경로가 같은 값을 읽게 한다.
+    -- 한 줄만 유지한다(id=1 고정 upsert) — lib/aiProviderConfig.ts 참고.
+    CREATE TABLE IF NOT EXISTS ai_provider_config (
+      id          INT PRIMARY KEY DEFAULT 1,
+      providers   JSONB NOT NULL,
+      updated_at  TIMESTAMPTZ DEFAULT NOW(),
+      CONSTRAINT ai_provider_config_single_row CHECK (id = 1)
     );
 
     -- 작명 템플릿 (3단계 작명 커스터마이징)

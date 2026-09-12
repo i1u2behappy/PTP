@@ -13,7 +13,7 @@ import { chromium, type BrowserContext, type Page, type APIResponse, type Elemen
 import { load as loadHtml } from 'cheerio'
 import iconv from 'iconv-lite'
 import type { ExtractedProduct } from './ai'
-import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsFromScreenshot, detectCategoryMenuTriggerFromScreenshot, detectVisibleCategoryGroupCount, type MallStructureReport, type OptionCandidate, type AiProviderId, ALL_AI_PROVIDERS } from './ai'
+import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsFromScreenshot, detectCategoryMenuTriggerFromScreenshot, detectVisibleCategoryGroupCount, type MallStructureReport, type OptionCandidate, type AiProviderId, ALL_AI_PROVIDERS, runWithAiProviders } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
@@ -1588,7 +1588,17 @@ export function stopProfileAnalysis(siteId: number): boolean {
   return true
 }
 
+/**
+ * 사용자가 화면에서 체크한 AI 공급자를 이 실행 "전체"의 컨텍스트로 고정하는 지점 — 아래에서 파생되는
+ * 모든 비동기 호출(화면인식 3종, 카테고리 링크 판별, 허브 확장 폴백, 리포트 생성)이 각자 인자를 받지
+ * 않고도 같은 선택을 따른다. 예전엔 이 선택을 호출 체인마다 인자로 넘겨야 했고, 넘기는 걸 빠뜨린 경로가
+ * 조용히 체크 해제된 공급자를 계속 부르는 사고가 네 번 났다(lib/aiProviderGate.ts 주석 참고).
+ */
 export async function profileMallStructure(siteId: number, deep = false, aiProviders: AiProviderId[] = ALL_AI_PROVIDERS): Promise<MallProfileSignals | null> {
+  return runWithAiProviders(aiProviders, () => profileMallStructureInner(siteId, deep, aiProviders))
+}
+
+async function profileMallStructureInner(siteId: number, deep: boolean, aiProviders: AiProviderId[]): Promise<MallProfileSignals | null> {
   const site = await siteInfo(siteId)
   if (!site.url) return null
   const { pattern: categoryUrlPattern, manualSamples: knownCategoryExamples, prevSortOptions } = await getCategoryMemory(siteId)

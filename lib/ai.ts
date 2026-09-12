@@ -2,15 +2,24 @@ import Anthropic from '@anthropic-ai/sdk'
 import { GoogleGenAI, FunctionCallingConfigMode, Type, type Schema } from '@google/genai'
 import sharp from 'sharp'
 
-/** "몰 구조분석" 리포트(generateMallProfileReport)가 시도할 수 있는 AI 공급자 — 사용자가 화면에서
- *  체크박스로 켜고 끌 수 있다(2026-09-02, 사용자 요청: "엔트로픽/제미나이/올라마 체크해서 쓰게 해달라,
- *  나중에 다른 AI도 더 붙일 수 있게"). 새 공급자를 추가하려면: 1) 여기 AiProviderId에 id 추가, 2) 이
- *  파일에 XxxYyy(mallName, ...) 형태의 생성 함수 추가, 3) generateMallProfileReport의 providers 배열에
- *  { id, label, fn } 한 줄 추가 — 그러면 이 순서가 그대로 화면 체크박스 순서 및 폴백 순서가 된다.
- *  components/panels/ScraperPanel.tsx가 같은 목록을 (서버 전용 SDK를 클라이언트 번들에 안 실으려고)
- *  별도로 들고 있으니, 공급자를 추가/삭제하면 그쪽 AI_PROVIDER_OPTIONS도 같이 맞춰야 한다. */
-export type AiProviderId = 'anthropic' | 'gemini' | 'groq' | 'ollama'
-export const ALL_AI_PROVIDERS: AiProviderId[] = ['anthropic', 'gemini', 'groq', 'ollama']
+/** 사용자가 화면에서 체크박스로 켜고 끄는 AI 공급자(2026-09-02, 사용자 요청: "엔트로픽/제미나이/올라마
+ *  체크해서 쓰게 해달라, 나중에 다른 AI도 더 붙일 수 있게"). 정의와 관문은 lib/aiProviderGate.ts에 있고
+ *  여기서는 그대로 re-export만 한다 — 기존 import 경로(`from './ai'`)를 바꾸지 않기 위함.
+ *
+ *  **중요**: "체크한 AI만 쓴다"는 더 이상 호출부가 인자를 넘겨서 지키는 규칙이 아니다. 이 파일에서 실제로
+ *  외부 AI를 호출하는 함수는 전부 isAiProviderEnabled()를 먼저 통과해야 하고, 진입점이 한 번
+ *  runWithAiProviders()로 감싸면 그 아래 전체에 자동 전파된다. 새 AI 호출 함수를 추가할 때도 인자를 받을
+ *  필요 없이 맨 앞에 isAiProviderEnabled() 한 줄만 넣으면 된다(자세한 배경은 aiProviderGate.ts 주석).
+ *
+ *  새 공급자를 추가하려면: 1) aiProviderGate.ts의 AiProviderId/ALL_AI_PROVIDERS에 id 추가, 2) 이 파일에
+ *  XxxYyy(mallName, ...) 형태의 생성 함수 추가(맨 앞에 isAiProviderEnabled 가드 포함), 3)
+ *  generateMallProfileReport의 providers 배열에 { id, fn } 한 줄 추가 — 그러면 이 순서가 그대로 화면
+ *  체크박스 순서 및 폴백 순서가 된다. components/panels/ScraperPanel.tsx가 같은 목록을 (서버 전용 SDK를
+ *  클라이언트 번들에 안 실으려고) 별도로 들고 있으니 그쪽 AI_PROVIDER_OPTIONS도 같이 맞춰야 한다. */
+export type { AiProviderId } from './aiProviderGate'
+export { ALL_AI_PROVIDERS, runWithAiProviders } from './aiProviderGate'
+import type { AiProviderId } from './aiProviderGate'
+import { ALL_AI_PROVIDERS, isAiProviderEnabled } from './aiProviderGate'
 
 // 매 호출마다 새로 생성 — 모듈 로드 시점에 키를 고정하면 .env 값을 나중에 바꿔도
 // (dev 서버가 모듈을 재평가하지 않는 한) 예전 키가 계속 쓰이는 문제가 있었다.
@@ -89,6 +98,9 @@ const OLLAMA_TIMEOUT_MS = 25_000
 function pickIndicesWithOllama(
   prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal, timeoutMs = OLLAMA_TIMEOUT_MS,
 ): Promise<number[]> {
+  // 화면에서 Ollama 체크를 끄면 로컬 추론을 아예 시작하지 않는다 — 빈 배열은 "AI가 못 골랐다"와 같은
+  // 의미라 호출부가 기존 히스틱으로 그대로 폴백한다(aiProviderGate.ts 주석 참고).
+  if (!isAiProviderEnabled('ollama')) return Promise.resolve([])
   return withOllamaQueue(() => pickIndicesWithOllamaOnce(prompt, toolName, toolDescription, signal, timeoutMs))
 }
 
@@ -661,7 +673,7 @@ const LAST_PAGE_TOOL_DESCRIPTION = '마지막 페이지로 이동하는 링크�
 async function pickIndicesWithGroq(
   prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal,
 ): Promise<number[] | null> {
-  if (!process.env.GROQ_API_KEY) return null
+  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) return null
   try {
     const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -808,7 +820,7 @@ function buildSortLabelScreenshotPrompt(mallName: string): string {
 async function detectSortLabelsWithGroqVision(
   mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
 ): Promise<string[] | null> {
-  if (!process.env.GROQ_API_KEY) return null
+  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) return null
   try {
     const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -859,6 +871,7 @@ async function detectSortLabelsWithGroqVision(
 async function detectSortLabelsWithOllamaVision(
   mallName: string, imageBase64: string, signal?: AbortSignal,
 ): Promise<string[] | null> {
+  if (!isAiProviderEnabled('ollama')) return null
   return withOllamaQueue(async () => {
     const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
     const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
@@ -1026,7 +1039,7 @@ function buildCategoryMenuTriggerScreenshotPrompt(mallName: string): string {
 async function detectCategoryMenuTriggerWithGroqVision(
   mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
 ): Promise<CategoryMenuTriggerResult | null> {
-  if (!process.env.GROQ_API_KEY) return null
+  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) return null
   try {
     const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -1082,6 +1095,7 @@ async function detectCategoryMenuTriggerWithGroqVision(
 async function detectCategoryMenuTriggerWithOllamaVision(
   mallName: string, imageBase64: string, signal?: AbortSignal,
 ): Promise<CategoryMenuTriggerResult | null> {
+  if (!isAiProviderEnabled('ollama')) return null
   return withOllamaQueue(async () => {
     const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
     const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
@@ -1175,7 +1189,7 @@ export async function detectVisibleCategoryGroupCount(
 async function detectCategoryGroupCountWithGroqVision(
   mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
 ): Promise<number | null> {
-  if (!process.env.GROQ_API_KEY) return null
+  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) return null
   try {
     const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -1222,6 +1236,7 @@ async function detectCategoryGroupCountWithGroqVision(
 async function detectCategoryGroupCountWithOllamaVision(
   mallName: string, imageBase64: string, signal?: AbortSignal,
 ): Promise<number | null> {
+  if (!isAiProviderEnabled('ollama')) return null
   return withOllamaQueue(async () => {
     const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
     const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
@@ -1269,8 +1284,10 @@ export interface MallStructureReport {
    *  결과인지 — 화면에서 신뢰도를 구분해 보여주는 용도. 'ollama'는 CategoryAnomalyVerdict의 source와
    *  같은 이유로 'ai'와 분리했다 — 로컬 소형 모델은 이런 종합 추론(12개 항목 동시 추출)에 클라우드보다
    *  약하다는 게 실측으로 확인돼 있어(detectCategoryAnomalyOllama 주석 참고), 신뢰도를 다르게 표시해야
-   *  한다. 'groq'도 같은 이유로 분리했다 — Llama 3.3 70B가 이 추출 작업에 얼마나 정확한지 아직 실사용
-   *  검증이 없다(도입 첫날, 2026-09-02). */
+   *  한다. 'groq'도 같은 이유로 분리했다 — GROQ_MODEL이 이 추출 작업에 얼마나 정확한지 아직 실사용
+   *  검증이 없다(도입 첫날, 2026-09-02). 모델명을 여기 박아두지 않는다 — 도입 당시 쓰려던 llama-3.3-70b가
+   *  같은 날 404 model_not_found로 교체됐는데(GROQ_MODEL 주석 참고) 이 주석과 화면 툴팁엔 옛 이름이
+   *  그대로 남아 사용자에게 없는 모델을 안내하고 있었다(2026-09-12 수정). */
   generatedBy: 'ai' | 'heuristic' | 'ollama' | 'groq'
 }
 
@@ -1524,7 +1541,7 @@ async function generateMallProfileReportGroq(
   mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
   signal?: AbortSignal,
 ): Promise<MallStructureReport | null> {
-  if (!process.env.GROQ_API_KEY || !contextText.trim()) return null
+  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY || !contextText.trim()) return null
   const properties: Record<string, { type: string; description: string }> = {}
   MALL_REPORT_FIELDS.forEach(f => {
     properties[f.key] = { type: 'string', description: `${f.label} — ${f.hint}. 확인 못하면 "확인 안됨"만 답한다(추측 금지).` }
@@ -1587,7 +1604,7 @@ async function generateMallProfileReportOllama(
   mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
   signal?: AbortSignal,
 ): Promise<MallStructureReport | null> {
-  if (!contextText.trim()) return null
+  if (!isAiProviderEnabled('ollama') || !contextText.trim()) return null
   const properties: Record<string, { type: string; description: string }> = {}
   MALL_REPORT_FIELDS.forEach(f => {
     properties[f.key] = { type: 'string', description: `${f.label} — ${f.hint}. 아래 원문에서 확인할 수 없으면 반드시 "확인 안됨"이라고만 답한다(추측 금지).` }

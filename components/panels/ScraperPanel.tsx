@@ -289,11 +289,18 @@ function previewValueFor(product: PreviewProduct, sourceUrl: string, fieldKey: s
  *  이 작은 목록만 따로 들고 있는다(이 파일의 다른 lib/scraper.ts 타입 중복과 같은 이유). 새 AI 공급자를
  *  추가하려면 lib/ai.ts의 ALL_AI_PROVIDERS/generateMallProfileReport와 이 목록을 같이 맞춰야 한다. */
 type AiProviderId = 'anthropic' | 'gemini' | 'groq' | 'ollama'
-const AI_PROVIDER_OPTIONS: { id: AiProviderId; label: string }[] = [
-  { id: 'anthropic', label: 'Anthropic' },
-  { id: 'gemini', label: 'Gemini' },
-  { id: 'groq', label: 'Groq(무료)' },
-  { id: 'ollama', label: 'Ollama(로컬)' },
+// 라벨엔 공급자 이름만 적지 않고 **실제로 도는 모델명**까지 적는다(2026-09-12 사용자 지시) — "Groq"만
+// 봐서는 그게 웹인지 로컬인지, 어떤 모델인지 알 수 없어 "지금 qwen 14b로 도는 것 같은데 Ollama는 왜
+// 꺼져 있냐" 같은 혼동이 실제로 있었다. 괄호는 "모델·실행위치" 한 축으로 통일한다 — 예전엔 Groq만
+// '(무료)', Ollama만 '(로컬)'이라 서로 다른 축을 나란히 붙여놔 "Ollama는 유료인가?"로 읽혔다.
+// title에는 텍스트/화면인식 모델을 나눠 적는다 — 이 둘이 서로 다르다(화면인식은 멀티모달 전용 모델).
+// **모델명은 lib/ai.ts의 상수와 반드시 일치해야 한다** — tests/unit/aiProviderLabels.test.ts가 검증
+// 루프에서 이걸 강제한다(예전에 Groq 툴팁이 이미 교체된 옛 모델명을 열흘 넘게 계속 안내하던 사고).
+const AI_PROVIDER_OPTIONS: { id: AiProviderId; label: string; title: string }[] = [
+  { id: 'anthropic', label: 'Anthropic(Haiku 4.5)', title: 'claude-haiku-4-5-20251001 — 유료 API(크레딧 필요), 웹.' },
+  { id: 'gemini', label: 'Gemini(Flash)', title: 'gemini-flash-latest — 무료 티어(일일 한도 있음), 웹.' },
+  { id: 'groq', label: 'Groq(qwen 27b·웹)', title: '텍스트 qwen/qwen3.8-27b, 화면인식 qwen/qwen3.6-27b — 무료 등급(분당 토큰 한도 있음), 웹.' },
+  { id: 'ollama', label: 'Ollama(qwen 14b·로컬)', title: '텍스트 qwen3:14b, 화면인식 qwen2.5vl:7b — 이 PC에서 직접 실행(요금 없음, CPU 사용).' },
 ]
 
 /** lib/ai.ts의 MallStructureReport와 같은 모양. */
@@ -616,7 +623,9 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
                 <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-teal-100 text-teal-700">🤖 AI 분석{elapsedSuffix}</span>
               ) : result.signals.report.generatedBy === 'groq' ? (
                 <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-violet-100 text-violet-700"
-                  title="Anthropic/Gemini 호출이 모두 실패해 무료 Groq(Llama 3.3 70B)로 대신 분석했습니다 — 도입 초기라 이 추출 작업의 정확도가 아직 충분히 검증되지 않았습니다.">
+                  /* 모델명은 lib/ai.ts의 GROQ_MODEL과 같이 맞춘다 — 클라이언트 번들에 lib/ai.ts를 못 들여와 문자열로 중복한다.
+                     예전엔 여기에 이미 교체된 옛 모델명이 남아 있었다(2026-09-12 수정, tests/unit/aiProviderLabels.test.ts가 재발을 막는다). */
+                  title="Anthropic/Gemini 호출이 모두 실패해 무료 Groq(qwen3.8-27b)로 대신 분석했습니다 — 도입 초기라 이 추출 작업의 정확도가 아직 충분히 검증되지 않았습니다.">
                   🚀 Groq 분석{elapsedSuffix}
                 </span>
               ) : result.signals.report.generatedBy === 'ollama' ? (
@@ -779,10 +788,32 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 사용자가 직접 체크해서 켤 수 있고, 그때는 "몰 구조분석이 오래 걸리고 그동안 화면이 느려질 수 있다"는
   // 걸 감수하는 선택이 된다 — 자동으로는 그 대가를 치르지 않는다.
   const [profileAiProviders, setProfileAiProviders] = useState<Set<AiProviderId>>(new Set(AI_PROVIDER_OPTIONS.filter(p => p.id !== 'ollama').map(p => p.id)))
+  // 이 선택은 화면 state로만 두지 않고 서버(ai_provider_config)에 저장한다 — 예전엔 state로만 있어서 이
+  // 버튼이 보내는 요청 하나에만 실려 갔고, 카테고리 불러오기·개발자모드 확장·스케줄러는 사용자의 선택을
+  // 알 방법이 없어 체크를 꺼도 그 AI를 계속 불렀다(2026-09-12 사용자 지적). 저장해두면 lib/aiProviderGate.ts의
+  // 관문이 모든 경로에서 같은 값을 읽는다.
+  useEffect(() => {
+    let alive = true
+    fetch('/api/settings/ai-providers')
+      .then(r => r.json())
+      .then((d: { providers?: AiProviderId[] | null }) => {
+        // providers가 null이면 서버가 설정을 못 읽은 것 — 화면 기본값을 그대로 둔다(덮어쓰지 않는다).
+        if (alive && Array.isArray(d.providers)) setProfileAiProviders(new Set(d.providers))
+      })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [])
   const toggleProfileAiProvider = (id: AiProviderId) => {
     setProfileAiProviders(prev => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id); else next.add(id)
+      // 저장 실패해도 화면 조작은 막지 않는다 — 이번 실행엔 아래 body의 aiProviders로 그대로 반영되고,
+      // 저장은 다음 토글에서 다시 시도된다.
+      fetch('/api/settings/ai-providers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providers: [...next] }),
+      }).catch(() => {})
       return next
     })
   }
@@ -3432,7 +3463,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               <div className="flex items-center gap-2.5 text-xs text-gray-500">
                 {AI_PROVIDER_OPTIONS.map(p => (
                   <label key={p.id} className="flex items-center gap-1 cursor-pointer select-none"
-                    title="체크한 공급자만, 왼쪽부터 순서대로 하나씩 시도해 처음 성공한 결과를 씁니다 — 전부 끄면 AI 시도 없이 곧장 규칙 기반으로 분석합니다. 결과가 부실하면 체크를 바꿔 재시도해보세요.">
+                    title={`${p.title}\n\n체크한 공급자만, 왼쪽부터 순서대로 하나씩 시도해 처음 성공한 결과를 씁니다 — 전부 끄면 AI 시도 없이 곧장 규칙 기반으로 분석합니다. 결과가 부실하면 체크를 바꿔 재시도해보세요.`}>
                     <input type="checkbox" checked={profileAiProviders.has(p.id)} onChange={() => toggleProfileAiProvider(p.id)}
                       className="w-3.5 h-3.5 accent-teal-500" />
                     {p.label}

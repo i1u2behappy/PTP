@@ -354,7 +354,7 @@ export function SiteDetailPanel({ params }: Props) {
             )}
             {mallReport.generatedBy === 'groq' && (
               <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-violet-100 text-violet-700"
-                title="Anthropic/Gemini 호출이 모두 실패해 무료 Groq(Llama 3.3 70B)로 대신 분석했습니다 — 도입 초기라 정확도가 아직 충분히 검증되지 않았습니다.">
+                title="Anthropic/Gemini 호출이 모두 실패해 무료 Groq(qwen3.8-27b)로 대신 분석했습니다 — 도입 초기라 정확도가 아직 충분히 검증되지 않았습니다.">
                 🚀 Groq 분석
               </span>
             )}

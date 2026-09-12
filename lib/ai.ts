@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { GoogleGenAI, FunctionCallingConfigMode, Type, type Schema } from '@google/genai'
+import sharp from 'sharp'
 
 /** "몰 구조분석" 리포트(generateMallProfileReport)가 시도할 수 있는 AI 공급자 — 사용자가 화면에서
  *  체크박스로 켜고 끌 수 있다(2026-09-02, 사용자 요청: "엔트로픽/제미나이/올라마 체크해서 쓰게 해달라,
@@ -924,6 +925,331 @@ export async function detectSortOptionsFromScreenshot(
   const viaGroq = await detectSortLabelsWithGroqVision(mallName, imageBase64, mimeType, signal)
   if (viaGroq !== null) return viaGroq
   return await detectSortLabelsWithOllamaVision(mallName, imageBase64, signal)
+}
+
+/** null=이 함수 자체를 확정 못 함(호출부가 다음 페이지로 넘어가거나 폴백해야 함), found:false=이 화면엔
+ *  없다고 확정, found:true=위치까지 확정. */
+export type CategoryMenuTriggerResult = { found: true; label: string; xPercent: number; yPercent: number } | { found: false }
+
+/** 격자 눈금 — 모델에게 좌표를 직접 추정(xPercent/yPercent 실수값)하게 시켰더니 같은 스크린샷을 다시
+ *  줘도 호출마다 완전히 다른 위치를 골랐다(실측, 2026-09-12 — 투비즈온 홈 화면 반복 호출에서
+ *  10.5%/96%/5%/11.8% 등 서로 무관한 값이 나왔고, 심지어 yPercent:256.63 같은 범위 밖 값도 나왔다).
+ *  연속값 추정 대신 화면에 미리 그려둔 칸 중 하나를 "고르게"(분류 문제로 바꿈) 하면 비전 모델이 훨씬
+ *  안정적이다(Set-of-Mark 프롬프팅) — 칸 이름(A1~H6)만 답하게 하고, 그 칸의 중심 좌표는 코드에서
+ *  계산한다. */
+const CATEGORY_TRIGGER_GRID_COLS = 8
+const CATEGORY_TRIGGER_GRID_ROWS = 6
+
+/** 스크린샷 위에 빨간 격자선과 칸 이름을 그려서 되돌려준다 — sharp로 SVG를 합성한다(픽셀 조작 없이
+ *  DOM/CSS로 그리는 것보다, 이미 찍힌 스크린샷 버퍼에 바로 합성하는 쪽이 화면 배율과 무관하게 정확하다). */
+async function overlayGridForVision(imageBase64: string): Promise<{ base64: string; mimeType: string } | null> {
+  try {
+    const buf = Buffer.from(imageBase64, 'base64')
+    const image = sharp(buf)
+    const meta = await image.metadata()
+    const width = meta.width ?? 1280
+    const height = meta.height ?? 800
+    const cellW = width / CATEGORY_TRIGGER_GRID_COLS
+    const cellH = height / CATEGORY_TRIGGER_GRID_ROWS
+    const lines: string[] = []
+    for (let c = 1; c < CATEGORY_TRIGGER_GRID_COLS; c++) {
+      const x = c * cellW
+      lines.push(`<line x1="${x}" y1="0" x2="${x}" y2="${height}" stroke="red" stroke-width="1" stroke-opacity="0.6"/>`)
+    }
+    for (let r = 1; r < CATEGORY_TRIGGER_GRID_ROWS; r++) {
+      const y = r * cellH
+      lines.push(`<line x1="0" y1="${y}" x2="${width}" y2="${y}" stroke="red" stroke-width="1" stroke-opacity="0.6"/>`)
+    }
+    const labels: string[] = []
+    for (let r = 0; r < CATEGORY_TRIGGER_GRID_ROWS; r++) {
+      for (let c = 0; c < CATEGORY_TRIGGER_GRID_COLS; c++) {
+        const label = `${String.fromCharCode(65 + c)}${r + 1}`
+        const x = c * cellW + 2
+        const y = r * cellH + 13
+        labels.push(
+          `<text x="${x}" y="${y}" font-size="13" font-weight="bold" fill="red" stroke="white" stroke-width="2" paint-order="stroke">${label}</text>`,
+        )
+      }
+    }
+    const svg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">${lines.join('')}${labels.join('')}</svg>`
+    const out = await image.composite([{ input: Buffer.from(svg), top: 0, left: 0 }]).jpeg({ quality: 90 }).toBuffer()
+    return { base64: out.toString('base64'), mimeType: 'image/jpeg' }
+  } catch {
+    return null
+  }
+}
+
+/** 모델이 답한 칸 이름(예: "C2")을 그 칸 중심의 화면 비율 좌표로 변환한다. 형식이 안 맞거나 격자 범위
+ *  밖이면 null(호출부는 found:false로 취급). */
+function cellLabelToPercent(cell: string): { xPercent: number; yPercent: number } | null {
+  const match = /^\s*([A-Za-z])\s*(\d+)\s*$/.exec(cell)
+  if (!match) return null
+  const col = match[1].toUpperCase().charCodeAt(0) - 65
+  const row = parseInt(match[2], 10) - 1
+  if (col < 0 || col >= CATEGORY_TRIGGER_GRID_COLS || row < 0 || row >= CATEGORY_TRIGGER_GRID_ROWS) return null
+  return {
+    xPercent: ((col + 0.5) / CATEGORY_TRIGGER_GRID_COLS) * 100,
+    yPercent: ((row + 0.5) / CATEGORY_TRIGGER_GRID_ROWS) * 100,
+  }
+}
+
+function buildCategoryMenuTriggerScreenshotPrompt(mallName: string): string {
+  return `이 스크린샷은 한국 쇼핑몰 '${mallName}'의 화면이다. 화면 위에는 빨간 격자선과 각 칸의 이름
+(왼쪽 위부터 A1, A는 열(왼쪽→오른쪽 A~${String.fromCharCode(64 + CATEGORY_TRIGGER_GRID_COLS)}), 숫자는
+행(위→아래 1~${CATEGORY_TRIGGER_GRID_ROWS}))이 그려져 있다. 화면에서 전체 상품 카테고리를 펼쳐서
+보여주는 메뉴/버튼(예: 햄버거 아이콘 ☰, "전체 카테고리", "카테고리", "전체보기", "MENU" 같은 라벨 —
+텍스트 없이 아이콘/이미지로만 표시돼 있어도 좋다)을 찾아서, 그 버튼의 중심이 들어있는 칸의 이름을
+답해라. 실제 카테고리 이름 하나하나(예: "여성의류", "가전")가 아니라, 그 카테고리들을 "전부 펼쳐서
+목록으로 보여주는" 트리거 버튼을 찾는 것이다.
+
+중요1: 화면 중앙에 크게 걸린 회전 배너/광고/프로모션 이미지(상품 사진, 할인 문구, 큰 배너 슬라이드 등)는
+이 트리거가 아니다 — 그런 배너를 착각해서 답하지 마라. 이 트리거는 거의 항상 화면 맨 위 헤더/내비게이션
+바 안에 있는 작고 아이콘 크기의 요소다(로고, 로그인, 장바구니 같은 다른 헤더 아이콘들과 나란히 있는
+경우가 많다).
+
+중요2: 헤더 근처에 작고 서로 비슷하게 생긴 아이콘이 "여러 개 나란히 줄지어" 있는 경우가 있다 — 이런
+줄은 각각 카테고리 하나씩으로 빠르게 이동하는 "바로가기" 아이콘 모음일 뿐, 찾는 트리거가 아니다. 찾는
+트리거는 그런 줄과는 별개로 있는 단 하나의 아이콘/버튼으로, 누르면 "카테고리 전체"(하나가 아니라 여러
+대분류 전부)가 한꺼번에 목록으로 펼쳐지는 것이다 — 보통 햄버거(☰) 모양이거나, 여러 줄이 겹친 듯한
+아이콘이거나, 화면 왼쪽 맨 끝(또는 다른 아이콘들보다 먼저)에 단독으로 있다. "여러 개가 나란히 줄지어
+있는 비슷한 아이콘들 중 하나"처럼 보이면 그건 트리거가 아닐 가능성이 높다 — 그 줄 자체가 아니라 그
+줄을 여는 별도의 단일 버튼을 찾아라.
+
+화면 맨 위 헤더 영역을 먼저 살펴보고, 거기서 못 찾겠으면 그때만 found를 false로 답하라.`
+}
+
+/** detectSortLabelsWithGroqVision과 같은 모델/제약(reasoning_effort:'none' 등, 같은 이유는 그쪽 주석
+ *  참고) — 카테고리 메뉴 트리거는 텍스트가 아예 없는 이미지/아이콘일 수 있어(투비즈온 실사용 확인,
+ *  2026-09-12 — "전체 카테고리" 버튼과 대분류 탭 전부 alt 없는 <img>) 라벨 텍스트 대신 화면에 그려둔
+ *  격자 칸 이름(cellLabelToPercent 참고)을 받아온다 — 이 위치를 셀렉터가 아니라 화면 좌표 클릭으로
+ *  그대로 쓴다(호출부 discoverCategoryMenuByVision 참고). */
+async function detectCategoryMenuTriggerWithGroqVision(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<CategoryMenuTriggerResult | null> {
+  if (!process.env.GROQ_API_KEY) return null
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(OLLAMA_TIMEOUT_MS)]) : AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
+      body: JSON.stringify({
+        model: GROQ_VISION_MODEL,
+        max_tokens: 300,
+        temperature: 0,
+        reasoning_effort: 'none',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: buildCategoryMenuTriggerScreenshotPrompt(mallName) },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_category_menu_trigger',
+            description: '화면에서 전체 카테고리 메뉴를 여는 버튼이 들어있는 격자 칸을 반환한다. 안 보이면 found:false만 채운다.',
+            parameters: {
+              type: 'object',
+              required: ['found'],
+              properties: {
+                found: { type: 'boolean' },
+                label: { type: 'string', description: '버튼 위 텍스트(있으면 그대로), 아이콘만 있으면 빈 문자열' },
+                cell: { type: 'string', description: '버튼 중심이 들어있는 격자 칸 이름(예: "C2")' },
+              },
+            },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_category_menu_trigger' } },
+      }),
+    })
+    if (!res.ok) return null
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) return null
+    const args = JSON.parse(call.function.arguments) as { found?: boolean; label?: string; cell?: string }
+    if (!args.found || typeof args.cell !== 'string') return { found: false }
+    const percent = cellLabelToPercent(args.cell)
+    if (!percent) return { found: false }
+    return { found: true, label: typeof args.label === 'string' ? args.label : '', ...percent }
+  } catch {
+    return null
+  }
+}
+
+/** detectSortLabelsWithOllamaVision과 같은 이유(이 모델은 함수 호출을 거부해 텍스트 JSON으로 강제)·같은
+ *  큐(withOllamaQueue)·같은 타임아웃을 쓴다. */
+async function detectCategoryMenuTriggerWithOllamaVision(
+  mallName: string, imageBase64: string, signal?: AbortSignal,
+): Promise<CategoryMenuTriggerResult | null> {
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        body: JSON.stringify({
+          model: OLLAMA_VISION_MODEL,
+          stream: false,
+          keep_alive: '30m',
+          messages: [{
+            role: 'user',
+            content: `${buildCategoryMenuTriggerScreenshotPrompt(mallName)}\n\n다른 설명 없이 JSON 객체 하나만 출력해라(예: {"found":true,"label":"전체 카테고리","cell":"C2"} 또는 {"found":false}).`,
+            images: [imageBase64],
+          }],
+        }),
+      })
+      if (!res.ok) return null
+      const data = await res.json() as { message?: { content?: string } }
+      const match = (data.message?.content ?? '').match(/\{[\s\S]*\}/)
+      if (!match) return null
+      const parsed = JSON.parse(match[0]) as { found?: boolean; label?: string; cell?: string }
+      if (!parsed.found || typeof parsed.cell !== 'string') return { found: false }
+      const percent = cellLabelToPercent(parsed.cell)
+      if (!percent) return { found: false }
+      return { found: true, label: typeof parsed.label === 'string' ? parsed.label : '', ...percent }
+    } catch {
+      return null
+    }
+  })
+}
+
+/**
+ * 카테고리 탐지의 마지막 수단(AI 텍스트 폴백보다도 먼저 시도) — 카테고리 메뉴가 DOM 텍스트/셀렉터로는
+ * 전혀 안 잡히는 몰(투비즈온 실사용 확인, 2026-09-12 — "전체 카테고리" 버튼과 대분류 탭이 전부 alt 없는
+ * 이미지라 글자 자체가 존재하지 않음)을 위한 것이다. 사용자 지시(2026-09-12): "화면을 열면 다 잘 보인다,
+ * 이 기준으로 방법을 찾아라" — 사람이 화면을 보고 "여기 카테고리 버튼이 있네"라고 판단하는 것과 똑같이,
+ * 스크린샷을 그대로 비전 AI에게 보여주고 위치를 물어본 뒤, DOM 셀렉터가 아니라 화면 좌표로 직접 클릭
+ * 한다(호출부 discoverCategoryMenuByVision 참고) — 그 버튼이 이미지든 텍스트든, 어떤 마크업이든 상관없다.
+ *
+ * null=두 공급자 다 실패(호출부가 이 페이지는 포기하고 다음 페이지나 기존 폴백으로 넘어가야 함).
+ */
+/** 모델이 가끔 0~100 범위를 벗어난 값을 내놓는다(실사용 확인, 2026-09-12 — yPercent:256.63 같은 값) —
+ *  그런 좌표로 클릭하면 화면 밖 엉뚱한 요소(로그인/약관 링크 등)를 눌러 의도치 않은 페이지 이동만
+ *  일으키므로, 범위를 벗어나면 "못 찾음"과 동일하게 취급해 호출부가 다음 페이지로 넘어가게 한다. */
+function sanitizeCategoryMenuTrigger(result: CategoryMenuTriggerResult | null): CategoryMenuTriggerResult | null {
+  if (!result?.found) return result
+  if (result.xPercent < 0 || result.xPercent > 100 || result.yPercent < 0 || result.yPercent > 100) return { found: false }
+  return result
+}
+
+export async function detectCategoryMenuTriggerFromScreenshot(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<CategoryMenuTriggerResult | null> {
+  const gridded = await overlayGridForVision(imageBase64)
+  const gridImage = gridded?.base64 ?? imageBase64
+  const gridMimeType = gridded?.mimeType ?? mimeType
+  const viaGroq = await detectCategoryMenuTriggerWithGroqVision(mallName, gridImage, gridMimeType, signal)
+  if (viaGroq !== null) return sanitizeCategoryMenuTrigger(viaGroq)
+  return sanitizeCategoryMenuTrigger(await detectCategoryMenuTriggerWithOllamaVision(mallName, gridImage, signal))
+}
+
+function buildCategoryGroupCountPrompt(mallName: string): string {
+  return `이 스크린샷은 한국 쇼핑몰 '${mallName}'에서 "전체 카테고리" 메뉴를 방금 열어본 화면이다(제대로
+안 열렸을 수도 있다). 화면에 상품 대분류가 서로 다른 몇 개의 그룹(탭, 열, 컬럼 등 어떤 형태든)으로
+나뉘어 보이는지 세어봐라 — 예를 들어 "여성의류/남성의류/신발/가방..." 같은 하위 카테고리 목록이 하나의
+그룹 제목 아래 나열돼 있고, 그런 그룹이 화면에 나란히 여러 개(예: 3개, 7개) 보이면 그 그룹의 개수를
+답해라. 그룹이 딱 하나만 보이거나(그 안 하위 카테고리 수는 몇 개든 상관없다), 메뉴 자체가 제대로 안
+열려 있으면 1을 답해라. 카테고리 메뉴 자체가 전혀 안 보이면 0을 답해라.`
+}
+
+/** lib/scraper.ts의 discoverCategoryMenuByVision이 트리거를 클릭한 뒤, "지금 이 결과가 화면에 보이는
+ *  전체 그룹 수를 다 담았는지" 검증하는 데 쓴다(사용자 지시, 2026-09-12 — "사람이 보는 화면을 기준으로
+ *  카테고리가 어디까지인지 먼저 확인하고, 그 이후 각 카테고리에 들어가라"). 투비즈온 실사용 확인: 트리거
+ *  클릭이 "전체 카테고리"(대분류 7개 전부 표시)가 아니라 비슷하게 생긴 다른 작은 아이콘(대분류 하나만
+ *  펼치는 "빠른 이동" 아이콘)에 잘못 맞아도, DOM 스캔 결과 자체는 "진짜 카테고리"라 표본검증(looksLikeRealCategoryBatch)
+ *  은 통과해버린다 — 그 검증은 "이게 진짜냐"만 보지 "이게 전부냐"는 안 보기 때문. 화면에 보이는 그룹
+ *  수를 별도로 세어 스캔이 실제로 찾은 그룹 수(CategoryMenuScanResult.groupCount)와 비교하면, "진짜지만
+ *  일부만" 잡은 경우를 잡아낼 수 있다.
+ *  null=두 공급자 다 실패(호출부가 이 신호 없이 기존 방식대로 판단해야 함). */
+export async function detectVisibleCategoryGroupCount(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<number | null> {
+  const viaGroq = await detectCategoryGroupCountWithGroqVision(mallName, imageBase64, mimeType, signal)
+  if (viaGroq !== null) return viaGroq
+  return await detectCategoryGroupCountWithOllamaVision(mallName, imageBase64, signal)
+}
+
+async function detectCategoryGroupCountWithGroqVision(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<number | null> {
+  if (!process.env.GROQ_API_KEY) return null
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(OLLAMA_TIMEOUT_MS)]) : AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
+      body: JSON.stringify({
+        model: GROQ_VISION_MODEL,
+        max_tokens: 200,
+        temperature: 0,
+        reasoning_effort: 'none',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: buildCategoryGroupCountPrompt(mallName) },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_category_group_count',
+            description: '화면에 보이는 상품 대분류 그룹의 개수를 반환한다.',
+            parameters: {
+              type: 'object',
+              required: ['groupCount'],
+              properties: { groupCount: { type: 'integer', description: '화면에 나란히 보이는 대분류 그룹 수(메뉴가 안 보이면 0, 하나뿐이면 1)' } },
+            },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_category_group_count' } },
+      }),
+    })
+    if (!res.ok) return null
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) return null
+    const args = JSON.parse(call.function.arguments) as { groupCount?: unknown }
+    return typeof args.groupCount === 'number' && Number.isFinite(args.groupCount) ? Math.max(0, Math.round(args.groupCount)) : null
+  } catch {
+    return null
+  }
+}
+
+async function detectCategoryGroupCountWithOllamaVision(
+  mallName: string, imageBase64: string, signal?: AbortSignal,
+): Promise<number | null> {
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        body: JSON.stringify({
+          model: OLLAMA_VISION_MODEL,
+          stream: false,
+          keep_alive: '30m',
+          messages: [{
+            role: 'user',
+            content: `${buildCategoryGroupCountPrompt(mallName)}\n\n다른 설명 없이 숫자 하나만 출력해라(예: 7).`,
+            images: [imageBase64],
+          }],
+        }),
+      })
+      if (!res.ok) return null
+      const data = await res.json() as { message?: { content?: string } }
+      const match = (data.message?.content ?? '').match(/\d+/)
+      if (!match) return null
+      return Math.max(0, parseInt(match[0], 10))
+    } catch {
+      return null
+    }
+  })
 }
 
 export interface MallStructureReport {

@@ -60,6 +60,7 @@ export function registerAll() {
   reg('fetchPageText', scraper.fetchPageText)
   reg('extractFromHtml', scraper.extractFromHtml)
   reg('startElementPicker', scraper.startElementPicker)
+  reg('reExtractPreviewProduct', scraper.reExtractPreviewProduct)
 
   // "몰 구조분석" — 취소는 stopProfileAnalysis(siteId)로 별도 처리(위에 이미 등록).
   reg('runMallStructureReport', runMallStructureReport)

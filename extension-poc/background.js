@@ -213,12 +213,20 @@ function withPageParam(url, pageNum) {
   }
 }
 
+// bakeSortUrl과 아래 applySortByClicking이 같은 방식으로 "지금 이 카테고리에 어떤 정렬이 선택돼
+// 있는지"를 찾아야 해서 하나로 뺐다.
+function findChosenSortOption(setting, sortOptions) {
+  return (setting?.sortLabel && sortOptions.find(o => o.label === setting.sortLabel)) || null
+}
+
 // 카테고리별 정렬 설정을 실제 스크랩 시작 순간에만 URL에 반영한다 — site.categorySettings(원본, href
 // 기준)에 정렬을 미리 구워 저장하면 다음 몰 재선택 시 체크박스/그리드 매칭이 깨지므로(ScraperPanel.tsx의
 // buildCategoryUrlsAndLimits와 같은 이유), 굽는 시점을 여기 하나로 좁혀둔다.
+// kind:'click'(AJAX, URL에 반영 안 됨 — 아래 applySortByClicking 참고)은 여기서 처리할 게
+// 없다 — paramsToAdd 자체가 없으므로 원래 URL 그대로 돌려준다.
 function bakeSortUrl(url, setting, sortOptions) {
-  const chosen = setting?.sortLabel && sortOptions.find(o => o.label === setting.sortLabel)
-  if (!chosen) return url
+  const chosen = findChosenSortOption(setting, sortOptions)
+  if (!chosen || chosen.kind === 'click' || !chosen.paramsToAdd) return url
   try {
     const u = new URL(url)
     Object.entries(chosen.paramsToAdd).forEach(([k, v]) => u.searchParams.set(k, v))
@@ -226,6 +234,43 @@ function bakeSortUrl(url, setting, sortOptions) {
   } catch {
     return url
   }
+}
+
+// lib/scraper.ts의 clickSortCandidateText와 같은 이유(2026-09-12, 투비즈온 실사용 확인) — kind:'click'
+// 정렬 후보 중엔 텍스트가 <option>(네이티브 <select>, 값이 URL이 아닌 순수 토큰)인 경우가 있어 일반
+// .click()으로는 안 열린다. 여기(개발자모드)는 Playwright locator가 아니라 CDP로 탭 안에서 JS를 그대로
+// 실행하는 구조라(evalInTab) 실제 마우스 이벤트 시뮬레이션 대신, <option>이면 조상 <select>의 값을
+// 직접 바꾸고 input/change 이벤트를 새로 만들어 보낸다 — 사이트가 change 리스너로 재정렬을 구현했다면
+// 실제 선택과 동일하게 반응한다. <option>이 아니면 기존처럼 그냥 클릭한다.
+// 실제 스크랩 시점(run())에서 카테고리당 딱 한 번만 부른다 — 이후 페이지네이션은 같은 탭 상태를 이어가므로
+// (서버 collectFromListing과 같은 가정) 페이지마다 다시 적용할 필요 없다.
+async function applySortByClicking(tabId, text) {
+  const expr = `(() => {
+    const target = ${JSON.stringify(text)}
+    let found = null
+    for (const el of Array.from(document.querySelectorAll('a, button, li, span, div, label, option'))) {
+      const t = (el.textContent || '').trim()
+      if (t !== target) continue
+      const hasTextChild = Array.from(el.children).some(c => (c.textContent || '').trim() === target)
+      if (hasTextChild) continue
+      found = el
+      break
+    }
+    if (!found) return false
+    if (found.tagName === 'OPTION') {
+      const select = found.closest('select')
+      if (!select) return false
+      select.value = found.value
+      select.dispatchEvent(new Event('input', { bubbles: true }))
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      return true
+    }
+    found.click()
+    return true
+  })()`
+  const clicked = await evalInTab(tabId, expr).catch(() => false)
+  if (clicked) await throttle() // AJAX 재정렬이 반영될 시간(서버 confirmSortCandidatesByClicking과 같은 이유)
+  return clicked
 }
 
 // 봇/과속요청 차단 인터스티셜 감지 — "로그인 필요"(비밀번호 입력창 유무로 판정하는 별도 신호)와는
@@ -362,7 +407,11 @@ const COLLECT_LINKS_EXPR = `(() => {
 
   // 로그인 필요 판정 — lib/scraper.ts의 countProductsOnPage/isLoginPage(비밀번호 입력창 유무)와 같은
   // 신호. 위 IS_BLOCK_PAGE_EXPR(봇/과속요청 차단)과는 다른 원인이라 따로 둔다.
-  const isLoginPage = !!document.querySelector('input[type="password"]')
+  // "화면에 실제로 보이는" 입력창만 센다 — lib/scraper.ts의 countProductsOnPage 주석 참고(2026-09-11,
+  // 도매토피아 실사용 확인: 고도몰 계열 몰의 "비밀번호 주기적 변경" 안내 팝업이 숨겨진 채 모든 페이지에
+  // 항상 존재해, 화면에 보이는지를 안 가리면 상품 0개인 정상 페이지마다 로그인 벽으로 오탐했다).
+  const isLoginPage = Array.from(document.querySelectorAll('input[type="password"]'))
+    .some(el => el.checkVisibility?.() ?? true)
   return { links: uniqueLinks, linkInfo: Object.fromEntries(linkInfo), nextUrl, category, brandFromCategory, isLoginPage }
 })()`
 
@@ -418,7 +467,9 @@ const COLLECT_ALL_LINKS_EXPR = `(() => {
 // 다시 확인하므로 후보를 넓게 잡아도 안전하다). 여기서는 후보 텍스트만 모으고, 실제 클릭은
 // runDetectSortOptions가 evalInTab을 반복 호출해 하나씩 수행한다(클릭마다 원래 페이지로 복귀해야 해서
 // 이 evaluate 하나로 전부 끝낼 수 없다).
-const SORT_KEYWORD_PATTERN = '(신상|신규|최신|낮은\\s*가격|높은\\s*가격|인기|판매량|조회|클릭|리뷰|추천|할인|세일|낱개판매|기본순)'
+// 최저/최고도 낮은가격/높은가격만큼 흔한 표현이다(lib/scraper.ts SORT_KEYWORD_PATTERN과 같은 이유로 추가,
+// 2026-09-12 — 두 곳이 갈라지지 않도록 항상 같이 반영).
+const SORT_KEYWORD_PATTERN = '(신상|신규|최신|낮은\\s*가격|높은\\s*가격|최저|최고|인기|판매량|조회|클릭|리뷰|추천|할인|세일|낱개판매|기본순)'
 const COLLECT_SORT_KEYWORD_TEXTS_EXPR = `(() => {
   const re = new RegExp(${JSON.stringify(SORT_KEYWORD_PATTERN)})
   const seen = new Set()
@@ -1079,8 +1130,12 @@ async function run(tabId, startUrl, categoryUrls, categorySettings, sortOptions,
       let categoryProcessed = 0
       let pageNum = 1
       if (listingStart) {
+        const chosenSort = findChosenSortOption(setting, sortOptions || [])
         await navigate(tabId, bakeSortUrl(listingStart, setting, sortOptions || []))
         await throttle()
+        // kind:'click'(AJAX 정렬, URL에 안 실림)은 URL을 구워도 아무 효과가 없으므로 여기서 실제로
+        // 선택/클릭까지 해줘야 한다(applySortByClicking 주석 참고) — bakeSortUrl은 kind:'query'만 처리한다.
+        if (chosenSort?.kind === 'click') await applySortByClicking(tabId, chosenSort.clickText)
       }
       while (processed < MAX_PRODUCTS) {
         const { links, nextUrl, category, brandFromCategory } = await evalInTab(tabId, COLLECT_LINKS_EXPR)
@@ -1498,6 +1553,18 @@ async function runPreview(tab, site, aiMode) {
 // 이쪽엔 반영 안 돼 있던 걸 발견 — 그대로 옮겼다.
 const NON_CATEGORY_TEXT_SRC = '로그인|회원가입|로그아웃|장바구니|마이페이지|고객센터|검색어?|주문|배송조회|결제|사이트맵|관리자|촬영명령|입고대?기|입고대령|단가\\s*(인상|조정)|재진행|색상?\\s*(별)?\\s*분류|공지사항|공지\\b|납품\\s*사례|제작\\s*문의|도매\\s*인증|상품\\s*문의|회원\\s*정보|정보\\s*수정|적립금|관심\\s*상품|최근\\s*본\\s*상품|위시\\s*리스트|찜\\s*(목록)?|notice|cart|login|logout|mypage|search|sitemap|wishlist'
 
+// lib/scraper.ts의 NON_CATEGORY_PATH_RE와 반드시 같은 값을 유지한다(같은 코드를 두 곳에 두는 이유는
+// NON_CATEGORY_TEXT_SRC와 동일). 게시판/마이페이지 경로는 라벨 텍스트가 뭐라고 붙어있든(예: "1:1문의")
+// 카테고리가 아니다 — 이 경로 필터가 없으면 이런 링크가 expandOne으로 그대로 넘어가 실제로 방문되고,
+// 그 안의 무관한 비밀번호 입력창(비밀글 보기 등)이 isLoginPage를 오탐시켜 세션이 멀쩡한데도 "로그인
+// 세션이 끊긴 것으로 보임" 경고가 매번 뜨는 원인이 됐다(2026-09-11, 도매토피아 실사용 확인 —
+// /mypage/myqna_catalog).
+const NON_CATEGORY_PATH_RE = /\/(board|bbs|mypage)\//i
+
+function safePathname(href) {
+  try { return new URL(href).pathname } catch { return '' }
+}
+
 // lib/scraper.ts의 canonicalizeHref와 같은 이유·같은 구현 — 같은 카테고리 페이지라도 www 유무만 다른
 // 호스트로 열릴 수 있어(소꿉노리 실사용 확인, 2026-09-08: "기타 패브릭" 허브가 www 없는 호스트로
 // 로드되며 그 페이지에서 다시 찾은 사이트 전체 GNB 링크의 href가 전부 www 없는 형태라 topLevelHrefs의
@@ -1521,6 +1588,10 @@ function buildScanSubmenuExpr(topLevelHrefs) {
   return `(() => {
   const canonHref = (h) => h.replace(/^(https?:\\/\\/)www\\./, '$1')
   const excludeRe = new RegExp(${JSON.stringify(NON_CATEGORY_TEXT_SRC)}, 'i')
+  // NON_CATEGORY_PATH_RE(lib/scraper.ts 상단)와 반드시 같은 값을 유지한다 — page.evaluate 콜백은
+  // 브라우저에서 실행돼 바깥 모듈 상수를 그대로 참조할 수 없어 여기에 그대로 복제해둔다.
+  const nonCategoryPathRe = /\\/(board|bbs|mypage)\\//i
+  const safePathname = (h) => { try { return new URL(h).pathname } catch { return '' } }
   const topLevelHrefSet = new Set(${JSON.stringify(topLevelHrefs)}.map(canonHref))
   const isMeaningful = (s) => !!s && /[\\uac00-\\ud7a3a-zA-Z0-9]/.test(s)
   function ownText(li) {
@@ -1565,7 +1636,7 @@ function buildScanSubmenuExpr(topLevelHrefs) {
       childLis.forEach(sub => buildPaths(sub, path, depth + 1, out))
     } else {
       const href = ownHref(li)
-      if (href && !topLevelHrefSet.has(canonHref(href))) out.push({ name: path.join(' > '), href })
+      if (href && !topLevelHrefSet.has(canonHref(href)) && !nonCategoryPathRe.test(safePathname(href))) out.push({ name: path.join(' > '), href })
     }
   }
   const SELECTOR_TIERS = [
@@ -1661,6 +1732,9 @@ async function runExpandCategories(tab, site) {
      *  참고). 재시도 후에도 안 풀리면 원래 항목을 미확장인 채로 남기고 blocked:true를 돌려준다 — 호출부가
      *  이걸로 남은 워커들의 동시성을 낮춘다. */
     async function expandOne(workerTabId, c) {
+      // NON_CATEGORY_PATH_RE(게시판/마이페이지 경로)는 애초에 카테고리 후보가 아니므로 방문조차 하지
+      // 않는다 — lib/scraper.ts의 같은 이름 가드와 동일한 이유(위 NON_CATEGORY_PATH_RE 정의부 참고).
+      if (NON_CATEGORY_PATH_RE.test(safePathname(c.href))) return { links: [c], blocked: false }
       for (let attempt = 0; attempt <= EXPAND_BLOCK_RETRY_COUNT; attempt++) {
         await navigate(workerTabId, c.href)
         const blocked = await evalInTab(workerTabId, IS_BLOCK_PAGE_EXPR).catch(() => false)
@@ -1960,6 +2034,11 @@ function pickerPageScript(seed) {
   const siteIdLocal = seed?.siteId
   const rulesLocal = { ...(seed?.extractionRules || {}) }
   let armedField = null
+  // lib/scraper.ts의 같은 이름 변수와 반드시 같은 동작을 유지한다(사용자 요청, 2026-09-12 — 오펠트 사례:
+  // 조건별로 여러 공급가를 보여주는 몰에서, 컬럼명도 화면 클릭으로 채울 수 있게 한다).
+  let armingNewFieldName = false
+  let newFieldNameDraft = ''
+  let newFieldValueDraft = ''
   const lastValueLocal = {}
   const expandedInputs = new Set()
 
@@ -1982,9 +2061,17 @@ function pickerPageScript(seed) {
     return [key, liveLabel || defaultLabel]
   })
   const masterOrder = seed?.masterOrder || []
-  const CANONICAL_FIELDS = [...relabeled].sort((a, b) => {
-    const idxA = masterOrder.indexOf(PICKER_TO_MASTER_KEY[a[0]])
-    const idxB = masterOrder.indexOf(PICKER_TO_MASTER_KEY[b[0]])
+  // lib/scraper.ts와 같은 이유(2026-09-12, 사용자 지적) — 기준 마스터테이블관리에는 있지만 위 12개 고정
+  // 매핑엔 없는 필드(몰상품코드/판매관리코드/마켓별카테고리/규제판가/소비자판가/옵션1~3/교환반품비 등)도
+  // 미리 목록에 올려, 미리보기 그리드에 이미 보이는 컬럼을 여기서 바로 "지정"할 수 있게 한다.
+  const coveredMasterKeys = new Set([...Object.values(PICKER_TO_MASTER_KEY), 'product_url'])
+  const extraMasterFields = masterOrder
+    .filter(k => !coveredMasterKeys.has(k) && masterLabels[k])
+    .map(k => [k, masterLabels[k]])
+  const CANONICAL_FIELDS = [...relabeled, ...extraMasterFields].sort((a, b) => {
+    const masterKeyOf = k => PICKER_TO_MASTER_KEY[k] ?? k
+    const idxA = masterOrder.indexOf(masterKeyOf(a[0]))
+    const idxB = masterOrder.indexOf(masterKeyOf(b[0]))
     if (idxA === -1 && idxB === -1) return 0
     if (idxA === -1) return 1
     if (idxB === -1) return -1
@@ -2081,10 +2168,10 @@ function pickerPageScript(seed) {
   panel.innerHTML = `
     <button id="ptp-picker-x" title="닫기" style="position:absolute;top:6px;right:8px;background:none;border:0;color:#999;font-size:16px;line-height:1;cursor:pointer;padding:2px 4px">✕</button>
     <div id="ptp-picker-drag" style="margin-bottom:6px;cursor:move;user-select:none;padding-right:20px">
-      <div style="font-size:9px;color:#999;letter-spacing:.02em">PTP 직접지정 패널 (개발자모드)</div>
+      <div style="font-size:12px;color:#999;letter-spacing:.02em">PTP 직접지정 패널 (개발자모드)</div>
       <div style="font-weight:600">⠿ 🎯 스크랩 대상 직접지정</div>
     </div>
-    <div style="font-size:10px;color:#888;margin-bottom:6px;line-height:1.5">① 필드 선택 → ② 몰 화면에서 값 클릭 → ③ 자동 저장 — 반복하세요</div>
+    <div style="font-size:12px;color:#888;margin-bottom:6px;line-height:1.5">① 필드 선택 → ② 몰 화면에서 값 클릭 → ③ 자동 저장 — 반복하세요</div>
     <div id="ptp-picker-status" style="color:#2563eb;font-weight:600;margin-bottom:8px;display:none"></div>
     <div id="ptp-picker-fieldlist" style="max-height:320px;overflow-y:auto;border-top:1px solid #eee;border-bottom:1px solid #eee;margin:8px 0;padding:4px 0"></div>
     <div id="ptp-picker-log" style="margin-top:4px;color:#0d9488;max-height:50px;overflow:auto"></div>
@@ -2139,7 +2226,10 @@ function pickerPageScript(seed) {
   }
 
   function updateStatus() {
-    if (armedField) {
+    if (armingNewFieldName) {
+      statusEl.textContent = '👉 새 컬럼명 지정 중 — 몰 화면에서 라벨을 클릭하세요'
+      statusEl.style.display = 'block'
+    } else if (armedField) {
       const label = (CANONICAL_FIELDS.find(([k]) => k === armedField)?.[1]) || armedField
       statusEl.textContent = `👉 "${label}" 지정 중 — 몰 화면에서 값을 클릭하세요`
       statusEl.style.display = 'block'
@@ -2227,7 +2317,7 @@ function pickerPageScript(seed) {
         } else badgeText = '🔗 셀렉터'
       }
       const badge = rule
-        ? `<span style="font-size:10px;background:#fff;color:#0d9488;border:1px solid #5eead4;border-radius:8px;padding:1px 6px;white-space:nowrap">${badgeText}</span>`
+        ? `<span style="font-size:12px;background:#fff;color:#0d9488;border:1px solid #5eead4;border-radius:8px;padding:1px 6px;white-space:nowrap">${badgeText}</span>`
         : ''
       const autoValue = !rule ? currentValue(key) : ''
       const valueLine = isForcedEmpty
@@ -2235,13 +2325,13 @@ function pickerPageScript(seed) {
         : rule
           ? `<div style="font-size:12px;color:#0d9488;font-weight:600;margin:3px 0;word-break:break-all">${esc(lastValueLocal[key] ?? currentValue(key)) || '(값 없음)'}</div>`
           : autoValue
-            ? `<div style="font-size:10px;color:#bbb;margin:3px 0">미지정 · 자동값: <span style="color:#888">${esc(autoValue)}</span></div>`
-            : `<div style="font-size:10px;color:#bbb;margin:3px 0">미지정</div>`
+            ? `<div style="font-size:12px;color:#bbb;margin:3px 0">미지정 · 자동값: <span style="color:#888">${esc(autoValue)}</span></div>`
+            : `<div style="font-size:12px;color:#bbb;margin:3px 0">미지정</div>`
       const delBtn = rule
-        ? `<button class="ptp-row-del" data-field="${esc(key)}" title="삭제" style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">✕</button>`
+        ? `<button class="ptp-row-del" data-field="${esc(key)}" title="삭제" style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:12px;cursor:pointer">✕</button>`
         : autoValue
           ? `<button class="ptp-row-clear-auto" data-field="${esc(key)}" title="자동으로 잡힌 값을 무시하고 항상 빈 값으로 고정합니다"
-              style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">🚫 자동값 제거</button>`
+              style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:12px;cursor:pointer">🚫 자동값 제거</button>`
           : ''
       const armBtnStyle = armed
         ? 'flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb'
@@ -2250,25 +2340,25 @@ function pickerPageScript(seed) {
           : 'flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb'
       const inputRow = expanded ? `
           <div style="display:flex;gap:4px;margin-top:5px">
-            <input class="ptp-row-input" data-field="${esc(key)}" placeholder="값 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
-            <button class="ptp-row-save" data-field="${esc(key)}" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">저장</button>
+            <input class="ptp-row-input" data-field="${esc(key)}" placeholder="값 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:12px" />
+            <button class="ptp-row-save" data-field="${esc(key)}" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:12px;cursor:pointer">저장</button>
           </div>` : ''
       return `
         <div style="padding:7px 7px;margin:3px 0;border:1px solid ${rowBorder};background:${rowBg};border-radius:8px">
           <div style="display:flex;justify-content:space-between;gap:4px;align-items:baseline">
-            <span style="font-size:11px">${rule ? '✅' : '⬜'} <b style="font-size:11px">${esc(label)}</b></span>
+            <span style="font-size:12px">${rule ? '✅' : '⬜'} <b style="font-size:12px">${esc(label)}</b></span>
             ${badge}
           </div>
           ${valueLine}
           <div style="display:flex;gap:4px;align-items:center;margin-top:2px">
             <button class="ptp-row-arm" data-field="${esc(key)}"
               title="${rule ? '이미 지정된 값에 새 요소(이미지)를 이어붙입니다 — 바꾸려면 먼저 ✕로 지우세요' : ''}"
-              style="${armBtnStyle};border-radius:5px;padding:4px 6px;font-size:10px;cursor:pointer">
+              style="${armBtnStyle};border-radius:5px;padding:4px 6px;font-size:12px;cursor:pointer">
               ${armed ? '❌ 클릭 대기 취소' : !rule ? '🎯 클릭해서 지정하기' : IMAGE_FIELDS.has(key) ? '🎯 이미지 추가' : '🎯 요소 추가'}
             </button>
             ${delBtn}
           </div>
-          <a class="ptp-row-toggle" data-field="${esc(key)}" style="display:inline-block;margin-top:4px;font-size:10px;color:#888;text-decoration:underline;cursor:pointer">
+          <a class="ptp-row-toggle" data-field="${esc(key)}" style="display:inline-block;margin-top:4px;font-size:12px;color:#888;text-decoration:underline;cursor:pointer">
             ${expanded ? '접기' : '값 직접 입력하기'}
           </a>
           ${inputRow}
@@ -2276,14 +2366,21 @@ function pickerPageScript(seed) {
       `
     }).join('') + `
       <div style="padding:7px 7px;margin:3px 0;border:1px dashed #ccc;border-radius:8px">
-        <div style="font-size:10px;color:#888;margin-bottom:4px">새 컬럼 만들기</div>
-        <input id="ptp-new-field-name" placeholder="컬럼명 (예: 택배사)" style="width:100%;margin-bottom:4px;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px;box-sizing:border-box" />
+        <div style="font-size:12px;color:#888;margin-bottom:4px">새 컬럼 만들기</div>
+        <div style="display:flex;gap:4px;margin-bottom:4px">
+          <input id="ptp-new-field-name" placeholder="컬럼명 (예: 택배사)" value="${esc(newFieldNameDraft)}" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:12px;box-sizing:border-box" />
+          <button id="ptp-new-field-name-arm"
+            style="${armingNewFieldName ? 'background:#2563eb;color:#fff;border:1px solid #2563eb' : 'background:#fff;color:#2563eb;border:1px solid #2563eb'};border-radius:5px;padding:3px 8px;font-size:12px;cursor:pointer;white-space:nowrap"
+            title="몰 화면에서 라벨(예: '도매가 (29개 이상)')을 클릭해 컬럼명으로 바로 채웁니다 — 조건별로 여러 공급가를 보여주는 몰에서 조건마다 새 컬럼을 만들 때 씁니다.">
+            ${armingNewFieldName ? '❌ 클릭 대기 취소' : '🎯 지정'}
+          </button>
+        </div>
         <div style="display:flex;gap:4px">
-          <button id="ptp-new-field-arm" style="flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb;border-radius:5px;padding:4px 6px;font-size:10px;cursor:pointer">🎯 클릭해서 지정하기</button>
+          <button id="ptp-new-field-arm" style="flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb;border-radius:5px;padding:4px 6px;font-size:12px;cursor:pointer">🎯 클릭해서 지정하기</button>
         </div>
         <div style="display:flex;gap:4px;margin-top:4px">
-          <input id="ptp-new-field-value" placeholder="또는 값 직접 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
-          <button id="ptp-new-field-add" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">저장</button>
+          <input id="ptp-new-field-value" placeholder="또는 값 직접 입력" value="${esc(newFieldValueDraft)}" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:12px" />
+          <button id="ptp-new-field-add" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:12px;cursor:pointer">저장</button>
         </div>
       </div>
     `
@@ -2295,6 +2392,7 @@ function pickerPageScript(seed) {
       btn.addEventListener('click', () => {
         const field = btn.dataset.field
         armedField = armedField === field ? null : field
+        armingNewFieldName = false
         if (hovered) { hovered.style.outline = ''; hovered = null }
         renderFieldList()
         updateStatus()
@@ -2324,11 +2422,25 @@ function pickerPageScript(seed) {
     fieldListEl.querySelectorAll('.ptp-row-clear-auto').forEach(btn => {
       btn.addEventListener('click', () => { forceEmpty(btn.dataset.field); renderFieldList() })
     })
+    fieldListEl.querySelector('#ptp-new-field-name').addEventListener('input', e => {
+      newFieldNameDraft = e.target.value
+    })
+    fieldListEl.querySelector('#ptp-new-field-value').addEventListener('input', e => {
+      newFieldValueDraft = e.target.value
+    })
+    fieldListEl.querySelector('#ptp-new-field-name-arm').addEventListener('click', () => {
+      armingNewFieldName = !armingNewFieldName
+      if (armingNewFieldName) armedField = null
+      if (hovered) { hovered.style.outline = ''; hovered = null }
+      renderFieldList()
+      updateStatus()
+    })
     fieldListEl.querySelector('#ptp-new-field-arm').addEventListener('click', () => {
       const nameEl = fieldListEl.querySelector('#ptp-new-field-name')
       const field = nameEl.value.trim()
       if (!field) { nameEl.focus(); return }
       armedField = armedField === field ? null : field
+      armingNewFieldName = false
       if (hovered) { hovered.style.outline = ''; hovered = null }
       renderFieldList()
       updateStatus()
@@ -2340,6 +2452,8 @@ function pickerPageScript(seed) {
       const value = valueEl.value.trim()
       if (!field || !value) return
       appendOrSaveField(field, { type: 'fixed', value }, value)
+      newFieldNameDraft = ''
+      newFieldValueDraft = ''
       renderFieldList()
     })
   }
@@ -2348,6 +2462,17 @@ function pickerPageScript(seed) {
   function onClick(e) {
     const el = e.target
     if (el === panel || panel.contains(el)) return
+    if (armingNewFieldName) {
+      // 값이 아니라 "새 컬럼 만들기"의 컬럼명 입력칸을 채운다 — lib/scraper.ts의 onClick과 동일 동작.
+      e.preventDefault()
+      e.stopPropagation()
+      newFieldNameDraft = elementDisplayText(el)
+      armingNewFieldName = false
+      renderFieldList()
+      updateStatus()
+      if (hovered) { hovered.style.outline = ''; hovered = null }
+      return
+    }
     if (!armedField) return
     e.preventDefault()
     e.stopPropagation()

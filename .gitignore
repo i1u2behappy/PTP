@@ -32,6 +32,7 @@ yarn-error.log*
 .dev-server.log
 .worker.log
 .worker-boot-status.json
+.restart-history.jsonl
 
 # env files (can opt-in for committing if needed)
 .env*

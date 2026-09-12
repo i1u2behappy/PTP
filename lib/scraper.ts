@@ -9,11 +9,11 @@ import fs from 'fs'
 import path from 'path'
 import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
-import { chromium, type BrowserContext, type Page, type APIResponse } from 'playwright'
+import { chromium, type BrowserContext, type Page, type APIResponse, type ElementHandle } from 'playwright'
 import { load as loadHtml } from 'cheerio'
 import iconv from 'iconv-lite'
 import type { ExtractedProduct } from './ai'
-import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsFromScreenshot, type MallStructureReport, type OptionCandidate, type AiProviderId, ALL_AI_PROVIDERS } from './ai'
+import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsFromScreenshot, detectCategoryMenuTriggerFromScreenshot, detectVisibleCategoryGroupCount, type MallStructureReport, type OptionCandidate, type AiProviderId, ALL_AI_PROVIDERS } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
@@ -791,12 +791,18 @@ export async function navigateOpenPageTo(siteId: number, url: string): Promise<{
  * (그 쿠키가 만료됐으면 그 사이트 자체가 로그인 페이지로 돌려보낼 뿐 — 이 함수가 할 수 있는 건 여기까지).
  */
 export async function openUrlInLoginWindow(siteId: number, url: string): Promise<void> {
-  // 이미 열린 세션에 새 탭을 여는 것은 공유 탭을 건드리지 않아 그 자체로 안전하다 — 락 없이 바로
-  // 처리한다(다른 무거운 작업이 같은 몰에서 진행 중이어도 미리보기 "열기"가 그것 때문에 기다릴
-  // 필요는 없다).
+  // 이미 열린 세션이 있으면 "메인 탭"(resolveMainPage/setMainPage — startElementPicker가 "스크랩 대상
+  // 직접지정" 때 그대로 재사용하는 바로 그 탭)을 그 자리에서 새 URL로 이동시킨다 — 락 없이 바로 처리한다
+  // (다른 무거운 작업이 같은 몰에서 진행 중이어도 "열기"가 그것 때문에 기다릴 필요는 없다).
+  // 예전엔 매번 existing.newPage()로 새 탭을 열기만 하고 어디도 "메인 탭"으로 등록하지 않아서, "상품 URL"을
+  // 눌러 열어본 탭과 그다음 "스크랩 대상 직접지정"이 실제로 조작하는 탭이 서로 다른 탭이 되는 문제가
+  // 있었다 — 게다가 누를 때마다 탭이 하나씩 계속 쌓였다(사용자 지적, 2026-09-12 — "상품 URL 클릭 시
+  // 로그인한 웹페이지에서 열리게 해. 그래야 스크랩 대상 직접지정이 가능해"). 같은 탭을 계속 재사용/이동
+  // 시키면 두 기능이 항상 같은 페이지를 보게 되고, 탭도 안 쌓인다.
   const existing = openSessions.get(siteId)
   if (existing) {
-    const page = await existing.newPage()
+    const page = resolveMainPage(existing, siteId) ?? await existing.newPage()
+    setMainPage(siteId, page)
     await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     await page.bringToFront().catch(() => {})
     await focusLoginWindow(siteId)
@@ -808,7 +814,8 @@ export async function openUrlInLoginWindow(siteId: number, url: string): Promise
     // 락을 기다리는 사이 다른 실행이 이미 로그인 창을 열어뒀을 수 있다 — 다시 확인한다.
     const nowExisting = openSessions.get(siteId)
     if (nowExisting) {
-      const page = await nowExisting.newPage()
+      const page = resolveMainPage(nowExisting, siteId) ?? await nowExisting.newPage()
+      setMainPage(siteId, page)
       await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
       await page.bringToFront().catch(() => {})
       await focusLoginWindow(siteId)
@@ -816,6 +823,7 @@ export async function openUrlInLoginWindow(siteId: number, url: string): Promise
     }
     const context = await launchVisibleWindow(siteId)
     const page = context.pages()[0] || await context.newPage()
+    setMainPage(siteId, page)
     await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     await focusLoginWindow(siteId)
   })
@@ -1809,6 +1817,40 @@ export async function startElementPicker(
   })
 }
 
+/**
+ * "스크랩 대상 직접지정"으로 규칙을 저장한 직후 PTP 화면의 미리보기 그리드에 그 결과를 바로 보여주기
+ * 위해 상품 1건만 가볍게 다시 추출한다 — previewCatalog 안의 extractPreview와 같은 추출 단계(규칙 기반
+ * 추출 → DOM 옵션 → 재고)를 쓰지만, 그 함수가 항상 먼저 하는 카테고리 개수 집계·부트스트랩·AI모드는
+ * 전부 건너뛴다(사용자 요청, 2026-09-12 — "직접지정에서 새로 컬럼을 만든 것은 미리보기 그리드에 표시되어야
+ * 하는 거 아니야?" — 카테고리가 몇백 개인 몰에서 그 무거운 전체 미리보기를 매번 다시 돌리는 건 이 목적엔
+ * 안 맞다). "스크랩 대상 직접지정"이 조작하는 바로 그 탭(resolveMainPage — openUrlInLoginWindow/
+ * startElementPicker와 같은 추적)을 그대로 재사용해 새 탭을 안 띄운다.
+ *
+ * openUrlInLoginWindow의 "이미 열린 세션" 분기와 같은 이유로 락을 안 건다 — 이 몰에서 다른 무거운 작업
+ * (몰 구조분석 등)이 진행 중이어도, 픽커로 방금 지정한 값을 확인하려는 이 가벼운 새로고침이 그 작업이
+ * 끝날 때까지(몇 분~몇십 분) 기다릴 이유는 없다. 세션 자체가 없으면(로그인 창이 없음) null.
+ */
+export async function reExtractPreviewProduct(siteId: number, url: string): Promise<ScrapeResult | null> {
+  const context = openSessions.get(siteId)
+  if (!context) return null
+  const page = resolveMainPage(context, siteId) ?? await context.newPage()
+  setMainPage(siteId, page)
+  if (page.url() !== url) {
+    await page.goto(url, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+  }
+  await waitForExtractableContent(page).catch(() => {})
+  const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null }>(
+    'SELECT extraction_rules FROM sites WHERE id=$1', [siteId],
+  )
+  const extractionRules = res.rows[0]?.extraction_rules ?? undefined
+  const product = await extractProductRuleBased(page, url, undefined, extractionRules)
+  const domOptions = await extractOptionsFromDom(page).catch(() => ({ options: [], combinations: [] }))
+  if (domOptions.options.length) product.options = domOptions.options
+  if (domOptions.combinations.length) product.option_combinations = domOptions.combinations
+  await applyStockByOption(page, product).catch(() => {})
+  return { sourceUrl: url, product }
+}
+
 /** 실제 몰 페이지 안에서 실행되는 함수 — page.evaluate로 그대로 주입된다(문자열이 아니라 함수 자체를
  *  Playwright가 직렬화). 이미 켜져 있으면 다시 켜지 않는다(같은 페이지에서 "스크랩 대상 직접지정 시작"을 또 눌러도
  *  리스너가 중복 등록되지 않도록). */
@@ -1837,6 +1879,19 @@ function injectElementPicker(seed?: {
   // 지금 "요소로 지정" 모드로 선택해둔 필드 — null이 아니면 다음 클릭이 이 필드에 저장된다. 목록에서
   // 컬럼을 먼저 고르고(선택) 화면에서 요소를 클릭 → 저장하는 순서를 반복할 수 있게 한다.
   let armedField: string | null = null
+  // "새 컬럼 만들기"의 컬럼명 자체를 화면 클릭으로 채우는 모드 — true면 다음 클릭의 텍스트가 값이 아니라
+  // #ptp-new-field-name 입력칸에 그대로 들어간다. 수량 조건별로 공급가가 여러 개인 몰(예: 수입가/도매
+  // 할인가/도매가/소매가처럼 조건별 가격표)에서, 조건 라벨("도매가 (29개 이상)" 등)을 매번 손으로 타이핑
+  // 하지 않고 그 라벨 셀을 그대로 클릭해 컬럼명으로 쓸 수 있게 한다(사용자 요청, 2026-09-12 — 오펠트
+  // 사례: 기존엔 컬럼 "값"만 클릭 지정이 가능하고 컬럼"명"은 항상 손으로 입력해야 했다). armedField(기존
+  // 필드의 값 지정)와는 동시에 켤 수 없다 — 서로 배타적으로 둔다.
+  let armingNewFieldName = false
+  // "새 컬럼 만들기" 입력칸 두 개(컬럼명/값)에 지금까지 타이핑되거나 클릭으로 채워진 내용 — renderFieldList가
+  // 다른 필드 지정(다른 줄의 🎯 클릭해서 지정하기 등)으로 다시 그려질 때마다 innerHTML을 통째로 새로 만들어
+  // 이 두 입력칸의 DOM 값이 그냥 사라지는 문제가 있었다(라이브 DOM엔 남아있던 값이 재렌더 순간 날아감).
+  // 이 값을 별도로 기억해뒀다가 매번 템플릿의 value로 되돌려 넣어 재렌더에도 살아남게 한다.
+  let newFieldNameDraft = ''
+  let newFieldValueDraft = ''
   // 방금 지정한(클릭했거나 직접 입력한) "실제 값" — 규칙 자체(라벨/셀렉터 패턴)와 달리 화면에 곧바로
   // 보여줄 목적으로만 쓴다. 지정하는 순간 그 자리에서 확인할 수 있어야 한다는 요청으로 추가.
   const lastValueLocal: Record<string, string> = {}
@@ -1868,9 +1923,23 @@ function injectElementPicker(seed?: {
   // 컬럼 순서도 기준 마스터테이블관리에서 정렬해둔 순서를 그대로 따라간다 — 대응 필드가 없는 것(영문상품명/
   // 상품요약정보 등)은 정렬 기준이 없으니 원래 순서 그대로 맨 뒤로 보낸다.
   const masterOrder = seed?.masterOrder || []
-  const CANONICAL_FIELDS: [string, string][] = [...relabeled].sort((a, b) => {
-    const idxA = masterOrder.indexOf(PICKER_TO_MASTER_KEY[a[0]])
-    const idxB = masterOrder.indexOf(PICKER_TO_MASTER_KEY[b[0]])
+  // 기준 마스터테이블관리(master_schema_fields)에는 있지만 위 12개 고정 매핑엔 없는 필드(몰상품코드/
+  // 판매관리코드/마켓별카테고리/규제판가/소비자판가/옵션1~3/교환반품비 등, 클라이언트가 "기준 마스터
+  // 테이블 관리"에서 직접 추가해둔 커스텀 컬럼 전부)도 똑같이 미리 목록에 올려둔다 — 그래야 미리보기
+  // 그리드에 이미 보이는 컬럼을 이 패널에서 "새 컬럼 만들기"로 이름을 다시 타이핑하지 않고 바로
+  // "지정"할 수 있다(사용자 지적, 2026-09-12 — "그리드의 컬럼과 직접지정에 나오는 컬럼을 기본적으로
+  // 맞춰줘야 그리드에 몰상품코드 컬럼에 대한 값을 직접지정에서 지정을 바로 할 수 있다"). 이 필드들은
+  // 마스터 키 자체를 그대로 컬럼명(picker field key)으로 써서, extraction_rules에 저장되는 키가 그리드가
+  // 값을 찾을 때 보는 키(previewValueFor의 fieldKey)와 항상 정확히 일치하게 한다. product_url(상품URL)은
+  // 제외한다 — 그 페이지 자신의 주소라 클릭으로 "지정"할 대상이 아니다(항상 sourceUrl 그대로 쓰임).
+  const coveredMasterKeys = new Set([...Object.values(PICKER_TO_MASTER_KEY), 'product_url'])
+  const extraMasterFields: [string, string][] = masterOrder
+    .filter(k => !coveredMasterKeys.has(k) && masterLabels[k])
+    .map(k => [k, masterLabels[k]])
+  const CANONICAL_FIELDS: [string, string][] = [...relabeled, ...extraMasterFields].sort((a, b) => {
+    const masterKeyOf = (k: string) => PICKER_TO_MASTER_KEY[k] ?? k
+    const idxA = masterOrder.indexOf(masterKeyOf(a[0]))
+    const idxB = masterOrder.indexOf(masterKeyOf(b[0]))
     if (idxA === -1 && idxB === -1) return 0
     if (idxA === -1) return 1
     if (idxB === -1) return -1
@@ -1975,10 +2044,10 @@ function injectElementPicker(seed?: {
   panel.innerHTML = `
     <button id="ptp-picker-x" title="닫기" style="position:absolute;top:6px;right:8px;background:none;border:0;color:#999;font-size:16px;line-height:1;cursor:pointer;padding:2px 4px">✕</button>
     <div id="ptp-picker-drag" style="margin-bottom:6px;cursor:move;user-select:none;padding-right:20px">
-      <div style="font-size:9px;color:#999;letter-spacing:.02em">PTP 직접지정 패널</div>
+      <div style="font-size:12px;color:#999;letter-spacing:.02em">PTP 직접지정 패널</div>
       <div style="font-weight:600">⠿ 🎯 스크랩 대상 직접지정</div>
     </div>
-    <div style="font-size:10px;color:#888;margin-bottom:6px;line-height:1.5">① 필드 선택 → ② 몰 화면에서 값 클릭 → ③ 자동 저장 — 반복하세요</div>
+    <div style="font-size:12px;color:#888;margin-bottom:6px;line-height:1.5">① 필드 선택 → ② 몰 화면에서 값 클릭 → ③ 자동 저장 — 반복하세요</div>
     <div id="ptp-picker-status" style="color:#2563eb;font-weight:600;margin-bottom:8px;display:none"></div>
     <div id="ptp-picker-fieldlist" style="max-height:320px;overflow-y:auto;border-top:1px solid #eee;border-bottom:1px solid #eee;margin:8px 0;padding:4px 0"></div>
     <div id="ptp-picker-log" style="margin-top:4px;color:#0d9488;max-height:50px;overflow:auto"></div>
@@ -2023,7 +2092,10 @@ function injectElementPicker(seed?: {
   }
 
   function updateStatus() {
-    if (armedField) {
+    if (armingNewFieldName) {
+      statusEl.textContent = '👉 새 컬럼명 지정 중 — 몰 화면에서 라벨을 클릭하세요'
+      statusEl.style.display = 'block'
+    } else if (armedField) {
       const label = (CANONICAL_FIELDS.find(([k]) => k === armedField)?.[1]) || armedField
       statusEl.textContent = `👉 "${label}" 지정 중 — 몰 화면에서 값을 클릭하세요`
       statusEl.style.display = 'block'
@@ -2135,7 +2207,7 @@ function injectElementPicker(seed?: {
         } else badgeText = '🔗 셀렉터'
       }
       const badge = rule
-        ? `<span style="font-size:10px;background:#fff;color:#0d9488;border:1px solid #5eead4;border-radius:8px;padding:1px 6px;white-space:nowrap">${badgeText}</span>`
+        ? `<span style="font-size:12px;background:#fff;color:#0d9488;border:1px solid #5eead4;border-radius:8px;padding:1px 6px;white-space:nowrap">${badgeText}</span>`
         : ''
       // 규칙이 없어도(미지정) 지금 자동/휴리스틱 추출로 잡힌 값이 있으면 같이 보여준다 — 안 그러면
       // "미지정"이라 값 자체가 없는 줄 알았는데 미리보기엔 값이 나와 있어 혼란스럽다는 지적이 있었다.
@@ -2146,13 +2218,13 @@ function injectElementPicker(seed?: {
         : rule
           ? `<div style="font-size:12px;color:#0d9488;font-weight:600;margin:3px 0;word-break:break-all">${esc(lastValueLocal[key] ?? currentValue(key)) || '(값 없음)'}</div>`
           : autoValue
-            ? `<div style="font-size:10px;color:#bbb;margin:3px 0">미지정 · 자동값: <span style="color:#888">${esc(autoValue)}</span></div>`
-            : `<div style="font-size:10px;color:#bbb;margin:3px 0">미지정</div>`
+            ? `<div style="font-size:12px;color:#bbb;margin:3px 0">미지정 · 자동값: <span style="color:#888">${esc(autoValue)}</span></div>`
+            : `<div style="font-size:12px;color:#bbb;margin:3px 0">미지정</div>`
       const delBtn = rule
-        ? `<button class="ptp-row-del" data-field="${esc(key)}" title="삭제" style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">✕</button>`
+        ? `<button class="ptp-row-del" data-field="${esc(key)}" title="삭제" style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:12px;cursor:pointer">✕</button>`
         : autoValue
           ? `<button class="ptp-row-clear-auto" data-field="${esc(key)}" title="자동으로 잡힌 값을 무시하고 항상 빈 값으로 고정합니다"
-              style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:10px;cursor:pointer">🚫 자동값 제거</button>`
+              style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:12px;cursor:pointer">🚫 자동값 제거</button>`
           : ''
       const armBtnStyle = armed
         ? 'flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb'
@@ -2161,25 +2233,25 @@ function injectElementPicker(seed?: {
           : 'flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb'
       const inputRow = expanded ? `
           <div style="display:flex;gap:4px;margin-top:5px">
-            <input class="ptp-row-input" data-field="${esc(key)}" placeholder="값 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
-            <button class="ptp-row-save" data-field="${esc(key)}" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">저장</button>
+            <input class="ptp-row-input" data-field="${esc(key)}" placeholder="값 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:12px" />
+            <button class="ptp-row-save" data-field="${esc(key)}" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:12px;cursor:pointer">저장</button>
           </div>` : ''
       return `
         <div style="padding:7px 7px;margin:3px 0;border:1px solid ${rowBorder};background:${rowBg};border-radius:8px">
           <div style="display:flex;justify-content:space-between;gap:4px;align-items:baseline">
-            <span style="font-size:11px">${rule ? '✅' : '⬜'} <b style="font-size:11px">${esc(label)}</b></span>
+            <span style="font-size:12px">${rule ? '✅' : '⬜'} <b style="font-size:12px">${esc(label)}</b></span>
             ${badge}
           </div>
           ${valueLine}
           <div style="display:flex;gap:4px;align-items:center;margin-top:2px">
             <button class="ptp-row-arm" data-field="${esc(key)}"
               title="${rule ? '이미 지정된 값에 새 요소(이미지)를 이어붙입니다 — 바꾸려면 먼저 ✕로 지우세요' : ''}"
-              style="${armBtnStyle};border-radius:5px;padding:4px 6px;font-size:10px;cursor:pointer">
+              style="${armBtnStyle};border-radius:5px;padding:4px 6px;font-size:12px;cursor:pointer">
               ${armed ? '❌ 클릭 대기 취소' : !rule ? '🎯 클릭해서 지정하기' : IMAGE_FIELDS.has(key) ? '🎯 이미지 추가' : '🎯 요소 추가'}
             </button>
             ${delBtn}
           </div>
-          <a class="ptp-row-toggle" data-field="${esc(key)}" style="display:inline-block;margin-top:4px;font-size:10px;color:#888;text-decoration:underline;cursor:pointer">
+          <a class="ptp-row-toggle" data-field="${esc(key)}" style="display:inline-block;margin-top:4px;font-size:12px;color:#888;text-decoration:underline;cursor:pointer">
             ${expanded ? '접기' : '값 직접 입력하기'}
           </a>
           ${inputRow}
@@ -2187,14 +2259,21 @@ function injectElementPicker(seed?: {
       `
     }).join('') + `
       <div style="padding:7px 7px;margin:3px 0;border:1px dashed #ccc;border-radius:8px">
-        <div style="font-size:10px;color:#888;margin-bottom:4px">새 컬럼 만들기</div>
-        <input id="ptp-new-field-name" placeholder="컬럼명 (예: 택배사)" style="width:100%;margin-bottom:4px;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px;box-sizing:border-box" />
+        <div style="font-size:12px;color:#888;margin-bottom:4px">새 컬럼 만들기</div>
+        <div style="display:flex;gap:4px;margin-bottom:4px">
+          <input id="ptp-new-field-name" placeholder="컬럼명 (예: 택배사)" value="${esc(newFieldNameDraft)}" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:12px;box-sizing:border-box" />
+          <button id="ptp-new-field-name-arm"
+            style="${armingNewFieldName ? 'background:#2563eb;color:#fff;border:1px solid #2563eb' : 'background:#fff;color:#2563eb;border:1px solid #2563eb'};border-radius:5px;padding:3px 8px;font-size:12px;cursor:pointer;white-space:nowrap"
+            title="몰 화면에서 라벨(예: '도매가 (29개 이상)')을 클릭해 컬럼명으로 바로 채웁니다 — 조건별로 여러 공급가를 보여주는 몰에서 조건마다 새 컬럼을 만들 때 씁니다.">
+            ${armingNewFieldName ? '❌ 클릭 대기 취소' : '🎯 지정'}
+          </button>
+        </div>
         <div style="display:flex;gap:4px">
-          <button id="ptp-new-field-arm" style="flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb;border-radius:5px;padding:4px 6px;font-size:10px;cursor:pointer">🎯 클릭해서 지정하기</button>
+          <button id="ptp-new-field-arm" style="flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb;border-radius:5px;padding:4px 6px;font-size:12px;cursor:pointer">🎯 클릭해서 지정하기</button>
         </div>
         <div style="display:flex;gap:4px;margin-top:4px">
-          <input id="ptp-new-field-value" placeholder="또는 값 직접 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:11px" />
-          <button id="ptp-new-field-add" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer">저장</button>
+          <input id="ptp-new-field-value" placeholder="또는 값 직접 입력" value="${esc(newFieldValueDraft)}" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:12px" />
+          <button id="ptp-new-field-add" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:12px;cursor:pointer">저장</button>
         </div>
       </div>
     `
@@ -2209,6 +2288,7 @@ function injectElementPicker(seed?: {
       btn.addEventListener('click', () => {
         const field = btn.dataset.field!
         armedField = armedField === field ? null : field
+        armingNewFieldName = false
         if (hovered) { hovered.style.outline = ''; hovered = null }
         renderFieldList()
         updateStatus()
@@ -2238,11 +2318,25 @@ function injectElementPicker(seed?: {
     fieldListEl.querySelectorAll<HTMLButtonElement>('.ptp-row-clear-auto').forEach(btn => {
       btn.addEventListener('click', () => { forceEmpty(btn.dataset.field!); renderFieldList() })
     })
+    fieldListEl.querySelector<HTMLInputElement>('#ptp-new-field-name')!.addEventListener('input', e => {
+      newFieldNameDraft = (e.target as HTMLInputElement).value
+    })
+    fieldListEl.querySelector<HTMLInputElement>('#ptp-new-field-value')!.addEventListener('input', e => {
+      newFieldValueDraft = (e.target as HTMLInputElement).value
+    })
+    fieldListEl.querySelector('#ptp-new-field-name-arm')!.addEventListener('click', () => {
+      armingNewFieldName = !armingNewFieldName
+      if (armingNewFieldName) armedField = null
+      if (hovered) { hovered.style.outline = ''; hovered = null }
+      renderFieldList()
+      updateStatus()
+    })
     fieldListEl.querySelector('#ptp-new-field-arm')!.addEventListener('click', () => {
       const nameEl = fieldListEl.querySelector<HTMLInputElement>('#ptp-new-field-name')!
       const field = nameEl.value.trim()
       if (!field) { nameEl.focus(); return }
       armedField = armedField === field ? null : field
+      armingNewFieldName = false
       if (hovered) { hovered.style.outline = ''; hovered = null }
       renderFieldList()
       updateStatus()
@@ -2254,6 +2348,8 @@ function injectElementPicker(seed?: {
       const value = valueEl.value.trim()
       if (!field || !value) return
       appendOrSaveField(field, { type: 'fixed', value }, value)
+      newFieldNameDraft = ''
+      newFieldValueDraft = ''
       renderFieldList()
     })
   }
@@ -2262,6 +2358,19 @@ function injectElementPicker(seed?: {
   function onClick(e: MouseEvent) {
     const el = e.target as HTMLElement
     if (el === panel || panel.contains(el)) return // 안내 패널 자체 클릭은 무시(버튼 클릭이 정상 동작하도록)
+    if (armingNewFieldName) {
+      // 값이 아니라 "새 컬럼 만들기"의 컬럼명 입력칸을 채운다 — armedField 경로(아래)와 달리 규칙을
+      // 저장하지 않고 그 자리에서 입력칸 텍스트만 바꿔치기한다(사용자가 이어서 "🎯 클릭해서 지정하기"로
+      // 값까지 지정해야 비로소 한 컬럼이 완성된다).
+      e.preventDefault()
+      e.stopPropagation()
+      newFieldNameDraft = elementDisplayText(el)
+      armingNewFieldName = false
+      renderFieldList() // 방금 채운 newFieldNameDraft를 템플릿의 value로 그대로 반영한다
+      updateStatus()
+      if (hovered) { hovered.style.outline = ''; hovered = null }
+      return
+    }
     if (!armedField) return // 아직 목록에서 필드를 선택하지 않았으면 페이지 클릭은 그냥 통과시킨다
     e.preventDefault()
     e.stopPropagation()
@@ -2455,16 +2564,22 @@ async function sampleMallProfile(
     for (const link of categoryLinks.slice(0, 5)) {
       if (signal?.aborted) break
       const moved = await page.goto(link.href, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
-      if (!moved) continue
-      const hasProducts = !!(await collectProductUrls(page, { maxPages: 1 }).catch(() => null))?.urls.length
-      if (hasProducts) { sampleCategoryUrl = link.href; break }
+      if (!moved) {
+        console.log(`[정렬탐지:진단:${mallName}] 카테고리 페이지 이동 실패(${link.href})`)
+        continue
+      }
+      const collected = await collectProductUrls(page, { maxPages: 1 }).catch(() => null)
+      console.log(`[정렬탐지:진단:${mallName}] ${link.name}(${link.href}) — 상품 URL ${collected?.urls.length ?? 0}개`)
+      if (collected?.urls.length) { sampleCategoryUrl = link.href; break }
     }
+    console.log(`[정렬탐지:진단:${mallName}] 표본 카테고리: ${sampleCategoryUrl ?? '(없음 — 5개 다 상품 0개)'}`)
     if (sampleCategoryUrl) {
       const baseUrl = page.url()
       // 1차: 화면(스크린샷)을 먼저 본다(사용자 지시, 2026-09-08 — "정렬은 어차피 사람 눈으로 화면에서
       // 확인 가능하다"). href/select 마크업 형태나 사이트 공통 내비게이션 텍스트와의 우연한 키워드
       // 겹침 같은 마크업발 오탐/누락(2026-09-08, 소꿉노리 다수)이 이 경로 자체로는 발생하지 않는다.
       sortOptions = await detectSortOptionsByScreenshot(page, baseUrl, mallName, signal).catch(() => [])
+      console.log(`[정렬탐지:진단:${mallName}] 화면 인식 결과: ${sortOptions.length}개`)
       if (!sortOptions.length) {
         // 2차: 화면 인식이 실패했거나(비전 AI 호출 자체 실패) 화면에서 못 찾았을 때만 기존 href/select
         // 구조 스캔 → 키워드 기반 클릭 폴백으로 이어간다(기존 로직 그대로 유지 — 안전망).
@@ -2479,10 +2594,12 @@ async function sampleMallProfile(
         // 더할 필요가 없다 — 키워드 매칭만 쓰는 클릭 폴백(detectSortOptionsByClicking)이 오히려 더
         // 안정적이었던 것과 같은 이유. 개발자모드 확장의 별도 정렬감지 경로(app/api/sites/[id]/sort-options,
         // detectSortOptionsWithAI 계속 사용)는 호출부가 달라 이번엔 손대지 않았다.
+        console.log(`[정렬탐지:진단:${mallName}] 정적 후보 ${sortCandidates.length}개(${sortCandidates.slice(0, 15).map(c => c.text).join(', ')})`)
         const queryBased = sortCandidates
           .filter(c => looksLikeSortLabel(c.text))
           .map(c => ({ label: c.text, kind: 'query' as const, paramsToAdd: diffQueryParams(baseUrl, c.href) }))
           .filter((o): o is { label: string; kind: 'query'; paramsToAdd: Record<string, string> } => !!o.paramsToAdd)
+        console.log(`[정렬탐지:진단:${mallName}] 키워드+쿼리검증 통과 ${queryBased.length}개`)
         if (queryBased.length) {
           sortOptions = queryBased
         } else {
@@ -2490,6 +2607,7 @@ async function sampleMallProfile(
           // 없을 때 — 화면 텍스트를 후보로 삼아 실제로 클릭해보고 URL/목록 순서 변화로 직접 검증한다
           // (detectSortOptionsByClicking 주석 참고 — kind:'query'/kind:'click' 둘 다 여기서 나올 수 있다).
           sortOptions = await detectSortOptionsByClicking(page, baseUrl).catch(() => [])
+          console.log(`[정렬탐지:진단:${mallName}] 클릭 폴백 결과 ${sortOptions.length}개`)
         }
       }
     }
@@ -2969,9 +3087,23 @@ const NON_CATEGORY_TEXT_RE = /로그인|회원가입|로그아웃|장바구니|�
 // 발견된 카테고리 59개 전부가 게시판 글이었다 — 규칙 기반 탐지가 한 번이라도 만든 학습 결과는 이렇게
 // 스스로 강화되며 영구화될 수 있어, 이 경로 필터를 학습/재사용 두 지점 모두에 넣어 다음 실행이 스스로
 // 회복(구조 스캔/AI로 다시 폴백)할 수 있게 한다.
-const BOARD_PATH_RE = /\/(board|bbs)\//i
+//
+// mypage(마이페이지, 나의 문의내역 등 개인 회원 전용 영역)도 같은 이유로 여기 추가한다(2026-09-11,
+// 도매토피아 실사용 확인) — /mypage/myqna_catalog(나의 1:1문의 내역) 같은 링크가 "1:1문의" 같은 라벨로
+// 카테고리 후보에 섞여 들어왔는데, NON_CATEGORY_TEXT_RE는 정확히 이 라벨 문구를 걸러낼 패턴이 없었다.
+// 더 근본적인 문제는 따로 있다: 이 페이지는 게시판 목록이라 "상품 0개"인데, 개별 글의 "비밀글" 보기용
+// 비밀번호 입력창이 목록 화면에도 있어 isLoginPage(countProductsOnPage — 페이지 어딘가에 input[type=
+// password]가 있으면 무조건 true)가 오탐, expandOne의 "isLoginPage && count===0 → 로그인 벽" 판정을
+// 그대로 통과시켜 세션은 멀쩡한데도(detectLoggedInSignal은 항상 true) "몰 구조분석" 돌릴 때마다 매번
+// "로그인 세션이 끊긴 것으로 보임" 경고가 떴다 — 실제로는 이 링크 자체가 애초에 카테고리가 아니었던 게
+// 원인이라, isLoginPage 판정을 건드리는 대신 여기서 후보 자체를 걸러내는 쪽이 더 근본적이고 안전하다.
+// goods_exhibit(전시관/기획전 배너 페이지)도 같은 이유로 추가한다(2026-09-12, 투비즈온 실사용 확인) —
+// "도매자동차용품"/"도매가구" 같은 기획전 링크 라벨이 진짜 카테고리명과 문구만으로는 구분이 안 될 만큼
+// 그럴듯한 데다, 그 페이지 자체가 실제 상품을 진열해두고 있어 countProductsOnPage 검증(표본검증)까지
+// 통과해버렸다 — AI가 진짜 카테고리(여성의류 등) 대신 이 기획전 목록을 카테고리로 통째로 잘못 채택함.
+const NON_CATEGORY_PATH_RE = /\/(board|bbs|mypage)\/|goods_exhibit/i
 
-/** BOARD_PATH_RE 검사용 — AI가 돌려준 href는 형식이 보장되지 않아(상대경로, 빈 문자열 등) new URL()이
+/** NON_CATEGORY_PATH_RE 검사용 — AI가 돌려준 href는 형식이 보장되지 않아(상대경로, 빈 문자열 등) new URL()이
  *  던질 수 있다. 파싱 실패하면 board 경로가 아니라고 본다(모르는 걸 의심해서 지우기보단, 확실한
  *  신호가 있을 때만 배제한다는 이 필터들의 기본 원칙과 같다). */
 function safePathname(href: string): string {
@@ -2994,6 +3126,13 @@ export interface CategoryMenuScanResult {
   /** <li> 안에 글자가 전혀 없어(이미지 스프라이트/아이콘 폰트 메뉴 등) 이름을 못 지은 항목의 href —
    *  호출부가 discoverCategoriesByVisitingLinks로 실제 방문해 이름을 채워야 한다. */
   textlessHrefs: string[]
+  /** 서로 다른 "그룹"(같은 tier 안에서 최소 2개 이상의 항목을 낸 후보 root)의 수 — 대분류 탭이 여러
+   *  개인 몰(투비즈온처럼 그룹마다 별도 <ul>인 메가메뉴 등)에서 "지금 이 결과가 그 그룹 중 일부만
+   *  담았는지"를 discoverCategoryMenuByVision의 완결성 검증(화면에 보이는 그룹 수와 비교)이 판단할 수
+   *  있게 한다(사용자 지시, 2026-09-12 — "사람이 보는 화면을 기준으로 카테고리가 어디까지인지 먼저
+   *  확인"). 옵션으로 둔 이유는 이 필드가 필요 없는 기존 호출부/폴백 리터럴을 전부 고치지 않기 위함 —
+   *  없으면(undefined) "모른다"로 취급한다. */
+  groupCount?: number
 }
 
 async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResult> {
@@ -3175,7 +3314,10 @@ async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResult> {
       }
       if (merged.length) {
         const mergedHrefSet = new Set(merged.map(m => m.href))
-        return { links: merged, textlessHrefs: [...new Set(textlessHrefs)].filter(h => !mergedHrefSet.has(h)) }
+        return {
+          links: merged, textlessHrefs: [...new Set(textlessHrefs)].filter(h => !mergedHrefSet.has(h)),
+          groupCount: groups.length,
+        }
       }
     }
     return { links: [], textlessHrefs: [...new Set(textlessHrefs)] }
@@ -3334,7 +3476,8 @@ function mergeCategoryMenuScans(a: CategoryMenuScanResult, b: CategoryMenuScanRe
     links.push(l)
   }
   const textlessHrefs = [...new Set([...a.textlessHrefs, ...b.textlessHrefs])].filter(h => !seenHrefs.has(h))
-  return { links, textlessHrefs }
+  const groupCount = a.groupCount != null || b.groupCount != null ? Math.max(a.groupCount ?? 0, b.groupCount ?? 0) : undefined
+  return { links, textlessHrefs, groupCount }
 }
 
 /** page.context().request(브라우저 렌더링을 안 거치는 순수 HTTP GET)의 응답 바이트를 실제 선언된
@@ -3505,7 +3648,10 @@ async function collectSortCandidates(page: Page): Promise<{ text: string; href: 
 // JS 드롭다운(<li>/<span>/<div> 등)까지 태그 종류를 가리지 않고 잡기 위한 느슨한 키워드 매칭이다. 이
 // 자체는 오탐(예: 상품명에 "신상"이 들어감)이 있어도 되는데, detectSortOptionsByClicking이 실제로
 // 클릭해보고 diffQueryParams(같은 pathname, 쿼리파라미터만 다름)로 재확인하기 때문이다.
-const SORT_KEYWORD_PATTERN = '(신상|신규|최신|낮은\\s*가격|높은\\s*가격|인기|판매량|조회|클릭|리뷰|추천|할인|세일|낱개판매|기본순)'
+// 최저/최고는 "낮은가격"/"높은가격"만큼(혹은 그보다 더) 흔한 표현이다(실사용 확인, 2026-09-12 — 투비즈온
+// "최저 가격순"/"최고 가격순"이 이 패턴에 안 걸려 유일하게 매칭되던 "신규 상품순"(이미 기본 선택된 옵션이라
+// 다시 골라도 목록이 안 바뀜)만 시도되고 끝나버렸다 — 정렬이 진짜로 있는데도 전부 미확정으로 끝난 원인).
+const SORT_KEYWORD_PATTERN = '(신상|신규|최신|낮은\\s*가격|높은\\s*가격|최저|최고|인기|판매량|조회|클릭|리뷰|추천|할인|세일|낱개판매|기본순)'
 
 /** SORT_KEYWORD_PATTERN을 쓰는 곳이 여러 자리라(sampleMallProfile의 AI 결과 사전 필터, 아래
  *  detectSortOptionsByClicking의 페이지 내부 스캔) 판정 로직을 하나로 모았다 — 순수 함수라
@@ -3544,31 +3690,80 @@ export function looksLikeSortLabel(text: string): boolean {
  *    (collectFromListing 참고).
  *  후보 하나를 시도할 때마다 baseUrl로 새로 불러와 "정렬 전" 기준을 매번 깨끗하게 다시 잡는다 — 이전
  *  후보 클릭이 남긴 상태가 다음 후보 판정을 오염시킬 수 있어서다(URL 기반이든 AJAX 기반이든 공통). */
+/** 정렬 후보 텍스트가 네이티브 `<select>`의 `<option>`일 수 있다(투비즈온 실사용 확인, 2026-09-12 —
+ *  "신규 상품순"/"최저 가격순"/"최고 가격순"이 실제로 `<select name="orderby"><option>`이었고, value도
+ *  "regdt_asc" 같은 순수 토큰이라 href로 못 바꿈). `<option>`은 네이티브 드롭다운이라 일반 마우스
+ *  `.click()`으로 열리지 않는다 — 조상 `<select>`에 `selectOption(label)`을 대신 호출해야 실제 브라우저가
+ *  그 옵션을 선택한 것과 동일한 change 이벤트가 발생한다. 이 판단(옵션이냐 아니냐)과 클릭 실행 자체를
+ *  한곳에 모아, confirmSortCandidatesByClicking(감지+검증)과 collectFromListing(실제 스크랩 시점 적용)
+ *  둘 다 같은 방식으로 동작하게 한다 — MallSortOption의 kind:'click'/clickText 저장 형식은 그대로 두고
+ *  (사용자가 저장된 정렬을 다시 쓸 때·개발자모드가 이 타입을 읽을 때 아무것도 안 바뀜), 클릭을 실행하는
+ *  이 저수준 동작만 옵션 태그를 인식하도록 넓힌다. 후보 텍스트를 못 찾으면 false. */
+async function clickSortCandidateText(page: Page, text: string): Promise<boolean> {
+  const locator = page.getByText(text, { exact: true }).first()
+  if (await locator.count() === 0) return false
+  const isOption = await locator.evaluate(el => el.tagName === 'OPTION').catch(() => false)
+  if (isOption) {
+    const select = locator.locator('xpath=ancestor::select[1]')
+    if (await select.count() === 0) return false
+    await select.selectOption({ label: text }, { timeout: 3_000 })
+  } else {
+    await locator.click({ timeout: 3_000 })
+  }
+  return true
+}
+
 async function confirmSortCandidatesByClicking(page: Page, baseUrl: string, candidateTexts: string[]): Promise<MallSortOption[]> {
   const confirmed: MallSortOption[] = []
   for (const text of candidateTexts) {
     try {
       await page.goto(baseUrl, { waitUntil: 'load', timeout: 15_000 })
+      // 'load' 이벤트 이후에도 정렬/배송조건 등 필터 위젯을 AJAX로 한 번 더 채워 넣는 몰이 있다(투비즈온
+      // 실사용 확인, 2026-09-12 — 'load' 직후 바로 getByText로 <option>을 찾으면 그새 못 찾음: count 0).
+      // 클릭 뒤 재정렬 반영을 기다리는 것과 같은 이유로, 클릭 "전" 기준선을 잡기 전에도 한 번 잠잠해질
+      // 때까지 기다린다.
+      await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {})
       // URL이 안 바뀌는(AJAX) 경우를 확인하려면 클릭 전 목록 순서가 필요하다 — 어느 쪽으로 판정될지는
       // 클릭 후에야 알 수 있으므로 매번 미리 잡아둔다.
       const before = (await collectProductUrls(page, { maxPages: 1 }).catch(() => null))?.urls.slice(0, 10) || []
-      const locator = page.getByText(text, { exact: true }).first()
-      if (await locator.count() === 0) continue
-      await locator.click({ timeout: 3_000 })
+      if (!await clickSortCandidateText(page, text)) {
+        console.log(`[정렬탐지:진단] "${text}" — 요소를 못 찾음/클릭 실패`)
+        continue
+      }
       await page.waitForLoadState('load', { timeout: 5_000 }).catch(() => {})
       const afterUrl = page.url()
-      if (afterUrl !== baseUrl) {
+      // 경로/쿼리(실제 요청 대상)는 그대로인데 해시(#...)만 바뀐 몰이 있다(투비즈온 실사용 확인,
+      // 2026-09-12 — 카테고리 페이지 자체가 SPA 스타일로 자기 상태를 해시에 적어두는데, 정렬도 여기
+      // 반영됨). afterUrl!==baseUrl만 보고 "URL이 바뀌었다"로 취급하면 diffQueryParams(쿼리만 비교,
+      // 해시는 안 봄)가 진짜 차이를 못 찾아 매번 continue로 버려진다 — 실제로는 서버 요청 자체가 그대로인
+      // AJAX 정렬과 똑같은 상황이라, 경로+쿼리가 같으면 해시 차이는 무시하고 아래 목록 변화 검증(kind:'click')
+      // 으로 넘어간다.
+      const sameRequestTarget = (() => {
+        try {
+          const b = new URL(baseUrl), a = new URL(afterUrl)
+          return b.origin === a.origin && b.pathname === a.pathname && b.search === a.search
+        } catch { return false }
+      })()
+      if (afterUrl !== baseUrl && !sameRequestTarget) {
         const paramsToAdd = diffQueryParams(baseUrl, afterUrl)
+        console.log(`[정렬탐지:진단] "${text}" — URL 이동(${afterUrl}), 쿼리차이 ${paramsToAdd ? JSON.stringify(paramsToAdd) : '없음(폐기)'}`)
         if (paramsToAdd) confirmed.push({ label: text, kind: 'query', paramsToAdd })
         continue
       }
-      if (!before.length) continue
+      if (!before.length) {
+        console.log(`[정렬탐지:진단] "${text}" — 클릭 전 상품 목록을 못 읽어 검증 불가`)
+        continue
+      }
       // AJAX 재정렬은 클릭 즉시 반영되지 않을 수 있어, 네트워크가 잠잠해질 때까지 우선 기다리고 그래도
       // 못 잡으면 짧게 고정 대기로 대체한다.
       await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(async () => { await page.waitForTimeout(800) })
       const after = (await collectProductUrls(page, { maxPages: 1 }).catch(() => null))?.urls.slice(0, 10) || []
-      if (after.length && JSON.stringify(after) !== JSON.stringify(before)) confirmed.push({ label: text, kind: 'click', clickText: text })
-    } catch { /* 이 후보가 안 되면 다음 후보로 */ }
+      const changed = after.length && JSON.stringify(after) !== JSON.stringify(before)
+      console.log(`[정렬탐지:진단] "${text}" — URL 동일(해시만 다를 수 있음), 목록 변화 ${changed ? '있음(확정)' : '없음(폐기)'} (before=${before.length}건, after=${after.length}건)`)
+      if (changed) confirmed.push({ label: text, kind: 'click', clickText: text })
+    } catch (e) {
+      console.log(`[정렬탐지:진단] "${text}" — 예외로 중단: ${e instanceof Error ? e.message : String(e)}`)
+    }
   }
   if (page.url() !== baseUrl) await page.goto(baseUrl, { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
   return confirmed
@@ -3584,7 +3779,7 @@ async function detectSortOptionsByClicking(page: Page, baseUrl: string): Promise
     const re = new RegExp(pattern)
     const seen = new Set<string>()
     const result: string[] = []
-    for (const el of Array.from(document.querySelectorAll('a, button, li, span, div, label'))) {
+    for (const el of Array.from(document.querySelectorAll('a, button, li, span, div, label, option'))) {
       if (result.length >= 10) break
       const text = (el.textContent || '').trim()
       if (!text || text.length > 12 || !re.test(text) || seen.has(text)) continue
@@ -3596,6 +3791,7 @@ async function detectSortOptionsByClicking(page: Page, baseUrl: string): Promise
     }
     return result
   }, SORT_KEYWORD_PATTERN).catch(() => [] as string[])
+  console.log(`[정렬탐지:진단] 클릭 후보 텍스트 ${candidateTexts.length}개: ${candidateTexts.join(', ')}`)
   return confirmSortCandidatesByClicking(page, baseUrl, candidateTexts)
 }
 
@@ -3753,7 +3949,7 @@ async function scanCategoryOverviewPage(page: Page): Promise<CategoryMenuLink[]>
   // 있으면 그대로 섞여 들어온다 — 실사용 확인(2026-09-02, 걸스굽: "장바구니" 링크(/order/basket.html)가
   // 카테고리로 오인돼 expandCategoryHubs가 방문 → 로그인 세션이 끊김). 다른 스캔 경로와 같은 필터를
   // 여기서도 적용한다.
-  return result.filter(l => !NON_CATEGORY_TEXT_RE.test(l.name) && !BOARD_PATH_RE.test(safePathname(l.href)))
+  return result.filter(l => !NON_CATEGORY_TEXT_RE.test(l.name) && !NON_CATEGORY_PATH_RE.test(safePathname(l.href)))
 }
 
 /**
@@ -3767,11 +3963,11 @@ async function scanCategoryOverviewPage(page: Page): Promise<CategoryMenuLink[]>
  * 다시 찾는 "기억" 역할을 한다. 순수 함수라 tests/unit에서 검증 가능.
  */
 export function deriveCategoryUrlPattern(urls: string[]): string | null {
-  // 게시판 글(BOARD_PATH_RE)은 애초에 카테고리 후보가 아니므로, "과반수" 기준의 분모(전체 개수)에서도
+  // 게시판 글(NON_CATEGORY_PATH_RE)은 애초에 카테고리 후보가 아니므로, "과반수" 기준의 분모(전체 개수)에서도
   // 뺀다 — 안 그러면 진짜 카테고리 URL이 남은 URL의 100%를 차지해도 원래 urls.length 기준 과반수에
   // 못 미쳐 패턴을 못 만드는 경우가 생긴다.
   const nonBoardUrls = urls.filter(u => {
-    try { return !BOARD_PATH_RE.test(new URL(u).pathname) } catch { return true }
+    try { return !NON_CATEGORY_PATH_RE.test(new URL(u).pathname) } catch { return true }
   })
   if (nonBoardUrls.length < 2) return null
   const keyCounts = new Map<string, number>()
@@ -3807,11 +4003,11 @@ async function scanByKnownUrlPattern(page: Page, patternSrc: string, detailPatte
   return page.evaluate(({ patternSrc, detailPatternSrc }) => {
     const re = new RegExp(patternSrc)
     const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc) : null
-    // BOARD_PATH_RE(lib/scraper.ts 상단)와 반드시 같은 값을 유지한다 — page.evaluate 콜백은 브라우저에서
-    // 실행돼 바깥 모듈 상수를 그대로 참조할 수 없어(Playwright가 인자로 넘긴 값만 직렬화) 여기에 그대로
-    // 복제해둔다. 학습된 패턴이 예전에 오염돼 있었더라도(예: bdId=) 게시판 글은 여기서 다시 걸러 재확산을
-    // 막는다.
-    const boardPathRe = /\/(board|bbs)\//i
+    // NON_CATEGORY_PATH_RE(lib/scraper.ts 상단)와 반드시 같은 값을 유지한다 — page.evaluate 콜백은
+    // 브라우저에서 실행돼 바깥 모듈 상수를 그대로 참조할 수 없어(Playwright가 인자로 넘긴 값만 직렬화)
+    // 여기에 그대로 복제해둔다. 학습된 패턴이 예전에 오염돼 있었더라도(예: bdId=) 게시판/마이페이지 글은
+    // 여기서 다시 걸러 재확산을 막는다.
+    const boardPathRe = /\/(board|bbs|mypage)\//i
     const origin = location.origin
     const seen = new Set<string>()
     const result: { name: string; href: string }[] = []
@@ -3884,7 +4080,12 @@ async function looksLikeRealCategoryBatch(
     for (const link of sampleLinks) {
       const moved = await page.goto(link.href, { waitUntil: 'domcontentloaded', timeout: 15_000 }).then(() => true).catch(() => false)
       if (!moved) continue
-      const probe = await countProductsOnPage(page, productLinkSelector || null, profile.productLinkSelector, detailPatternSrc, link.href).catch(() => ({ count: 0, isLoginPage: false }))
+      // baseUrl은 사이트 원점(origin)이어야 한다(다른 호출부 전부 new URL(...).origin 참고) — 카테고리
+      // 페이지 URL 자체(예: goods_list.php?ctno=007)를 넘기면 실제 상품 상세 링크(goods_view.php?...)는
+      // 그 문자열로 시작할 리 없어 href.startsWith(baseUrl) 필터에 전부 걸러졌다(실사용 확인, 2026-09-12
+      // — 투비즈온에서 진짜 카테고리 8개를 찾고도 표본검증에서 상품 0개로 나와 매번 가짜로 판정됨).
+      const sampleOrigin = new URL(link.href).origin
+      const probe = await countProductsOnPage(page, productLinkSelector || null, profile.productLinkSelector, detailPatternSrc, sampleOrigin).catch(() => ({ count: 0, isLoginPage: false }))
       // 로그인 벽에 막힌 방문은 "가짜 카테고리"의 증거가 아니다 — 그냥 확인이 안 된 것뿐이라, 위
       // anyPageLoaded 주석이 설명하는 "페이지 로드 자체가 실패한 경우"와 같은 방식으로 다룬다: 이
       // 표본은 건너뛰고, 표본 전부가 로그인 벽이었으면(anyPageLoaded가 끝까지 false) "증거 없음=가짜"로
@@ -3906,6 +4107,275 @@ async function looksLikeRealCategoryBatch(
   } finally {
     await page.close().catch(() => {})
   }
+}
+
+// discoverCategoryMenuByVision이 시작 페이지에서 (MAX_START_PAGE_VISION_ATTEMPTS번 재시도해도) 끝내
+// 실패했을 때, 추가로 시도해볼 다른 페이지 수 — 사용자 지시(2026-09-12) "첫 화면에서 안 나오면 다른
+// 화면에서도 하게 해서"에 따라 1개가 아니라 여러 페이지를 시도하되, 카테고리 하나 찾자고 페이지를
+// 무한정 돌아다니지 않도록 상한을 둔다.
+const MAX_CATEGORY_VISION_PAGES = 3
+
+// 로그인/회원가입/약관 등 계정 상태에 영향을 줄 수 있는 페이지는 후보에서 제외한다 — 실사용 확인
+// (2026-09-12, 투비즈온): 이 화면들을 후보로 넣었더니 비전이 찍은 좌표를 그대로 클릭하다가 로그인
+// 세션이 끊겼다(이후 실행에서 sessionLostDuringAnalysis:true 발생, 정렬 옵션 확인 단계가 카테고리
+// 페이지를 열어도 로그인이 풀린 채로 열려 상품이 0개로 보여 실패). "전체 카테고리" 트리거는 모든
+// 페이지에 공통인 헤더 요소라 굳이 이런 화면까지 시도할 이유도 없다 — 안전과 무관하게도 득이 없다.
+// cart/mypage/order류도 제외한다(실사용 확인, 2026-09-12 — 투비즈온에서 비전이 홈 화면 트리거를 못
+// 찾으면 이런 무관한 페이지로 넘어갔는데, 마침 그 페이지에도 "카테고리"처럼 보이는 작은 위젯이 있어
+// 표본검증을 통과해버렸다 — 진짜 전체 메뉴(7개 대분류, 51개)가 아니라 8개짜리 부분만 잘못 확정됨).
+// 계정/주문 상태에 영향 줄 수 있다는 안전 측면도 login류와 같다.
+// exhibit/event류(전시관·기획전 배너 페이지)도 제외한다 — "전체 카테고리" 트리거를 찾을 이유가 없는
+// 무관한 페이지인 데다, 그런 페이지의 링크 텍스트("도매자동차용품" 등)가 진짜 카테고리명과 구분이 안 될
+// 만큼 그럴듯해서, 뒤(AI 텍스트 폴백)에서 진짜 카테고리 대신 이런 기획전 링크를 잘못 채택하는 사고로도
+// 이어졌다(실사용 확인, 2026-09-12).
+const CATEGORY_VISION_UNSAFE_URL_RE = /\/(member|login|logout|signin|signup|join|agreement|terms|privacy|cart|basket|mypage|order|myorder|exhibit|event)[/.]|goods_exhibit/i
+
+// 비전 모델의 좌표 추정이 같은 화면(같은 스크린샷)을 다시 줘도 호출마다 달라진다(실사용 확인, 여러 차례
+// 반복 — 어떤 실행은 정확히 찾고, 바로 다음 실행은 완전히 다른(틀린) 위치를 준다). 그러니 시작 페이지
+// (보통 홈 — "전체 카테고리" 트리거가 사는 곳)에서 한 번 실패했다고 곧장 다른(대개 무관한) 페이지로
+// 넘어가면, 위 CATEGORY_VISION_UNSAFE_URL_RE로도 다 못 거르는 페이지에서 엉뚱한 부분 결과를 주울
+// 위험만 커진다 — 다른 페이지로 넘어가기 전에 시작 페이지에서 몇 번 더 다시 시도해본다.
+const MAX_START_PAGE_VISION_ATTEMPTS = 3
+
+/**
+ * 카테고리 탐지의 마지막 수단(AI 텍스트 폴백보다 먼저 시도) — "전체 카테고리" 메뉴가 완전히 이미지/
+ * 아이콘으로만 돼 있어 텍스트가 전혀 없는 몰(투비즈온 실사용 확인, 2026-09-12 — 상단 카테고리 탭·
+ * "전체 카테고리" 버튼 전부 <img>, alt도 비어있음)에서는 DOM 텍스트/셀렉터 기반 스캔이 원천적으로
+ * 아무것도 못 찾는다. 화면을 실제로 캡처해 비전 AI에게 "사람이 보는 기준"으로 그 트리거의 위치를 물어본
+ * 뒤, CSS 셀렉터가 아니라 화면 좌표로 직접 클릭한다(사용자 지시, 2026-09-12 — "로그인 이후 첫 전체화면
+ * 캡쳐를 떠서 사람이 보는 기준의 텍스트를 찾는다거나, 그런 이후 클릭을 해 보던지"). 클릭으로 열리는
+ * 메뉴 자체는(투비즈온 기준) 실제 텍스트 링크였으므로, 연 뒤에는 기존 DOM 스캔(scanCategoryMenuRobust)을
+ * 그대로 재사용해 카테고리를 읽는다 — 비전은 "메뉴를 여는 것"까지만 맡고, 읽는 것은 이미 검증된 방식을
+ * 그대로 믿는다.
+ *
+ * 첫 화면(보통 지금 있는 페이지, 대개 홈)에서 못 찾으면 그걸로 끝내지 않고 다른 화면 몇 개도 마저
+ * 시도한다(사용자 지시, 2026-09-12 — "1단계에서 첫화면만 언급되어 있는데... 다른 화면에서도 하게 해서").
+ * 다만 "다른 화면"으로 넘어가기 전에 시작 화면 자체를 MAX_START_PAGE_VISION_ATTEMPTS번 먼저 재시도한다
+ * (실사용 확인, 2026-09-12 — 비전의 좌표 추정이 같은 화면에서도 호출마다 크게 달라져, 한 번 실패했다고
+ * 곧장 다른 화면으로 넘어가면 그쪽에서 엉뚱한 부분 결과를 주울 위험이 실제로 있었다: 투비즈온에서 홈
+ * 화면 인식이 실패하자 무관한 페이지(장바구니/마이페이지)에서 우연히 표본검증을 통과하는 작은 위젯을
+ * 잘못 확정해, 진짜 전체 메뉴(대분류 7개, 51개)가 아니라 8개짜리 부분만 카테고리로 저장된 사고). 그래도
+ * 안 되면 candidatePages(이미 페이지에서 찾은 같은 사이트 링크들, 위험한 페이지는 제외) 중 최대
+ * MAX_CATEGORY_VISION_PAGES-1개까지 한 번씩 시도하고, 하나라도 성공(트리거 클릭 후 실제 카테고리 링크
+ * 까지 확인)하면 그 자리에서 멈춘다.
+ */
+
+/** 비전이 준 좌표에 실제로 무엇이 있는지(elementFromPoint) 확인해, 그 지점 자체(li 안의 여백 등, 클릭
+ *  핸들러가 안 걸린 빈 영역일 수 있음)가 아니라 그 근처의 실제 클릭 대상(img/a/button)에 클릭을 보낸다
+ *  — 실사용 확인(2026-09-12, 투비즈온): 비전 좌표가 기하학적으로는 정확히 올바른 <li>(전체 카테고리
+ *  버튼을 담은) 안에 들어갔는데도, 그 정확한 픽셀이 <li>의 여백(자식 <img>가 li 전체를 채우지 않음)에
+ *  걸려 있어 raw `page.mouse.click(x,y)`로는 jQuery가 `<img class="total-category-btn">`에 직접 바인딩한
+ *  클릭 핸들러가 전혀 발동하지 않았다(li 자신은 그 핸들러의 대상이 아님) — 메뉴가 안 열려 매번 "클릭
+ *  후에도 링크 0개"로 실패했다. Playwright의 ElementHandle.click()은 요소의 중심을 스스로 계산해 클릭하므로,
+ *  "대략 맞는 좌표"만 있으면 "정확히 그 요소 위"로 자동 보정되는 효과가 있다. */
+async function clickNearestClickableAtPoint(page: Page, x: number, y: number): Promise<boolean> {
+  const handle = await page.evaluateHandle(({ x, y }) => {
+    const el = document.elementFromPoint(x, y)
+    if (!el) return null
+    if (/^(IMG|A|BUTTON)$/.test(el.tagName)) return el
+    return el.querySelector('img, a, button') || el
+  }, { x, y }).catch(() => null)
+  const element = handle?.asElement()
+  if (!element) {
+    await page.mouse.move(x, y).catch(() => {})
+    await page.mouse.click(x, y).catch(() => {})
+    return false
+  }
+  const clicked = await element.click({ timeout: 3_000 }).then(() => true).catch(() => false)
+  await handle?.dispose().catch(() => {})
+  if (!clicked) {
+    await page.mouse.move(x, y).catch(() => {})
+    await page.mouse.click(x, y).catch(() => {})
+  }
+  return clicked
+}
+async function discoverCategoryMenuByVision(
+  context: BrowserContext, page: Page, mallName: string, candidatePages: string[], platform: MallPlatform,
+  productLinkSelector?: string | null, signal?: AbortSignal,
+): Promise<{ links: CategoryMenuLink[]; groupCount: number }> {
+  const startUrl = page.url()
+  const safeCandidates = candidatePages.filter(u => u !== startUrl && !CATEGORY_VISION_UNSAFE_URL_RE.test(u))
+
+  // 한 페이지에서 한 번(attemptNo) 시도 — 실패 이유별로 null(다음 시도로) / 링크(성공)를 돌려준다.
+  // attemptNo>1(같은 페이지 재시도)이면 이미 그 URL에 있어도 다시 로드한다 — 안 그러면 스크린샷이
+  // 이전과 완전히 똑같아서(회전 배너/팝업 등이 그대로), 비전이 매번 같은(틀린) 좌표를 그대로 반복해
+  // 재시도가 아무 효과가 없다(실사용 확인, 2026-09-12 — 투비즈온에서 3번 다 똑같이 (80,300)을 줌).
+  async function attemptOnce(url: string, attemptNo: number): Promise<{ links: CategoryMenuLink[]; groupCount: number } | null> {
+    if (page.url() !== url || attemptNo > 1) {
+      const moved = await page.goto(url, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
+      if (!moved) return null
+    }
+    const screenshot = await page.screenshot({ type: 'jpeg', quality: 90 }).catch(() => null)
+    if (!screenshot) {
+      console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: 스크린샷 실패(${url}, 시도 ${attemptNo})`)
+      return null
+    }
+    const trigger = await detectCategoryMenuTriggerFromScreenshot(mallName, screenshot.toString('base64'), 'image/jpeg', signal).catch(() => null)
+    if (!trigger?.found) {
+      console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: 트리거 못 찾음(${url}, 시도 ${attemptNo})`)
+      return null
+    }
+    const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
+      .catch(() => page.viewportSize() ?? { width: 1280, height: 800 })
+    const x = viewport.width * (trigger.xPercent / 100)
+    const y = viewport.height * (trigger.yPercent / 100)
+    console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: "${trigger.label || '(아이콘)'}" 발견(${trigger.xPercent}%,${trigger.yPercent}%) → 뷰포트 ${viewport.width}x${viewport.height} 기준 (${x.toFixed(0)},${y.toFixed(0)}) 클릭(시도 ${attemptNo})`)
+    await clickNearestClickableAtPoint(page, x, y)
+    await sleep(1_200) // 클릭으로 열리는 메뉴가 AJAX로 채워질 시간(투비즈온 실측 — 1초 안팎이면 충분)
+    const { links, groupCount } = await scanCategoryMenuRobust(page).catch(() => ({ links: [] as CategoryMenuLink[], textlessHrefs: [] as string[], groupCount: undefined as number | undefined }))
+    if (!links.length) {
+      console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: 클릭 후에도 링크 0개(${url}, 시도 ${attemptNo})`)
+      return null
+    }
+    if (!await looksLikeRealCategoryBatch(context, links, platform, productLinkSelector)) {
+      console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: 클릭 후 ${links.length}개 찾았지만 표본검증 실패(${url}, 시도 ${attemptNo}) — ${links.slice(0, 10).map(l => `${l.name}(${l.href})`).join(', ')}`)
+      return null
+    }
+    // "진짜냐"(looksLikeRealCategoryBatch)는 통과해도 "전부냐"는 별개 질문이다(사용자 지시, 2026-09-12 —
+    // "사람이 보는 화면을 기준으로 카테고리가 어디까지인지 먼저 확인"). 방금 클릭으로 연 화면을 다시
+    // 찍어 비전에게 "대분류 그룹이 몇 개 보이는지" 물어보고, 실제로 스캔한 그룹 수보다 화면에 더 많이
+    // 보이면(투비즈온 실사용 확인 — 비슷하게 생긴 "그룹 하나만 여는" 작은 아이콘을 잘못 클릭해도
+    // 표본검증은 통과했다) 이 결과를 "일부만 찾음"으로 보고 다음 시도로 넘어간다.
+    const completenessScreenshot = await page.screenshot({ type: 'jpeg', quality: 90 }).catch(() => null)
+    const visibleGroupCount = completenessScreenshot
+      ? await detectVisibleCategoryGroupCount(mallName, completenessScreenshot.toString('base64'), 'image/jpeg', signal).catch(() => null)
+      : null
+    const scannedGroupCount = groupCount ?? 1
+    if (visibleGroupCount != null && visibleGroupCount > 1 && visibleGroupCount > scannedGroupCount) {
+      console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: 클릭 후 ${links.length}개 찾았지만(그룹 ${scannedGroupCount}개) 화면엔 대분류 그룹 ${visibleGroupCount}개가 보임 — 일부만 찾은 것으로 보고 폐기(${url}, 시도 ${attemptNo})`)
+      return null
+    }
+    console.log(`[카테고리탐지:진단:${mallName}] 화면 인식으로 "${trigger.label || '(아이콘)'}" 버튼(${url}) 클릭 → ${links.length}개 찾음(그룹 ${scannedGroupCount}개, 화면상 그룹 ${visibleGroupCount ?? '확인불가'}개, 표본검증 통과, 시도 ${attemptNo})`)
+    return { links, groupCount: scannedGroupCount }
+  }
+
+  // 시작 페이지(대개 홈 — "전체 카테고리" 트리거가 사는 곳)에서 먼저 여러 번 재시도한다(MAX_START_PAGE_
+  // VISION_ATTEMPTS 주석 참고 — 비전 좌표 추정이 같은 화면에서도 호출마다 달라져, 한 번 실패했다고 곧장
+  // 다른(대개 무관한) 페이지로 넘어가면 그쪽에서 엉뚱한 부분 결과를 주울 위험만 커진다).
+  for (let attempt = 1; attempt <= MAX_START_PAGE_VISION_ATTEMPTS; attempt++) {
+    if (signal?.aborted) return { links: [], groupCount: 0 }
+    const result = await attemptOnce(startUrl, attempt)
+    if (result) return result
+  }
+  // 시작 페이지에서 끝내 못 찾았을 때만 다른 화면도 마저 시도한다(사용자 지시, 2026-09-12 — "첫화면에서
+  // 안나오면 다른 화면에서도 하게 해서").
+  for (const url of safeCandidates.slice(0, MAX_CATEGORY_VISION_PAGES - 1)) {
+    if (signal?.aborted) break
+    const result = await attemptOnce(url, 1)
+    if (result) return result
+  }
+  return { links: [], groupCount: 0 }
+}
+
+// discoverCategoryMenuByExhaustiveHeaderClick이 시도해볼 후보 상한 — 조상/자손을 중복으로 걸러내지
+// 않으므로(nthHeaderIconCandidate 주석 참고) 아이콘 하나가 <li>+<img> 등 여러 겹으로 두 번 이상
+// 잡힐 수 있어, 예전(중복 제거 시절) 상한 15보다 넉넉히 올린다 — 후보마다 새로고침+클릭+스캔이 들어
+// (수십 초~1분대) 무한정 늘리지는 않는다.
+const MAX_HEADER_ICON_CANDIDATES = 50
+
+// 흔히 쓰이는 "카테고리 식별" 쿼리파라미터 이름들 — 사용자 제안(2026-09-12): "category, cate, ctno 같은
+// 걸 찾아서 참고하라". scanCategoryMenu(DOM 구조 기반)가 클릭으로 열린 내용을 못 읽어내도(예: 예상 못한
+// 마크업 모양), 그 화면에 이런 파라미터를 쓰는 링크가 여럿 보이면 카테고리일 가능성이 높다는 독립적인
+// 신호로 쓴다 — discoverCategoryMenuByExhaustiveHeaderClick의 구조 기반 스캔이 0개일 때만 보조로 시도.
+const CATEGORY_URL_PARAM_RE = /[?&](category|cate|cat|ctno|cno|cateno|cate_no|cat_no|catecd|cate_cd|ca_id|gcode|cid)=/i
+// 헤더로 볼 상단 영역 높이(px)와, "아이콘/버튼"으로 볼 최대 크기 — 이보다 크면 배너/로고 등 아이콘이
+// 아닌 요소로 본다. 실제로 배너(1920×450)와 아이콘을 구분하는 건 크기 상한(HEADER_ICON_MAX_*)만으로도
+// 충분하다 — 배너는 세로 450px로 HEADER_ICON_MAX_HEIGHT_PX(80)를 이미 훌쩍 넘으므로, 위치(HEADER_REGION_
+// HEIGHT_PX) 쪽은 "화면 전체를 다 훑지 않기 위한" 넉넉한 상한일 뿐이다 — 실사용 확인(2026-09-12,
+// 투비즈온): "전체 카테고리" 버튼이 세로 위치 257~281px에 있어, 처음 잡아둔 200px 상한 안에 못 들어가
+// 후보에서 통째로 빠졌었다. 너비/높이도 따로 둔다 — 이 버튼 자체가 191×23px(가로로 넓고 얇은 "ALL MENU"
+// 류 그래픽)라, 가로/세로를 같은 상한(120px)으로 걸렀을 때도 마찬가지로 빠졌었다.
+const HEADER_REGION_HEIGHT_PX = 400
+const HEADER_ICON_MAX_WIDTH_PX = 300
+const HEADER_ICON_MAX_HEIGHT_PX = 80
+
+/** 헤더 영역 안의 "아이콘처럼 작은" 클릭 가능해 보이는 요소를 전부 모아, i번째 것을 돌려준다 — 순서는
+ *  document 순회 순서라 같은 페이지를 다시 불러와도 안정적이다(같은 정적 HTML이므로).
+ *  조상/자손을 서로 중복이라고 걸러내지 않는다 — 실제 클릭 핸들러가 어느 쪽에 달려있는지는 몰마다
+ *  다르다(실사용 확인, 2026-09-12 — 투비즈온은 같은 페이지 안에서도 ".total-category-btn"은 <img>에,
+ *  ".sub-category-btn"은 그 부모 <li>에 각각 바인딩돼 있었다). 조상만 후보로 남기면(예전 방식) 실제
+ *  핸들러가 자손에 달린 경우 그 자손은 영영 후보에서 빠져 클릭해도 아무 반응이 없다 — "어느 계층이
+ *  맞는지" 미리 판단하지 않고 둘 다 독립적인 후보로 넣어, 실제로 클릭해본 결과(scanCategoryMenuRobust)
+ *  로만 판단한다. */
+async function nthHeaderIconCandidate(page: Page, index: number): Promise<ElementHandle | null> {
+  const handle = await page.evaluateHandle(({ index, heightLimit, maxWidth, maxHeight }) => {
+    const candidates: Element[] = []
+    for (const el of Array.from(document.querySelectorAll('img, a, li, button'))) {
+      const rect = el.getBoundingClientRect()
+      if (rect.width === 0 || rect.height === 0) continue
+      if (rect.top > heightLimit || rect.bottom > heightLimit + 100) continue
+      if (rect.width > maxWidth || rect.height > maxHeight) continue
+      candidates.push(el)
+    }
+    return candidates[index] ?? null
+  }, {
+    index, heightLimit: HEADER_REGION_HEIGHT_PX, maxWidth: HEADER_ICON_MAX_WIDTH_PX, maxHeight: HEADER_ICON_MAX_HEIGHT_PX,
+  }).catch(() => null)
+  const element = handle?.asElement() ?? null
+  if (!element) await handle?.dispose().catch(() => {})
+  return element
+}
+
+/**
+ * 비전이 "이 중 어느 아이콘이 정답이냐"를 스스로 맞히지 못하는 몰을 위한 마지막 수단(사용자 지시,
+ * 2026-09-12 — "다른 방법으로 해") — 비전에게 좌표를 하나 콕 집어 맞혀보라고 하는 대신, 헤더 영역의
+ * 아이콘처럼 생긴 요소를 전부 찾아 하나씩 실제로 클릭해보고, 그 결과(scanCategoryMenuRobust로 실제
+ * 찾아지는 카테고리 수)가 가장 큰 것을 채택한다 — "어느 게 맞는지 미리 판단"하는 대신 "다 해보고 제일
+ * 잘 되는 걸 확인 후 고른다"는 방식이라 비전의 판단력에 기대지 않는다(투비즈온 실사용 확인: 비슷하게
+ * 생긴 아이콘이 여러 개라 비전이 프롬프트를 세 번 다르게 바꿔도 계속 같은 오답을 골랐다). 후보마다 새로
+ * 페이지를 불러와 초기화한 뒤 시도해, 이전 클릭이 열어둔 메뉴 상태가 다음 시도를 오염시키지 않는다.
+ */
+async function discoverCategoryMenuByExhaustiveHeaderClick(
+  context: BrowserContext, page: Page, mallName: string, startUrl: string, platform: MallPlatform,
+  productLinkSelector?: string | null, signal?: AbortSignal,
+): Promise<{ links: CategoryMenuLink[]; groupCount: number }> {
+  let best: { links: CategoryMenuLink[]; score: number; groupCount: number } | null = null
+  for (let i = 0; i < MAX_HEADER_ICON_CANDIDATES; i++) {
+    if (signal?.aborted) break
+    const moved = await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
+    if (!moved) {
+      console.log(`[카테고리탐지:진단:${mallName}] 헤더 아이콘 전수클릭: 페이지 이동 실패(${startUrl}) — 중단`)
+      break
+    }
+    const element = await nthHeaderIconCandidate(page, i)
+    if (!element) {
+      console.log(`[카테고리탐지:진단:${mallName}] 헤더 아이콘 전수클릭: 후보 ${i + 1}번째 없음(총 ${i}개 시도함) — 종료`)
+      break
+    }
+    const clicked = await element.click({ timeout: 3_000 }).then(() => true).catch(() => false)
+    await element.dispose().catch(() => {})
+    if (!clicked) {
+      console.log(`[카테고리탐지:진단:${mallName}] 헤더 아이콘 전수클릭: 후보 ${i + 1} 클릭 실패`)
+      continue
+    }
+    await sleep(1_200)
+    let { links, groupCount } = await scanCategoryMenuRobust(page).catch(() => ({ links: [] as CategoryMenuLink[], textlessHrefs: [] as string[], groupCount: undefined as number | undefined }))
+    if (!links.length) {
+      // 구조 기반 스캔이 못 읽어도, 이 클릭으로 열린 화면에 카테고리 파라미터 패턴(CATEGORY_URL_PARAM_RE)
+      // 의 링크가 여럿 보이면 그걸로 대신한다(사용자 제안, 2026-09-12).
+      const patternLinks = await collectAllPageLinks(page)
+        .then(all => all.filter(l => CATEGORY_URL_PARAM_RE.test(l.href)).map(l => ({ name: l.text, href: l.href })))
+        .catch(() => [])
+      if (patternLinks.length < 2) {
+        console.log(`[카테고리탐지:진단:${mallName}] 헤더 아이콘 전수클릭: 후보 ${i + 1} 클릭 후 링크 0개(파라미터 패턴도 없음)`)
+        continue
+      }
+      console.log(`[카테고리탐지:진단:${mallName}] 헤더 아이콘 전수클릭: 후보 ${i + 1} 클릭 후 구조 스캔은 0개지만 카테고리 파라미터 패턴으로 ${patternLinks.length}개 찾음`)
+      links = patternLinks
+      groupCount = undefined
+    }
+    if (!await looksLikeRealCategoryBatch(context, links, platform, productLinkSelector)) {
+      console.log(`[카테고리탐지:진단:${mallName}] 헤더 아이콘 전수클릭: 후보 ${i + 1} → ${links.length}개 찾았지만 표본검증 실패`)
+      continue
+    }
+    const score = links.length * (groupCount ?? 1)
+    console.log(`[카테고리탐지:진단:${mallName}] 헤더 아이콘 전수클릭: 후보 ${i + 1} → ${links.length}개(그룹 ${groupCount ?? '?'})`)
+    if (!best || score > best.score) best = { links, score, groupCount: groupCount ?? 1 }
+  }
+  if (best) {
+    console.log(`[카테고리탐지:진단:${mallName}] 헤더 아이콘 전수클릭 최종 채택: ${best.links.length}개(그룹 ${best.groupCount})`)
+  }
+  return { links: best?.links ?? [], groupCount: best?.groupCount ?? 0 }
 }
 
 async function discoverTopLevelCategoryLinks(
@@ -3957,18 +4427,51 @@ async function discoverTopLevelCategoryLinks(
     return { links, textlessHrefs, aiUsed: false }
   }
 
-  // 규칙 기반이 전부 실패했을 때만 AI로 넘어간다 — 마지막 수단이라 시간을 넉넉히 준다.
+  // DOM 텍스트/셀렉터 기반이 전부 실패했다 — AI 텍스트 폴백(아래)으로 넘어가기 전에, 화면 인식으로
+  // "전체 카테고리" 트리거를 찾아 직접 클릭해본다(discoverCategoryMenuByVision 참고, 2026-09-12 — 텍스트
+  // 자체가 없는(이미지뿐인) 메뉴는 AI 텍스트 폴백도 어차피 못 찾으므로 이게 이 경로에서 더 근본적인 수단).
+  const startUrlBeforeVision = page.url()
+  const aiCandidates = await collectAllPageLinks(page, baseUrl ? new URL(baseUrl).origin : undefined)
+  const visionResult = await discoverCategoryMenuByVision(
+    context, page, mallName, aiCandidates.map(c => c.href), platform, productLinkSelector, signal,
+  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0 }))
+
+  // 비전이 "그럴듯하지만 일부만" 찾은 경우(표본검증은 통과하지만 실제로는 비슷하게 생긴 다른 아이콘을
+  // 잘못 클릭한 것) 그 결과를 곧바로 받아들이지 않는다(사용자 지시, 2026-09-12 — "다른 방법으로 해") —
+  // 비전 결과가 이미 충분히 커 보이면(그룹 3개 이상, 여러 대분류를 실제로 찾은 것으로 볼 만한 근거) 그대로
+  // 받아들이고, 그렇지 않으면(그룹 1~2개 — 부분 결과일 위험이 큼) 헤더 아이콘을 전부 실제로 클릭해보는
+  // 더 느리지만 확실한 방법도 마저 시도해 더 나은 쪽(찾은 개수×그룹 수가 더 큰 쪽)을 채택한다.
+  const visionScore = visionResult.links.length * Math.max(1, visionResult.groupCount)
+  const VISION_CONFIDENT_GROUP_COUNT = 3
+  if (visionResult.links.length && visionResult.groupCount >= VISION_CONFIDENT_GROUP_COUNT) {
+    return { links: visionResult.links, textlessHrefs, aiUsed: false }
+  }
+
+  // 화면 인식이 실패했거나 그룹 수가 적어 못 미더울 때 — 비슷하게 생긴 아이콘이 여러 개라 비전이 계속
+  // 헷갈리는 몰(투비즈온 실사용 확인: 프롬프트를 세 번 바꿔도 매번 같은 오답)을 위해, 헤더의 아이콘
+  // 후보를 전부 실제로 클릭해보고 결과가 제일 좋은 것을 채택한다(discoverCategoryMenuByExhaustiveHeaderClick 참고).
+  const exhaustiveResult = await discoverCategoryMenuByExhaustiveHeaderClick(
+    context, page, mallName, startUrlBeforeVision, platform, productLinkSelector, signal,
+  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0 }))
+  const exhaustiveScore = exhaustiveResult.links.length * Math.max(1, exhaustiveResult.groupCount)
+
+  if (exhaustiveScore > 0 || visionScore > 0) {
+    const winner = exhaustiveScore >= visionScore ? exhaustiveResult : visionResult
+    console.log(`[카테고리탐지:진단:${mallName}] 화면 인식 ${visionResult.links.length}개(그룹 ${visionResult.groupCount}) vs 헤더 전수클릭 ${exhaustiveResult.links.length}개(그룹 ${exhaustiveResult.groupCount}) — ${exhaustiveScore >= visionScore ? '전수클릭' : '화면 인식'} 채택`)
+    return { links: winner.links, textlessHrefs, aiUsed: false }
+  }
+
+  // 규칙 기반(화면 인식 포함)이 전부 실패했을 때만 AI 텍스트로 넘어간다 — 마지막 수단이라 시간을 넉넉히 준다.
   if (useAi) {
-    const aiCandidates = await collectAllPageLinks(page, baseUrl ? new URL(baseUrl).origin : undefined)
     console.log(`[카테고리탐지:진단:${mallName}] 규칙 기반 실패 → AI 시도(후보 ${aiCandidates.length}개)`)
-    // 규칙 기반 스캔(scanCategoryMenu 등)은 NON_CATEGORY_TEXT_RE/BOARD_PATH_RE로 공지/문의 게시판을
+    // 규칙 기반 스캔(scanCategoryMenu 등)은 NON_CATEGORY_TEXT_RE/NON_CATEGORY_PATH_RE로 공지/문의 게시판을
     // 걸러내지만, AI 결과에는 그 필터가 전혀 안 걸려 있었다 — 실사용 확인(2026-08-30, 소꿉노리):
     // 구조 스캔이 이 몰의 진짜 카테고리 메뉴를 못 찾아 AI로 넘어갔는데, AI가 홈페이지 푸터의 "NOTICE"
     // 공지 위젯(href가 board/list.php)을 카테고리로 잘못 골라, 그 뒤 expandCategoryHubs가 그 "카테고리"를
     // 펼치며 진짜 상품 카테고리들까지 전부 "NOTICE > ..." 접두어로 오염시켰다. AI 결과에도 규칙 기반과
     // 같은 필터를 반드시 거치게 한다.
     const aiLinks = (await detectCategoryLinksWithAI(mallName, aiCandidates, undefined, signal, knownCategoryExamples).catch(() => []))
-      .filter(l => !NON_CATEGORY_TEXT_RE.test(l.name) && !BOARD_PATH_RE.test(safePathname(l.href)))
+      .filter(l => !NON_CATEGORY_TEXT_RE.test(l.name) && !NON_CATEGORY_PATH_RE.test(safePathname(l.href)))
     console.log(`[카테고리탐지:진단:${mallName}] AI 결과 ${aiLinks.length}개`)
     if (aiLinks.length && await looksLikeRealCategoryBatch(context, aiLinks, platform, productLinkSelector)) {
       return { links: aiLinks, textlessHrefs, aiUsed: true }
@@ -4307,9 +4810,10 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
     const sortClickText = opts.categorySortClicks?.[listingUrl]
     if (sortClickText) {
       try {
-        const locator = workerPage.getByText(sortClickText, { exact: true }).first()
-        if (await locator.count() > 0) {
-          await locator.click({ timeout: 3_000 })
+        // clickSortCandidateText가 <option>(네이티브 <select> 정렬)이면 selectOption으로, 아니면 기존
+        // .click()으로 처리한다 — confirmSortCandidatesByClicking(감지)과 실행 방식을 반드시 맞춰야
+        // 여기서 실패하지 않는다(투비즈온 실사용 확인, 2026-09-12 — 위 주석 clickSortCandidateText 참고).
+        if (await clickSortCandidateText(workerPage, sortClickText)) {
           await workerPage.waitForLoadState('load', { timeout: 5_000 }).catch(() => {})
           await workerPage.waitForLoadState('networkidle', { timeout: 3_000 }).catch(async () => { await workerPage.waitForTimeout(800) })
           // kind:'click' 정렬은 정의상 AJAX라 URL이 전혀 안 바뀌어야 한다(detectSortOptionsByClicking이
@@ -4654,12 +5158,22 @@ const WIDGET_CLASS_EXCLUDE_SRC = 'productrecent|recent-?list|recent-?view|recent
  *  다시 돌려주는 몰이 있다(2026-08-09 seasonbag.co.kr에서 재현 확인 — URL은 page=32인데 실제로는 14페이지
  *  내용). count만 보면 "0이 아니니 더 있다"고 오판해 지수 탐색이 진짜 끝을 못 찾고 페이지 번호만 계속
  *  올리며 헤맨다 — 상품 링크 목록을 정렬해 이어붙인 문자열로 비교하면 "새 페이지인지 같은 내용의 반복인지"
- *  구분할 수 있다. */
+ *  구분할 수 있다.
+ *  isLoginPage 판정은 "화면에 실제로 보이는" 비밀번호 입력창만 센다 — 고도몰 계열 몰은 "비밀번호 주기적
+ *  변경" 안내 팝업(예: <div id='popupChangePassword' class='hide'>)을 로그인 여부와 무관하게 모든
+ *  페이지의 공통 푸터 템플릿에 항상 심어두는 경우가 있다(2026-09-11, 도매토피아 실사용 확인 — 공개
+ *  페이지를 로그인 없이 그대로 GET해도 이 폼이 그대로 응답에 있었다). 이 팝업은 기본적으로 숨겨져 있을
+ *  뿐 DOM에는 항상 존재해, 화면에 보이는지를 안 가리면 상품이 0개인 페이지(정상적인 안내성 페이지)마다
+ *  매번 "로그인 세션이 끊긴 것"으로 오탐한다 — 세션은 멀쩡한데도 "몰 구조분석"을 돌릴 때마다 경고가
+ *  반복됐다. checkVisibility()(Chromium 105+, display:none/visibility:hidden/0크기 등을 한 번에 판정)를
+ *  지원하지 않는 예전 브라우저에서는 안전하게 기존 동작(무조건 로그인 페이지로 간주)으로 폴백한다. */
 async function countProductsOnPage(
   page: Page, userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
 ): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; hrefs: string[] }> {
   return page.evaluate(({ userSel, platformSel, detailPatternSrc, baseUrl, widgetExcludeSrc }) => {
-    const isLoginPage = !!document.querySelector('input[type="password"]')
+    type WithVisibilityCheck = Element & { checkVisibility?: () => boolean }
+    const isLoginPage = Array.from(document.querySelectorAll('input[type="password"]'))
+      .some(el => (el as WithVisibilityCheck).checkVisibility?.() ?? true)
     const detailRe = detailPatternSrc ? new RegExp(detailPatternSrc, 'i') : null
     const widgetRe = new RegExp(widgetExcludeSrc, 'i')
     const inWidget = (el: Element) => {
@@ -5524,6 +6038,17 @@ function isBrowserClosedError(err: unknown): boolean {
   return /has been closed|target closed/i.test(message)
 }
 
+/** page.goto()가 지정한 타임아웃(30초) 안에 응답을 못 받았다는 뜻 — 몰이 순간적으로 느려졌거나(과부하)
+ *  동시 요청을 티 안 나게 늦춰서 사실상 차단하는 경우(명시적인 차단 안내 페이지 없이 그냥 응답을 안
+ *  주는 방식)에 흔히 나타난다. 기존엔 "가격/이미지를 둘 다 못 찾음"만 차단 신호로 보고 동시성을
+ *  낮췄는데, 이 타임아웃 자체는 그 판정에 안 걸려 동시성이 계속 올라간 채로 방치돼 실패가 쌓인 사례가
+ *  실사용에서 확인됐다(2026-09-12, 도매토피아 — 동시성이 14까지 올라간 직후부터 30초 타임아웃이 29건
+ *  연달아 났는데도 한 번도 안 낮아짐). scrapeOne이 이것도 "차단/과부하 추정"으로 같이 취급하게 한다. */
+function isNavigationTimeoutError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return /Timeout \d+ms exceeded/.test(message)
+}
+
 /** 목록 페이지(들)에서 제품 URL 수집 후 각각 스크랩. 카테고리 여러 개 + 페이지네이션 + 중지 + 이미 스크랩한 상품 제외 + 동시 처리 지원 */
 export async function scrapeCatalogPage(
   opts: ScrapeOptions,
@@ -5600,6 +6125,7 @@ export async function scrapeCatalogPage(
     async function scrapeOne(workerPage: Page, pUrl: string): Promise<{ result: ScrapeResult | null; blocked: boolean; browserClosed?: boolean }> {
       let lastProduct: ExtractedProduct | null = null
       let blocked = false
+      let sawNavigationTimeout = false
       for (let attempt = 0; attempt <= RETRY_COUNT; attempt++) {
         try {
           await workerPage.goto(pUrl, { waitUntil: 'load', timeout: 30_000 })
@@ -5629,9 +6155,13 @@ export async function scrapeCatalogPage(
           // 브라우저/컨텍스트 자체가 닫힌 거면 이 상품도, 남은 재시도도, 다음 상품도 전부 똑같이
           // 실패할 게 확실하다 — 의미 없는 재시도 대기(최대 몇 초씩)를 건너뛰고 바로 포기한다.
           if (isBrowserClosedError(err)) return { result: null, blocked: false, browserClosed: true }
+          if (isNavigationTimeoutError(err)) sawNavigationTimeout = true
           if (attempt < RETRY_COUNT) await sleep(2_000 * (attempt + 1) + Math.random() * 2_000)
         }
       }
+      // 재시도를 다 써도 안 됐는데 그 원인에 탐색 타임아웃이 섞여 있었으면(가격/이미지 없음과 별개 신호)
+      // 이것도 차단/과부하로 추정해 동시성을 낮춘다(위 isNavigationTimeoutError 주석 참고).
+      if (sawNavigationTimeout) blocked = true
       if (lastProduct) {
         const aiProduct = await tryAiFallback(workerPage, lastProduct)
         if (aiProduct) {
@@ -5964,12 +6494,12 @@ async function expandCategoryHubs(
    *  아님")만 돌려준다. 진행률 보고(doneCount 증가)를 호출부 한 곳에만 두기 위해 이 함수 안에서는
    *  early return만 하고 expandedByIndex에 직접 쓰지 않는다. */
   async function expandOne(workerPage: Page, c: CategoryMenuLink): Promise<CategoryMenuLink[]> {
-    // 게시판/공지 경로(board/bbs)는 카테고리 목록 페이지 스캔 단계에서도 이미 걸러내는 기준(BOARD_PATH_RE)
+    // 게시판/공지 경로(board/bbs)는 카테고리 목록 페이지 스캔 단계에서도 이미 걸러내는 기준(NON_CATEGORY_PATH_RE)
     // 인데, 최상위 카테고리 링크 자체가 이 경로를 갖고 있으면(예: 걸스굽의 "1:1 상담" 메뉴가 실제로는
     // /board/consult/list.html) 그 필터를 못 거치고 여기까지 넘어온다 — 실제로 방문해서 상품 0개/하위메뉴
     // 0개임을 확인하는 데만 22초 넘게 걸린 사례가 있었다(2026-09-01). 방문 자체를 건너뛰면 그 시간을
     // 통째로 아낄 수 있다.
-    if (BOARD_PATH_RE.test(safePathname(c.href))) return []
+    if (NON_CATEGORY_PATH_RE.test(safePathname(c.href))) return []
     // 카테고리 하나당 시간이 어디서 새는지(순수 페이지 로딩인지, 봇차단 재시도 슬립인지, AI인지) 사후에
     // 되짚어볼 방법이 전혀 없었다(2026-08-30, 도매토피아 339개 실행 — 전체 소요시간은 보여도 항목별
     // 내역이 안 보여 추측에 의존해야 했음) — 단계별 소요시간을 재서, 이 항목 하나가 느렸으면(8초 이상)
@@ -6050,13 +6580,13 @@ async function expandCategoryHubs(
     if (!realChildren.length && allowOllamaHubAi && hubAiAttempts < MAX_HUB_AI_ATTEMPTS_PER_RUN) {
       hubAiAttempts++
       const aiSubCandidates = await collectAllPageLinks(workerPage, baseUrl)
-      // discoverTopLevelCategoryLinks의 AI 폴백과 같은 이유(위 NON_CATEGORY_TEXT_RE/BOARD_PATH_RE
+      // discoverTopLevelCategoryLinks의 AI 폴백과 같은 이유(위 NON_CATEGORY_TEXT_RE/NON_CATEGORY_PATH_RE
       // 주석 참고, 2026-08-30 소꿉노리) — 규칙 기반(scanCategoryMenuRobust)엔 이 필터가 있지만 AI
       // 결과엔 없어서, 이 허브의 진짜 하위 카테고리를 찾다가 오히려 공지/문의 게시글을 "하위
       // 카테고리"로 잘못 채택하는 사고가 여기서도 그대로 났다.
       const aiStart = Date.now()
       realChildren = (await detectCategoryLinksWithAI(mallName, aiSubCandidates, c.name, signal, undefined, HUB_EXPANSION_AI_TIMEOUT_MS).catch(() => []))
-        .filter(s => !topLevelHrefSet.has(canonicalizeHref(s.href)) && !NON_CATEGORY_TEXT_RE.test(s.name) && !BOARD_PATH_RE.test(safePathname(s.href)))
+        .filter(s => !topLevelHrefSet.has(canonicalizeHref(s.href)) && !NON_CATEGORY_TEXT_RE.test(s.name) && !NON_CATEGORY_PATH_RE.test(safePathname(s.href)))
       aiMs = Date.now() - aiStart
       if (realChildren.length) aiUsed = true
     }
@@ -6231,7 +6761,7 @@ export async function expandCategoryChildren(
       // 위 discoverTopLevelCategoryLinks/expandCategoryHubs의 AI 폴백과 같은 이유(2026-08-30 소꿉노리) —
       // AI 결과에 공지/문의 게시판 링크가 섞여 나와도 걸러낼 필터가 없었다.
       let children = (await detectCategoryLinksWithAI(mallName, aiCandidates, parentName || '지금 보고 있는 카테고리').catch(() => []))
-        .filter(c => !NON_CATEGORY_TEXT_RE.test(c.name) && !BOARD_PATH_RE.test(safePathname(c.href)))
+        .filter(c => !NON_CATEGORY_TEXT_RE.test(c.name) && !NON_CATEGORY_PATH_RE.test(safePathname(c.href)))
       const aiUsed = children.length > 0
       // 실사용 중 "하위 메뉴가 없는 카테고리를 체크했더니 무관한 대분류가 잔뜩 딸려왔다"는 문제가 있었는데
       // (오토카필, 2026-08-27), 이 함수 자체엔 진단 로그가 전혀 없어 서버 로그만으로 원인(정말 하위

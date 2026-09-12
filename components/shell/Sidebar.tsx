@@ -5,6 +5,7 @@ import { useTabs, type Tab } from './TabsContext'
 import { useCurrentUser } from './CurrentUserContext'
 import { DashboardIcon, ClientIcon, StoreIcon, ListIcon, SearchIcon, ReviewIcon, InboxIcon, ArchiveIcon, ImageEditIcon, ExportIcon, SettingsIcon, TagIcon, MapIcon, CoinIcon, RefreshIcon } from './icons'
 import { CLIENTS_LIST_TAB, SITES_LIST_TAB, MASTER_LIST_TAB, PRODUCTS_LIST_TAB } from './menuTabs'
+import { SystemStatus } from './SystemStatus'
 
 type IconComponent = (props: { active?: boolean }) => React.ReactNode
 
@@ -125,6 +126,7 @@ export function Sidebar() {
         </nav>
 
         <div className="px-2 pb-3 shrink-0 border-t border-slate-100 pt-2">
+          <SystemStatus />
           <button onClick={async () => { await fetch('/api/auth/logout', { method: 'POST' }); window.location.href = '/login' }}
             title={sidebarCollapsed ? '로그아웃' : undefined}
             className={`w-full flex items-center gap-2 py-1.5 text-sm rounded-full text-slate-500 hover:bg-slate-50 hover:text-slate-700 transition-colors text-left

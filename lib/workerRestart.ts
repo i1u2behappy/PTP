@@ -4,6 +4,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { orphanedChromeCleanupScript, closeAllOpenSessionsGracefully } from './scraper'
+import { recordRestart, type RestartTrigger } from './restartHistory'
 
 const execFileAsync = promisify(execFile)
 const TASK_NAME = 'PTPRestartWorker'
@@ -40,7 +41,7 @@ export function isWorkerRestartInFlight(): boolean {
   }
 }
 
-export async function restartWorker(): Promise<void> {
+export async function restartWorker(trigger: RestartTrigger = 'manual'): Promise<void> {
   if (isWorkerRestartInFlight()) throw new Error('이미 재시작이 진행 중입니다')
   fs.writeFileSync(LOCK_PATH, String(Date.now()))
   // 아래 스크립트의 Stop-Process -Force(강제종료) 전에 열린 로그인 창들을 정상 종료해 쿠키를 디스크에
@@ -78,6 +79,7 @@ export async function restartWorker(): Promise<void> {
     fs.rmSync(LOCK_PATH, { force: true })
     throw new Error(`작업 스케줄러 등록/실행 실패: ${e instanceof Error ? e.message : String(e)}`)
   }
+  recordRestart('worker', trigger)
   // 성공 경로에선 잠금을 여기서 풀지 않는다 — 실제 kill+재기동은 이 시점 이후 별개 프로세스(schtasks가
   // 실행한 PowerShell)에서 몇 초간 더 이어지므로, 그 물리적 재시작이 실제로 끝날 때까지는 잠긴 채로
   // 둬야 두 번째 요청과 경쟁하지 않는다(위 LOCK_TTL_MS 주석 참고) — TTL이 지나면 isWorkerRestartInFlight가

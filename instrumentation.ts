@@ -1,4 +1,5 @@
 import { ensureStartedOnce } from './lib/onceGlobally'
+import { looksLikeStaleCompileError } from './lib/staleCompileError'
 
 // Next.js가 서버 시작 시 한 번만 불러주는 표준 훅(instrumentation.ts, 15.0.0부터 안정화 — 별도 플래그
 // 불필요). console.log/warn/error에 타임스탬프를 붙여, .dev-server.log를 나중에 grep해서 "이 로그가
@@ -49,6 +50,42 @@ export function register() {
     setInterval(() => {
       ensureWorkerRunning().catch(e => console.error('[worker] 주기 확인 중 재기동 실패:', e))
     }, 30_000)
+  })
+}
+
+// 짧은 시간에 같은 원인(컴파일 캐시 불일치)으로 여러 요청이 동시에 실패하면 onRequestError가 그만큼
+// 여러 번 불린다 — restartPtpServer 자신도 중복 트리거를 막지만(이미 진행 중이면 에러), 재시작
+// 엔드포인트를 반복 호출하는 것 자체를 줄이려고 여기서도 쿨다운을 둔다. ensureWorkerRunning의
+// lastSpawnAt과 같은 패턴.
+let lastStaleCompileRestartAt = 0
+const STALE_COMPILE_RESTART_COOLDOWN_MS = 5 * 60 * 1000
+
+/**
+ * Next.js 15 표준 훅(register()와 같은 파일, 같은 계약 — 서버가 라우트 핸들러/RSC 등에서 잡히지 않고
+ * 새는 에러를 만날 때마다 불러준다). 이 앱의 에러 처리 철학(GlobalErrorNet.tsx 참고 — 사용자가 "다시
+ * 시도"를 직접 눌러야만 해소되는 문제를 최대한 줄인다)의 연장이다: staleCompileError.ts가 감지하는
+ * "컴파일 캐시 불일치" 부류는 사용자가 뭘 다시 시도해도 **절대** 안 풀린다(요청이 아니라 이미 떠 있는
+ * 프로세스의 컴파일된 상태 자체가 깨진 것이므로) — 그래서 사람이 알아채고 "PTP 서버 재시작" 버튼을
+ * 누르기 전에 여기서 먼저 자동으로 눌러준다(사용자 지시, 2026-09-12 — "이러한 일이 반복되지 않게 해").
+ *
+ * restartPtpServer(lib/systemRestart.ts)를 직접 부르지 않고 이미 있는 /api/system/restart-server를
+ * fetch로 호출한다 — 이 파일(instrumentation.ts)은 webpack이 제한된 "instrument" 레이어로 번들링해서
+ * Node 내장 모듈(child_process 등)을 직접 쓰는 모듈을 그대로 import하면 빌드가 깨진다(위 ensureWorkerRunning
+ * 주석 참고, eval('require')로 우회한 이유와 같음) — lib/systemRestart.ts는 child_process를 일반
+ * import로 쓰므로 여기서 직접 끌어오는 대신, 이미 검증된 그 라우트를 로컬 HTTP로 그대로 호출하는 쪽이
+ * 훨씬 안전하다(ensureWorkerRunning/warmUpRoutes도 이미 같은 방식으로 로컬 엔드포인트를 fetch한다).
+ * 이 프로세스 자체는 죽지 않은 채 이 요청 하나만 실패한 것이므로(다른 라우트는 계속 응답), 같은 프로세스
+ * 안에서 자기 자신의 다른 엔드포인트를 불러도 안전하다.
+ */
+export async function onRequestError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!looksLikeStaleCompileError(message)) return
+  if (Date.now() - lastStaleCompileRestartAt < STALE_COMPILE_RESTART_COOLDOWN_MS) return
+  lastStaleCompileRestartAt = Date.now()
+  console.error(`[stale-compile] 컴파일 캐시 불일치 감지 — PTP 서버 자동 재시작: ${message}`)
+  const base = process.env.PTP_BASE_URL || 'http://localhost:3000'
+  await fetch(`${base}/api/system/restart-server`, { method: 'POST' }).catch(e => {
+    console.error('[stale-compile] 자동 재시작 트리거 실패:', e)
   })
 }
 

@@ -77,9 +77,13 @@ interface StagingRow {
   created_at: string
 }
 
+// 컬럼 자체가 "확정여부"이고, 이 화면의 다른 문구(확정 버튼/"확정됨 전체선택"/"미확정으로 되돌리기")도
+// 전부 "확정"으로 부른다 — status 값 자체는 내부적으로 merge_group_id 등과 엮여 'merged'로 남아있지만,
+// 화면 표시 문구만 "병합됨"이었던 게 이 화면 안에서 서로 다른 용어를 섞어 쓰는 불일치였다(사용자 지적,
+// 2026-09-12).
 const STATUS_LABELS: Record<string, { text: string; cls: string }> = {
   pending: { text: '대기(미확정)', cls: 'text-amber-600' },
-  merged: { text: '병합됨', cls: 'text-teal-600' },
+  merged: { text: '확정됨', cls: 'text-teal-600' },
   skipped: { text: '무시됨', cls: 'text-gray-400' },
 }
 

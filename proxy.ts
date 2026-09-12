@@ -13,6 +13,7 @@ const PUBLIC_PATHS = ['/login', '/logo.jpg', '/icon.jpg']
 const PUBLIC_API_PREFIXES = [
   '/api/auth/', '/api/scrape/extension-ingest', '/api/sites/resolve', '/api/scrape/stop-requested',
   '/api/health/db', '/api/health/worker-boot', '/api/system/restart-docker', '/api/system/restart-server',
+  '/api/system/recover',
   // extension-progress: 개발자모드 스크랩 진행률("카테고리 N/M") 보고 — 위와 같은 이유로 세션 쿠키 없이
   // 확장이 부른다. 여기 빠뜨렸다가 조용히 401로 매번 실패해, "진행 상황이 안 보인다"는 지적으로 뒤늦게
   // 발견됐다(2026-08-22) — 위 profile 라우트 때와 똑같은 실수라 다시 반복하지 않도록 주석을 남긴다.

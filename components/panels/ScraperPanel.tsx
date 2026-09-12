@@ -974,6 +974,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [excludedCategoryHrefs, setExcludedCategoryHrefs] = useState<string[]>([])
 
   const [previewResult, setPreviewResult]   = useState<{ sourceUrl: string; product: PreviewProduct } | null>(null)
+  // refreshPickerRules(피커 폴링 콜백)가 최신 previewResult를 읽기 위한 용도 — 그 콜백은 setInterval에
+  // pickerActive/selectedSite가 바뀔 때만 다시 등록되므로, previewResult를 직접 클로저로 참조하면 그
+  // 사이에 바뀐 값을 못 본다(다른 폴링에서 갱신되는 등). ref로 항상 최신값을 따로 들고 있는다.
+  const previewResultRef = useRef(previewResult)
+  useEffect(() => { previewResultRef.current = previewResult }, [previewResult])
+  // refreshPickerRules가 "이번 폴링에서 규칙이 실제로 바뀌었는지"를 비교하는 용도 — 렌더마다 새로 만들어지는
+  // 클로저와 무관하게 이 ref 하나로 호출들 사이에서 계속 이어서 비교한다.
+  const lastPickerRulesJsonRef = useRef<string>('{}')
   // 미리보기 결과가 로그인 세션이 끊긴 상태로 얻어진 것 같을 때(창을 닫은 뒤 세션 만료 등) — 자동으로
   // 로그인 창을 다시 띄우고 이 배너로 재확인을 안내한다.
   const [sessionExpiredWarning, setSessionExpiredWarning] = useState(false)
@@ -1977,7 +1985,26 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     if (!selectedSite) return
     const res = await fetch(`/api/sites/${selectedSite.id}`)
     const d = await res.json() as { extraction_rules?: Record<string, { type: string; value: string }> }
-    setPickerRules(d.extraction_rules || {})
+    const nextRules = d.extraction_rules || {}
+    setPickerRules(nextRules)
+    // 규칙이 실제로 바뀌었을 때만(2초마다 매번은 아니고) 미리보기 상품 1건을 가볍게 다시 추출해 그리드에
+    // 곧바로 반영한다 — 안 그러면 픽커로 새 컬럼을 지정해도 "스크랩 미리보기"를 수동으로 다시 눌러야만
+    // 보였다(사용자 지적, 2026-09-12 — "직접지정에서 새로 컬럼을 만든 것은 미리보기 그리드에 표시되어야
+    // 하는 거 아니야?"). 전체 미리보기(카테고리 개수 재집계 포함, 몰에 따라 몇 분씩 걸림)를 다시 도는
+    // 대신 lib/scraper.ts의 reExtractPreviewProduct로 상품 1건만 가볍게 다시 읽는다.
+    const nextRulesJson = JSON.stringify(nextRules)
+    const changed = nextRulesJson !== lastPickerRulesJsonRef.current
+    lastPickerRulesJsonRef.current = nextRulesJson
+    const preview = previewResultRef.current
+    if (changed && preview) {
+      const refreshRes = await fetch(`/api/sites/${selectedSite.id}/preview-refresh`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: preview.sourceUrl }),
+      }).catch(() => null)
+      const refreshData = await refreshRes?.json().catch(() => null) as
+        { preview?: { sourceUrl: string; product: PreviewProduct } | null } | null
+      if (refreshData?.preview) setPreviewResult(refreshData.preview)
+    }
   }
 
   // 피커가 켜져있는 동안 몰 페이지에서 저장한 컬럼이 이 화면에도 곧바로 보이도록 짧게 폴링한다.

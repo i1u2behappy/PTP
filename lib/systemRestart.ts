@@ -4,6 +4,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { orphanedChromeCleanupScript } from './scraper'
+import { recordRestart, type RestartTrigger } from './restartHistory'
 
 const execFileAsync = promisify(execFile)
 const TASK_NAME = 'PTPRestartServer'
@@ -54,7 +55,7 @@ export function isRestartInFlight(): boolean {
   return restartInFlight
 }
 
-export async function restartPtpServer(): Promise<void> {
+export async function restartPtpServer(trigger: RestartTrigger = 'manual'): Promise<void> {
   if (restartInFlight) throw new Error('이미 재시작이 진행 중입니다')
   restartInFlight = true
   const pid = process.pid
@@ -83,4 +84,5 @@ export async function restartPtpServer(): Promise<void> {
     restartInFlight = false
     throw new Error(`작업 스케줄러 등록/실행 실패: ${e instanceof Error ? e.message : String(e)}`)
   }
+  recordRestart('server', trigger)
 }

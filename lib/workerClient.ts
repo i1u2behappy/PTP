@@ -91,6 +91,8 @@ export const extractFromHtml = (html: string, url: string, extractionRules?: Rec
   callWorker<ExtractedProduct>('extractFromHtml', [html, url, extractionRules])
 export const startElementPicker = (siteId: number, previewProduct?: Record<string, unknown> | null, targetUrl?: string) =>
   callWorker<boolean>('startElementPicker', [siteId, previewProduct, targetUrl])
+export const reExtractPreviewProduct = (siteId: number, url: string) =>
+  callWorker<ScrapeResult | null>('reExtractPreviewProduct', [siteId, url])
 
 // ── 몰 구조분석 ───────────────────────────────────────────────────────────
 export const runMallStructureReport = (siteId: number, aiProviders: AiProviderId[] = ALL_AI_PROVIDERS) => callWorker<ProfileCheckResult | null>('runMallStructureReport', [siteId, aiProviders])

@@ -58,7 +58,10 @@ function errorMessage(e: unknown): string {
 export function startRpcServer(port: number) {
   const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, bootedAt: BOOTED_AT }))
+      // pid: 시스템 상태 팝업(app/api/system/status/route.ts)이 "지금 실제로 어느 프로세스가 떠있는지"를
+      // 화면에 보여줄 수 있게 한다 — 전엔 포트로만 찾을 수 있어(netstat 등) 사람이 직접 터미널에서
+      // 확인해야 했다.
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, bootedAt: BOOTED_AT, pid: process.pid }))
       return
     }
     if (req.method !== 'POST' || req.url !== '/rpc') {

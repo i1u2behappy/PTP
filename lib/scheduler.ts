@@ -23,7 +23,7 @@ export function startScheduler() {
 // 새로고침으로 React 상태 초기화, [[scrape-preview-catalog-count-and-target-ui]] 스펙에 이미 기록된
 // 증상). 사용자가 눈치채고 수동으로 재시작 버튼을 누르기 전에, 조용히 스스로 정리한다.
 // 2026-08-20 PC 업그레이드(8코어16스레드/28GB)로 1536MB는 지나치게 보수적이라 6144MB로 상향.
-const MEMORY_RESTART_THRESHOLD_MB = 6144
+export const MEMORY_RESTART_THRESHOLD_MB = 6144
 
 /** 이 서버 프로세스 자신의 메모리(RSS)가 임계치를 넘었고, 지금 어떤 몰이든 브라우저 세션을 쓰는 작업이
  *  진행 중이 아니면(isAnySiteBusy) 조용히 재시작한다 — 작업 중간에 끼어들어 진행상황을 날리는 걸
@@ -39,7 +39,7 @@ async function checkMemoryAndAutoRestart() {
     return
   }
   console.log(`[autoRestart] 메모리 ${Math.round(rssMB)}MB로 임계치(${MEMORY_RESTART_THRESHOLD_MB}MB) 초과 + 유휴 상태 확인 — 자동 재시작`)
-  await restartPtpServer()
+  await restartPtpServer('auto')
 }
 
 interface DueSite {

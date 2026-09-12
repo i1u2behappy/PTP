@@ -140,7 +140,10 @@ export function setSystemOutageActive(active: boolean) {
 
 // DbHealthBanner가 이미 전담하는 엔드포인트는 제외한다 — 서버/DB가 죽으면 이 요청들도 같이 실패해
 // 화면 위(DbHealthBanner)와 아래(이 토스트)에 같은 내용이 중복으로 뜨게 된다.
-const EXCLUDED_PREFIXES = ['/api/health/db', '/api/health/worker-boot', '/api/system/restart-docker', '/api/system/restart-server']
+const EXCLUDED_PREFIXES = [
+  '/api/health/db', '/api/health/worker-boot', '/api/system/restart-docker', '/api/system/restart-server',
+  '/api/system/recover',
+]
 
 function patchFetch() {
   if (patched || typeof window === 'undefined') return
@@ -221,7 +224,24 @@ export function GlobalErrorNet() {
             </p>
           </div>
           <div className="flex flex-col gap-1 shrink-0">
-            <button onClick={() => { dismiss(f.id); fetch(...f.retryArgs).catch(() => {}) }}
+            <button onClick={() => {
+              dismiss(f.id)
+              // 어떤 API든 5xx가 나는 원인의 상당수가 DbHealthBanner가 아직 감지 못 한(또는 이미 감지했지만
+              // 사용자가 그 배너 대신 여기서 먼저 마주친) DB/워커/서버 쪽 문제였다 — 그냥 같은 요청만
+              // 다시 보내면 워커/서버가 여전히 좀비 커넥션을 들고 있는 경우 등은 똑같이 실패를 반복한다.
+              // 처음엔(2026-09-11) 이 버튼이 무조건 Docker/워커/PTP 서버를 전부 재기동시켰는데, 인프라가
+              // 진짜 죽은 것과 "특정 몰 작업 하나가 그냥 오래 걸리는 것"을 구분 못 해 후자에도 매번 무거운
+              // 재기동이 걸렸다 — 도매토피아 몰 구조분석이 339개 카테고리를 재발견하느라 정상적으로 41분
+              // 걸리던 중이었는데, 재시도할 때마다 그 작업이 계속 끊겼다(2026-09-12 실사용 확인). 이제는
+              // /api/system/recover가 먼저 원인을 가린다 — 인프라가 실제로 이상할 때만 재기동하고, 인프라는
+              // 멀쩡한데 특정 몰의 락이 오래 잡혀있을 뿐이면 그 작업만 중지시켜, 무관한 다른 몰의 진행 중
+              // 작업까지 같이 죽이지 않는다(app/api/system/recover/route.ts 참고).
+              fetch('/api/system/recover', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: f.url }),
+              }).catch(() => {})
+              fetch(...f.retryArgs).catch(() => {})
+            }}
               className="px-2 py-1 bg-white text-rose-600 rounded-full text-xs font-semibold hover:bg-rose-50 transition-colors">
               다시 시도
             </button>

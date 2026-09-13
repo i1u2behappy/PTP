@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { GoogleGenAI, FunctionCallingConfigMode, Type, type Schema } from '@google/genai'
 import sharp from 'sharp'
+import { Agent } from 'undici'
 
 /** 사용자가 화면에서 체크박스로 켜고 끄는 AI 공급자(2026-09-02, 사용자 요청: "엔트로픽/제미나이/올라마
  *  체크해서 쓰게 해달라, 나중에 다른 AI도 더 붙일 수 있게"). 정의와 관문은 lib/aiProviderGate.ts에 있고
@@ -92,6 +93,42 @@ function withOllamaQueue<T>(fn: () => Promise<T>): Promise<T> {
 const OLLAMA_MAX_CANDIDATES = 60
 const OLLAMA_TIMEOUT_MS = 25_000
 
+// Ollama의 컨텍스트 기본값은 4096 토큰이고, 그걸 넘는 입력은 **에러 없이 조용히 잘려서** 들어간다.
+// 실측(2026-09-13, 투비즈온 "AI 호출 실패" 조사): 1만8천 자(약 9천 토큰) 프롬프트를 보냈더니 실제 처리된
+// 입력은 2,050토큰뿐이었고, 앞쪽의 지시문과 도구 설명이 통째로 날아가 모델이 도구 호출 대신 남은 본문을
+// 요약하는 일반 텍스트로 답했다 — tool_calls가 비니 호출부는 null을 받고, 화면엔 "AI 호출 실패"로만
+// 뜬다(왜인지는 아무 데도 안 남는다). 바로 위 OLLAMA_MAX_CANDIDATES 주석이 적어둔 "긴 프롬프트면 도구
+// 호출 대신 텍스트로 샌다"도 십중팔구 같은 원인이었다 — 후보 수를 60개로 줄인 건 결과적으로 프롬프트를
+// 기본 컨텍스트 안에 다시 집어넣은 것이었지, 모델 실력 문제가 아니었던 셈이다.
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 8_192
+// num_ctx를 키우면 그만큼 VRAM과 시간이 든다(실측: 16384로 올리면 모델 적재가 9.6GB→11.8GB, 생성도 5분
+// 넘게 걸려 아래 타임아웃에 걸렸다). 그래서 "컨텍스트를 키우는 것"과 "프롬프트를 줄이는 것"을 같이 쓴다 —
+// 한국어는 대략 1.5자/토큰이라 6,000자면 약 4,000토큰, 도구 스키마와 출력까지 더해도 8,192 안에 든다
+// (실측: 5,000자 프롬프트 → 입력 3,347토큰, 205초, 도구 호출 정상). Groq의 GROQ_CONTEXT_CHAR_LIMIT와
+// 같은 취지이며, 이 PC의 Ollama가 느린 것(2천 자짜리도 122초)을 감안한 값이기도 하다.
+const OLLAMA_PROMPT_CHAR_LIMIT = Number(process.env.OLLAMA_PROMPT_CHAR_LIMIT) || 6_000
+
+/** 프롬프트가 num_ctx를 넘겨 "조용히" 잘리는 대신, 어디를 버릴지 우리가 정하고 잘랐다는 사실을 로그로
+ *  남긴다 — 반드시 앞쪽(지시문 + 도구 설명)을 살리고 뒤쪽(수집 원문)을 버린다. Ollama의 기본 잘림은
+ *  정확히 그 반대로 동작해(앞을 버림) 도구 호출 자체를 없애버린다. */
+export function fitOllamaPrompt(prompt: string, label = '(이름없음)'): string {
+  if (prompt.length <= OLLAMA_PROMPT_CHAR_LIMIT) return prompt
+  console.log(`[AI:ollama] ${label}: 프롬프트 ${prompt.length}자 → ${OLLAMA_PROMPT_CHAR_LIMIT}자로 줄임(num_ctx ${OLLAMA_NUM_CTX} 초과 방지)`)
+  return `${prompt.slice(0, OLLAMA_PROMPT_CHAR_LIMIT)}\n…(원문 이하 생략 — 컨텍스트 한도)`
+}
+
+// Node의 fetch(undici)는 headersTimeout/bodyTimeout이 각각 기본 300초다. Ollama 호출은 stream:false라
+// 생성이 전부 끝날 때까지 헤더가 오지 않으므로, 5분을 넘기는 요청은 우리가 준 타임아웃(아래
+// MALL_REPORT_OLLAMA_TIMEOUT_MS = 480초)과 무관하게 `TypeError: fetch failed`로 끊긴다 — 실측으로
+// 두 번 재현(2026-09-13, 각각 305.1초/304.8초). lib/workerClient.ts가 2026-08-23에 겪은 것과 똑같은
+// 함정인데 이쪽 호출들엔 적용돼 있지 않았다. 로컬호스트 전용이라 두 타임아웃을 끄고(0 = 비활성화),
+// 실제 중단은 각 호출이 넘기는 AbortSignal이 책임진다.
+const ollamaDispatcher = new Agent({ headersTimeout: 0, bodyTimeout: 0 })
+
+/** 모든 Ollama /api/chat 호출이 공유하는 고정 옵션 — 새 호출을 추가할 때 num_ctx나 dispatcher를 빠뜨려
+ *  위 두 함정(조용한 잘림 / 300초 강제 종료)에 다시 걸리지 않게 한 곳에 모아둔다. */
+const OLLAMA_CHAT_OPTIONS = { num_ctx: OLLAMA_NUM_CTX }
+
 /** signal(선택)을 넘기면 "몰 구조분석 중지" 버튼이 이 호출까지 실제로 끊는다 — CPU 연산 자체인 로컬
  *  추론은 끊자마자 Ollama(llama-server)도 그 요청의 생성을 멈춘다(fetch abort 시 서버가 요청 컨텍스트
  *  취소를 감지하는 표준 동작, 2026-08-22 사용자 요청: "중지를 누르면 llama-server 작업도 멈추게"). */
@@ -116,14 +153,16 @@ async function pickIndicesWithOllamaOnce(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: combinedSignal,
+      dispatcher: ollamaDispatcher,
       body: JSON.stringify({
         model: OLLAMA_MODEL,
         stream: false,
         think: false,
+        options: OLLAMA_CHAT_OPTIONS,
         // 모델이 세션 중 계속 메모리에 남아있게(콜드스타트 자체는 실제로 막아준다 — 다만 위 주석대로
         // 이게 300초 지연의 진짜 원인은 아니었다).
         keep_alive: '30m',
-        messages: [{ role: 'user', content: prompt }],
+        messages: [{ role: 'user', content: fitOllamaPrompt(prompt, toolName) }],
         tools: [{
           type: 'function',
           function: {
@@ -137,7 +176,7 @@ async function pickIndicesWithOllamaOnce(
           },
         }],
       }),
-    })
+    } as RequestInit)
     if (!res.ok) return []
     const data = await res.json() as { message?: { tool_calls?: { function: { name: string; arguments: unknown } }[] } }
     const call = data.message?.tool_calls?.[0]
@@ -880,9 +919,11 @@ async function detectSortLabelsWithOllamaVision(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
         body: JSON.stringify({
           model: OLLAMA_VISION_MODEL,
           stream: false,
+          options: OLLAMA_CHAT_OPTIONS,
           keep_alive: '30m',
           messages: [{
             role: 'user',
@@ -890,7 +931,7 @@ async function detectSortLabelsWithOllamaVision(
             images: [imageBase64],
           }],
         }),
-      })
+      } as RequestInit)
       if (!res.ok) return null
       const data = await res.json() as { message?: { content?: string } }
       const match = (data.message?.content ?? '').match(/\[[\s\S]*\]/)
@@ -1104,9 +1145,11 @@ async function detectCategoryMenuTriggerWithOllamaVision(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
         body: JSON.stringify({
           model: OLLAMA_VISION_MODEL,
           stream: false,
+          options: OLLAMA_CHAT_OPTIONS,
           keep_alive: '30m',
           messages: [{
             role: 'user',
@@ -1114,7 +1157,7 @@ async function detectCategoryMenuTriggerWithOllamaVision(
             images: [imageBase64],
           }],
         }),
-      })
+      } as RequestInit)
       if (!res.ok) return null
       const data = await res.json() as { message?: { content?: string } }
       const match = (data.message?.content ?? '').match(/\{[\s\S]*\}/)
@@ -1245,9 +1288,11 @@ async function detectCategoryGroupCountWithOllamaVision(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
         body: JSON.stringify({
           model: OLLAMA_VISION_MODEL,
           stream: false,
+          options: OLLAMA_CHAT_OPTIONS,
           keep_alive: '30m',
           messages: [{
             role: 'user',
@@ -1255,12 +1300,243 @@ async function detectCategoryGroupCountWithOllamaVision(
             images: [imageBase64],
           }],
         }),
-      })
+      } as RequestInit)
       if (!res.ok) return null
       const data = await res.json() as { message?: { content?: string } }
       const match = (data.message?.content ?? '').match(/\d+/)
       if (!match) return null
       return Math.max(0, parseInt(match[0], 10))
+    } catch {
+      return null
+    }
+  })
+}
+
+function buildVisibleCategoryNamesPrompt(mallName: string): string {
+  return `이 스크린샷은 한국 쇼핑몰 '${mallName}'에서 카테고리 메뉴를 열어본 화면이다. **사람이 이 화면에서
+상품 카테고리로 읽는 이름을 전부** 순서대로 뽑아라. 대분류와 그 아래 하위 카테고리를 모두 포함한다.
+다음은 카테고리가 아니므로 넣지 마라: 로그인/로그아웃/회원가입/장바구니/마이페이지/주문조회/고객센터/
+검색창/공지사항/이벤트 배너 문구/가격이나 숫자만 있는 항목. 화면에 실제로 보이는 글자만 답하고, 안 보이는
+것을 상상해서 채우지 마라.`
+}
+
+/** lib/scraper.ts가 "화면에서 파악한 카테고리"와 "최종 결과"를 대조하는 데 쓴다(사용자 지시, 2026-09-13 —
+ *  "화면을 통해 카테고리를 파악했으면, 마지막 결과가 그 화면의 카테고리와 맞는지, 안 맞는 건 어떤 건지
+ *  왜 그런지 피드백을 줄 수 있게 해야 한다"). 화면 인식은 이미 트리거를 찾고(detectCategoryMenuTriggerFromScreenshot)
+ *  그룹 수를 세는 데(detectVisibleCategoryGroupCount) 쓰고 있었지만, "그래서 그 화면에 뭐가 보였는지"를
+ *  이름 단위로 남기지 않아 결과와 대조할 근거 자체가 없었다.
+ *  null=두 공급자 다 실패(호출부는 대조를 건너뛴다 — 없는 근거로 "누락"이라고 단정하지 않는다). */
+export async function detectVisibleCategoryNames(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<string[] | null> {
+  const viaGroq = await detectVisibleCategoryNamesWithGroqVision(mallName, imageBase64, mimeType, signal)
+  if (viaGroq !== null) return viaGroq
+  return await detectVisibleCategoryNamesWithOllamaVision(mallName, imageBase64, signal)
+}
+
+/** 비전이 돌려준 이름 목록을 정리한다 — 공백/빈 문자열/중복 제거, 길이 상한(메뉴 이름이 아닌 문장이
+ *  섞여 들어오는 것 방지), 개수 상한. 순수 함수라 테스트로 규칙을 고정해둔다. */
+export function sanitizeVisibleCategoryNames(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const name = item.replace(/\s+/g, ' ').trim()
+    if (!name || name.length > 40) continue
+    if (seen.has(name)) continue
+    seen.add(name)
+    out.push(name)
+    if (out.length >= 300) break
+  }
+  return out
+}
+
+async function detectVisibleCategoryNamesWithGroqVision(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<string[] | null> {
+  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) return null
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(OLLAMA_TIMEOUT_MS)]) : AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
+      body: JSON.stringify({
+        model: GROQ_VISION_MODEL,
+        max_tokens: 900,
+        temperature: 0,
+        reasoning_effort: 'none',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: buildVisibleCategoryNamesPrompt(mallName) },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_visible_categories',
+            description: '화면에 보이는 상품 카테고리 이름을 순서대로 반환한다.',
+            parameters: {
+              type: 'object',
+              required: ['names'],
+              properties: { names: { type: 'array', items: { type: 'string' }, description: '화면에 보이는 카테고리 이름들' } },
+            },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_visible_categories' } },
+      }),
+    })
+    if (!res.ok) return null
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) return null
+    const names = sanitizeVisibleCategoryNames((JSON.parse(call.function.arguments) as { names?: unknown }).names)
+    return names.length ? names : null
+  } catch {
+    return null
+  }
+}
+
+async function detectVisibleCategoryNamesWithOllamaVision(
+  mallName: string, imageBase64: string, signal?: AbortSignal,
+): Promise<string[] | null> {
+  if (!isAiProviderEnabled('ollama')) return null
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
+        body: JSON.stringify({
+          model: OLLAMA_VISION_MODEL,
+          stream: false,
+          options: OLLAMA_CHAT_OPTIONS,
+          keep_alive: '30m',
+          messages: [{
+            role: 'user',
+            // 이 모델은 도구 호출을 지원하지 않아(OLLAMA_VISION_MODEL 주석) 프롬프트로 JSON 배열만 강제한다.
+            content: `${buildVisibleCategoryNamesPrompt(mallName)}\n\n다른 설명 없이 JSON 배열만 출력해라(예: ["여성의류","남성의류"]).`,
+            images: [imageBase64],
+          }],
+        }),
+      } as RequestInit)
+      if (!res.ok) return null
+      const content = (await res.json() as { message?: { content?: string } }).message?.content ?? ''
+      const match = content.match(/\[[\s\S]*\]/)
+      if (!match) return null
+      const names = sanitizeVisibleCategoryNames(JSON.parse(match[0]))
+      return names.length ? names : null
+    } catch {
+      return null
+    }
+  })
+}
+
+function buildProductListVisiblePrompt(mallName: string): string {
+  return `이 스크린샷은 한국 쇼핑몰 '${mallName}'의 어떤 카테고리 페이지를 연 화면이다. **사람이 보기에 이
+화면에 판매 상품 목록이 있는가?** 상품 썸네일과 상품명/가격이 격자나 목록 형태로 여러 개 늘어서 있으면
+있는 것이다. 다음은 "있다"의 근거가 아니다: 배너/기획전 이미지만 있음, 카테고리 메뉴만 있음, "상품이
+없습니다" 안내, 로그인 화면, 빈 화면. 확실하지 않으면 false로 답해라.`
+}
+
+/** lib/scraper.ts의 "누락 카테고리 재검증"이 마지막 수단으로 쓴다(사용자 지시, 2026-09-13 — "사람이 보는
+ *  화면에는 모든 카테고리가 확인이 된다. 누락된 카테고리가 있으면 다른 방법으로라도 다시 검증하는
+ *  프로세스를 넣어라"). DOM 기반 상품 개수 세기(countProductsSettled)가 0으로 나와도, 사람 눈에 상품이
+ *  보이면 그건 우리 셀렉터가 못 읽은 것이지 빈 카테고리가 아니다 — 그 판단을 화면으로 대신한다.
+ *  null = 두 공급자 다 실패(호출부는 이 근거 없이 판단한다). */
+export async function detectProductListVisible(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<boolean | null> {
+  const viaGroq = await detectProductListVisibleWithGroqVision(mallName, imageBase64, mimeType, signal)
+  if (viaGroq !== null) return viaGroq
+  return await detectProductListVisibleWithOllamaVision(mallName, imageBase64, signal)
+}
+
+async function detectProductListVisibleWithGroqVision(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<boolean | null> {
+  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) return null
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(OLLAMA_TIMEOUT_MS)]) : AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
+      body: JSON.stringify({
+        model: GROQ_VISION_MODEL,
+        max_tokens: 200,
+        temperature: 0,
+        reasoning_effort: 'none',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: buildProductListVisiblePrompt(mallName) },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_product_list_visible',
+            description: '이 화면에 판매 상품 목록이 보이는지 답한다.',
+            parameters: {
+              type: 'object',
+              required: ['visible'],
+              properties: {
+                visible: { type: 'boolean', description: '상품 목록이 보이면 true' },
+                itemCount: { type: 'integer', description: '대략 몇 개가 보이는지(모르면 0)' },
+              },
+            },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_product_list_visible' } },
+      }),
+    })
+    if (!res.ok) return null
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) return null
+    const args = JSON.parse(call.function.arguments) as { visible?: unknown }
+    return typeof args.visible === 'boolean' ? args.visible : null
+  } catch {
+    return null
+  }
+}
+
+async function detectProductListVisibleWithOllamaVision(
+  mallName: string, imageBase64: string, signal?: AbortSignal,
+): Promise<boolean | null> {
+  if (!isAiProviderEnabled('ollama')) return null
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
+        body: JSON.stringify({
+          model: OLLAMA_VISION_MODEL,
+          stream: false,
+          options: OLLAMA_CHAT_OPTIONS,
+          keep_alive: '30m',
+          messages: [{
+            role: 'user',
+            content: `${buildProductListVisiblePrompt(mallName)}\n\n다른 설명 없이 true 또는 false만 출력해라.`,
+            images: [imageBase64],
+          }],
+        }),
+      } as RequestInit)
+      if (!res.ok) return null
+      const content = ((await res.json() as { message?: { content?: string } }).message?.content ?? '').toLowerCase()
+      if (content.includes('true')) return true
+      if (content.includes('false')) return false
+      return null
     } catch {
       return null
     }
@@ -1617,12 +1893,14 @@ async function generateMallProfileReportOllama(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: reportAiSignal(MALL_REPORT_OLLAMA_TIMEOUT_MS, signal),
+        dispatcher: ollamaDispatcher,
         body: JSON.stringify({
           model: OLLAMA_MODEL,
           stream: false,
           think: false,
+          options: OLLAMA_CHAT_OPTIONS,
           keep_alive: '30m',
-          messages: [{ role: 'user', content: prompt }],
+          messages: [{ role: 'user', content: fitOllamaPrompt(prompt, '몰 구조분석 리포트') }],
           tools: [{
             type: 'function',
             function: {
@@ -1632,15 +1910,33 @@ async function generateMallProfileReportOllama(
             },
           }],
         }),
-      })
-      if (!res.ok) return null
-      const data = await res.json() as { message?: { tool_calls?: { function: { name: string; arguments: unknown } }[] } }
+      } as RequestInit)
+      // 실패 경로가 넷(HTTP 오류 / 도구 호출 없음 / 인자 파싱 실패 / 예외)인데 예전엔 전부 그냥 null이라,
+      // 화면엔 "AI 호출 실패"만 뜨고 이유는 어디에도 안 남았다 — 2026-09-13 투비즈온 조사에서 원인
+      // (num_ctx 초과로 프롬프트가 잘려 도구 호출이 아예 안 나옴)을 찾는 데 로그가 하나도 도움이 안 됐다.
+      if (!res.ok) {
+        console.log(`[AI:ollama] 몰 구조분석 리포트 실패 — HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`)
+        return null
+      }
+      const data = await res.json() as {
+        message?: { content?: string; tool_calls?: { function: { name: string; arguments: unknown } }[] }
+        prompt_eval_count?: number
+      }
       const call = data.message?.tool_calls?.[0]
-      if (!call) return null
+      if (!call) {
+        console.log(`[AI:ollama] 몰 구조분석 리포트 실패 — 도구 호출 없이 일반 텍스트로 답함(입력 ${data.prompt_eval_count ?? '?'}토큰, num_ctx ${OLLAMA_NUM_CTX}). 답 앞부분: ${JSON.stringify((data.message?.content || '').slice(0, 120))}`)
+        return null
+      }
       const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments
-      if (!args || typeof args !== 'object') return null
+      if (!args || typeof args !== 'object') {
+        console.log('[AI:ollama] 몰 구조분석 리포트 실패 — 도구 인자가 객체가 아님')
+        return null
+      }
       return { ...(args as Omit<MallStructureReport, 'generatedBy'>), generatedBy: 'ollama' }
-    } catch {
+    } catch (e) {
+      // fetch failed(UND_ERR_HEADERS_TIMEOUT)라면 ollamaDispatcher가 제대로 안 붙은 것이다 —
+      // 그 상수 주석 참고.
+      console.log(`[AI:ollama] 몰 구조분석 리포트 실패 — ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`)
       return null
     }
   })
@@ -1675,8 +1971,14 @@ export async function generateMallProfileReport(
     // 어차피 그 결과도 곧 버려질 것이므로 남은 API 호출(과금/무료한도 소모)을 아낀다.
     if (signal?.aborted) return null
     if (!enabledProviders.includes(p.id)) continue
-    const result = await p.fn().catch(() => null)
+    // 공급자별 실패 이유를 남긴다 — 예전엔 여기서도 통째로 삼켜, 화면의 "AI 호출 실패"가 "키가 없어서"인지
+    // "한도 초과"인지 "타임아웃"인지 사용자도 나중에 보는 사람도 알 방법이 없었다(2026-09-13).
+    const result = await p.fn().catch((e: unknown) => {
+      console.log(`[AI:${p.id}] 몰 구조분석 리포트 실패 — ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`)
+      return null
+    })
     if (result) return result
+    console.log(`[AI:${p.id}] 몰 구조분석 리포트를 못 만듦 — 다음 공급자로 넘어감(남은 공급자: ${providers.slice(providers.indexOf(p) + 1).filter(n => enabledProviders.includes(n.id)).map(n => n.id).join(', ') || '없음 → 규칙 기반으로 대체'})`)
   }
   return null
 }

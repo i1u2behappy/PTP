@@ -8,6 +8,12 @@ Ctrl(⌘)+클릭하면 바로 이동하고, 그 문서를 열어두면 오른쪽
 새 스펙 문서를 추가하면 이 노트에도 알맞은 분류로 한 줄 추가해주세요 — 분류는 엄격한 기준이 아니라
 탐색 편의를 위한 것이니, 애매하면 가장 가까운 곳에 넣으면 됩니다.
 
+## 진행 중 작업
+
+아래 스펙 문서들이 "끝난 일의 영구 기록"이라면, 이건 **아직 안 끝난 일**을 담는 유일한 문서입니다.
+
+- [[work-in-progress]] — 작업 인수인계 노트(대화 맥락을 비우기 전에 갱신, 새 대화에서 먼저 읽음)
+
 ## 스크래핑 · 카테고리 탐지
 
 - [[cascading-option-combinations]] — 옵션1↔옵션2 실제 조합 스크랩
@@ -72,6 +78,7 @@ Ctrl(⌘)+클릭하면 바로 이동하고, 그 문서를 열어두면 오른쪽
 - [[sharp-duplicate-version-dll-conflict]] — sharp 중복 버전 Windows DLL 충돌
 - [[back-navigation-trap-no-longer-forces-dashboard]] — 뒤로가기 트랩이 화면 강제 이동시키던 문제
 - [[external-service-readiness]] — 대외 서비스화(범용 솔루션) 준비 검토(인프라/소스/운영)
+- [[customer-request-portal]] — 고객 스크래핑 요청 포털 기본 분석/설계 검토(위 문서의 후속)
 
 ## UI 공통 · 기타
 

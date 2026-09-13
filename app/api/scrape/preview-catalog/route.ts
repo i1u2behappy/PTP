@@ -24,12 +24,16 @@ export async function POST(req: NextRequest) {
     // 개수 집계가 매번 같은 확인을 반복하지 않고 곧장 지수+이분 탐색으로 넘어가게 한다(knownNoPaginationWidget
     // 참고) — "몰구조파악 한 내용은 미리보기/스크래핑 때 반드시 참조돼야 한다"는 기존 원칙과 동일.
     let knownNoPaginationWidget = false
+    let learnedDetailUrlPattern: string | undefined
     if (body.siteId) {
-      const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null, scrape_profile: { hasPaginationWidget?: boolean } | null }>(
+      const res = await pool.query<{ extraction_rules: Record<string, ExtractionRule> | null, scrape_profile: { hasPaginationWidget?: boolean; detailUrlPattern?: string } | null }>(
         'SELECT extraction_rules, scrape_profile FROM sites WHERE id=$1', [body.siteId],
       )
       extractionRules = res.rows[0]?.extraction_rules || undefined
       knownNoPaginationWidget = res.rows[0]?.scrape_profile?.hasPaginationWidget === false
+      // 이 몰에서 학습해둔 상품 상세 URL 패턴 — 플랫폼 프로필에 없는 몰(unknown)에서 "이미지를 감싼
+      // <a>는 전부 상품"이라는 폴백 대신 이 패턴으로 상품을 가려낸다(deriveDetailUrlPattern 참고).
+      learnedDetailUrlPattern = res.rows[0]?.scrape_profile?.detailUrlPattern || undefined
     }
     // 사용자가 미리보기 도중 "중지"를 누르거나 PTP 탭 자체를 닫으면 클라이언트/브라우저가 이 요청의
     // 연결을 끊는다 — req.signal이 그 신호다. previewCatalog의 두 번째 인자(signal)로 넘겨야 workerClient의
@@ -38,9 +42,17 @@ export async function POST(req: NextRequest) {
     // 얹어 보내는 건 아무 효과가 없다(registry.ts의 withStopSignal이 opts.stopSignal을 그 REQUEST_SIGNAL로
     // 덮어써버리고, AbortSignal 자체는 JSON으로 직렬화도 안 된다). 이 인자를 빠뜨렸던 탓에 "PTP를 닫아도
     // 미리보기가 안 멈춘다"는 문제가 있었다(2026-09-06, 사용자 지적).
-    const result = await previewCatalog({ ...body, extractionRules, knownNoPaginationWidget }, req.signal)
+    const result = await previewCatalog({ ...body, extractionRules, knownNoPaginationWidget, detailUrlPattern: learnedDetailUrlPattern }, req.signal)
     // 체크리스트가 카테고리별 개수/확인일시를 보여줄 수 있게 저장해둔다 — 실패해도 미리보기 결과 자체는
     // 그대로 보여줘야 하니 응답을 막지 않는다.
+    // 새로 학습한 상품 상세 URL 패턴은 사이트에 기억해둔다 — 다음부터 개수 세기/미리보기/스크랩이
+    // 전부 이 패턴을 기준으로 상품을 가려낸다(실패해도 미리보기 결과 자체는 그대로 보여준다).
+    if (body.siteId && result.learnedDetailUrlPattern) {
+      await pool.query(
+        `UPDATE sites SET scrape_profile = jsonb_set(COALESCE(scrape_profile, '{}'::jsonb), '{detailUrlPattern}', to_jsonb($1::text)) WHERE id = $2`,
+        [result.learnedDetailUrlPattern, body.siteId],
+      ).catch(() => {})
+    }
     if (body.siteId && result.categoryCounts?.length) {
       await persistCategoryCounts(body.siteId, result.categoryCounts).catch(() => {})
     }

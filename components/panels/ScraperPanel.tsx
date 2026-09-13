@@ -6,6 +6,8 @@ import { PRODUCTS_LIST_TAB } from '../shell/menuTabs'
 import { FIXED_FIELD_INFO } from '../../lib/master/schema'
 import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
 import RemoteScreenViewer from './RemoteScreenViewer'
+import { shortenCategoryUrlForDisplay } from '../../lib/urlDisplay'
+import { looksLikeMallHomeUrl } from '../../lib/categoryUrl'
 
 // lib/extract.ts의 CLAIMED_INFO_LABEL_RE와 같은 목록 — 이 파일은 Playwright 등 서버 전용 코드를 담고
 // 있어 클라이언트 컴포넌트에서 직접 import하지 않고 그대로 복제해 둔다(둘 중 하나를 고치면 같이 맞출 것).
@@ -365,6 +367,16 @@ interface MallProfileSignals {
   /** 몰 구조분석 도중/직후 로그인 세션이 끊긴 것으로 보이면 true — lib/scraper.ts의
    *  MallProfileSignals.sessionLostDuringAnalysis 주석 참고. */
   sessionLostDuringAnalysis?: boolean
+  /** lib/scraper.ts의 MallProfileSignals.categoryScreenCheck와 같은 모양 — 화면(비전)으로 읽은 카테고리와
+   *  최종 결과의 대조 결과. 화면 인식을 안 탔거나 실패한 실행에서는 없다(그땐 아무것도 표시하지 않는다). */
+  categoryScreenCheck?: {
+    screenNames: string[]
+    /** 재검증으로 되살려 최종 목록에 다시 넣은 카테고리(lib/scraper.ts의 recoverMissingCategories) */
+    recovered?: { name: string; href: string; evidence: string }[]
+    missing: { name: string; reason: string }[]
+    extra: string[]
+    checkedAt: string
+  } | null
   /** 카테고리 체크리스트 컬럼용 — previewCatalog가 저장해둔 카테고리별 개수(href 기준, 사용자 요청 2026-08-17) */
   categoryCounts?: Record<string, { count: number; truncated?: boolean; label: string; checkedAt: string }>
   /** 지난번 categoryLinks 갱신 때 새로 나타난 href 목록 — "발견된 카테고리 N개" 배지의 "새 카테고리 M개"용
@@ -655,6 +667,47 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
             <ul className="mb-3 text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2 space-y-0.5">
               {result.diffs.map(d => <li key={d}>· {d}</li>)}
             </ul>
+          )}
+          {/* 화면 대조 — 카테고리를 "사람이 보는 화면" 기준으로 찾았으면, 최종 결과가 그 화면과 맞는지까지
+              되짚어 보여준다(사용자 지시, 2026-09-13: "화면을 통해 카테고리를 파악했으면, 마지막 결과가
+              그 화면의 카테고리와 맞는지, 안 맞는 건 어떤 건지 왜 그런지 피드백을 줄 수 있게 해야지").
+              화면 인식을 안 탔거나 실패한 실행에서는 categoryScreenCheck 자체가 없어 아무것도 안 보인다. */}
+          {result.signals.categoryScreenCheck && (
+            <div className={`mb-3 text-xs rounded-lg px-3 py-2 ${result.signals.categoryScreenCheck.missing.length ? 'text-amber-800 bg-amber-50' : 'text-emerald-800 bg-emerald-50'}`}>
+              {/* 재검증으로 되살린 카테고리 — "화면엔 보이는데 결과에 없으면 다른 방법으로 다시 확인하라"는
+                  지시(2026-09-13)에 따라 추가된 단계의 결과다. 무엇을 근거로 되살렸는지까지 보여준다. */}
+              {!!result.signals.categoryScreenCheck.recovered?.length && (
+                <div className="mb-2 pb-2 border-b border-current/20">
+                  <p className="font-medium">🛟 화면에는 있는데 빠졌던 카테고리 {result.signals.categoryScreenCheck.recovered.length}개를 재검증으로 되살렸습니다</p>
+                  <ul className="mt-0.5 space-y-0.5">
+                    {result.signals.categoryScreenCheck.recovered.slice(0, 12).map(r => (
+                      <li key={r.href}>· <span className="font-medium">{r.name}</span> — {r.evidence}</li>
+                    ))}
+                  </ul>
+                  {result.signals.categoryScreenCheck.recovered.length > 12 && (
+                    <p className="mt-0.5">…외 {result.signals.categoryScreenCheck.recovered.length - 12}개</p>
+                  )}
+                </div>
+              )}
+              {result.signals.categoryScreenCheck.missing.length === 0 ? (
+                <p>✓ 화면에서 읽은 카테고리 {result.signals.categoryScreenCheck.screenNames.length}개가 모두 결과에 담겼습니다.</p>
+              ) : (
+                <>
+                  <p className="font-medium mb-1">
+                    ⚠ 화면에는 보이는데 결과에 없는 카테고리 {result.signals.categoryScreenCheck.missing.length}개
+                    <span className="font-normal text-amber-700"> (화면에서 읽은 {result.signals.categoryScreenCheck.screenNames.length}개 기준)</span>
+                  </p>
+                  <ul className="space-y-0.5">
+                    {result.signals.categoryScreenCheck.missing.slice(0, 12).map(m => (
+                      <li key={m.name}>· <span className="font-medium">{m.name}</span> — {m.reason}</li>
+                    ))}
+                  </ul>
+                  {result.signals.categoryScreenCheck.missing.length > 12 && (
+                    <p className="mt-1 text-amber-700">…외 {result.signals.categoryScreenCheck.missing.length - 12}개</p>
+                  )}
+                </>
+              )}
+            </div>
           )}
           {result.autoRuleFields.length > 0 && (
             <p className="mb-3 text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2">
@@ -1037,6 +1090,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const [exactTotalLoading, setExactTotalLoading] = useState(false)
   const exactTotalAbortRef = useRef<AbortController | null>(null)
   const [previewItems, setPreviewItems]     = useState<PreviewItem[]>([])
+  /** 미리보기 1건을 어느 목록에서·어떤 정렬로 뽑았는지(lib/scraper.ts의 CatalogPreviewResult.previewSource) */
+  const [previewSource, setPreviewSource] = useState<{ url: string; requestedUrl: string; switchedReason?: string; sortClick?: { clickText: string; applied: boolean } } | null>(null)
   // 일반모드 카탈로그 미리보기 전용 — 카테고리별 상품 개수만(이름/썸네일 없이). 개발자모드는 이 필드를
   // 채우지 않으므로(확장이 previewItems 쪽만 보냄) 항상 빈 배열로 남아 기존 표시와 자연히 구분된다.
   const [categoryCounts, setCategoryCounts] = useState<CategoryCountItem[]>([])
@@ -1795,7 +1850,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setCategoryInfo({})
     setPreviewResult(null)
     setPreviewTotal(null)
-    setPreviewItems([]); setCategoryCounts([])
+    setPreviewItems([]); setCategoryCounts([]); setPreviewSource(null)
     setSessionExpiredWarning(false)
     // 반대로, 이 몰이 이전에 몰 구조분석/카테고리 불러오기를 이미 성공적으로 마쳐뒀다면(sites.scrape_profile
     // 캐시) 그 결과를 곧바로 되살려, 두 단계를 또 거칠 필요 없이 카테고리 선택→스크래핑으로 바로 넘어갈
@@ -2056,6 +2111,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     try {
       const res = await fetch(`/api/scrape/current-url?siteId=${selectedSite.id}`)
       const d = await res.json() as { url: string | null }
+      // 몰 홈(첫 화면)은 카테고리가 아니다 — 목록에 들어가면 그 줄이 미리보기/스크랩의 첫 대상이 돼
+      // "몰 홈페이지 자체가 상품 1건"으로 나오는 사고로 이어진다(2026-09-13, 투비즈온 실사용 확인:
+      // 상품명이 몰 타이틀, 공급가 ₩2,640). 쿼리가 붙은 URL은 카테고리일 수 있어 막지 않는다.
+      if (d.url && looksLikeMallHomeUrl(d.url)) {
+        alert('지금 로그인 창이 보고 있는 화면이 몰 첫 화면(홈)입니다 — 카테고리가 아니라 목록에 넣지 않았습니다.\n\n로그인 창에서 원하는 카테고리 페이지로 이동한 뒤 다시 눌러주세요. (카테고리 링크가 새 탭으로 열렸다면 그 탭에서 한 번 더 이동하거나 새로고침한 뒤 눌러주세요.)')
+        return
+      }
       if (d.url) {
         const isNew = !manualCategoryUrlsText.split('\n').map(s => s.trim()).filter(Boolean).includes(d.url)
         setManualCategoryUrlsText(prev => {
@@ -2138,7 +2200,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPreviewLoading(false)
     setPreviewResult(null)
     setPreviewTotal(null)
-    setPreviewItems([]); setCategoryCounts([])
+    setPreviewItems([]); setCategoryCounts([]); setPreviewSource(null)
     exactTotalAbortRef.current?.abort(); setExactTotal(null); setExactTotalLoading(false)
     // "전체 가져오기" 체크 상태(categoryUrlsText)도 같은 이유로 비운다 — 예전엔 목록만 새로 불러오고
     // 체크는 그대로 남겨뒀는데(선택 보존이 의도였음), 몰 구조분석을 다른 경로(예: 워커에 직접 재분석
@@ -2310,9 +2372,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 비활성화될 수 있었다(2026-08-27, 카테고리별 상품 개수 표와 같이 발견된 문제).
   const canPreview = !!targetUrl.trim() || activeCategoryUrlsText.trim().length > 0
 
-  function applyCatalogPreview(d: { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; categoryCounts?: CategoryCountItem[]; needsLogin?: boolean; noProductsFound?: boolean; devPreviewElapsedSec?: number | null }) {
+  function applyCatalogPreview(d: { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; categoryCounts?: CategoryCountItem[]; needsLogin?: boolean; noProductsFound?: boolean; devPreviewElapsedSec?: number | null; previewSource?: { url: string; requestedUrl: string; switchedReason?: string; sortClick?: { clickText: string; applied: boolean } } | null }) {
     setPreviewTotal(d.total)
     setDetectedPlatform(d.platform || null)
+    setPreviewSource(d.previewSource ?? null)
     setPreviewItems((d.items || []).slice(d.preview ? 1 : 0)) // 첫 상품은 위 상세 카드에 이미 나오니 그리드에서는 제외
     setCategoryCounts(d.categoryCounts || [])
     // 체크리스트의 상품개수/확인일시 컬럼도 곧바로 갱신한다 — 서버(lib/scraper.ts의 persistCategoryCounts)에도
@@ -2448,7 +2511,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     }
     setPreviewResult(null)
     setPreviewTotal(null)
-    setPreviewItems([]); setCategoryCounts([])
+    setPreviewItems([]); setCategoryCounts([]); setPreviewSource(null)
     setPreviewLoading(true)
     setSessionExpiredWarning(false)
     setNoProductsFoundWarning(false)
@@ -2524,7 +2587,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     setPreviewResult(null)
     earlyPreviewAppliedRef.current = false
     setPreviewTotal(null)
-    setPreviewItems([]); setCategoryCounts([])
+    setPreviewItems([]); setCategoryCounts([]); setPreviewSource(null)
     setPreviewProgress(null)
     // 스크랩 대상이 다시 정해지는 시점이므로, 이전 선택 기준으로 구한 "정확한 총 개수"는 더 이상 안
     // 맞을 수 있어 같이 지운다(선택이 안 바뀌었으면 그냥 다시 눌러 확인).
@@ -2578,7 +2641,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         }),
       })
       if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`확인 실패: ${e.error || res.status}`); return }
-      const d = await res.json() as { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; categoryCounts?: CategoryCountItem[]; needsLogin?: boolean; noProductsFound?: boolean; superseded?: boolean }
+      const d = await res.json() as { total: number; platform: string; preview: { sourceUrl: string; product: PreviewProduct } | null; items: PreviewItem[]; categoryCounts?: CategoryCountItem[]; needsLogin?: boolean; noProductsFound?: boolean; superseded?: boolean; previewSource?: { url: string; requestedUrl: string; switchedReason?: string; sortClick?: { clickText: string; applied: boolean } } | null }
       // 같은 몰에 대해 다른 탭/요청이 더 뒤에 미리보기를 시작해 이 실행이 서버에서 중간에 밀려난
       // 경우(lib/scraper.ts의 beginPreviewRun 참고) — 이 응답은 불완전하니 화면에 반영하지 않는다.
       // 밀어낸 쪽(진짜 최신 요청)의 응답이 곧 따로 온다.
@@ -3150,11 +3213,15 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       )}
                     </div>
                   </td>
-                  <td className="px-3 py-1.5 max-w-[320px] truncate">
+                  {/* URL은 길어서 잘리는데, 하필 카테고리를 구분하는 부분(?ctno=001 등)이 **뒤쪽**에 있어
+                      앞에서 자르면 모든 행이 똑같아 보인다 — 사용자가 "현재 카테고리를 제대로 못 불러온다"고
+                      본 것도 실제로는 이 표시 때문이었다(2026-09-13, 투비즈온: 저장된 값엔 ?ctno=001이
+                      멀쩡히 있었다). 도메인/경로 앞부분은 줄이고 파일명+쿼리를 그대로 보여준다. */}
+                  <td className="px-3 py-1.5 max-w-[320px]">
                     <button type="button" onClick={() => handleOpenItem(href)}
                       title={`${href} — 클릭하면 이 카테고리 페이지를 엽니다`}
-                      className="text-gray-400 hover:text-teal-600 hover:underline truncate max-w-full">
-                      {href}
+                      className="text-gray-400 hover:text-teal-600 hover:underline block max-w-full truncate text-left">
+                      {shortenCategoryUrlForDisplay(href)}
                     </button>
                   </td>
                   <td className="px-3 py-1.5 text-right text-gray-600 whitespace-nowrap" title={count?.truncated ? truncatedTitle : undefined}>
@@ -4174,6 +4241,27 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             </div>
           )}
 
+          {/* 이 상품을 **어느 카테고리에서, 어떤 정렬로** 뽑았는지 — 없으면 사용자는 자기가 고른
+              카테고리의 상품을 보고 있다고 오해한다(사용자 지적, 2026-09-13: "왜 다른 카테고리를
+              봤는지"). 첫 카테고리가 비어 조용히 갈아탄 경우와 정렬 클릭이 실패한 경우를 분명히 알린다. */}
+          {previewResult && previewSource && mallMode === 'normal' && (
+            <div className={`mt-2 text-xs rounded-lg px-3 py-2 ${previewSource.switchedReason || previewSource.sortClick?.applied === false ? 'text-amber-800 bg-amber-50' : 'text-gray-600 bg-gray-50'}`}>
+              <p>
+                <span className="font-medium">표본 출처</span> —{' '}
+                <span title={previewSource.url}>{shortenCategoryUrlForDisplay(previewSource.url)}</span>
+                {previewSource.sortClick && (
+                  previewSource.sortClick.applied
+                    ? <span className="text-emerald-700">{` · 정렬 "${previewSource.sortClick.clickText}" 적용됨`}</span>
+                    : <span className="text-amber-700">{` · ⚠ 정렬 "${previewSource.sortClick.clickText}"을 화면에서 못 찾아 기본 정렬로 뽑음`}</span>
+                )}
+              </p>
+              {previewSource.switchedReason && (
+                <p className="mt-0.5">
+                  ⚠ {previewSource.switchedReason} (고른 카테고리: <span title={previewSource.requestedUrl}>{shortenCategoryUrlForDisplay(previewSource.requestedUrl)}</span>)
+                </p>
+              )}
+            </div>
+          )}
           {previewResult && (
             <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
               {mallMode === 'normal' && (

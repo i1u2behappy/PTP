@@ -13,10 +13,11 @@ import { chromium, type BrowserContext, type Page, type APIResponse, type Elemen
 import { load as loadHtml } from 'cheerio'
 import iconv from 'iconv-lite'
 import type { ExtractedProduct } from './ai'
-import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsFromScreenshot, detectCategoryMenuTriggerFromScreenshot, detectVisibleCategoryGroupCount, type MallStructureReport, type OptionCandidate, type AiProviderId, ALL_AI_PROVIDERS, runWithAiProviders } from './ai'
+import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsFromScreenshot, detectCategoryMenuTriggerFromScreenshot, detectVisibleCategoryGroupCount, detectVisibleCategoryNames, detectProductListVisible, type MallStructureReport, type OptionCandidate, type AiProviderId, ALL_AI_PROVIDERS, runWithAiProviders } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
+import { isSamePageUrl, looksLikeMallHomeUrl } from './categoryUrl'
 import { runAutoAnalysis } from './scrape/adjustment'
 import pool, { decryptSecret } from './db'
 import { acquireKeepAwake, releaseKeepAwake } from './keepAwake'
@@ -111,6 +112,9 @@ export interface ScrapeOptions {
    *  구워 넣을 수 있는 kind:'query' 정렬은 categoryUrls 자체에 이미 반영돼 있어 이 맵이 필요 없다 —
    *  collectFromListing이 listingUrl로 처음 진입한 순간에만 한 번 적용한다. */
   categorySortClicks?: Record<string, string>
+  /** 이 몰에서 학습해 기억해둔 상품 상세 URL 패턴(정규식 source) — deriveDetailUrlPattern 참고.
+   *  PLATFORM_PROFILES에 없는 몰(platform=unknown)에서 상품 링크 판별의 기준이 된다. */
+  detailUrlPattern?: string
   /** 이미 스크랩된 상품 URL — 목록에서 발견해도 건너뛴다 */
   excludeUrls?: string[]
   /** 상품 페이지 방문 사이 최소 지연(ms). 실제 지연은 이 값~2배 사이 랜덤 (차단 방지) */
@@ -257,6 +261,31 @@ function resolveMainPage(context: BrowserContext, siteId: number): Page | null {
   const pages = context.pages()
   if (tracked && pages.includes(tracked)) return tracked
   return pages.length ? pages[pages.length - 1] : null
+}
+
+// 사용자가 로그인 창에서 카테고리 링크를 누르면 몰이 **새 탭으로 여는 경우**가 흔하다(target=_blank).
+// 그때 "현재 카테고리 가져오기"는 추적 중인 원래 탭(대개 홈)을 읽어 엉뚱한 URL을 담았다 — 투비즈온
+// 실사용 확인(2026-09-13): 서버에 기억된 수동 카테고리 표본에 `index.php`(홈)가 그대로 섞여 있었다.
+// 그래서 "마지막으로 실제 페이지 이동이 일어난 탭"을 따로 기억해두고 그쪽을 우선 읽는다 — 사용자가
+// 방금 보고 있는 화면이 곧 그 탭이다.
+const lastNavigatedAt = new WeakMap<Page, number>()
+function trackPageNavigations(context: BrowserContext) {
+  const watch = (page: Page) => {
+    lastNavigatedAt.set(page, Date.now())
+    page.on('framenavigated', frame => {
+      if (frame === page.mainFrame()) lastNavigatedAt.set(page, Date.now())
+    })
+  }
+  context.pages().forEach(watch)
+  context.on('page', watch)
+}
+
+/** 지금 사용자가 보고 있을 가능성이 가장 큰 탭 — 실제 이동이 가장 최근에 일어난 탭을 고르고,
+ *  기록이 없으면(모듈 재평가 등) 기존 추적 탭으로 돌아간다. about:blank/devtools 탭은 제외한다. */
+function resolveUserVisiblePage(context: BrowserContext, siteId: number): Page | null {
+  const usable = context.pages().filter(p => !p.isClosed() && /^https?:/i.test(p.url()))
+  if (!usable.length) return resolveMainPage(context, siteId)
+  return usable.reduce((best, p) => ((lastNavigatedAt.get(p) ?? 0) >= (lastNavigatedAt.get(best) ?? 0) ? p : best))
 }
 
 /** siteId의 "로그인 창 메인 탭"을 지정한다 — 이 탭이 닫히면 추적을 스스로 지운다(닫힌 뒤에도 남아있으면
@@ -511,6 +540,90 @@ function polyfillEsbuildNameHelper() {
   if (typeof g.__name !== 'function') g.__name = fn => fn
 }
 
+/** "누르거나 방문하는 순간 로그인 세션이 끊기는" 링크만 좁게 잡는 패턴 — 계정/주문 관련 페이지를
+ *  폭넓게 거르는 ACCOUNT_UNSAFE_URL_RE와 달리, 이쪽은 "막지 않으면 곧바로 피해가 나는 것"만 담는다.
+ *  모든 클릭에 걸리는 전역 그물(blockLogoutClicks)이 쓰는 패턴이라, 넓게 잡아 진짜 카테고리 링크까지
+ *  막아버리는 오탐의 대가가 크기 때문이다. 몰마다 쓰는 형태를 모아둔다 — 카페24 `/member/logout.html`,
+ *  고도몰/코워크몰 `/mall/member/logout.php`, 메이크샵 `member.html?type=logout` 등. */
+export const LOGOUT_URL_RE = /(^|[/_?&=.-])(logout|log-out|log_out|signout|sign-out|sign_out|logoff)([/_?&=.-]|$)/i
+export const LOGOUT_TEXT_RE = /로그아웃|로그\s*아웃|log\s*out|sign\s*out/i
+
+/**
+ * 모든 브라우저 컨텍스트(헤드리스 자동화 + 화면에 보이는 로그인 창)에 심는 마지막 안전망 — 페이지
+ * 안에서 "로그아웃으로 이어지는 클릭"을 취소한다.
+ *
+ * 왜 클릭 지점마다가 아니라 여기(전역)에도 두는가: 이 코드베이스는 카테고리 메뉴를 찾으려고 화면을
+ * 더듬는 경로가 계속 늘어나는데(href 방문 → 텍스트 없는 링크 방문 → 비전 좌표 클릭 → 헤더 아이콘
+ * 전수클릭), **새 경로가 생길 때마다 같은 사고가 반복됐다**: 걸스굽(2026-09-01, 텍스트 없는 로그아웃
+ * 링크 방문), 오토카필(2026-09-06, 카테고리로 저장된 member/logout.php 방문), 투비즈온(2026-09-12,
+ * 비전 좌표 클릭이 계정 페이지에 떨어짐), 투비즈온(2026-09-13, 헤더 아이콘 전수클릭이 헤더 우측
+ * 유틸리티 영역의 로그아웃을 그대로 클릭 — 몰구조분석 3회 연속 종료 직후 세션이 끊긴 것으로 확인).
+ * 기존 방어는 전부 "어떤 URL로 이동할지"를 거르는 것이라, URL을 보지 않고 DOM 요소를 그냥 누르는
+ * 새 경로가 생기면 그대로 다시 뚫린다 — 그래서 "무엇을 누르든 로그아웃이면 안 된다"는 규칙을 개별
+ * 호출부가 아니라 브라우저 쪽 한 곳에 둔다.
+ *
+ * route() 가로채기로 로그아웃 요청 자체를 막는 방법도 검토했지만 쓰지 않았다 — 이 프로젝트에서 이미
+ * 실측으로 폐기된 방식이다(MALL_PROFILE_CONCURRENCY 주석: 요청마다 Node 왕복이 생겨 "샘플 상품 6건"이
+ * 46~91초 → 183초). 이 방식은 브라우저 안에서 끝나 요청당 비용이 0이다.
+ *
+ * 사람이 로그인 창에서 정말로 로그아웃하려는 경우(계정 바꾸기 등)까지 막으면 "버튼이 죽은" 것처럼
+ * 보이므로, 같은 요소를 0.6~5초 안에 한 번 더 누르면 통과시킨다 — 자동화는 같은 요소를 그 간격으로
+ * 두 번 누르지 않는다(전수클릭은 후보마다 페이지를 새로 불러오고, 비전 클릭의 폴백은 100ms 안쪽).
+ */
+function blockLogoutClicks({ urlSrc, textSrc }: { urlSrc: string; textSrc: string }) {
+  const urlRe = new RegExp(urlSrc, 'i')
+  const textRe = new RegExp(textSrc, 'i')
+  let lastBlockedEl: Element | null = null
+  let lastBlockedAt = 0
+  window.addEventListener('click', event => {
+    let target: Element | null = null
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : []
+    for (const node of path) {
+      const el = node as Element
+      if (!el || typeof el.tagName !== 'string') continue
+      if (el.tagName === 'A' || el.tagName === 'BUTTON') { target = el; break }
+    }
+    if (!target && event.target instanceof Element) target = event.target.closest('a, button')
+    if (!target) return
+    const urls = `${target.getAttribute('href') || ''} ${target.getAttribute('onclick') || ''}`
+    const labels = `${target.textContent || ''} ${target.getAttribute('title') || ''} ${target.getAttribute('alt') || ''}`
+    if (!urlRe.test(urls) && !textRe.test(labels)) return
+    const now = Date.now()
+    const sinceBlocked = now - lastBlockedAt
+    if (target === lastBlockedEl && sinceBlocked >= 600 && sinceBlocked <= 5_000) {
+      lastBlockedEl = null
+      return // 사람이 한 번 더 눌러 확인한 것 — 실제 로그아웃을 진행시킨다
+    }
+    lastBlockedEl = target
+    lastBlockedAt = now
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    console.warn('[PTP] 로그아웃 클릭을 막았습니다 — 스크랩 중 로그인 세션이 끊기는 것을 방지합니다.')
+    try {
+      const id = '__ptp_logout_guard_toast'
+      const old = document.getElementById(id)
+      if (old) old.remove()
+      const box = document.createElement('div')
+      box.id = id
+      box.textContent = 'PTP가 로그아웃을 막았습니다 — 정말 로그아웃하려면 한 번 더 클릭하세요.'
+      box.setAttribute('style', 'position:fixed;z-index:2147483647;left:50%;top:16px;transform:translateX(-50%);'
+        + 'max-width:90vw;padding:10px 14px;border-radius:8px;background:#0f172a;color:#fff;'
+        + 'font:13px/1.5 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.35)')
+      if (document.body) document.body.appendChild(box)
+      setTimeout(() => box.remove(), 5_000)
+    } catch { /* 안내 토스트는 부가 기능 — 실패해도 차단 자체는 이미 끝났다 */ }
+  }, true)
+}
+
+/** 새로 만든 브라우저 컨텍스트마다 공통으로 심어야 하는 초기화 스크립트 — 컨텍스트를 만드는 곳이
+ *  네 군데(로그인 창/개인프로필 사본/몰 전용 프로필/임시)라, 하나씩 따로 부르면 새 경로가 생겼을 때
+ *  또 빠진다. 순서가 중요하다: __name 폴리필이 먼저 들어가야 그 뒤 스크립트가 esbuild keepNames
+ *  변환(polyfillEsbuildNameHelper 주석 참고)에 걸리지 않는다. */
+async function installCommonInitScripts(context: BrowserContext) {
+  await context.addInitScript(polyfillEsbuildNameHelper)
+  await context.addInitScript(blockLogoutClicks, { urlSrc: LOGOUT_URL_RE.source, textSrc: LOGOUT_TEXT_RE.source })
+}
+
 /** 화면에 보이는(headed) 브라우저 창을 새로 띄우고 openSessions에 등록한다. 프로필 디렉터리가 그대로라
  * 예전에 로그인했던 쿠키가 남아있으면 자동으로 로그인된 상태로 뜬다. */
 async function launchVisibleWindow(siteId: number): Promise<BrowserContext> {
@@ -533,7 +646,8 @@ async function launchVisibleWindow(siteId: number): Promise<BrowserContext> {
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
-  await context.addInitScript(polyfillEsbuildNameHelper)
+  await installCommonInitScripts(context)
+  trackPageNavigations(context)
   openSessions.set(siteId, context)
   // 사용자가 창을 직접 닫거나 브라우저가 죽었을 때도 반영되도록 추적
   context.on('close', () => {
@@ -743,7 +857,8 @@ export async function closeAllOpenSessionsGracefully(timeoutMs = 3_000): Promise
 export function getOpenPageUrl(siteId: number): string | null {
   const context = openSessions.get(siteId)
   if (!context) return null
-  return resolveMainPage(context, siteId)?.url() ?? null
+  // 추적 탭이 아니라 "방금 이동한 탭"을 읽는다 — resolveUserVisiblePage 주석 참고(새 탭으로 열리는 몰).
+  return resolveUserVisiblePage(context, siteId)?.url() ?? null
 }
 
 /** "로그인 확인" 버튼이 실제로 로그인됐는지 조금이라도 검증할 수 있게, 지금 페이지에 "로그아웃"
@@ -897,7 +1012,7 @@ export async function withContext<T>(
             await context.addInitScript(() => {
               Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
             })
-            await context.addInitScript(polyfillEsbuildNameHelper)
+            await installCommonInitScripts(context)
           } catch (e) {
             throw new Error(`개인 크롬 프로필 복사본 실행에 실패했습니다: ${e instanceof Error ? e.message : String(e)}`)
           }
@@ -917,7 +1032,7 @@ export async function withContext<T>(
         headless: true, channel: 'chrome', chromiumSandbox: true,
       })
       installDialogAutoDismiss(context)
-      await context.addInitScript(polyfillEsbuildNameHelper)
+      await installCommonInitScripts(context)
       try {
         const page = context.pages()[0] || await context.newPage()
         return await fn(page, context)
@@ -931,7 +1046,7 @@ export async function withContext<T>(
   try {
     const ctx  = await browser.newContext()
     installDialogAutoDismiss(ctx)
-    await ctx.addInitScript(polyfillEsbuildNameHelper)
+    await installCommonInitScripts(ctx)
     const page = await ctx.newPage()
     return await fn(page, ctx)
   } finally {
@@ -1158,7 +1273,10 @@ async function loginIfNeeded(
 
 interface DomOption { name: string; values: string[] }
 
-const OPTION_SELECT_EXCLUDE_RE = /수량|qty|quantity|정렬|sort|perpage|page/i
+// 카테고리 선택 UI(`cate[]`, `category`, `ctno` 등)를 상품 옵션으로 잡던 문제를 막는다 — 투비즈온
+// 실사용 확인(2026-09-13): 미리보기 옵션1이 `cate[]`로 잡히고 값이 "여성의류, 남성의류, 언더웨어…"
+// 였다. 상품 옵션이 아니라 페이지의 카테고리 필터다. 검색/브랜드 필터도 같은 부류라 같이 막는다.
+const OPTION_SELECT_EXCLUDE_RE = /수량|qty|quantity|정렬|sort|perpage|page|cate|category|분류|검색|search|brand|브랜드|filter|필터/i
 // 실제 선택 가능한 값이 아닌 안내문("- [필수] 옵션을 선택해 주세요 -")과 구분선("-----")을 걸러낸다.
 const OPTION_PLACEHOLDER_RE = /선택.*(주세요|하세요)|필수|choose|please select|^[-=_*·.\s]+$/i
 
@@ -1437,6 +1555,11 @@ export interface MallProfileSignals {
    *  checkCategoryAnomaly 참고(2026-08-29, 봇 차단 페이지 링크가 카테고리로 잘못 저장됐던 사고의
    *  재발 감지용 안전망). null이면 이상 없음(또는 비교할 기준선이 부족해 검사를 건너뜀). */
   categoryAnomalyWarning?: { reason: string; checkedAt: string; source: 'anthropic' | 'gemini' | 'ollama' } | null
+  /** "화면으로 파악한 카테고리"와 "최종 저장된 카테고리"의 대조 결과 — 사용자 지시(2026-09-13):
+   *  "화면을 통해 카테고리를 파악했으면, 마지막 결과가 그 화면의 카테고리와 맞는지, 안 맞는 건 어떤 건지
+   *  왜 그런지 피드백을 줄 수 있게 해야 한다". 화면 인식이 실패했거나 그 경로를 안 탄 실행에서는
+   *  undefined/null로 남는다(근거 없이 "누락"이라고 단정하지 않는다). */
+  categoryScreenCheck?: CategoryScreenCheck | null
   /** deep(="몰 구조분석") 실행이 끝난 시점에 로그인 세션이 끊긴 것으로 보이면 true — "로그아웃 링크를
    *  못 찾음"(detectLoggedInSignal)이라는 약한 신호라 확정은 아니지만, 화면에서 이유도 모른 채 다음
    *  실행이 로그인 안 된 채로 도는 걸 막기 위해 최소한 경고는 보여준다(걸스굽 실사용 확인, 2026-09-01
@@ -1601,7 +1724,7 @@ export async function profileMallStructure(siteId: number, deep = false, aiProvi
 async function profileMallStructureInner(siteId: number, deep: boolean, aiProviders: AiProviderId[]): Promise<MallProfileSignals | null> {
   const site = await siteInfo(siteId)
   if (!site.url) return null
-  const { pattern: categoryUrlPattern, manualSamples: knownCategoryExamples, prevSortOptions } = await getCategoryMemory(siteId)
+  const { pattern: categoryUrlPattern, manualSamples: knownCategoryExamples, prevSortOptions, prevCategoryLinks } = await getCategoryMemory(siteId)
   const controller = new AbortController()
   profileAbortControllers.set(siteId, controller)
   // withContext가 이미 siteId 기준 락(withSiteLock)을 쥐므로 여기서 따로 또 걸지 않는다 — 같은 키로
@@ -1684,7 +1807,7 @@ async function profileMallStructureInner(siteId: number, deep: boolean, aiProvid
       }
       const startUrl = page.url()
       if (!startUrl || startUrl === 'about:blank') return null
-      return sampleMallProfile(page, context, startUrl, site.name, deep, controller.signal, siteId, aiProviders, categoryUrlPattern, knownCategoryExamples, prevSortOptions)
+      return sampleMallProfile(page, context, startUrl, site.name, deep, controller.signal, siteId, aiProviders, categoryUrlPattern, knownCategoryExamples, prevSortOptions, prevCategoryLinks)
     }, deep ? '몰 구조분석' : '구조 변화 감지')
   } finally {
     // 이 실행이 등록해둔 컨트롤러가 그대로면(중간에 stopProfileAnalysis가 이미 지웠을 수도 있음) 지운다.
@@ -1717,12 +1840,17 @@ async function siteInfo(siteId: number): Promise<{ name: string; url: string; lo
  *  그 보호를 못 받고 계속 "확인 안됨"으로 남는 문제가 있었다(걸스굽 실사용 확인, 2026-09-02 — sortOptions
  *  자체는 정상 복원되는데 report.sortStructure만 몇 주째 비어있었음). report를 만들기 "전"에 같은
  *  안전장치를 걸어야 해서 여기서 미리 읽어온다. */
-export async function getCategoryMemory(siteId: number): Promise<{ pattern: string | null; manualSamples: string[]; prevSortOptions: MallSortOption[] }> {
-  const res = await pool.query<{ scrape_profile: { categoryUrlPattern?: string | null; manualCategorySamples?: string[]; sortOptions?: MallSortOption[] } | null }>(
+export async function getCategoryMemory(siteId: number): Promise<{ pattern: string | null; manualSamples: string[]; prevSortOptions: MallSortOption[]; prevCategoryLinks: CategoryMenuLink[] }> {
+  const res = await pool.query<{ scrape_profile: { categoryUrlPattern?: string | null; manualCategorySamples?: string[]; sortOptions?: MallSortOption[]; categoryLinks?: CategoryMenuLink[] } | null }>(
     'SELECT scrape_profile FROM sites WHERE id = $1', [siteId],
   )
   const profile = res.rows[0]?.scrape_profile
-  return { pattern: profile?.categoryUrlPattern || null, manualSamples: profile?.manualCategorySamples || [], prevSortOptions: profile?.sortOptions || [] }
+  return {
+    pattern: profile?.categoryUrlPattern || null, manualSamples: profile?.manualCategorySamples || [],
+    prevSortOptions: profile?.sortOptions || [],
+    // 직전 실행에서 확인된 카테고리 — screenCheckAndRecover가 '이번에 사라진 것'을 가려내는 기준선으로 쓴다.
+    prevCategoryLinks: profile?.categoryLinks || [],
+  }
 }
 
 // manualCategorySamples는 AI 프롬프트 근거/패턴 역산 재료로만 쓰는 참고용이라, 몰 하나에 카테고리를
@@ -2453,6 +2581,8 @@ async function sampleMallProfile(
   page: Page, context: BrowserContext, startUrl: string, mallName: string, deep: boolean, signal?: AbortSignal, siteId?: number,
   aiProviders: AiProviderId[] = ALL_AI_PROVIDERS, categoryUrlPattern?: string | null, knownCategoryExamples?: string[],
   prevSortOptions: MallSortOption[] = [],
+  /** 직전 실행에서 확인된 카테고리 — screenCheckAndRecover의 두 번째 기준선(주석 참고). */
+  prevCategoryLinks: CategoryMenuLink[] = [],
 ): Promise<MallProfileSignals | null> {
   // "몰 구조분석"이 항상 오래 걸리는데 label 하나("몰 구조분석")로는 지금 뭘 하고 있는지 알 방법이
   // 없다는 지적(2026-08-22)으로, 주요 단계 경계마다 setSiteLockDetail로 세부 문구를 남긴다 — siteId가
@@ -2515,9 +2645,12 @@ async function sampleMallProfile(
   // (detectCategoryLinksWithAI, pickIndicesWithOllama) 전용이라 — Anthropic/Gemini는 이 판별에 안 쓰인다
   // (파일 상단 "이 둘만 로컬 Ollama로 옮긴다" 주석 참고) — aiProviders 중 'ollama' 포함 여부만 넘긴다.
   const useOllamaForCategoryLinks = aiProviders.includes('ollama')
-  let { links: categoryLinks, aiUsed: categoryLinksAiUsed } = await discoverTopLevelCategoryLinks(
+  const discovery = await discoverTopLevelCategoryLinks(
     context, page, mallName, deep, signal, useOllamaForCategoryLinks, categoryUrlPattern, knownCategoryExamples, startUrl, platform,
   )
+  let { links: categoryLinks, aiUsed: categoryLinksAiUsed } = discovery
+  const categoryScreenNames = discovery.screenNames
+  const categoryMenuLinks = discovery.menuLinks
   // 이번에 카테고리를 찾았으면(어느 방법으로든) URL 패턴을 다시 역산해 "기억"을 최신 상태로 갱신한다 —
   // 카테고리 구성이 바뀐 몰도 계속 정확한 패턴을 유지하기 위함. 이번엔 하나도 못 찾았으면 새로 역산할
   // 근거가 없으니 예전에 알던 패턴(categoryUrlPattern 인자)을 그대로 들고 간다 — 일시적 실패로 "기억"
@@ -2540,6 +2673,7 @@ async function sampleMallProfile(
   // (2026-09-02 서버 쪽 직접 쿠키/헤더 캡처로 확인). 그래서 다른 호출부(카테고리 불러오기 등)와 같은
   // 기본 동시성(4)으로 되돌린다.
   let hubExpansionHitLoginWall = false
+  let categoryExclusions: CategoryExclusion[] = []
   // MALL_REPORT_HINT_KEYWORDS 참고 — 카테고리 하위구조 확인 중 결제/배송/정렬 등 관련 키워드가 발견된
   // 페이지 URL. 아래 "AI로 결제/배송/업체정보 분석 중" 단계가 이 URL만 다시 방문해 참고 자료로 쓴다.
   let categoryPageHintHrefs: string[] = []
@@ -2556,6 +2690,20 @@ async function sampleMallProfile(
     categoryLinksAiUsed = categoryLinksAiUsed || expansion.aiUsed
     hubExpansionHitLoginWall = expansion.loginBlockedExpansion
     categoryPageHintHrefs = expansion.relevantHrefs
+    categoryExclusions = expansion.excluded
+  }
+  // 화면으로 카테고리를 파악한 실행이면 최종 목록이 그 화면과 맞는지 대조하고, 빠진 게 있으면 다른
+  // 방법으로 재검증해 되살린다 — "카테고리 불러오기"와 **같은 공용 함수**를 쓴다(두 화면의 카테고리
+  // 개수가 갈리던 문제, screenCheckAndRecover 주석 참고).
+  let categoryScreenCheck: CategoryScreenCheck | null = null
+  if (deep) {
+    const checked = await screenCheckAndRecover(
+      context, mallName, categoryScreenNames, categoryMenuLinks, categoryLinks, categoryExclusions,
+      platform === 'unknown' ? await detectMallPlatform(page).catch(() => 'unknown' as MallPlatform) : platform,
+      new URL(startUrl).origin, signal, prevCategoryLinks,
+    )
+    categoryLinks = checked.links
+    categoryScreenCheck = checked.screenCheck
   }
   if (signal?.aborted) return null
 
@@ -2695,7 +2843,7 @@ async function sampleMallProfile(
     optionUiTypes: [], hasCascadingOptions: false, hasStockQty: false, hasStockStatusText: false,
     hasStockByOption: false, hasDetailText: false, infoLabels: [], categoryPaths: [], categoryMaxDepth: 0,
     categoryMenuNames, categoryLinks, categoryLinksAiUsed, categoryUrlPattern: finalCategoryUrlPattern,
-    hasPaginationWidget, sortOptions, report: null,
+    hasPaginationWidget, sortOptions, report: null, categoryScreenCheck,
   }
   const optionTypes = new Set<'select' | 'swatch' | 'none'>()
   const infoLabelSet = new Set<string>()
@@ -3709,9 +3857,18 @@ export function looksLikeSortLabel(text: string): boolean {
  *  둘 다 같은 방식으로 동작하게 한다 — MallSortOption의 kind:'click'/clickText 저장 형식은 그대로 두고
  *  (사용자가 저장된 정렬을 다시 쓸 때·개발자모드가 이 타입을 읽을 때 아무것도 안 바뀜), 클릭을 실행하는
  *  이 저수준 동작만 옵션 태그를 인식하도록 넓힌다. 후보 텍스트를 못 찾으면 false. */
-async function clickSortCandidateText(page: Page, text: string): Promise<boolean> {
+async function clickSortCandidateText(page: Page, text: string, waitMs = 5_000): Promise<boolean> {
   const locator = page.getByText(text, { exact: true }).first()
-  if (await locator.count() === 0) return false
+  // 정렬 위젯을 'load' 이후에 AJAX로 한 번 더 채워 넣는 몰이 있다 — 바로 아래 confirmSortCandidatesByClicking
+  // (감지 경로)은 2026-09-12에 이걸 알고 기다리도록 고쳤는데, **적용 경로**(collectFromListing이 스크랩/
+  // 미리보기 때 정렬을 다시 클릭하는 곳)는 그대로라 매번 "화면에서 못 찾음"으로 실패했다(투비즈온 실사용
+  // 확인, 2026-09-13 — 미리보기 표본이 기본 정렬로 뽑힘). 같은 함정을 한쪽만 고쳐둔 상태였으므로, 대기를
+  // 이 함수 안으로 넣어 두 경로가 함께 혜택을 보게 한다.
+  const deadline = Date.now() + waitMs
+  while (await locator.count() === 0) {
+    if (Date.now() >= deadline) return false
+    await page.waitForTimeout(300)
+  }
   const isOption = await locator.evaluate(el => el.tagName === 'OPTION').catch(() => false)
   if (isOption) {
     const select = locator.locator('xpath=ancestor::select[1]')
@@ -3972,6 +4129,51 @@ async function scanCategoryOverviewPage(page: Page): Promise<CategoryMenuLink[]>
  * 몰의 카테고리 탐지 시 scanByKnownUrlPattern이 이 패턴 하나로 즉시(구조 스캔/AI 없이) 카테고리를
  * 다시 찾는 "기억" 역할을 한다. 순수 함수라 tests/unit에서 검증 가능.
  */
+/**
+ * 목록에서 실제로 모은 상품 URL들에서 **이 몰의 상품 상세 URL 패턴**을 역산한다 —
+ * `PLATFORM_PROFILES`에 없는 몰(platform='unknown')은 상세 URL 패턴이 없어, 상품 링크 판별이 매번
+ * "이미지를 감싼 <a>는 전부 상품"이라는 폴백에 의존했다. 그 폴백이 로고·회사소개·배너를 상품으로
+ * 주워 미리보기 표본이 엉뚱한 페이지로 잡히고(2026-09-13 투비즈온: `/index.php`, 이어서
+ * `/mall/service/company_intro.php`), 개수도 부풀었다. 한 번 학습해 사이트에 기억해두면 개수 세기·
+ * 미리보기·스크랩이 **전부 같은 기준**을 쓰게 된다.
+ *
+ * 규칙(deriveCategoryUrlPattern과 같은 보수적 기준):
+ *  - 과반수가 공유하는 "경로 + 쿼리 키" 조합만 패턴으로 인정한다(한두 개짜리 우연은 배제).
+ *  - 경로는 그대로, 쿼리는 "그 키가 있다"까지만 본다(값은 상품마다 다르므로).
+ *  - 쿼리가 아예 없는 몰(경로에 상품번호가 들어가는 형태)은 마지막 숫자 조각을 \\d+로 일반화한다.
+ *  - 근거가 부족하면 null — 잘못된 패턴을 저장하면 그 몰의 상품을 전부 놓치므로 "모름"이 더 안전하다.
+ */
+export function deriveDetailUrlPattern(urls: string[]): string | null {
+  if (urls.length < 3) return null
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  // 경로에 상품번호가 들어가는 몰(/product/1234)은 URL마다 경로가 달라, 숫자를 지운 형태로 묶어야
+  // "같은 모양"으로 인식된다 — 이 정규화를 안 하면 그런 몰에서 과반수 판정이 항상 실패한다(테스트로 확인).
+  const shapeKeyOf = (pathname: string) => pathname.replace(/\d+/g, '#')
+  const shapes = new Map<string, { count: number; pathname: string; keys: string[] }>()
+  for (const u of urls) {
+    try {
+      const x = new URL(u)
+      const keys = [...new Set(x.searchParams.keys())].sort()
+      const shape = `${shapeKeyOf(x.pathname)}|${keys.join(',')}`
+      const prev = shapes.get(shape)
+      if (prev) prev.count++
+      else shapes.set(shape, { count: 1, pathname: x.pathname, keys })
+    } catch { /* URL 파싱 실패는 건너뛴다 */ }
+  }
+  if (!shapes.size) return null
+  const [, best] = [...shapes.entries()].sort((a, b) => b[1].count - a[1].count)[0]
+  if (best.count * 2 <= urls.length) return null // 과반수가 아니면 확신 없음
+  // 정규식으로 옮길 때도 같은 정규화를 적용한다(숫자는 escape 대상이 아니라 순서 상관없음).
+  const pathPattern = escape(best.pathname).replace(/\d+/g, '\\d+')
+  if (best.keys.length) {
+    // 예: /mall/goods/goods_view.php + [goodsno] → /mall/goods/goods_view\.php\?(?=.*goodsno=)
+    const keyPart = best.keys.map(k => `(?=.*${escape(k)}=)`).join('')
+    return `${pathPattern}\\?${keyPart}`
+  }
+  // 쿼리가 없는 형태 — 경로에 숫자가 전혀 없으면 너무 느슨한 패턴이 되므로 배우지 않는다.
+  return pathPattern === escape(best.pathname) ? null : `${pathPattern}$`
+}
+
 export function deriveCategoryUrlPattern(urls: string[]): string | null {
   // 게시판 글(NON_CATEGORY_PATH_RE)은 애초에 카테고리 후보가 아니므로, "과반수" 기준의 분모(전체 개수)에서도
   // 뺀다 — 안 그러면 진짜 카테고리 URL이 남은 URL의 100%를 차지해도 원래 urls.length 기준 과반수에
@@ -4095,7 +4297,11 @@ async function looksLikeRealCategoryBatch(
       // 그 문자열로 시작할 리 없어 href.startsWith(baseUrl) 필터에 전부 걸러졌다(실사용 확인, 2026-09-12
       // — 투비즈온에서 진짜 카테고리 8개를 찾고도 표본검증에서 상품 0개로 나와 매번 가짜로 판정됨).
       const sampleOrigin = new URL(link.href).origin
-      const probe = await countProductsOnPage(page, productLinkSelector || null, profile.productLinkSelector, detailPatternSrc, sampleOrigin).catch(() => ({ count: 0, isLoginPage: false }))
+      // 표본검증도 "이동 직후 한 번만" 세면 늦게 그려지는 몰에서 진짜 카테고리를 가짜로 판정한다
+      // (countProductsSettled 주석 참고) — 여기서 한 번 잘못 판단하면 찾아둔 카테고리 묶음 **전체**가
+      // 버려지므로, 허브 확장보다 오히려 더 비싼 실수다.
+      const probe = await countProductsSettled(page, productLinkSelector || null, profile.productLinkSelector, detailPatternSrc, sampleOrigin)
+        .catch(() => ({ count: 0, isLoginPage: false }))
       // 로그인 벽에 막힌 방문은 "가짜 카테고리"의 증거가 아니다 — 그냥 확인이 안 된 것뿐이라, 위
       // anyPageLoaded 주석이 설명하는 "페이지 로드 자체가 실패한 경우"와 같은 방식으로 다룬다: 이
       // 표본은 건너뛰고, 표본 전부가 로그인 벽이었으면(anyPageLoaded가 끝까지 false) "증거 없음=가짜"로
@@ -4138,7 +4344,10 @@ const MAX_CATEGORY_VISION_PAGES = 3
 // 무관한 페이지인 데다, 그런 페이지의 링크 텍스트("도매자동차용품" 등)가 진짜 카테고리명과 구분이 안 될
 // 만큼 그럴듯해서, 뒤(AI 텍스트 폴백)에서 진짜 카테고리 대신 이런 기획전 링크를 잘못 채택하는 사고로도
 // 이어졌다(실사용 확인, 2026-09-12).
-const CATEGORY_VISION_UNSAFE_URL_RE = /\/(member|login|logout|signin|signup|join|agreement|terms|privacy|cart|basket|mypage|order|myorder|exhibit|event)[/.]|goods_exhibit/i
+// (2026-09-13) 이 상수는 이제 "어느 페이지로 갈지"만이 아니라 "무엇을 클릭할지"를 가리는 데도 쓴다 —
+// nthHeaderIconCandidate(헤더 아이콘 전수클릭 후보)/clickNearestClickableAtPoint(비전 좌표 클릭) 참고.
+// 이름을 CATEGORY_VISION_UNSAFE_URL_RE에서 바꾼 이유도 그것 — 더 이상 비전 경로 전용이 아니다.
+export const ACCOUNT_UNSAFE_URL_RE = /\/(member|login|logout|signin|signup|join|agreement|terms|privacy|cart|basket|mypage|order|myorder|exhibit|event)[/.]|goods_exhibit/i
 
 // 비전 모델의 좌표 추정이 같은 화면(같은 스크린샷)을 다시 줘도 호출마다 달라진다(실사용 확인, 여러 차례
 // 반복 — 어떤 실행은 정확히 찾고, 바로 다음 실행은 완전히 다른(틀린) 위치를 준다). 그러니 시작 페이지
@@ -4178,7 +4387,31 @@ const MAX_START_PAGE_VISION_ATTEMPTS = 3
  *  클릭 핸들러가 전혀 발동하지 않았다(li 자신은 그 핸들러의 대상이 아님) — 메뉴가 안 열려 매번 "클릭
  *  후에도 링크 0개"로 실패했다. Playwright의 ElementHandle.click()은 요소의 중심을 스스로 계산해 클릭하므로,
  *  "대략 맞는 좌표"만 있으면 "정확히 그 요소 위"로 자동 보정되는 효과가 있다. */
-async function clickNearestClickableAtPoint(page: Page, x: number, y: number): Promise<boolean> {
+async function clickNearestClickableAtPoint(page: Page, x: number, y: number, mallName = '?'): Promise<boolean> {
+  // 비전이 준 좌표에 계정 링크(로그아웃 등)가 있으면 아예 클릭하지 않는다 — 비전의 좌표 추정은 같은
+  // 화면에서도 호출마다 크게 달라지는데(discoverCategoryMenuByVision 주석), 몰 헤더는 "전체 카테고리"
+  // 트리거와 계정 링크가 바로 옆에 붙어있는 자리라 빗나간 좌표가 로그아웃에 떨어질 수 있다(투비즈온
+  // 실사용 확인, 2026-09-12 — 계정 페이지를 클릭하다 세션이 끊김). 기존 방어(ACCOUNT_UNSAFE_URL_RE로
+  // 후보 "페이지"를 거르는 것)는 어느 화면으로 갈지만 막았을 뿐 그 화면에서 무엇을 누르는지는 안 봤다
+  // — 홈 화면에도 로그아웃 링크는 항상 있다. 판정만 따로 떼어 boolean으로 받는다(요소 핸들과 값을 한
+  // 번에 돌려받으면 ElementHandle 직렬화에 기대게 돼 불안정하다).
+  const unsafe = await page.evaluate(({ x, y, unsafeUrlSrc, logoutTextSrc }) => {
+    const el = document.elementFromPoint(x, y)
+    if (!el) return false
+    const target = /^(IMG|A|BUTTON)$/.test(el.tagName) ? el : (el.querySelector('img, a, button') || el)
+    const unsafeUrlRe = new RegExp(unsafeUrlSrc, 'i')
+    const logoutTextRe = new RegExp(logoutTextSrc, 'i')
+    const link = target.closest('a, button') || target.querySelector('a[href], button')
+    const urls = `${target.getAttribute('href') || ''} ${target.getAttribute('onclick') || ''}`
+      + ` ${link ? link.getAttribute('href') || '' : ''} ${link ? link.getAttribute('onclick') || '' : ''}`
+    const labels = `${target.textContent || ''} ${target.getAttribute('alt') || ''} ${target.getAttribute('title') || ''}`
+      + ` ${link ? link.textContent || '' : ''}`
+    return unsafeUrlRe.test(urls) || logoutTextRe.test(labels)
+  }, { x, y, unsafeUrlSrc: ACCOUNT_UNSAFE_URL_RE.source, logoutTextSrc: LOGOUT_TEXT_RE.source }).catch(() => false)
+  if (unsafe) {
+    console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: 좌표(${x.toFixed(0)},${y.toFixed(0)})에 계정 관련 링크(로그아웃/마이페이지 등)가 있어 클릭하지 않음 — 로그인 세션 보호`)
+    return false
+  }
   const handle = await page.evaluateHandle(({ x, y }) => {
     const el = document.elementFromPoint(x, y)
     if (!el) return null
@@ -4199,18 +4432,31 @@ async function clickNearestClickableAtPoint(page: Page, x: number, y: number): P
   }
   return clicked
 }
+/** 카테고리 메뉴 탐지 결과 — screenNames는 "그 메뉴가 열린 화면에서 사람이 읽을 수 있는 카테고리 이름"
+ *  으로, 최종 결과를 이 목록과 대조해 누락을 사용자에게 알려주는 데 쓴다(사용자 지시, 2026-09-13).
+ *  null = 화면 인식이 실패했거나 시도하지 않음(대조를 건너뛴다 — 근거 없이 "누락"이라고 단정하지 않는다). */
+interface CategoryMenuDiscovery {
+  links: CategoryMenuLink[]
+  groupCount: number
+  screenNames: string[] | null
+  /** 메뉴가 열려 있던 그 화면의 모든 링크(텍스트+href) — 화면에서 읽은 이름만 있고 URL을 모르는
+   *  누락 카테고리를 재검증하려면 그 이름의 링크를 찾아야 한다(recoverMissingCategories). 화면을
+   *  캡처한 바로 그 순간에 같이 모아둔다 — 루프가 끝나면 그 DOM은 사라진다. */
+  menuLinks?: { text: string; href: string }[]
+}
+
 async function discoverCategoryMenuByVision(
   context: BrowserContext, page: Page, mallName: string, candidatePages: string[], platform: MallPlatform,
   productLinkSelector?: string | null, signal?: AbortSignal,
-): Promise<{ links: CategoryMenuLink[]; groupCount: number }> {
+): Promise<CategoryMenuDiscovery> {
   const startUrl = page.url()
-  const safeCandidates = candidatePages.filter(u => u !== startUrl && !CATEGORY_VISION_UNSAFE_URL_RE.test(u))
+  const safeCandidates = candidatePages.filter(u => u !== startUrl && !ACCOUNT_UNSAFE_URL_RE.test(u))
 
   // 한 페이지에서 한 번(attemptNo) 시도 — 실패 이유별로 null(다음 시도로) / 링크(성공)를 돌려준다.
   // attemptNo>1(같은 페이지 재시도)이면 이미 그 URL에 있어도 다시 로드한다 — 안 그러면 스크린샷이
   // 이전과 완전히 똑같아서(회전 배너/팝업 등이 그대로), 비전이 매번 같은(틀린) 좌표를 그대로 반복해
   // 재시도가 아무 효과가 없다(실사용 확인, 2026-09-12 — 투비즈온에서 3번 다 똑같이 (80,300)을 줌).
-  async function attemptOnce(url: string, attemptNo: number): Promise<{ links: CategoryMenuLink[]; groupCount: number } | null> {
+  async function attemptOnce(url: string, attemptNo: number): Promise<CategoryMenuDiscovery | null> {
     if (page.url() !== url || attemptNo > 1) {
       const moved = await page.goto(url, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
       if (!moved) return null
@@ -4230,7 +4476,7 @@ async function discoverCategoryMenuByVision(
     const x = viewport.width * (trigger.xPercent / 100)
     const y = viewport.height * (trigger.yPercent / 100)
     console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: "${trigger.label || '(아이콘)'}" 발견(${trigger.xPercent}%,${trigger.yPercent}%) → 뷰포트 ${viewport.width}x${viewport.height} 기준 (${x.toFixed(0)},${y.toFixed(0)}) 클릭(시도 ${attemptNo})`)
-    await clickNearestClickableAtPoint(page, x, y)
+    await clickNearestClickableAtPoint(page, x, y, mallName)
     await sleep(1_200) // 클릭으로 열리는 메뉴가 AJAX로 채워질 시간(투비즈온 실측 — 1초 안팎이면 충분)
     const { links, groupCount } = await scanCategoryMenuRobust(page).catch(() => ({ links: [] as CategoryMenuLink[], textlessHrefs: [] as string[], groupCount: undefined as number | undefined }))
     if (!links.length) {
@@ -4256,14 +4502,20 @@ async function discoverCategoryMenuByVision(
       return null
     }
     console.log(`[카테고리탐지:진단:${mallName}] 화면 인식으로 "${trigger.label || '(아이콘)'}" 버튼(${url}) 클릭 → ${links.length}개 찾음(그룹 ${scannedGroupCount}개, 화면상 그룹 ${visibleGroupCount ?? '확인불가'}개, 표본검증 통과, 시도 ${attemptNo})`)
-    return { links, groupCount: scannedGroupCount }
+    // 이미 찍어둔 같은 화면으로 "사람이 읽는 카테고리 이름"까지 받아둔다(추가 캡처 없음) — 최종 결과를
+    // 이 목록과 대조해 누락을 알려주기 위함(categoryScreenCheck, 사용자 지시 2026-09-13).
+    const screenNames = completenessScreenshot
+      ? await detectVisibleCategoryNames(mallName, completenessScreenshot.toString('base64'), 'image/jpeg', signal).catch(() => null)
+      : null
+    const menuLinks = await collectAllPageLinks(page).catch(() => [])
+    return { links, groupCount: scannedGroupCount, screenNames, menuLinks }
   }
 
   // 시작 페이지(대개 홈 — "전체 카테고리" 트리거가 사는 곳)에서 먼저 여러 번 재시도한다(MAX_START_PAGE_
   // VISION_ATTEMPTS 주석 참고 — 비전 좌표 추정이 같은 화면에서도 호출마다 달라져, 한 번 실패했다고 곧장
   // 다른(대개 무관한) 페이지로 넘어가면 그쪽에서 엉뚱한 부분 결과를 주울 위험만 커진다).
   for (let attempt = 1; attempt <= MAX_START_PAGE_VISION_ATTEMPTS; attempt++) {
-    if (signal?.aborted) return { links: [], groupCount: 0 }
+    if (signal?.aborted) return { links: [], groupCount: 0, screenNames: null }
     const result = await attemptOnce(startUrl, attempt)
     if (result) return result
   }
@@ -4274,7 +4526,7 @@ async function discoverCategoryMenuByVision(
     const result = await attemptOnce(url, 1)
     if (result) return result
   }
-  return { links: [], groupCount: 0 }
+  return { links: [], groupCount: 0, screenNames: null }
 }
 
 // discoverCategoryMenuByExhaustiveHeaderClick이 시도해볼 후보 상한 — 조상/자손을 중복으로 걸러내지
@@ -4307,19 +4559,46 @@ const HEADER_ICON_MAX_HEIGHT_PX = 80
  *  핸들러가 자손에 달린 경우 그 자손은 영영 후보에서 빠져 클릭해도 아무 반응이 없다 — "어느 계층이
  *  맞는지" 미리 판단하지 않고 둘 다 독립적인 후보로 넣어, 실제로 클릭해본 결과(scanCategoryMenuRobust)
  *  로만 판단한다. */
-async function nthHeaderIconCandidate(page: Page, index: number): Promise<ElementHandle | null> {
-  const handle = await page.evaluateHandle(({ index, heightLimit, maxWidth, maxHeight }) => {
+/* 테스트에서 실제 페이지를 띄워 "로그아웃/장바구니가 후보에서 빠지는지"를 직접 확인할 수 있도록
+ * export한다 — 이 판정이 조용히 뚫리면 곧바로 로그인 세션이 끊기는 사고로 이어지는데(아래 주석),
+ * 화면 밖에서 도는 함수라 회귀를 눈으로 알아채기 어렵다. */
+export async function nthHeaderIconCandidate(page: Page, index: number): Promise<ElementHandle | null> {
+  const handle = await page.evaluateHandle(({ index, heightLimit, maxWidth, maxHeight, unsafeUrlSrc, logoutTextSrc }) => {
+    const unsafeUrlRe = new RegExp(unsafeUrlSrc, 'i')
+    const logoutTextRe = new RegExp(logoutTextSrc, 'i')
     const candidates: Element[] = []
     for (const el of Array.from(document.querySelectorAll('img, a, li, button'))) {
       const rect = el.getBoundingClientRect()
       if (rect.width === 0 || rect.height === 0) continue
       if (rect.top > heightLimit || rect.bottom > heightLimit + 100) continue
       if (rect.width > maxWidth || rect.height > maxHeight) continue
+      // 계정/주문 링크(로그아웃·마이페이지·장바구니·주문조회 등)는 후보에서 아예 뺀다 — 몰 헤더 우측
+      // 유틸리티 영역이 정확히 이 "작고 위쪽에 있는 요소" 조건에 들어맞아, 위치/크기만으로 후보를
+      // 모으면 로그아웃 링크가 반드시 섞여 들어온다(투비즈온 실사용 확인, 2026-09-13 — 후보 39개를
+      // 클릭하는 동안 로그인 세션이 끊겨 이후 단계가 전부 로그아웃 상태로 수집됨: 몰구조분석 3회
+      // 연속 같은 패턴). 이건 이 몰만의 문제가 아니라, 로그인 상태에서 헤더에 "로그아웃"을 노출하는
+      // 국내 몰 전반에 해당한다 — 이 파일의 detectLoggedInSignal이 바로 그 관례를 로그인 판정에
+      // 쓰고 있을 정도로 일반적이다. 어차피 "전체 카테고리" 트리거가 계정 링크일 리 없으므로 잃는 것도
+      // 없고, 헛클릭이 줄어 전수클릭 자체도 빨라진다.
+      // 자기 자신뿐 아니라 위(조상 <a>)와 아래(자식 <a>)도 같이 본다 — 같은 아이콘이 <li>/<a>/<img>로
+      // 여러 겹 후보에 들어오는 구조라(nthHeaderIconCandidate 주석), 한 겹만 보면 나머지 겹이 그대로
+      // 클릭된다(투비즈온 헤더: `<li><a href="/mall/member/logout.php">로그아웃</a></li>`).
+      const ancestorLink = el.closest('a, button')
+      const descendantLink = el.querySelector('a[href], button')
+      const urls: string[] = []
+      const labels: string[] = []
+      for (const node of [el, ancestorLink, descendantLink]) {
+        if (!node) continue
+        urls.push(node.getAttribute('href') || '', node.getAttribute('onclick') || '')
+        labels.push(node.textContent || '', node.getAttribute('alt') || '', node.getAttribute('title') || '')
+      }
+      if (unsafeUrlRe.test(urls.join(' ')) || logoutTextRe.test(labels.join(' '))) continue
       candidates.push(el)
     }
     return candidates[index] ?? null
   }, {
     index, heightLimit: HEADER_REGION_HEIGHT_PX, maxWidth: HEADER_ICON_MAX_WIDTH_PX, maxHeight: HEADER_ICON_MAX_HEIGHT_PX,
+    unsafeUrlSrc: ACCOUNT_UNSAFE_URL_RE.source, logoutTextSrc: LOGOUT_TEXT_RE.source,
   }).catch(() => null)
   const element = handle?.asElement() ?? null
   if (!element) await handle?.dispose().catch(() => {})
@@ -4338,13 +4617,29 @@ async function nthHeaderIconCandidate(page: Page, index: number): Promise<Elemen
 async function discoverCategoryMenuByExhaustiveHeaderClick(
   context: BrowserContext, page: Page, mallName: string, startUrl: string, platform: MallPlatform,
   productLinkSelector?: string | null, signal?: AbortSignal,
-): Promise<{ links: CategoryMenuLink[]; groupCount: number }> {
-  let best: { links: CategoryMenuLink[]; score: number; groupCount: number } | null = null
+): Promise<CategoryMenuDiscovery> {
+  let best: { links: CategoryMenuLink[]; score: number; groupCount: number; shot: Buffer | null; menuLinks: { text: string; href: string }[] } | null = null
+  // 클릭 "전" 로그인 상태를 기억해두고, 후보를 하나 클릭할 때마다 시작 페이지에서 다시 확인한다 —
+  // URL/텍스트 패턴(ACCOUNT_UNSAFE_URL_RE, LOGOUT_TEXT_RE)으로 거르는 앞의 두 방어는 "우리가 아는
+  // 모양의 로그아웃"만 막는다. 몰이 form 제출이나 전혀 다른 URL로 로그아웃을 구현했으면 그 둘 다
+  // 통과하므로, 마지막엔 "패턴이 아니라 실제 결과"로 판정한다 — 어떤 몰이든, 어떤 방식이든 세션이
+  // 끊기면 여기서 걸린다. 기준값도 비교값도 **매번 같은 시작 페이지에서** 읽는다 — 이 함수가 불릴 때
+  // page가 어디에 있는지는 호출부마다 다르고, 클릭으로 열린 페이지는 헤더가 없을 수 있어 "로그아웃
+  // 링크 없음"이 그대로 오탐이 된다(detectLoggedInSignal 주석 참고). 그래서 첫 후보를 클릭하기 직전
+  // (i===0, goto 직후)의 값을 기준으로 삼는다.
+  let loggedInBefore: boolean | null = null
   for (let i = 0; i < MAX_HEADER_ICON_CANDIDATES; i++) {
     if (signal?.aborted) break
     const moved = await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
     if (!moved) {
       console.log(`[카테고리탐지:진단:${mallName}] 헤더 아이콘 전수클릭: 페이지 이동 실패(${startUrl}) — 중단`)
+      break
+    }
+    const loggedInNow = await detectLoggedInSignal(page)
+    if (i === 0) {
+      loggedInBefore = loggedInNow
+    } else if (loggedInBefore === true && loggedInNow === false) {
+      console.log(`[카테고리탐지:진단:${mallName}] 헤더 아이콘 전수클릭: 후보 ${i}를 클릭한 뒤 로그인 세션이 끊긴 것으로 보임 — 남은 후보를 클릭하지 않고 중단(지금까지 찾은 결과만 사용). 이 몰의 로그아웃 링크가 기존 패턴에 안 걸리는 형태일 수 있으니 LOGOUT_URL_RE/LOGOUT_TEXT_RE 보완이 필요한지 확인할 것`)
       break
     }
     const element = await nthHeaderIconCandidate(page, i)
@@ -4380,19 +4675,29 @@ async function discoverCategoryMenuByExhaustiveHeaderClick(
     }
     const score = links.length * (groupCount ?? 1)
     console.log(`[카테고리탐지:진단:${mallName}] 헤더 아이콘 전수클릭: 후보 ${i + 1} → ${links.length}개(그룹 ${groupCount ?? '?'})`)
-    if (!best || score > best.score) best = { links, score, groupCount: groupCount ?? 1 }
+    if (!best || score > best.score) {
+      // 메뉴가 열려 있는 "바로 지금"의 화면을 남겨둔다 — 최종 결과를 이 화면과 대조해 사용자에게
+      // "화면엔 보이는데 결과엔 없는 카테고리"를 알려주기 위함(categoryScreenCheck). 루프가 끝난 뒤엔
+      // 페이지를 다시 불러온 상태라 이 화면을 다시 만들 수 없어, 채택 시점에 찍어둬야 한다.
+      const shot = await page.screenshot({ type: 'jpeg', quality: 90 }).catch(() => null)
+      const menuLinks = await collectAllPageLinks(page).catch(() => [])
+      best = { links, score, groupCount: groupCount ?? 1, shot, menuLinks }
+    }
   }
   if (best) {
     console.log(`[카테고리탐지:진단:${mallName}] 헤더 아이콘 전수클릭 최종 채택: ${best.links.length}개(그룹 ${best.groupCount})`)
   }
-  return { links: best?.links ?? [], groupCount: best?.groupCount ?? 0 }
+  const screenNames = best?.shot
+    ? await detectVisibleCategoryNames(mallName, best.shot.toString('base64'), 'image/jpeg', signal).catch(() => null)
+    : null
+  return { links: best?.links ?? [], groupCount: best?.groupCount ?? 0, screenNames, menuLinks: best?.menuLinks ?? [] }
 }
 
 async function discoverTopLevelCategoryLinks(
   context: BrowserContext, page: Page, mallName: string, visitTextlessFallback: boolean, signal?: AbortSignal, useAi = true,
   categoryUrlPattern?: string | null, knownCategoryExamples?: string[], baseUrl?: string,
   platform: MallPlatform = 'unknown', productLinkSelector?: string | null,
-): Promise<{ links: CategoryMenuLink[]; textlessHrefs: string[]; aiUsed: boolean }> {
+): Promise<{ links: CategoryMenuLink[]; textlessHrefs: string[]; aiUsed: boolean; screenNames?: string[] | null; menuLinks?: { text: string; href: string }[] }> {
   if (categoryUrlPattern) {
     const patternLinks = await scanByKnownUrlPattern(page, categoryUrlPattern, PLATFORM_PROFILES[platform].detailUrlPattern?.source)
     if (patternLinks.length >= 2 && await looksLikeRealCategoryBatch(context, patternLinks, platform, productLinkSelector)) {
@@ -4444,7 +4749,7 @@ async function discoverTopLevelCategoryLinks(
   const aiCandidates = await collectAllPageLinks(page, baseUrl ? new URL(baseUrl).origin : undefined)
   const visionResult = await discoverCategoryMenuByVision(
     context, page, mallName, aiCandidates.map(c => c.href), platform, productLinkSelector, signal,
-  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0 }))
+  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0, screenNames: null, menuLinks: [] as { text: string; href: string }[] }))
 
   // 비전이 "그럴듯하지만 일부만" 찾은 경우(표본검증은 통과하지만 실제로는 비슷하게 생긴 다른 아이콘을
   // 잘못 클릭한 것) 그 결과를 곧바로 받아들이지 않는다(사용자 지시, 2026-09-12 — "다른 방법으로 해") —
@@ -4454,7 +4759,7 @@ async function discoverTopLevelCategoryLinks(
   const visionScore = visionResult.links.length * Math.max(1, visionResult.groupCount)
   const VISION_CONFIDENT_GROUP_COUNT = 3
   if (visionResult.links.length && visionResult.groupCount >= VISION_CONFIDENT_GROUP_COUNT) {
-    return { links: visionResult.links, textlessHrefs, aiUsed: false }
+    return { links: visionResult.links, textlessHrefs, aiUsed: false, screenNames: visionResult.screenNames, menuLinks: visionResult.menuLinks }
   }
 
   // 화면 인식이 실패했거나 그룹 수가 적어 못 미더울 때 — 비슷하게 생긴 아이콘이 여러 개라 비전이 계속
@@ -4462,13 +4767,13 @@ async function discoverTopLevelCategoryLinks(
   // 후보를 전부 실제로 클릭해보고 결과가 제일 좋은 것을 채택한다(discoverCategoryMenuByExhaustiveHeaderClick 참고).
   const exhaustiveResult = await discoverCategoryMenuByExhaustiveHeaderClick(
     context, page, mallName, startUrlBeforeVision, platform, productLinkSelector, signal,
-  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0 }))
+  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0, screenNames: null, menuLinks: [] as { text: string; href: string }[] }))
   const exhaustiveScore = exhaustiveResult.links.length * Math.max(1, exhaustiveResult.groupCount)
 
   if (exhaustiveScore > 0 || visionScore > 0) {
     const winner = exhaustiveScore >= visionScore ? exhaustiveResult : visionResult
     console.log(`[카테고리탐지:진단:${mallName}] 화면 인식 ${visionResult.links.length}개(그룹 ${visionResult.groupCount}) vs 헤더 전수클릭 ${exhaustiveResult.links.length}개(그룹 ${exhaustiveResult.groupCount}) — ${exhaustiveScore >= visionScore ? '전수클릭' : '화면 인식'} 채택`)
-    return { links: winner.links, textlessHrefs, aiUsed: false }
+    return { links: winner.links, textlessHrefs, aiUsed: false, screenNames: winner.screenNames, menuLinks: winner.menuLinks }
   }
 
   // 규칙 기반(화면 인식 포함)이 전부 실패했을 때만 AI 텍스트로 넘어간다 — 마지막 수단이라 시간을 넉넉히 준다.
@@ -4596,6 +4901,10 @@ async function detectCategoryLabel(page: Page): Promise<CategoryLabel> {
 interface CollectedLinks {
   urls: string[]
   platform: MallPlatform
+  /** AJAX(클릭) 방식 정렬을 이 수집에서 실제로 적용했는지 — 지금까지는 클릭 성공 여부를 아무 데도
+   *  남기지 않아 "미리보기가 정렬 기준대로 나온 게 맞나"를 사용자도 로그로도 확인할 수 없었다
+   *  (사용자 지적, 2026-09-13). 요청한 정렬이 없으면 undefined. */
+  sortClick?: { clickText: string; applied: boolean }
   /** 각 상품 URL이 발견된 목록 페이지의 카테고리 경로(및 "브랜드" 카테고리 노드 아래서 뽑은 브랜드명) */
   categoryByUrl: Map<string, CategoryLabel>
   /** 목록 페이지에서 바로 얻을 수 있는 상품명/썸네일 (실제 상품 페이지를 열지 않아 빠른 미리보기용) */
@@ -4628,6 +4937,13 @@ interface CollectedLinks {
 // 수량이 되어야만 한다"). paginationActuallyWorks()가 이미 페이지 번호가 안 통하는 몰을 먼저 걸러내므로
 // (2페이지가 1페이지와 같으면 이 상한까지 갈 필요 없이 훨씬 앞에서 멈춤), 정상적으로 페이지네이션되는
 // 대형 카테고리를 놓치지 않도록 넉넉히 올린다.
+// 미리보기 전용 페이지 예산 — "정확한 총 개수"는 끝까지 세지만(countDedupedProductUrls가 모든 페이지를
+// 실제로 순회해 URL을 모아 중복까지 제거한다), **미리보기는 빠른 감(感)을 주는 게 목적**이다(사용자
+// 지시, 2026-09-13: "미리보기를 빠르게 보여주는 건 좋다. 정확한 총 개수 확인이 정확히 나온다면 미리보기는
+// N개 이상으로 하고, 정확한 총 개수는 선택한 카테고리를 기준으로 분석하는 것으로"). 이 예산을 넘어가면
+// 더 세지 않고 "N개 이상"(truncated)으로 끊는다 — 해시 페이징 지원 후 카테고리 하나에 100초 가까이
+// 걸리던 것을 수 초로 되돌린다.
+const PREVIEW_PAGE_BUDGET = 5
 const AUTO_PAGINATION_CAP = 1000
 
 // findRealLastPage(지수+이분 탐색)의 절대 상한 — 위 AUTO_PAGINATION_CAP에 맞춰 함께 늘어난다. 예전엔
@@ -4659,9 +4975,18 @@ export function resetToFirstPage(url: string): string {
  * 링크(1 2 3 ...)로만 제공되고 "다음" 화살표가 없는 경우가 흔한데(보여줄 페이지 수가 적을 때), 그런
  * 스킨에서도 이 파라미터로 직접 이동하면 다음 페이지를 안정적으로 가져올 수 있다.
  */
+/** 목록 URL에 페이지 번호를 반영한다 — 쿼리(`?page=N`)가 기본이지만, **해시에 페이지 상태를 담는 몰**도
+ *  있다(투비즈온 실사용 확인, 2026-09-13: 목록이 AJAX로 그려지고 페이지 이동은 `#page=2&category=007`
+ *  해시로 이뤄진다 — `?page=2`를 붙여도 1페이지 그대로라 "2페이지가 1페이지와 같다 → 더 없다"로 판정,
+ *  모든 카테고리 개수가 1페이지 분량인 24로 고정됐다). 해시에 page=N이 이미 있으면 그쪽을 바꾼다.
+ *  실측으로 확인: 같은 URL에 `#page=1`과 `#page=2`를 주면 실제로 다른 상품 묶음이 나온다. */
 function withPageParam(url: string, pageNum: number): string {
   try {
     const u = new URL(url)
+    if (/(^|[&#])page=\d+/i.test(u.hash)) {
+      u.hash = u.hash.replace(/(^|[&#])page=\d+/i, `$1page=${pageNum}`)
+      return u.toString()
+    }
     u.searchParams.set('page', String(pageNum))
     return u.toString()
   } catch { return url }
@@ -4787,10 +5112,43 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
       const normalize = (u: string) => u.replace(/\/+$/, '')
       const currentNorm = normalize(location.href)
       const originNorm = normalize(location.origin)
-      return pick('a', true, true).filter(item => {
+      // 루트(`/`)만 막던 기존 필터엔 구멍이 있었다 — 이 몰의 로고는 `/`가 아니라 `/index.php`를 가리켜
+      // 그대로 "상품"으로 잡혔고, 그 결과 미리보기 첫 상품이 **몰 홈페이지 자체**로 나왔다(투비즈온
+      // 실사용 확인, 2026-09-13: 상품명=몰 타이틀, 상품URL=index.php). 쿼리가 없는 루트/index.* 는
+      // 상품일 수 없으므로 같이 막는다(`index.php?cate=12`처럼 쿼리가 있으면 진짜 목록일 수 있어 통과).
+      const isHomeLike = (u: string) => {
+        try {
+          const x = new URL(u)
+          if (x.search || x.hash) return false
+          const p = x.pathname.replace(/\/+$/, '')
+          return p === '' || /^\/index\.(php|html?|asp|jsp)$/i.test(p)
+        } catch { return false }
+      }
+      const candidates = pick('a', true, true).filter(item => {
         const n = normalize(item.href)
-        return n !== currentNorm && n !== originNorm
+        return n !== currentNorm && n !== originNorm && !isHomeLike(item.href)
       })
+      // 상품 링크는 목록 안에서 **같은 URL 모양으로 여러 개 반복**된다(goods_view.php?goodsno=… 처럼).
+      // 반면 로고·회사소개·이벤트 배너처럼 상품이 아닌 이미지 링크는 페이지에 하나씩만 있다. 그래서
+      // 가장 많이 반복된 모양(경로 + 쿼리 키 구성)만 상품으로 인정한다 — 플랫폼을 몰라 상세 URL 패턴이
+      // 없는 몰(투비즈온: platform=unknown)에서 이 폴백이 아무 <a><img>나 상품으로 받아들여, 미리보기
+      // 표본이 회사소개 페이지(/mall/service/company_intro.php)로 잡히던 문제를 막는다(2026-09-13).
+      // 상품이 딱 1개뿐인 카테고리도 있으므로, 2개 이상 반복된 모양이 있을 때만 적용한다.
+      const shapeOf = (u: string) => {
+        try {
+          const x = new URL(u)
+          return `${x.pathname}|${[...x.searchParams.keys()].sort().join(',')}`
+        } catch { return u }
+      }
+      const shapeCounts = new Map<string, number>()
+      for (const item of candidates) {
+        const k = shapeOf(item.href)
+        shapeCounts.set(k, (shapeCounts.get(k) ?? 0) + 1)
+      }
+      let bestShape = ''
+      let bestCount = 0
+      shapeCounts.forEach((n, k) => { if (n > bestCount) { bestCount = n; bestShape = k } })
+      return bestCount >= 2 ? candidates.filter(item => shapeOf(item.href) === bestShape) : candidates
     }, { userSel, platformSel, detailPatternSrc: profile.detailUrlPattern?.source, widgetExcludeSrc: WIDGET_CLASS_EXCLUDE_SRC })
     return items.filter(item => item.href.startsWith(baseUrl))
   }
@@ -4801,6 +5159,9 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
   // 없어서 "중지"를 눌러도 상품을 하나도 못 긁은 채로 이 수집이 끝날 때까지 그냥 계속 돌았다
   // (2026-08-11 실사용 확인·수정).
   let collectionStopped = false
+  // 이 수집에서 정렬 클릭이 실제로 적용됐는지 — 호출부(미리보기)가 화면에 "정렬 적용됨/실패"를 보여줄
+  // 수 있게 같이 돌려준다(CollectedLinks.sortClick 주석 참고).
+  let sortClickResult: { clickText: string; applied: boolean } | undefined
   async function collectFromListing(workerPage: Page, listingUrl: string) {
     if (workerPage.url() !== listingUrl) {
       // 실패를 조용히 삼키면(예전 코드) 워커페이지가 이전 카테고리 페이지나 about:blank에 그대로 머문
@@ -4823,7 +5184,10 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
         // clickSortCandidateText가 <option>(네이티브 <select> 정렬)이면 selectOption으로, 아니면 기존
         // .click()으로 처리한다 — confirmSortCandidatesByClicking(감지)과 실행 방식을 반드시 맞춰야
         // 여기서 실패하지 않는다(투비즈온 실사용 확인, 2026-09-12 — 위 주석 clickSortCandidateText 참고).
-        if (await clickSortCandidateText(workerPage, sortClickText)) {
+        const clicked = await clickSortCandidateText(workerPage, sortClickText)
+        sortClickResult = { clickText: sortClickText, applied: clicked }
+        console.log(`[정렬적용:${clicked ? '성공' : '실패'}] "${sortClickText}" — ${listingUrl}${clicked ? '' : ' (정렬 라벨을 화면에서 못 찾음 — 기본 정렬로 진행)'}`)
+        if (clicked) {
           await workerPage.waitForLoadState('load', { timeout: 5_000 }).catch(() => {})
           await workerPage.waitForLoadState('networkidle', { timeout: 3_000 }).catch(async () => { await workerPage.waitForTimeout(800) })
           // kind:'click' 정렬은 정의상 AJAX라 URL이 전혀 안 바뀌어야 한다(detectSortOptionsByClicking이
@@ -4878,9 +5242,28 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
     // 신규가 하나도 없는 페이지라고 "더 이상 상품이 없다"로 오판하면 안 된다.
     const alreadyScrapedSet = new Set(opts.excludeUrls || [])
 
+    // 목록을 JS/AJAX로 늦게 그리는 몰에서는 이동 직후 한 번만 훑으면 헤더 링크(로고·회사소개 등)만
+    // 보이고 상품은 아직 없다 — 실측으로 확인했다(투비즈온, 2026-09-13): 정렬 클릭이 있는 실행은
+    // 그 대기 덕에 상품을 찾았고(18초), 정렬 없는 실행은 4초 만에 끝나며 표본이 회사소개 페이지로
+    // 잡혔다. 개수 세기 쪽(countProductsSettled)에는 이미 같은 대기를 넣었는데 **수집 쪽에는 없었다.**
+    // 개수가 더 늘지 않을 때까지(최소 2초, 최대 6초) 지켜본 뒤 확정한다.
+    const scanProductsSettled = async (): Promise<{ href: string; name: string; thumbnail: string }[]> => {
+      let best = await scanForProducts(workerPage)
+      const startedAt = Date.now()
+      let stable = 0
+      while (Date.now() - startedAt < SETTLE_COUNT_TIMEOUT_MS) {
+        await sleep(SETTLE_COUNT_INTERVAL_MS)
+        const next = await scanForProducts(workerPage).catch(() => null)
+        if (!next) break
+        if (next.length > best.length) { best = next; stable = 0; continue }
+        stable++
+        if (best.length > 0 && Date.now() - startedAt >= SETTLE_COUNT_MIN_OBSERVE_MS && stable >= SETTLE_COUNT_STABLE_CHECKS) break
+      }
+      return best
+    }
     for (let p = 0; p < effectiveMaxPages; p++) {
       if (shouldStop()) { collectionStopped = true; break }
-      let matched = await scanForProducts(workerPage)
+      let matched = p === 0 ? await scanProductsSettled() : await scanForProducts(workerPage)
       let hrefsThisPage = new Set(matched.map(m => m.href))
       const isDeadEnd = (hrefs: Set<string>) => hrefs.size === 0 || (prevHrefs !== null && [...hrefs].every(h => prevHrefs!.has(h)))
 
@@ -4898,7 +5281,17 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
       // dead-end(페이지네이션 끝) 판정은 이 페이지에서 실제로 찾은 전체 목록(matched/hrefsThisPage)
       // 기준으로 그대로 한다 — 개수 상한 때문에 일부만 담기로 했다고 해서 "새 상품이 없다"로 오판하면
       // 안 된다(아래 담는 부분만 상한을 적용한다).
-      if (isDeadEnd(hrefsThisPage)) break
+      // "끝"이라고 단정하기 전에 한 번 더 확인한다 — 목록을 AJAX로 늦게 그리는 몰에서는 방금 연 다음
+      // 페이지가 아직 안 그려져 이전 페이지와 같아 보인다(투비즈온 실사용 확인, 2026-09-13: 그래서
+      // "정확한 총 개수 확인"이 1페이지만 세고 24로 끝났다). 매 페이지마다 기다리면 대형 카테고리에서
+      // 누적 비용이 크므로, **끝이라고 판단한 순간에만** 안정화 후 재확인한다.
+      if (isDeadEnd(hrefsThisPage)) {
+        const settled = await scanProductsSettled()
+        const settledHrefs = new Set(settled.map(m => m.href))
+        if (isDeadEnd(settledHrefs)) break
+        matched = settled
+        hrefsThisPage = settledHrefs
+      }
       prevHrefs = hrefsThisPage
 
       const itemsToAdd = limit?.mode === 'count'
@@ -4921,8 +5314,17 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
       // 것으로 잘못 판단한다(실사용 확인: 펫투비 — 위젯/총문구 없는 카테고리에서 실제의 15~24%만
       // 수집된 채 멈춤). 실패하면 더 긴 타임아웃으로 한 번 더 시도한다.
       const nextUrl = withPageParam(workerPage.url(), p + 2)
+      // 페이지 번호가 해시에 실리는 몰은 해시만 바뀌면 문서를 다시 안 읽는다(probePage의 같은 처리
+      // 참고) — 그러면 다음 페이지가 이전 페이지와 같아 보여 수집이 1페이지에서 끝난다.
+      const hashOnly = (() => {
+        try {
+          const cur = new URL(workerPage.url()); const next = new URL(nextUrl)
+          return cur.origin === next.origin && cur.pathname === next.pathname && cur.search === next.search && cur.hash !== next.hash
+        } catch { return false }
+      })()
       const moved = await workerPage.goto(nextUrl, { waitUntil: 'load', timeout: 15_000 }).then(() => true).catch(() => false)
       if (!moved) await workerPage.goto(nextUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+      if (hashOnly) await workerPage.reload({ waitUntil: 'load', timeout: 30_000 }).catch(() => {})
     }
   }
 
@@ -4960,7 +5362,7 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
   perCategoryUrls.forEach((set, key) => perCategoryUrls.set(key, new Set([...set].filter(dropExcluded))))
 
   if (opts.sessionId != null) collectProgress.delete(opts.sessionId)
-  return { urls, platform, categoryByUrl, linkInfo, needsLogin, stopped: collectionStopped, listingUrls, perCategoryUrls }
+  return { urls, platform, categoryByUrl, linkInfo, needsLogin, stopped: collectionStopped, listingUrls, perCategoryUrls, sortClick: sortClickResult }
 }
 
 /**
@@ -5136,6 +5538,24 @@ export interface CatalogPreviewResult {
   items: CatalogPreviewItem[]
   /** 카테고리(또는 단일 시작 URL)별 상품 개수만 — 이름/썸네일/링크는 모으지 않는다. */
   categoryCounts: CategoryCount[]
+  /** 미리보기 1건을 **어느 목록에서, 어떤 정렬로** 뽑았는지 — 지금까지는 이 정보가 응답에 없어,
+   *  화면이 보여주는 상품이 사용자가 고른 카테고리의 것인지 아닌지조차 알 수 없었다(사용자 지적,
+   *  2026-09-13: "왜 다른 카테고리를 봤는지"). 특히 첫 카테고리가 비어 있으면 코드가 **조용히 다른
+   *  카테고리로 갈아타** 표본을 뽑는데, 그 사실이 화면에 전혀 드러나지 않았다. */
+  /** 이번 미리보기에서 목록을 보고 새로 학습한 상품 상세 URL 패턴(정규식 source) — 호출부(라우트)가
+   *  사이트에 저장해두면 다음부터 개수 세기·미리보기·스크랩이 전부 같은 기준을 쓴다.
+   *  이미 알고 있던 패턴과 같거나 근거가 부족하면 없음. */
+  learnedDetailUrlPattern?: string | null
+  previewSource?: {
+    /** 실제로 표본을 뽑은 목록 URL */
+    url: string
+    /** 사용자가 고른 첫 카테고리 URL — url과 다르면 갈아탄 것이다 */
+    requestedUrl: string
+    /** 갈아탄 이유(첫 카테고리에서 상품을 못 찾음 등). 갈아타지 않았으면 없음 */
+    switchedReason?: string
+    /** AJAX(클릭) 정렬을 요청했다면 그 라벨과 실제 적용 여부 */
+    sortClick?: { clickText: string; applied: boolean }
+  } | null
   /** true면 로그인 세션이 끊긴 채로(또는 아예 로그인 안 된 채로) 이 결과를 얻었을 수 있다 —
    *  화면에서 로그인 창을 다시 띄우도록 안내하는 데 쓴다. */
   needsLogin: boolean
@@ -5210,6 +5630,17 @@ async function countProductsOnPage(
       if (viaProfile.length > 0) return toResult(viaProfile)
     }
     const normalize = (u: string) => u.replace(/\/+$/, '')
+    // 로고가 '/'가 아니라 '/index.php'를 가리키는 몰이 있다(투비즈온 실사용 확인, 2026-09-13 — 그 로고
+    // 링크가 "상품"으로 잡혀 미리보기 첫 상품이 몰 홈페이지로 나왔다). 쿼리 없는 루트/index.*는 상품일
+    // 수 없으므로 제외한다 — collectProductUrls 폴백과 같은 기준.
+    const isHomeLikeHref = (u: string) => {
+      try {
+        const x = new URL(u)
+        if (x.search || x.hash) return false
+        const pth = x.pathname.replace(/\/+$/, '')
+        return pth === '' || /^\/index\.(php|html?|asp|jsp)$/i.test(pth)
+      } catch { return false }
+    }
     const currentNorm = normalize(location.href)
     const originNorm = normalize(location.origin)
     // 로고/장바구니/마이샵/상단메뉴/"TODAY VIEW"(최근 본 상품) 위젯 등 사이트 공통 헤더의 <a><img>가 실제
@@ -5226,7 +5657,7 @@ async function countProductsOnPage(
       .filter(a => !inWidget(a))
       .map(a => (a as HTMLAnchorElement).href)
       .filter(href => href && href.startsWith(baseUrl))
-      .filter(href => { const n = normalize(href); return n !== currentNorm && n !== originNorm })
+      .filter(href => { const n = normalize(href); return n !== currentNorm && n !== originNorm && !isHomeLikeHref(href) })
       // 페이지네이션 이전/다음 화살표, 검색·비교 버튼처럼 #contents 안에 있지만 상품이 아닌 <a><img>가
       // 있다(실사용 확인: 진짜양말 — href="#none"/"#SelectSearch"라 #contents 스코프로도 안 걸러지고,
       // 프래그먼트라 상세 페이지(#currentNorm)와도 달라 매 페이지 "새 상품 2개"로 잘못 잡혀 지수+이분
@@ -5235,6 +5666,48 @@ async function countProductsOnPage(
       .filter(href => !detailRe || detailRe.test(href))
     return toResult(fallback)
   }, { userSel, platformSel, detailPatternSrc, baseUrl, widgetExcludeSrc: WIDGET_CLASS_EXCLUDE_SRC })
+}
+
+// countProductsOnPage는 "부르는 그 순간의 DOM"만 보는 스냅샷이다 — 목록을 JS/AJAX로 그리는 몰에서
+// 페이지 이동 직후 한 번만 세면 실제로는 상품이 있는데 0개(또는 먼저 그려진 일부만)로 잡힌다.
+// 실사용 확인(2026-09-13, 투비즈온 — 사용자 지적: "해당 카테고리를 클릭하면 살짝 늦게 열리는데,
+// 그러한 이유로 건너뛴 건 아닌지"): 카테고리 51개 중 32개가 "상품 0개 + 하위메뉴 0개"로 판정돼 최종
+// 목록에서 통째로 빠졌고(뷰티/바디헤어/대형가전/카메라 등 실제로 상품이 있는 카테고리들), 살아남은
+// 것들조차 하나같이 "상품 5개"로 균일했다(먼저 그려지는 일부만 센 흔적).
+const SETTLE_COUNT_TIMEOUT_MS = 6_000
+const SETTLE_COUNT_INTERVAL_MS = 500
+// "한 번 더 세봤는데 안 늘었으면 끝"으로는 부족하다 — 합성 페이지로 실측(2026-09-13)해보니, 추천상품
+// 위젯 5개가 **먼저** 그려져 있고 진짜 목록 40개가 1.5초 뒤 오는 페이지에서 0.5초 만에 "5개로 안정됐다"고
+// 확정해버렸다(투비즈온에서 살아남은 카테고리가 전부 "상품 5개"였던 것과 정확히 같은 모양). 그래서
+// 개수가 0이 아니어도 최소 이 시간만큼은 계속 지켜보고, 그 뒤 연속 2회 안 늘어야 확정한다.
+const SETTLE_COUNT_MIN_OBSERVE_MS = 2_000
+const SETTLE_COUNT_STABLE_CHECKS = 2
+
+/** countProductsOnPage를 "개수가 더 이상 늘지 않을 때까지" 반복해 센다 — 위 상수 주석 참고.
+ *  이미 다 그려진 정상 페이지는 확인 한 번(0.5초)만 더 들고, 끝까지 0개인 진짜 빈 페이지만 상한까지
+ *  기다린다. onGrew: 첫 스냅샷보다 실제로 늘어난 경우에만 불린다(진단 로그용). */
+async function countProductsSettled(
+  page: Page, userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
+  onGrew?: (first: number, final: number, elapsedMs: number) => void,
+): Promise<{ count: number; isLoginPage: boolean; fingerprint: string; hrefs: string[] }> {
+  const once = () => countProductsOnPage(page, userSel, platformSel, detailPatternSrc, baseUrl)
+  let probe = await once()
+  if (probe.isLoginPage) return probe
+  const first = probe.count
+  const startedAt = Date.now()
+  let stableChecks = 0
+  while (Date.now() - startedAt < SETTLE_COUNT_TIMEOUT_MS) {
+    await sleep(SETTLE_COUNT_INTERVAL_MS)
+    const next = await once().catch(() => null)
+    if (!next) break
+    if (next.isLoginPage) return next
+    if (next.count > probe.count) { probe = next; stableChecks = 0; continue } // 아직 그려지는 중
+    stableChecks++
+    const observedEnough = Date.now() - startedAt >= SETTLE_COUNT_MIN_OBSERVE_MS
+    if (probe.count > 0 && observedEnough && stableChecks >= SETTLE_COUNT_STABLE_CHECKS) break
+  }
+  if (probe.count > first) onGrew?.(first, probe.count, Date.now() - startedAt)
+  return probe
 }
 
 /** 페이지네이션 위젯에 보이는 페이지 번호 중 가장 큰 값을 "총 페이지 수"로 읽는다 — 사용자가 요청한
@@ -5364,6 +5837,8 @@ function countProductsFromHtml(
     if (viaProfile.length > 0) return toResult(viaProfile)
   }
   const normalize = (u: string) => u.replace(/\/+$/, '')
+  // 브라우저 버전(countProductsOnPage)의 isHomeLikeHref와 같은 기준 — 로고가 /index.php를 가리키는 몰 대비.
+  const isHomeLikeHref = looksLikeMallHomeUrl
   const currentNorm = normalize(finalUrl)
   const originNorm = normalize(new URL(finalUrl).origin)
   // countProductsOnPage의 #contents 스코프 좁히기 + TODAY VIEW 제외와 반드시 같게 유지한다(위 함수 주석
@@ -5376,7 +5851,7 @@ function countProductsFromHtml(
     .filter(el => !$(el).parents().toArray().some(p => widgetRe.test($(p).attr('class') || '')))
     .map(el => resolve($(el).attr('href')))
     .filter((href): href is string => !!href && href.startsWith(baseUrl))
-    .filter(href => { const n = normalize(href); return n !== currentNorm && n !== originNorm })
+    .filter(href => { const n = normalize(href); return n !== currentNorm && n !== originNorm && !isHomeLikeHref(href) })
     // countProductsOnPage의 상세 URL 패턴 필터와 반드시 같게 유지한다(위 함수 주석 참고 — 페이지네이션
     // 화살표/검색·비교 버튼처럼 #contents 안에 있는 비상품 <a><img>가 상품으로 잘못 잡히는 문제).
     .filter(href => !detailRe || detailRe.test(href))
@@ -5457,9 +5932,22 @@ async function probeCategoryPage(
     const lightweight = await probeLightweight(context, withPageParam(firstPageUrl, pageNum), userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
     if (lightweight) return lightweight
   }
-  await workerPage.goto(withPageParam(firstPageUrl, pageNum), { waitUntil: patient ? 'load' : 'domcontentloaded', timeout: patient ? 30_000 : 15_000 }).catch(() => {})
+  const targetUrl = withPageParam(firstPageUrl, pageNum)
+  // 페이지 번호가 **해시**에 실리는 몰(withPageParam 주석 참고)은 해시만 바뀌면 브라우저가 문서를 다시
+  // 읽지 않는다(same-document navigation) — 그러면 목록이 그대로라 "2페이지가 1페이지와 같다 → 끝"으로
+  // 오판한다. 해시만 다른 이동이면 새로고침해서 그 페이지 상태로 다시 그리게 한다.
+  const hashOnlyMove = (() => {
+    try {
+      const cur = new URL(workerPage.url()); const next = new URL(targetUrl)
+      return cur.origin === next.origin && cur.pathname === next.pathname && cur.search === next.search && cur.hash !== next.hash
+    } catch { return false }
+  })()
+  await workerPage.goto(targetUrl, { waitUntil: patient ? 'load' : 'domcontentloaded', timeout: patient ? 30_000 : 15_000 }).catch(() => {})
+  if (hashOnlyMove) await workerPage.reload({ waitUntil: 'load', timeout: 30_000 }).catch(() => {})
   await settleAfterNav(workerPage)
-  const { count, isLoginPage, fingerprint, hrefs } = await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+  // 목록을 AJAX로 늦게 그리는 몰에서 한 번만 세면 0개/일부만 잡힌다 — 개수가 안정될 때까지 본다
+  // (countProductsSettled 주석). 페이지 탐색은 O(log n)번만 돌므로 이 대기 비용은 크지 않다.
+  const { count, isLoginPage, fingerprint, hrefs } = await countProductsSettled(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
   const currentPage = count > 0 ? await readCurrentPageNumber(workerPage, nextPageSelector) : null
   return { count, isLoginPage, fingerprint, hrefs, currentPage }
 }
@@ -5641,6 +6129,8 @@ async function countCategoryProductsOnce(
   workerPage: Page, categoryUrl: string,
   userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined,
   nextPageSelector: string | undefined, baseUrl: string, stop: () => boolean, knownNoPaginationWidget: boolean,
+  /** 이 페이지 수를 넘어가면 더 세지 않고 "N개 이상"으로 끊는다 — PREVIEW_PAGE_BUDGET 주석 참고. */
+  pageBudget: number = PREVIEW_PAGE_BUDGET,
 ): Promise<CategoryCount> {
   // 개수만 세려고 <a> 태그만 보면 되니 'load'(이미지·광고·채팅위젯까지 다 받을 때까지 대기)가 아니라
   // 'domcontentloaded'로 충분하다 — 상품 이미지가 많은 목록 페이지에서 이 차이가 페이지 방문 하나당
@@ -5758,14 +6248,16 @@ async function countCategoryProductsOnce(
       }
       console.log(`[previewCatalog] "${label}" maxPage=${maxPage}이 위젯 페이지 묶음의 끝일 뿐(page ${maxPage + 1}에도 ${afterLastCount}개 더 있음) → 실제 마지막 페이지 빠르게 탐색`)
       const found = await findRealLastPage(
-        workerPage, firstPageUrl, MAX_PAGE_SEARCH_BOUND, maxPage + 1, afterLastCount, afterLastFingerprint,
+        workerPage, firstPageUrl, Math.min(MAX_PAGE_SEARCH_BOUND, pageBudget), maxPage + 1, afterLastCount, afterLastFingerprint,
         userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector, stop,
       )
       if (found) {
         const count = perPage * (found.page - 1) + found.count
         if (found.needsLogin) return { url: categoryUrl, label, count, needsLogin: true }
-        console.log(`[previewCatalog] "${label}" perPage=${perPage} 실제 마지막 페이지=${found.page} lastPageCount=${found.count} → count=${count}`)
-        return { url: categoryUrl, label, count }
+        // 예산 끝에서 멈춘 것이면 "여기까지만 확인했다"는 뜻 — 총 개수로 단정하지 않는다.
+        const budgetHit = found.page >= pageBudget
+        console.log(`[previewCatalog] "${label}" perPage=${perPage} 실제 마지막 페이지=${found.page} lastPageCount=${found.count} → count=${count}${budgetHit ? ' (미리보기 예산까지만 확인 — 더 있을 수 있음)' : ''}`)
+        return { url: categoryUrl, label, count, truncated: budgetHit }
       }
       console.log(`[previewCatalog] "${label}" 실제 마지막 페이지를 못 찾음(${MAX_PAGE_SEARCH_BOUND}페이지 이내) → 안전한 순차 탐색으로 폴백`)
     }
@@ -5781,14 +6273,15 @@ async function countCategoryProductsOnce(
   // 순회했는데, "maxPage 페이지 자체가 비어있게 읽힌" 카테고리가 실제로는 수백~수천 개짜리인 경우도
   // 있어(실사용 확인: 1020bag.com의 한 카테고리가 5622개) 순차 탐색이 카테고리 하나에 수십 분씩 걸렸다.
   const fallbackFound = await findRealLastPage(
-    workerPage, firstPageUrl, MAX_PAGE_SEARCH_BOUND, 1, perPage, perPageFingerprint,
+    workerPage, firstPageUrl, Math.min(MAX_PAGE_SEARCH_BOUND, pageBudget), 1, perPage, perPageFingerprint,
     userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector, stop,
   )
   if (fallbackFound) {
     const count = perPage * (fallbackFound.page - 1) + fallbackFound.count
     if (fallbackFound.needsLogin) return { url: categoryUrl, label, count, needsLogin: true }
-    console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage}(불신) → 실제 마지막 페이지=${fallbackFound.page} → count=${count} url=${firstPageUrl}`)
-    return { url: categoryUrl, label, count }
+    const fallbackBudgetHit = fallbackFound.page >= pageBudget
+    console.log(`[previewCatalog] "${label}" perPage=${perPage} maxPage=${maxPage}(불신) → 실제 마지막 페이지=${fallbackFound.page} → count=${count}${fallbackBudgetHit ? ' (미리보기 예산까지만 확인 — 더 있을 수 있음)' : ''} url=${firstPageUrl}`)
+    return { url: categoryUrl, label, count, truncated: fallbackBudgetHit }
   }
 
   // 그래도 못 찾으면(탐색 상한을 넘김) 최후 수단으로 안전하게 한 페이지씩 순회한다(정확한 개수
@@ -5806,7 +6299,11 @@ async function countCategoryProductsOnce(
   // 나온다(paginationActuallyWorks가 이미 같은 방식으로 검증됨).
   const seenHrefs = new Set<string>(page1Hrefs)
   let hitCap = true
-  for (let pageNum = 2; pageNum <= AUTO_PAGINATION_CAP; pageNum++) {
+  // 이 순차 순회는 "정확한 개수 보장"이 목적이라 원래 AUTO_PAGINATION_CAP(1000페이지)까지 돈다.
+  // 미리보기는 빠른 감이 목적이므로 예산까지만 돌고 "N개 이상"으로 끊는다(PREVIEW_PAGE_BUDGET 주석) —
+  // 정확한 값은 "정확한 총 개수 확인"(countDedupedProductUrls)이 모든 페이지를 실제로 순회해 낸다.
+  const sequentialCap = Math.min(AUTO_PAGINATION_CAP, pageBudget)
+  for (let pageNum = 2; pageNum <= sequentialCap; pageNum++) {
     if (stop()) { hitCap = false; break }
     const probed = await probeCategoryPage(workerPage, context, firstPageUrl, pageNum, useHttp, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
     const { isLoginPage } = probed
@@ -5899,7 +6396,19 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
         // 택했다(카테고리가 많아도 중복은 1페이지 분량 뿐이라 전체 시간에 미치는 영향은 미미하다).
         const bootstrap = await collectProductUrls(scratchPage, { ...opts, url: listingUrls[0], categoryUrls: undefined, maxPages: 1 })
         const platform = bootstrap.platform
-        let firstUrl = bootstrap.urls[0]
+        // 표본이 "목록 페이지 자신"이면 상품이 아니다 — 느슨한 폴백 셀렉터(<a><img>)가 로고/배너 링크를
+        // 상품으로 주워오면 이런 일이 생긴다. 실사용 확인(2026-09-13, 투비즈온): 카테고리 목록 첫 줄에
+        // 몰 홈 URL이 잘못 들어가 있던 상태에서 미리보기를 돌리니 **몰 홈페이지 자체가 상품 1건으로**
+        // 나왔다(상품명=몰 타이틀, 공급가 ₩2,640). 목록 URL과 같은 페이지는 후보에서 뺀다.
+        const sampleCandidates = bootstrap.urls.filter(u => !isSamePageUrl(u, listingUrls[0]))
+        if (bootstrap.urls.length && !sampleCandidates.length) {
+          console.log(`[미리보기:진단] 목록(${listingUrls[0]})에서 찾은 상품 링크가 목록 페이지 자신뿐이라 표본으로 쓰지 않음`)
+        }
+        let firstUrl = sampleCandidates[0]
+        // 표본을 어디서·어떤 정렬로 뽑았는지 추적한다(CatalogPreviewResult.previewSource 주석 참고).
+        let sampleListingUrl = listingUrls[0]
+        let sampleSwitchedReason: string | undefined
+        let sampleSortClick = bootstrap.sortClick
         let categoryByUrl = bootstrap.categoryByUrl
         let needsLogin = bootstrap.needsLogin
         if (stop()) return supersededResult()
@@ -5907,7 +6416,8 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
         const profile = PLATFORM_PROFILES[platform]
         const userSel = opts.productLinkSelector || null
         const platformSel = profile.productLinkSelector
-        const detailPatternSrc = profile.detailUrlPattern?.source
+        // 플랫폼 프로필에 패턴이 없으면(unknown 몰) 이 몰에서 학습해둔 패턴을 쓴다.
+        const detailPatternSrc = profile.detailUrlPattern?.source ?? opts.detailUrlPattern
         const nextPageSelector = opts.nextPageSelector || profile.nextPageSelector || undefined
         const baseUrl = new URL(listingUrls[0]).origin
 
@@ -5992,10 +6502,17 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
         if (!firstUrl) {
           const nonEmpty = doneCounts.find(c => c.count > 0)
           if (nonEmpty) {
+            // 갈아타는 것 자체는 "아무것도 못 보여주는 것"보다 낫지만, **말없이** 갈아타면 사용자는
+            // 자기가 고른 카테고리의 상품을 보고 있다고 오해한다(사용자 지적, 2026-09-13). 어디서
+            // 뽑았는지 기록해 화면이 그대로 알려주게 한다.
+            console.log(`[미리보기:표본] 첫 카테고리(${listingUrls[0]})에서 상품을 못 찾아 "${nonEmpty.url}"에서 표본을 뽑습니다`)
             const retry = await collectProductUrls(scratchPage, { ...opts, url: nonEmpty.url, categoryUrls: undefined, maxPages: 1 })
-            firstUrl = retry.urls[0]
+            firstUrl = retry.urls.filter(u => !isSamePageUrl(u, nonEmpty.url))[0]
             categoryByUrl = retry.categoryByUrl
             needsLogin = needsLogin || retry.needsLogin
+            sampleListingUrl = nonEmpty.url
+            sampleSwitchedReason = '고른 첫 카테고리에서 상품을 찾지 못해 다른 카테고리에서 표본을 뽑았습니다'
+            sampleSortClick = retry.sortClick
           }
         }
 
@@ -6006,7 +6523,22 @@ export async function previewCatalog(opts: ScrapeOptions): Promise<CatalogPrevie
           needsLogin = needsLogin || extracted.needsLoginHere
           if (runEntry) runEntry.earlyPreview = preview
         }
-        return { total, platform, preview, items: [], categoryCounts: doneCounts, needsLogin }
+        // 이 몰의 상품 상세 URL 패턴을 아직 모르면(플랫폼 프로필에도 없고 기억해둔 것도 없음), 방금
+        // 목록에서 실제로 모은 상품 URL들로 학습해 호출부가 저장하게 한다 — 그래야 다음부터 개수 세기·
+        // 미리보기·스크랩이 "이미지를 감싼 <a>는 전부 상품"이라는 폴백에 의존하지 않는다.
+        const learnedDetailUrlPattern = (profile.detailUrlPattern?.source ?? opts.detailUrlPattern)
+          ? null
+          : deriveDetailUrlPattern(bootstrap.urls)
+        if (learnedDetailUrlPattern) {
+          console.log(`[상세URL패턴:학습] ${listingUrls[0]} → /${learnedDetailUrlPattern}/ (상품 ${bootstrap.urls.length}개 기준)`)
+        }
+        return {
+          total, platform, preview, items: [], categoryCounts: doneCounts, needsLogin,
+          learnedDetailUrlPattern,
+          previewSource: preview
+            ? { url: sampleListingUrl, requestedUrl: listingUrls[0], switchedReason: sampleSwitchedReason, sortClick: sampleSortClick }
+            : null,
+        }
       } finally {
         await scratchPage.close().catch(() => {})
       }
@@ -6373,6 +6905,9 @@ export interface CategoryDiscoveryResult {
    *  (사용자 요청, 2026-08-18). GEMINI_API_KEY가 없거나 AI가 매번 빈 결과를 줘 기존 히스틱으로만
    *  전부 채워졌으면 false. */
   aiUsed?: boolean
+  /** 화면(비전)으로 읽은 카테고리와 이번 결과의 대조 + 누락 재검증 결과 — "몰 구조분석"의
+   *  MallProfileSignals.categoryScreenCheck와 같은 값이다(screenCheckAndRecover가 두 경로 공용). */
+  categoryScreenCheck?: CategoryScreenCheck | null
 }
 
 /** 시작 URL 페이지에서 카테고리 메뉴로 보이는 링크를 찾아 사용자가 고를 수 있도록 목록으로 반환한다.
@@ -6412,10 +6947,302 @@ export async function discoverCategoryLinks(opts: ScrapeOptions): Promise<Catego
 // 저장하지 않는다(진짜 수집은 아래 gatherRelevantCategoryPageHints가 나중에 그 URL만 다시 방문해서 함).
 const MALL_REPORT_HINT_KEYWORDS = /무통장|계좌|입금|택배|배송비|배송조회|반품|교환|환불|재고|품절|정렬|최신순|인기순|낮은가격순|높은가격순|사업자|대표자?\s*:|통신판매/
 
+/** 하위구조 확인(expandCategoryHubs) 단계에서 최종 목록에서 빠진 카테고리와 그 이유 — 화면 대조
+ *  리포트(categoryScreenCheck)가 "화면엔 있는데 결과엔 없는" 항목의 사유를 여기서 찾아 붙인다. */
+export interface CategoryExclusion { name: string; href: string; reason: string }
+
+/** 화면(비전)으로 읽은 카테고리 이름과 최종 결과를 대조한 결과 — MallProfileSignals.categoryScreenCheck 참고. */
+export interface CategoryScreenCheck {
+  /** 비전이 그 화면에서 읽은 카테고리 이름들(사람이 보는 기준) */
+  screenNames: string[]
+  /** 재검증(recoverMissingCategories)으로 되살려 최종 목록에 다시 넣은 카테고리 — 무엇을 근거로
+   *  되살렸는지(상품을 실제로 찾음 / 화면에 상품이 보임)까지 남겨, 사용자가 신뢰도를 판단할 수 있게 한다. */
+  recovered?: { name: string; href: string; evidence: string }[]
+  /** 화면엔 있는데 최종 결과엔 없는 것 — reason은 파이프라인이 아는 사유(모르면 "탐지 단계에서 못 찾음") */
+  missing: { name: string; reason: string }[]
+  /** 최종 결과엔 있는데 화면에서는 못 읽은 것 — 비전이 놓쳤을 수도, 스크롤 밖이었을 수도 있어 참고용 */
+  extra: string[]
+  checkedAt: string
+}
+
+/** 이름 비교용 정규화 — 최종 결과는 "대분류 > 중분류"처럼 경로로 저장되고 비전은 화면에 보이는 마지막
+ *  이름만 읽으므로, 경로의 마지막 조각끼리 비교한다. 공백/구분자/대소문자 차이도 흡수한다. */
+export function normalizeCategoryName(name: string): string {
+  const leaf = name.split('>').pop() ?? name
+  return leaf.replace(/[\s·ㆍ/｜|,()[\]]+/g, '').toLowerCase()
+}
+
+/** 두 문자열의 편집거리(Levenshtein) — 비전(OCR)이 한두 글자를 잘못 읽는 걸 흡수하는 데만 쓴다. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0
+  if (!a.length || !b.length) return Math.max(a.length, b.length)
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i)
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i]
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+    }
+    prev = cur
+  }
+  return prev[b.length]
+}
+
+/** 화면에서 읽은 이름이 결과의 어떤 이름과 "사실상 같은지" 판정한다 — 비전은 글자를 종종 잘못 읽는다
+ *  (투비즈온 실사용 확인, 2026-09-13: "천구/커튼"=침구/커튼, "유아동류"=유아동의류, "주얼리/시계"=
+ *  쥬얼리/시계, "취미/니스/수영"=휘트니스/수영). 이걸 그대로 "누락"이라고 보고하면 **이미 결과에 있는
+ *  카테고리를 없다고 알리는 오보**가 되고, 재검증까지 헛돌게 된다. 짧은 이름일수록 한 글자 차이가
+ *  다른 카테고리일 수 있으니(예: "신발"/"실발") 길이에 따라 허용치를 다르게 둔다. */
+export function findApproximateMatch(key: string, keys: Iterable<string>): string | null {
+  if (!key) return null
+  const allowed = key.length >= 5 ? 2 : key.length >= 3 ? 1 : 0
+  if (allowed === 0) return null
+  let best: { k: string; d: number } | null = null
+  for (const k of keys) {
+    if (!k || Math.abs(k.length - key.length) > allowed) continue
+    const d = editDistance(key, k)
+    if (d <= allowed && (!best || d < best.d)) best = { k, d }
+  }
+  return best?.k ?? null
+}
+
+/** 재검증할 후보 — 화면에서 읽은 이름에 URL을 붙인 것. href를 못 찾으면 재검증 자체가 불가능하다. */
+export interface MissingCategoryCandidate { name: string; href: string; reason: string }
+
+/** 화면엔 있는데 결과엔 없는 이름들에 URL을 붙인다(재검증 대상 만들기) — 순수 함수라 테스트로 고정한다.
+ *  1순위: 확장 단계에서 제외된 기록(excluded)에 그 이름이 있으면 그때의 href를 그대로 쓴다.
+ *  2순위: 메뉴가 열려 있던 화면에서 같이 모아둔 링크(menuLinks) 중 이름이 일치하는 것 — "탐지 단계에서
+ *  아예 못 찾은" 카테고리는 이 경로로만 URL을 얻을 수 있다.
+ *  둘 다 없으면 후보에서 뺀다 — 방문할 URL을 모르면 다른 방법으로 검증할 방법도 없다. */
+export function resolveMissingCategoryCandidates(
+  missing: { name: string; reason: string }[],
+  excluded: CategoryExclusion[],
+  menuLinks: { text: string; href: string }[] | undefined,
+): MissingCategoryCandidate[] {
+  const byExcluded = new Map<string, string>()
+  for (const e of excluded) {
+    const key = normalizeCategoryName(e.name)
+    if (key && !byExcluded.has(key)) byExcluded.set(key, e.href)
+  }
+  const byMenu = new Map<string, string>()
+  for (const l of menuLinks ?? []) {
+    const key = normalizeCategoryName(l.text)
+    if (key && l.href && !byMenu.has(key)) byMenu.set(key, l.href)
+  }
+  const out: MissingCategoryCandidate[] = []
+  const seen = new Set<string>()
+  for (const m of missing) {
+    const key = normalizeCategoryName(m.name)
+    if (!key || seen.has(key)) continue
+    const href = byExcluded.get(key) ?? byMenu.get(key)
+    if (!href) continue
+    seen.add(key)
+    out.push({ name: m.name, href, reason: m.reason })
+  }
+  return out
+}
+
+/** 재검증 상한 — 화면 이름이 수십 개씩 나올 수 있어, 되살리기 한 번에 몇 개까지 다시 열어볼지 제한한다.
+ *  하나당 최대 (페이지로드 + 인내심 있는 개수 세기 + 비전 1회)라 무제한이면 분석 전체가 늘어진다. */
+const MAX_CATEGORY_RECOVERY_ATTEMPTS = 25
+
+/**
+ * "화면에는 보이는데 결과엔 없는" 카테고리를 **다른 방법으로 다시 검증한다**(사용자 지시, 2026-09-13 —
+ * "사람이 보는 화면에는 모든 카테고리가 확인이 된다. 그 기준으로 누락된 카테고리가 있을 경우 다른
+ * 방법으로라도 다시 해당 카테고리를 검증하는 프로세스를 넣어").
+ *
+ * 1차 판정(허브 확장)은 "페이지를 열고 DOM에서 상품 링크를 센다"는 한 가지 방법만 쓴다 — 목록이 늦게
+ * 그려지거나(countProductsSettled 주석), 이 몰 스킨이 우리 셀렉터와 안 맞으면 멀쩡한 카테고리가 0개로
+ * 잡힌다. 그래서 되살리기는 **서로 독립적인 두 근거**를 순서대로 쓴다:
+ *   ① 더 끈질긴 재방문 — 'load'까지 기다리고, 개수가 안정될 때까지 더 오래 지켜본다.
+ *   ② 그래도 0개면 화면 캡처 → 비전에게 "사람이 보기에 상품 목록이 있느냐"고 묻는다(detectProductListVisible).
+ *      DOM을 못 읽는 것과 상품이 없는 것은 다른 문제이므로, 눈으로 보이면 있는 것으로 인정한다.
+ * 둘 중 하나라도 통과하면 최종 목록에 다시 넣는다(근거를 같이 기록해 신뢰도를 구분할 수 있게 한다).
+ */
+async function recoverMissingCategories(
+  context: BrowserContext, mallName: string, candidates: MissingCategoryCandidate[],
+  userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined, baseUrl: string,
+  signal?: AbortSignal,
+): Promise<{ recovered: { name: string; href: string; evidence: string }[]; stillMissing: Map<string, string> }> {
+  const recovered: { name: string; href: string; evidence: string }[] = []
+  const stillMissing = new Map<string, string>()
+  if (!candidates.length) return { recovered, stillMissing }
+  const targets = candidates.slice(0, MAX_CATEGORY_RECOVERY_ATTEMPTS)
+  console.log(`[누락재검증:${mallName}] 화면엔 있는데 결과에 없는 ${candidates.length}개 중 ${targets.length}개를 다른 방법으로 다시 확인합니다`)
+  const page = await context.newPage()
+  try {
+    for (const c of targets) {
+      if (signal?.aborted) break
+      // ① 더 끈질긴 재방문 — 1차와 달리 'load'까지 기다린다(1차는 domcontentloaded).
+      const moved = await page.goto(c.href, { waitUntil: 'load', timeout: 30_000 }).then(() => true).catch(() => false)
+      if (!moved) {
+        stillMissing.set(normalizeCategoryName(c.name), '재검증 중에도 페이지를 열지 못함')
+        continue
+      }
+      await settleAfterNav(page)
+      const probe = await countProductsSettled(page, userSel, platformSel, detailPatternSrc, baseUrl)
+        .catch(() => ({ count: 0, isLoginPage: false }))
+      if (probe.count > 0) {
+        console.log(`[누락재검증:${mallName}] "${c.name}" — 다시 열어보니 상품 ${probe.count}개 → 목록에 되살림 (${c.href})`)
+        // 사용자 화면에는 **개수를 적지 않는다**(사용자 지시, 2026-09-13): 몰 구조분석 단계의 개수는
+        // 1페이지 분량만 본 값이라(이 몰은 페이지 번호가 URL에 안 실려 2페이지를 못 연다) 총 개수처럼
+        // 읽히면 오해를 준다. 상품 개수는 미리보기 단계에서 세어 그 값만 보여준다. 진단용 로그에는
+        // 그대로 남긴다(위 console.log).
+        recovered.push({ name: c.name, href: c.href, evidence: '재방문에서 상품이 있는 것을 확인' })
+        continue
+      }
+      if (probe.isLoginPage) {
+        stillMissing.set(normalizeCategoryName(c.name), '재검증 시 로그인 화면이 떠 확인 불가(로그인 상태를 확인해주세요)')
+        continue
+      }
+      // ② 눈으로 확인 — DOM을 못 읽는 것과 상품이 없는 것은 다르다.
+      const shot = await page.screenshot({ type: 'jpeg', quality: 90 }).catch(() => null)
+      const visible = shot ? await detectProductListVisible(mallName, shot.toString('base64'), 'image/jpeg', signal).catch(() => null) : null
+      if (visible === true) {
+        console.log(`[누락재검증:${mallName}] "${c.name}" — DOM으로는 0개지만 화면에는 상품이 보임 → 목록에 되살림 (${c.href})`)
+        recovered.push({ name: c.name, href: c.href, evidence: '화면 인식으로 상품 목록 확인(DOM 셀렉터가 못 읽은 것으로 보임)' })
+        continue
+      }
+      stillMissing.set(normalizeCategoryName(c.name), visible === false
+        ? '다시 열어봐도 상품이 없고, 화면으로 봐도 상품 목록이 없음(진짜 빈 카테고리로 보임)'
+        : '다시 열어봐도 상품이 없었고, 화면 인식은 판단하지 못함')
+    }
+  } finally {
+    await page.close().catch(() => {})
+  }
+  console.log(`[누락재검증:${mallName}] 되살린 카테고리 ${recovered.length}개 / 여전히 확인 안 되는 것 ${stillMissing.size}개`)
+  return { recovered, stillMissing }
+}
+
+/** 되살린 카테고리를 기존 목록에 합친다(같은 href는 한 번만). */
+function mergeRecovered(links: CategoryMenuLink[], recovered: { name: string; href: string }[]): CategoryMenuLink[] {
+  if (!recovered.length) return links
+  const known = new Set(links.map(c => canonicalizeHref(c.href)))
+  return [...links, ...recovered.filter(r => !known.has(canonicalizeHref(r.href))).map(r => ({ name: r.name, href: r.href }))]
+}
+
+/** 화면 인식이 실패한 실행에서 "직전 결과 기준으로 사라진 카테고리"만 재검증한다 —
+ *  recoverMissingCategories와 같은 방법(끈질긴 재방문 → 화면 확인)을 쓴다. */
+async function recoverDroppedCategories(
+  context: BrowserContext, mallName: string, dropped: CategoryMenuLink[],
+  platform: MallPlatform, baseUrl: string, signal?: AbortSignal,
+): Promise<{ name: string; href: string; evidence: string }[]> {
+  const { recovered } = await recoverMissingCategories(
+    context, mallName,
+    dropped.map(p => ({ name: p.name, href: p.href, reason: '직전 실행엔 있었는데 이번엔 안 나옴' })),
+    null, PLATFORM_PROFILES[platform].productLinkSelector, PLATFORM_PROFILES[platform].detailUrlPattern?.source,
+    baseUrl, signal,
+  )
+  return recovered
+}
+
+/**
+ * "화면 대조 → 누락 재검증 → 되살리기"를 한 묶음으로 실행한다 — **"몰 구조분석"과 "카테고리 불러오기"가
+ * 반드시 같은 결과를 내게 하기 위한 공용 경로다.**
+ *
+ * 처음엔 이 과정을 "몰 구조분석" 안에만 넣었는데, 그 결과 두 화면의 숫자가 갈렸다(사용자 지적,
+ * 2026-09-13 — "몰구조분석에 51개와 몰카테고리전체가져오기 49개가 달라"): 몰 구조분석이 재검증으로
+ * 되살린 카테고리를, 나중에 돈 "카테고리 불러오기"가 같은 1차 판정으로 다시 떨어뜨리고 캐시까지
+ * 덮어썼다. 두 버튼은 같은 탐지/확장 함수를 공유하므로, 되살리기도 같이 공유해야 한다.
+ */
+async function screenCheckAndRecover(
+  context: BrowserContext, mallName: string, screenNames: string[] | null | undefined,
+  menuLinks: { text: string; href: string }[] | undefined, links: CategoryMenuLink[],
+  exclusions: CategoryExclusion[], platform: MallPlatform, baseUrl: string, signal?: AbortSignal,
+  /** 직전 실행에서 확인된 카테고리(캐시) — "화면"과 별개의 두 번째 기준선이다. 화면 인식이 실패해
+   *  screenNames가 없어도, 이 목록보다 줄어든 만큼은 재검증 대상이 된다(아래 주석 참고). */
+  previousLinks?: CategoryMenuLink[],
+): Promise<{ links: CategoryMenuLink[]; screenCheck: CategoryScreenCheck | null }> {
+  // 이번 실행에서 사라진 "직전 결과의 카테고리"도 재검증 대상에 넣는다 — 실사용에서 같은 몰의 같은
+  // 페이지가 실행마다 상품 0개로 보이기도 하고 25개로 보이기도 해(투비즈온, 2026-09-13: 51 → 49 → 46로
+  // 매번 줄어듦) 결과가 계속 깎여나갔다. 화면 인식(비전)은 실패할 수 있는 반면 직전 결과는 항상 있으므로,
+  // 두 기준선을 같이 쓰면 "한 번이라도 확인된 카테고리가 조용히 사라지는" 일이 없어진다.
+  const currentHrefs = new Set(links.map(c => canonicalizeHref(c.href)))
+  const droppedFromPrevious = (previousLinks ?? []).filter(p => !currentHrefs.has(canonicalizeHref(p.href)))
+  if (droppedFromPrevious.length) {
+    console.log(`[이전결과대조:${mallName}] 직전에 있던 카테고리 ${droppedFromPrevious.length}개가 이번 결과엔 없음 — 재검증 대상에 포함: ${droppedFromPrevious.slice(0, 10).map(p => p.name).join(', ')}`)
+  }
+
+  const first = buildCategoryScreenCheck(screenNames, links, exclusions)
+  if (!first) {
+    // 화면 인식이 실패한 실행 — 화면 대조는 못 하지만 직전 결과 기준 재검증은 그대로 진행한다.
+    if (!droppedFromPrevious.length || signal?.aborted) return { links, screenCheck: null }
+    const restored = await recoverDroppedCategories(context, mallName, droppedFromPrevious, platform, baseUrl, signal)
+    return { links: mergeRecovered(links, restored), screenCheck: null }
+  }
+  console.log(`[화면대조:${mallName}] 화면에서 읽은 카테고리 ${first.screenNames.length}개 중 결과에 없는 것 ${first.missing.length}개${first.missing.length ? ` — ${first.missing.slice(0, 10).map(m => `${m.name}(${m.reason})`).join(' / ')}` : ''}`)
+  if ((!first.missing.length && !droppedFromPrevious.length) || signal?.aborted) return { links, screenCheck: first }
+
+  const candidates = [
+    ...resolveMissingCategoryCandidates(first.missing, exclusions, menuLinks),
+    ...droppedFromPrevious.map(p => ({ name: p.name, href: p.href, reason: '직전 실행엔 있었는데 이번엔 안 나옴' })),
+  ].filter((c, i, arr) => arr.findIndex(x => canonicalizeHref(x.href) === canonicalizeHref(c.href)) === i)
+  if (!candidates.length) {
+    // 링크가 하나도 안 붙는다는 건 대개 화면의 대분류 탭(그룹 제목)만 남았다는 뜻이다.
+    return { links, screenCheck: { ...first, missing: first.missing.map(m => ({ name: m.name, reason: '화면의 대분류 탭(그룹 제목)으로 보임 — 링크가 없어 카테고리로 저장하지 않습니다(정상)' })) } }
+  }
+  const { recovered, stillMissing } = await recoverMissingCategories(
+    context, mallName, candidates, null,
+    PLATFORM_PROFILES[platform].productLinkSelector, PLATFORM_PROFILES[platform].detailUrlPattern?.source,
+    baseUrl, signal,
+  )
+  let nextLinks = links
+  if (recovered.length) {
+    const known = new Set(links.map(c => canonicalizeHref(c.href)))
+    nextLinks = [...links, ...recovered.filter(r => !known.has(canonicalizeHref(r.href))).map(r => ({ name: r.name, href: r.href }))]
+  }
+  const after = buildCategoryScreenCheck(screenNames, nextLinks, exclusions)
+  if (!after) return { links: nextLinks, screenCheck: first }
+  const candidateKeys = new Set(candidates.map(c => normalizeCategoryName(c.name)))
+  return {
+    links: nextLinks,
+    screenCheck: {
+      ...after,
+      recovered,
+      missing: after.missing.map(m => {
+        const key = normalizeCategoryName(m.name)
+        const recheckReason = stillMissing.get(key)
+        if (recheckReason) return { name: m.name, reason: recheckReason }
+        if (!candidateKeys.has(key)) return { name: m.name, reason: '화면의 대분류 탭(그룹 제목)으로 보임 — 링크가 없어 카테고리로 저장하지 않습니다(정상)' }
+        return m
+      }),
+    },
+  }
+}
+
+/** 화면에서 읽은 이름 목록과 최종 카테고리 목록을 대조한다 — 순수 함수라 테스트로 규칙을 고정해둔다.
+ *  screenNames가 비어 있으면(화면 인식 실패) null을 돌려줘 호출부가 대조 자체를 건너뛰게 한다. */
+export function buildCategoryScreenCheck(
+  screenNames: string[] | null | undefined, finalLinks: CategoryMenuLink[], excluded: CategoryExclusion[],
+): CategoryScreenCheck | null {
+  if (!screenNames?.length) return null
+  const finalKeys = new Set<string>()
+  for (const l of finalLinks) {
+    finalKeys.add(normalizeCategoryName(l.name))
+    // "대분류 > 중분류"로 저장된 경우 각 조각도 넣어, 화면의 대분류 이름이 "누락"으로 잘못 잡히지 않게 한다.
+    l.name.split('>').forEach(part => finalKeys.add(normalizeCategoryName(part)))
+  }
+  const excludedByKey = new Map(excluded.map(e => [normalizeCategoryName(e.name), e.reason]))
+  const missing: { name: string; reason: string }[] = []
+  const screenKeys = new Set<string>()
+  for (const name of screenNames) {
+    const key = normalizeCategoryName(name)
+    if (!key) continue
+    screenKeys.add(key)
+    if (finalKeys.has(key)) continue
+    // 비전이 한두 글자 잘못 읽은 것뿐이면 "있는 것"으로 본다(findApproximateMatch 주석 참고).
+    if (findApproximateMatch(key, finalKeys)) continue
+    missing.push({ name, reason: excludedByKey.get(key) ?? '탐지 단계에서 이 카테고리를 찾지 못함(메뉴 스캔에 안 잡혔거나 화면 인식이 잘못 읽었을 수 있음)' })
+  }
+  const extra = finalLinks.map(l => l.name).filter(n => !screenKeys.has(normalizeCategoryName(n)))
+  return { screenNames, missing, extra, checkedAt: new Date().toISOString() }
+}
+
 interface CategoryExpansionResult {
   links: CategoryMenuLink[]
   aiUsed: boolean
   loginBlockedExpansion: boolean
+  /** 이번 확장에서 제외된 카테고리들(이유 포함) */
+  excluded: CategoryExclusion[]
   /** MALL_REPORT_HINT_KEYWORDS 참고 — 카테고리 하위구조 확인 중 이 키워드가 발견된 페이지의 URL(중복
    *  없음). "몰 구조분석" 리포트 단계가 이 URL만 다시 방문해 상세 텍스트를 참고 자료로 쓴다. */
   relevantHrefs: string[]
@@ -6470,7 +7297,8 @@ async function expandCategoryHubs(
   const profile = PLATFORM_PROFILES[platform]
   const userSel = concurrencyOpts.productLinkSelector || null
   const platformSel = profile.productLinkSelector
-  const detailPatternSrc = profile.detailUrlPattern?.source
+  // 플랫폼 프로필에 패턴이 없으면(unknown 몰) 이 몰에서 학습해둔 패턴을 쓴다(deriveDetailUrlPattern).
+  const detailPatternSrc = profile.detailUrlPattern?.source ?? concurrencyOpts.detailUrlPattern
   const expandedByIndex: CategoryMenuLink[][] = new Array(categoryLinks.length)
   // 기본값 4 — "몰 구조분석"(profileMallStructure)도 한때 이 호출만 동시성을 1로 강제했었지만(걸스굽
   // 실사용 중 동시 접속이 로그인 세션을 끊는 것처럼 보였던 문제), 진짜 원인은 동시성이 아니라
@@ -6486,16 +7314,31 @@ async function expandCategoryHubs(
   let loginBlockedExpansion = false
   let hubAiAttempts = 0
   const relevantHrefsSeen = new Set<string>()
+  // 확장을 시작하는 시점의 로그인 상태 — 아래 "빈 허브 배제" 직전에 이 값과 그 페이지의 상태를 비교해,
+  // "로그인이 풀려서 비어 보이는 것"과 "진짜 빈 카테고리"를 구분한다(expandOne의 해당 분기 주석 참고).
+  const loggedInAtStart = await detectLoggedInSignal(page)
+  // 최종 결과에서 빠진 카테고리를 사용자에게 이유와 함께 알려주기 위해 모아둔다(화면 대조 리포트 —
+  // categoryScreenCheck). 로그로만 남기면 사용자는 왜 사라졌는지 알 방법이 없다(2026-09-13 사용자 지시:
+  // "화면으로 카테고리를 파악했으면 최종 결과가 그 화면과 맞는지, 안 맞는 건 왜인지 피드백해야 한다").
+  const excluded: CategoryExclusion[] = []
   // 차단이 감지되면 남은 카테고리 전체를 워커 1개로 낮춰 계속 두드리지 않는다 — 이 실행 안에서는 다시
   // 안 올린다(카테고리 개수가 보통 수십 개 안팎이라, lib/scraper.ts의 상품 스크랩 AIMD처럼 서서히
   // 회복시키면 처리량 대부분이 낮은 동시성에 갇혀 정상 상황(차단이 아예 없는 대다수 몰)에서도 매번
   // 느려진다 — 펫토리 실사용 확인, 2026-08-29). 처음부터 1로 시작하지 않는 것도 같은 이유다.
   let activeLimit = EXPAND_CONCURRENCY
   const BLOCK_RETRY_COUNT = 2
-  async function probeOnce(workerPage: Page, href: string) {
+  // 목록이 JS/AJAX로 조금 늦게 그려지는 몰이 있다(투비즈온 실사용 확인, 2026-09-13 — 사용자 지적:
+  // "해당 카테고리를 클릭하면 살짝 늦게 열리는데, 그러한 이유로 건너뛴 건 아닌지"). countProductsOnPage는
+  // 호출 시점의 DOM만 보는 스냅샷이고 probeOnce는 navigation 직후 곧바로 한 번만 셌다 — 그래서 멀쩡한
+  // 카테고리가 "상품 0개"로 잡혀 아래 "빈 허브" 규칙에 걸려 통째로 배제됐다(같은 실행에서 51개 중 32개가
+  // 이렇게 빠졌고, 남은 것들도 하나같이 "상품 5개"로 균일했다 — 먼저 그려지는 일부만 센 것으로 보인다).
+  // 0개가 나오면 바로 단정하지 말고 상품이 나타날 때까지 짧게 폴링한다. 진짜 빈 카테고리는 이 시간만큼
+  // 느려지지만(최대 6초), "있는 카테고리를 없다고 지우는" 쪽이 훨씬 비싼 실수다.
+  async function probeOnce(workerPage: Page, href: string, label: string) {
     try {
       await gotoViaLinkClick(workerPage, href, { waitUntil: 'domcontentloaded', timeout: 20_000 })
-      return await countProductsOnPage(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+      return await countProductsSettled(workerPage, userSel, platformSel, detailPatternSrc, baseUrl,
+        (first, final, elapsedMs) => console.log(`[허브확장:진단:${mallName}] "${label}" — 첫 스냅샷 ${first}개 → ${(elapsedMs / 1000).toFixed(1)}초 기다린 뒤 ${final}개(늦게 그려지는 목록)`))
     } catch {
       return { count: 0, isLoginPage: false, fingerprint: '', hrefs: [] }
     }
@@ -6509,7 +7352,12 @@ async function expandCategoryHubs(
     // /board/consult/list.html) 그 필터를 못 거치고 여기까지 넘어온다 — 실제로 방문해서 상품 0개/하위메뉴
     // 0개임을 확인하는 데만 22초 넘게 걸린 사례가 있었다(2026-09-01). 방문 자체를 건너뛰면 그 시간을
     // 통째로 아낄 수 있다.
-    if (NON_CATEGORY_PATH_RE.test(safePathname(c.href))) return []
+    if (NON_CATEGORY_PATH_RE.test(safePathname(c.href))) {
+      const reason = '게시판/마이페이지 경로라 카테고리가 아니라고 판단'
+      console.log(`[허브확장:제외:${mallName}] "${c.name}" — ${reason} (${c.href})`)
+      excluded.push({ name: c.name, href: c.href, reason })
+      return []
+    }
     // 카테고리 하나당 시간이 어디서 새는지(순수 페이지 로딩인지, 봇차단 재시도 슬립인지, AI인지) 사후에
     // 되짚어볼 방법이 전혀 없었다(2026-08-30, 도매토피아 339개 실행 — 전체 소요시간은 보여도 항목별
     // 내역이 안 보여 추측에 의존해야 했음) — 단계별 소요시간을 재서, 이 항목 하나가 느렸으면(8초 이상)
@@ -6517,7 +7365,7 @@ async function expandCategoryHubs(
     const itemStart = Date.now()
     let probeMs = 0
     let blockRetryMs = 0
-    let probe = await (async () => { const t = Date.now(); const r = await probeOnce(workerPage, c.href); probeMs += Date.now() - t; return r })()
+    let probe = await (async () => { const t = Date.now(); const r = await probeOnce(workerPage, c.href, c.name); probeMs += Date.now() - t; return r })()
     // isLoginPage(로그인 폼)와는 별개 신호 — 봇 차단 인터스티셜은 count===0인데 로그인 폼도 없다.
     // 재시도 전에 확인해 진짜 빈 페이지에 매번 isBotBlockPage를 낭비하지 않는다.
     let botBlocked = !probe.isLoginPage && probe.count === 0 && await isBotBlockPage(workerPage)
@@ -6528,7 +7376,7 @@ async function expandCategoryHubs(
       await sleep(5_000 * (attempt + 1))
       blockRetryMs += Date.now() - tSleep
       const tProbe = Date.now()
-      probe = await probeOnce(workerPage, c.href)
+      probe = await probeOnce(workerPage, c.href, c.name)
       probeMs += Date.now() - tProbe
       botBlocked = !probe.isLoginPage && probe.count === 0 && await isBotBlockPage(workerPage)
     }
@@ -6630,6 +7478,27 @@ async function expandCategoryHubs(
     const sortCandidates = await collectSortCandidates(workerPage).catch(() => [])
     const hasSort = sortCandidates.some(sc => looksLikeSortLabel(sc.text) && diffQueryParams(hubUrl, sc.href))
     logIfSlow(hasSort ? '정렬 있음(유지)' : '빈 허브(배제)')
+    // 제외는 "카테고리가 화면에서 통째로 사라지는" 눈에 띄는 결과인데, logIfSlow는 8초 이상 걸린 항목만
+    // 남겨서 빠르게 제외된 카테고리는 흔적조차 없었다 — 사용자가 "뷰티/바디헤어가 목록에 없다"고 신고했을
+    // 때(2026-09-13, 투비즈온) 어느 단계에서 빠졌는지 로그로 확인할 방법이 전혀 없었다. 제외만큼은 항상
+    // 남긴다(카테고리 수만큼 쌓이지 않는다 — 유지되는 항목은 여전히 조용하다).
+    if (!hasSort) {
+      // "상품 0개 + 하위메뉴 0개 + 정렬 없음"은 **로그인이 풀린 회원전용 몰의 화면과 구분이 안 된다** —
+      // 투비즈온처럼 로그인해야 상품은 물론 카테고리 메뉴조차 안 보이는 몰에서는, 세션이 흔들린 실행
+      // 하나가 멀쩡한 카테고리를 통째로 목록에서 지워버린다(2026-09-13 실사용 신고: 메뉴에 있는
+      // "뷰티"/"바디/헤어"가 PTP 목록에 없음. 같은 실행에 "로그인 신원쿠키를 30초 안에 못 받음" 경고가
+      // 함께 있었다). 그래서 배제 직전에 "이 페이지가 로그인된 상태로 보이는지"를 한 번 더 확인하고,
+      // 시작 시점엔 로그인돼 있었는데 지금 화면이 로그아웃 상태로 보이면 배제하지 않고 그대로 둔다.
+      // 시작 시점 로그인 신호가 없던 몰(로그인이 필요 없는 몰)은 이 분기를 타지 않으므로, 게시판 글이
+      // 빈 허브로 남던 사고(2026-08-30 소꿉노리)를 막던 기존 배제는 그대로 유지된다.
+      if (loggedInAtStart === true && await detectLoggedInSignal(workerPage) === false) {
+        console.log(`[허브확장:유지:${mallName}] "${c.name}" — 상품/하위메뉴가 안 보이지만 이 페이지가 로그아웃 상태로 보임 → 배제하지 않고 그대로 둔다 (${c.href})`)
+        return [c]
+      }
+      const reason = '이 페이지에 상품도, 하위 메뉴도, 정렬 위젯도 없어 상품 목록 페이지가 아니라고 판단'
+      console.log(`[허브확장:제외:${mallName}] "${c.name}" — ${reason} (${c.href})`)
+      excluded.push({ name: c.name, href: c.href, reason })
+    }
     return hasSort ? [c] : []
   }
   // 서버 쪽엔 개발자모드 확장(extension-poc/background.js의 runExpandCategories)에 이미 있던 카테고리별
@@ -6701,7 +7570,12 @@ async function expandCategoryHubs(
     const key = canonicalizeHref(c.href)
     return seenHrefs.has(key) ? false : (seenHrefs.add(key), true)
   })
-  return { links, aiUsed, loginBlockedExpansion, relevantHrefs: [...relevantHrefsSeen] }
+  // 들어온 개수와 나간 개수를 항상 한 줄로 남긴다 — "메뉴에는 있는데 PTP 목록엔 없다"는 신고(2026-09-13,
+  // 투비즈온의 뷰티/바디헤어)를 받았을 때, 그게 애초에 못 찾은 것인지(탐지 단계) 찾았다가 여기서 뺀
+  // 것인지(확장 단계)부터 갈라볼 수 있어야 한다. 예전에는 이 단계가 51개를 32개로 줄여도 아무 기록이
+  // 없었다.
+  console.log(`[허브확장:${mallName}] 최상위 ${categoryLinks.length}개 → 최종 ${links.length}개(하위 펼침/제외 ${excluded.length}개/중복제거 반영)${loginBlockedExpansion ? ' — 로그인 벽에 막힌 카테고리가 있었음(결과가 부실할 수 있음)' : ''}`)
+  return { links, aiUsed, loginBlockedExpansion, excluded, relevantHrefs: [...relevantHrefsSeen] }
 }
 
 async function discoverCategoryLinksInner(opts: ScrapeOptions, signal: AbortSignal | undefined): Promise<CategoryDiscoveryResult> {
@@ -6720,9 +7594,9 @@ async function discoverCategoryLinksInner(opts: ScrapeOptions, signal: AbortSign
       // "카테고리 메뉴/구조 탐지"는 sampleMallProfile("몰 구조분석")과 공용 함수(discoverTopLevelCategoryLinks)를
       // 쓴다 — AI(Gemini)를 우선 시도하고 실패하면 기존 셀렉터 히스틱 체인으로 폴백한다(2026-08-18/19).
       const mallName = opts.siteId ? (await siteInfo(opts.siteId)).name : new URL(url).hostname
-      const { pattern: categoryUrlPattern, manualSamples: knownCategoryExamples } = opts.siteId
-        ? await getCategoryMemory(opts.siteId) : { pattern: null, manualSamples: [] }
-      const { links: topLevelLinks, aiUsed: topLevelAiUsed } = await discoverTopLevelCategoryLinks(
+      const { pattern: categoryUrlPattern, manualSamples: knownCategoryExamples, prevCategoryLinks } = opts.siteId
+        ? await getCategoryMemory(opts.siteId) : { pattern: null, manualSamples: [], prevCategoryLinks: [] as CategoryMenuLink[] }
+      const { links: topLevelLinks, aiUsed: topLevelAiUsed, screenNames, menuLinks } = await discoverTopLevelCategoryLinks(
         context, scanPage, mallName, true, signal, true, categoryUrlPattern, knownCategoryExamples, url,
         platform, opts.productLinkSelector,
       )
@@ -6737,8 +7611,18 @@ async function discoverCategoryLinksInner(opts: ScrapeOptions, signal: AbortSign
       // 최상위 탐지든 허브 하위메뉴 탐지든 AI 결과를 하나라도 그대로 채택했으면 true.
       const aiUsed = topLevelAiUsed || expansion.aiUsed
 
-      const links: CategoryLink[] = expansion.links.map(c => ({ href: c.href, text: c.name }))
-      return { platform, links, loginBlockedExpansion: expansion.loginBlockedExpansion, aiUsed }
+      // "몰 구조분석"과 같은 화면 대조 + 누락 재검증을 여기서도 그대로 거친다 — 이 과정을 한쪽에만 두면
+      // 나중에 돈 쪽이 되살린 카테고리를 다시 떨어뜨리고 캐시까지 덮어써 두 화면의 개수가 갈린다
+      // (사용자 지적, 2026-09-13: 몰구조분석 51개 vs 카테고리 불러오기 49개 — screenCheckAndRecover 주석).
+      const checked = await screenCheckAndRecover(
+        context, mallName, screenNames, menuLinks, expansion.links, expansion.excluded, platform, baseUrl, signal,
+        prevCategoryLinks,
+      )
+      const links: CategoryLink[] = checked.links.map(c => ({ href: c.href, text: c.name }))
+      return {
+        platform, links, loginBlockedExpansion: expansion.loginBlockedExpansion, aiUsed,
+        categoryScreenCheck: checked.screenCheck,
+      }
     } finally {
       await scanPage.close().catch(() => {})
     }

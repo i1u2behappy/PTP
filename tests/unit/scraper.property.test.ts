@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import fc from 'fast-check'
-import { diffQueryParams, resetToFirstPage, looksLikeSortLabel, deriveCategoryUrlPattern } from '../../lib/scraper'
+import { diffQueryParams, resetToFirstPage, looksLikeSortLabel, deriveCategoryUrlPattern, LOGOUT_URL_RE } from '../../lib/scraper'
 
 // 사람이 떠올리는 예시 몇 개(scraper.test.ts)와 달리, 여기는 "이 함수가 어떤 입력에서도 지켜야 할 규칙"을
 // 정의해두고 fast-check가 극단값(빈 문자열, 유니코드, 아주 긴 문자열 등)을 대량으로 생성해 대신 검증한다.
@@ -79,6 +79,29 @@ describe('deriveCategoryUrlPattern (속성 기반)', () => {
         expect(pattern).not.toBeNull()
         const re = new RegExp(pattern!)
         urls.forEach(u => expect(re.test(u)).toBe(true))
+      },
+    ))
+  })
+})
+
+// 로그아웃 판정은 "모든 클릭에 걸리는 전역 그물"(lib/scraper.ts의 blockLogoutClicks)이 쓰는 규칙이라,
+// 특정 몰의 예시 URL 몇 개보다 "어떤 몰이 어떤 형태로 써도 지켜야 할 성질"을 고정하는 게 중요하다.
+describe('LOGOUT_URL_RE (속성 기반)', () => {
+  it('임의 문자열에 대해 예외를 던지지 않고, 같은 입력이면 항상 같은 결과다', () => {
+    // 정규식에 나중에 누가 g 플래그를 붙이면 .test()가 lastIndex를 들고 다니며 한 번 걸러 한 번씩
+    // false를 돌려준다 — 그러면 로그아웃 차단이 "가끔" 뚫리는, 재현이 아주 어려운 버그가 된다.
+    fc.assert(fc.property(fc.string(), (s) => {
+      expect(() => LOGOUT_URL_RE.test(s)).not.toThrow()
+      expect(LOGOUT_URL_RE.test(s)).toBe(LOGOUT_URL_RE.test(s))
+    }))
+  })
+
+  it('경로 어딘가에 logout 세그먼트가 있으면 호스트/확장자/쿼리가 무엇이든 잡아낸다', () => {
+    fc.assert(fc.property(
+      safeToken, fc.array(safeToken, { maxLength: 3 }), fc.constantFrom('php', 'html', 'asp', 'jsp', 'do'), safeToken,
+      (host, segments, ext, query) => {
+        const prefix = segments.length ? `${segments.join('/')}/` : ''
+        expect(LOGOUT_URL_RE.test(`https://${host}.co.kr/${prefix}logout.${ext}?r=${query}`)).toBe(true)
       },
     ))
   })

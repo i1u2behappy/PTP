@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern, scanCategoryMenuFromHtml } from '../../lib/scraper'
+import fc from 'fast-check'
+import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern, scanCategoryMenuFromHtml, deriveDetailUrlPattern, LOGOUT_URL_RE, ACCOUNT_UNSAFE_URL_RE } from '../../lib/scraper'
 
 // diffQueryParams는 "카테고리별 정렬기준 설정" 기능의 핵심 — 정렬 후보 링크가 baseUrl과 같은 경로에서
 // 쿼리파라미터만 다른지 확인해, 다른 카테고리/상품 상세로 튀는 링크를 걸러낸다.
@@ -207,5 +208,97 @@ describe('scanCategoryMenuFromHtml — onclick="location.href=...\'" 메뉴(구�
   it('상위 항목 이름을 경로에 포함한 이름(예: "가구/인테리어 > DIY자재/용품")을 만든다', () => {
     const { links } = scanCategoryMenuFromHtml(html, 'https://www.domesin.com/')
     expect(links.some(l => l.name === '가구/인테리어 > DIY자재/용품')).toBe(true)
+  })
+})
+
+// 로그인 세션을 끊는 링크 판정 — "카테고리 메뉴를 찾으려고 헤더를 더듬다가 로그아웃을 눌러버리는"
+// 사고가 이 프로젝트에서 네 번 반복됐다(걸스굽 2026-09-01 / 오토카필 2026-09-06 / 투비즈온 2026-09-12
+// 비전 클릭 / 투비즈온 2026-09-13 헤더 아이콘 전수클릭). 어느 몰이든 통하도록 "몰별 URL"이 아니라
+// 패턴으로 막고 있으므로, 실제로 쓰이는 몰 솔루션들의 로그아웃 URL 형태를 여기에 고정해둔다.
+describe('LOGOUT_URL_RE (세션을 끊는 링크 판정)', () => {
+  it('국내 몰 솔루션들이 실제로 쓰는 로그아웃 URL 형태를 잡아낸다', () => {
+    const logoutUrls = [
+      'https://www.tobizon.co.kr/mall/member/logout.php',       // 코워크몰(투비즈온)
+      'http://www.autocarfeel.co.kr/member/logout.php?returnUrl=', // 오토카필 — 실제 사고 URL
+      'https://girlsgoob.cafe24.com/member/logout.html',        // 카페24
+      'https://mall.com/shop/member.html?type=logout',          // 메이크샵
+      'https://mall.com/member/log_out.asp',
+      'https://mall.com/signout',
+      'https://mall.com/auth/sign-out',
+    ]
+    logoutUrls.forEach(u => expect(LOGOUT_URL_RE.test(u)).toBe(true))
+  })
+
+  it('로그인/일반 카테고리 링크는 막지 않는다 — 오탐하면 진짜 카테고리가 통째로 사라진다', () => {
+    const safeUrls = [
+      'https://www.tobizon.co.kr/mall/goods/goods_list.php?ctno=007',
+      'https://girlsgoob.cafe24.com/product/list.html?cate_no=80',
+      'https://www.tobizon.co.kr/mall/member/login.php',        // 로그인은 막으면 안 된다
+      'https://mall.com/member/join.html',
+      'https://mall.com/goods/catalog?logouts=1',               // "logout"이 낱말 경계 없이 이어지는 경우
+    ]
+    safeUrls.forEach(u => expect(LOGOUT_URL_RE.test(u)).toBe(false))
+  })
+})
+
+describe('ACCOUNT_UNSAFE_URL_RE (클릭/방문 후보에서 뺄 계정·주문 링크)', () => {
+  it('헤더 우측 유틸리티 영역의 계정/주문 링크를 잡아낸다', () => {
+    const unsafe = [
+      'https://www.tobizon.co.kr/mall/member/logout.php',
+      'https://www.tobizon.co.kr/mall/order/cart.php',
+      'https://www.tobizon.co.kr/mall/mypage/order_list.php',
+      'https://girlsgoob.cafe24.com/member/login.html',
+    ]
+    unsafe.forEach(u => expect(ACCOUNT_UNSAFE_URL_RE.test(u)).toBe(true))
+  })
+
+  it('상품 목록 URL은 후보로 남긴다', () => {
+    expect(ACCOUNT_UNSAFE_URL_RE.test('https://www.tobizon.co.kr/mall/goods/goods_list.php?ctno=011')).toBe(false)
+    expect(ACCOUNT_UNSAFE_URL_RE.test('https://girlsgoob.cafe24.com/product/list.html?cate_no=80')).toBe(false)
+  })
+})
+
+// 플랫폼 프로필에 없는 몰(platform=unknown)은 상품 상세 URL 패턴이 없어, 상품 링크 판별이 "이미지를
+// 감싼 <a>는 전부 상품"이라는 폴백에 의존했다 — 그 결과 미리보기 표본이 로고(/index.php)나 회사소개
+// (/mall/service/company_intro.php)로 잡히고 개수도 부풀었다(2026-09-13, 투비즈온). 목록에서 한 번
+// 학습해 기억해두면 개수/미리보기/스크랩이 전부 같은 기준을 쓴다 — 잘못 학습하면 그 몰 상품을 통째로
+// 놓치므로 "근거가 부족하면 null"이 이 함수의 핵심 규칙이다.
+describe('deriveDetailUrlPattern', () => {
+  const tobizon = [1, 2, 3, 4, 5].map(i => `https://www.tobizon.co.kr/mall/goods/goods_view.php?goodsno=${i}`)
+
+  it('과반수가 공유하는 "경로+쿼리키"를 패턴으로 만든다', () => {
+    const pattern = deriveDetailUrlPattern(tobizon)
+    expect(pattern).toBeTruthy()
+    const re = new RegExp(pattern!)
+    tobizon.forEach(u => expect(re.test(u)).toBe(true))
+  })
+
+  it('학습한 패턴은 상품이 아닌 링크를 걸러낸다 — 이게 이 기능의 목적이다', () => {
+    const re = new RegExp(deriveDetailUrlPattern(tobizon)!)
+    expect(re.test('https://www.tobizon.co.kr/index.php')).toBe(false)
+    expect(re.test('https://www.tobizon.co.kr/mall/service/company_intro.php')).toBe(false)
+    expect(re.test('https://www.tobizon.co.kr/mall/goods/goods_list.php?ctno=065')).toBe(false)
+  })
+
+  it('표본이 적거나 제각각이면 null — 잘못된 패턴보다 "모름"이 안전하다', () => {
+    expect(deriveDetailUrlPattern(tobizon.slice(0, 2))).toBeNull()
+    expect(deriveDetailUrlPattern([
+      'https://m.com/a.php?x=1', 'https://m.com/b.php?y=2', 'https://m.com/c.php?z=3',
+      'https://m.com/d.php?w=4', 'https://m.com/e.php?v=5',
+    ])).toBeNull()
+  })
+
+  it('쿼리 없이 경로에 상품번호가 들어가는 몰은 숫자를 일반화한다', () => {
+    const pattern = deriveDetailUrlPattern([1, 2, 3, 4].map(i => `https://m.com/product/${i}`))
+    expect(pattern).toBeTruthy()
+    const re = new RegExp(pattern!)
+    expect(re.test('https://m.com/product/77')).toBe(true)
+    expect(re.test('https://m.com/company_intro')).toBe(false)
+  })
+
+  it('임의 입력에서도 예외를 던지지 않는다', () => {
+    fc.assert(fc.property(fc.array(fc.string(), { maxLength: 20 }), (urls) => {
+      expect(() => deriveDetailUrlPattern(urls)).not.toThrow()
+    }))
   })
 })

@@ -21,6 +21,9 @@ Ctrl(⌘)+클릭하면 바로 이동하고, 그 문서를 열어두면 오른쪽
 - [[ai-mode-scraping]] — AI모드 스크래핑
 - [[ai-mode-gemini-provider]] — AI모드 스크래핑 전용 Gemini 전환
 - [[ai-detection-local-ollama-migration]] — 카테고리/정렬 옵션 AI 감지 로컬 Ollama 이관
+- [[logout-during-category-discovery]] — 카테고리 탐지가 몰에서 로그아웃시키던 문제 + 3층 방어
+- [[ollama-context-truncation-and-fetch-timeout]] — "AI 호출 실패"의 원인(num_ctx 조용한 잘림 + fetch 300초 한도)
+- [[category-screen-check]] — 화면으로 파악한 카테고리 ↔ 최종 결과 대조 피드백(누락 항목과 그 이유 표시)
 - [[scrape-preview-grid-columns]] — 스크랩 미리보기 그리드 컬럼 구성
 - [[scrape-preview-catalog-count-and-target-ui]] — 미리보기 카테고리 개수 정확도 + 스크랩 대상 UI
 - [[preview-catalog-widget-count-inflation]] — 미리보기 개수 부풀림(위젯 오염) 수정

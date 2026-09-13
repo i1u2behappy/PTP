@@ -72,13 +72,32 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     // 고도몰(펫투비 등)은 og:title/ld+json이 아예 없는 스킨이 있어(실제 페이지로 확인), 그런 경우
     // document.title(사이트 전체에 공통인 "OO 도매 플랫폼" 같은 문구)로 잘못 빠지는 문제가 실제 발견됨 —
     // .info_name(상품 폼 안의 실제 상품명 div)을 document.title보다 먼저 시도한다.
-    if (!name) {
-      name = ogContent('og:title') || document.querySelector<HTMLInputElement>('input[name="brandname"]')?.value
-        || document.querySelector('.info_name')?.textContent?.trim() || document.title || ''
+    // 본문에서 "상품명처럼 이름 붙은" 요소를 찾는다 — og:title보다 먼저 본다.
+    // 이유: og:title/<title>을 **사이트 공통 문구**로 두는 몰이 있다(투비즈온 실사용 확인, 2026-09-13:
+    // 상품 상세페이지인데도 둘 다 "투비즈온(코워크몰) - 도매 B2B 배송대행"이라, 미리보기 상품명이
+    // 몰 이름으로 나왔다). 정작 본문에는 `<h3 class="product-name">여성 오버핏 …</h3>`처럼 아주 표준적인
+    // 마크업이 있었다 — 메타태그를 먼저 믿는 순서 자체가 문제였다.
+    const nameFromBody = (): string => {
+      const direct = document.querySelector<HTMLElement>(
+        '[class*="product-name" i],[class*="product_name" i],[class*="goods-name" i],[class*="goods_name" i],'
+        + '[class*="item-name" i],[class*="item_name" i],[class*="prd-name" i],[class*="prd_name" i],'
+        + '[id*="goodsnm" i],[id*="goodsname" i],.info_name',
+      )
+      if (direct?.textContent?.trim()) return direct.textContent.trim()
+      for (const h of Array.from(document.querySelectorAll<HTMLElement>('h1,h2,h3'))) {
+        const key = `${h.className} ${h.id}`.toLowerCase()
+        const looksLikeName = /(product|goods|item|prd)[^a-z]*(name|title|subject)|(name|title|subject)[^a-z]*(product|goods|item|prd)/.test(key)
+        if (looksLikeName && h.textContent?.trim()) return h.textContent.trim()
+      }
+      return ''
     }
-    if (!mainImages.length) {
-      const ogImg = ogContent('og:image')
-      if (ogImg) mainImages = [ogImg]
+    if (!name) {
+      const ogTitle = ogContent('og:title').trim()
+      // og:title이 문서 타이틀과 똑같으면 그건 사이트 공통 문구지 상품명이 아니다.
+      const ogTitleUsable = !!ogTitle && ogTitle !== document.title.trim()
+      name = nameFromBody() || (ogTitleUsable ? ogTitle : '')
+        || document.querySelector<HTMLInputElement>('input[name="brandname"]')?.value
+        || document.title || ''
     }
     if (!mainImages.length) {
       // 대표이미지가 여러 장인 갤러리형 UI(예: 신우의 .img_small 썸네일 목록)를 먼저 시도한다.
@@ -98,6 +117,26 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
           if (bigImg?.src) mainImages = [bigImg.src]
         }
       }
+    }
+    if (!mainImages.length) {
+      // 위 몰별 셀렉터가 다 안 맞는 스킨 — 본문에서 "상품 이미지처럼 생긴" <img>를 크기 순으로 고른다.
+      // 경로에 goods/product/item/upfile 같은 조각이 있고(상품 이미지 저장소), 로고/아이콘이 아니며,
+      // 실제로 화면에서 큰 것만 인정한다.
+      // 크기를 **조건으로 쓰지 않는다** — 아직 로딩 안 된 이미지는 naturalWidth가 0이라, 크기를 필수로
+      // 걸면 "언제 실행됐는지"에 따라 결과가 달라진다(회귀 테스트가 이 불안정성을 바로 잡아냈다).
+      // 경로 모양으로 상품 이미지를 고르고, 크기는 알 수 있을 때만 정렬에 쓴다(큰 것 우선).
+      const sizeOf = (img: HTMLImageElement) => Math.max(img.naturalWidth || 0, img.width || 0)
+      const productish = Array.from(document.querySelectorAll<HTMLImageElement>('img'))
+        .filter(img => /\/(goods|product|item|upfile|prd)[\W_]/i.test(img.src) && !/logo|icon|btn|banner/i.test(img.src))
+        .sort((a, b) => sizeOf(b) - sizeOf(a))
+        .map(img => img.src)
+      if (productish.length) mainImages = [...new Set(productish)].slice(0, 5)
+    }
+    if (!mainImages.length) {
+      // og:image는 **마지막 수단**이다 — 상품 상세페이지인데도 이 값을 사이트 로고로 두는 몰이 있다
+      // (투비즈온 실사용 확인, 2026-09-13: 미리보기 대표이미지가 로고(og_image.jpg)로 나왔다).
+      const ogImg = ogContent('og:image')
+      if (ogImg) mainImages = [ogImg]
     }
 
     // ld+json/og 이미지는 URL만 있고 alt 텍스트가 없으니, 페이지의 실제 <img> 태그에서 src 기준으로 alt를 찾아 붙인다.
@@ -147,7 +186,17 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
     const detailText = (detailContainer ? cleanText(detailContainer) : '').replace(/\s+/g, ' ').trim().slice(0, 3000)
 
     if (!description) {
-      description = ogContent('og:description') || document.querySelector('meta[name="description"]')?.getAttribute('content') || ''
+      // 상세페이지 본문 텍스트를 먼저 쓴다 — og:description/meta description을 **사이트 공통 소개 문구**로
+      // 두는 몰이 있어(투비즈온 실사용 확인, 2026-09-13: 모든 상품의 추가설명이 "도매,B2B,배송대행,
+      // 도매쇼핑몰,온라인유통,판촉물,생활잡화,온라인창업" — 이건 메타 키워드지 상품 설명이 아니다),
+      // 메타를 먼저 믿으면 모든 상품이 같은 설명을 갖게 된다. og:title/og:image와 같은 부류의 함정이다.
+      const metaDesc = ogContent('og:description') || document.querySelector('meta[name="description"]')?.getAttribute('content') || ''
+      const metaKeywords = document.querySelector('meta[name="keywords"]')?.getAttribute('content')?.trim() || ''
+      // 메타 설명이 키워드 목록과 같거나(키워드를 그대로 description에 넣은 몰), 쉼표로만 나열된
+      // 형태면 상품 설명으로 쓰지 않는다.
+      const metaLooksLikeKeywords = !!metaDesc && (metaDesc.trim() === metaKeywords
+        || (metaDesc.split(',').length >= 4 && !/[.!?]/.test(metaDesc)))
+      description = detailText || (metaLooksLikeKeywords ? '' : metaDesc)
     }
 
     // document 전체에서 table/dl을 훑다 보면 이 상품과 무관한 표까지 섞여 들어간다 — 사이트 공통 영역
@@ -251,9 +300,28 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
         // "SANDAL/MULE"처럼 카테고리명 자체에 "/"가 들어있는 경우까지 잘못 쪼개진다(실제 발견된 사례).
         // 각 <li> 자체가 "/ 라벨"처럼 구분자를 텍스트 안에 그대로 갖고 있는 몰도 있어(실제 발견된 사례)
         // 앞뒤의 "/"·공백은 벗겨낸다.
+        // <li> 안에 **하위 카테고리 드롭다운 메뉴가 통째로 중첩**돼 있는 몰이 있다(투비즈온 실사용
+        // 확인, 2026-09-13: 몰카테고리가 "Home > 패션의류/잡화/뷰티  여성의류  남성의류  언더웨어 …"로
+        // 메뉴 전체가 들어왔다). li.textContent는 그 중첩 메뉴까지 다 긁으므로, 중첩된 목록/폼 요소를
+        // 떼어낸 "그 항목 자신의 이름"만 읽는다. 그래도 비정상적으로 긴 항목은 메뉴 덩어리로 보고 버린다.
         const items = Array.from(el.querySelectorAll('li'))
-          .map(li => (li.textContent || '').replace(/^[\s/]+|[\s/]+$/g, '').trim())
-          .filter(Boolean)
+          // 드롭다운 카테고리 메뉴가 브레드크럼과 **같은 컨테이너 안에 형제 <li>로** 들어있는 몰이 있다
+          // (투비즈온 실사용 확인, 2026-09-13: 몰카테고리가 "Home > 패션의류/잡화/뷰티 > 여성의류 >
+          // 남성의류 > 언더웨어 > …"로 메뉴 전체가 들어왔다). 그 메뉴는 평소 화면에 안 보이고(hover 시
+          // 노출) 브레드크럼은 보이므로, **화면에 실제로 보이는 항목만** 쓰면 깔끔하게 갈린다.
+          .filter(li => {
+            const withCheck = li as HTMLElement & { checkVisibility?: () => boolean }
+            return withCheck.checkVisibility ? withCheck.checkVisibility() : !!li.getClientRects().length
+          })
+          .map(li => {
+            const clone = li.cloneNode(true) as HTMLElement
+            clone.querySelectorAll('ul,ol,select,nav,table').forEach(n => n.remove())
+            return (clone.textContent || '').replace(/\s+/g, ' ').replace(/^[\s/]+|[\s/]+$/g, '').trim()
+          })
+          .filter(t => t && t.length <= 40)
+          // 브레드크럼이 <select> 드롭다운으로 된 몰은 아직 안 고른 단계가 "중분류 선택 / 소분류 선택"
+          // 같은 플레이스홀더로 보인다(투비즈온 실사용 확인, 2026-09-13) — 카테고리 경로가 아니므로 뺀다.
+          .filter(t => !/(선택(하세요)?|선택해\s*주세요)$/.test(t) && t !== '전체')
         if (!items.length) {
           const text = (el.textContent || '').split('/').map(s => s.trim()).filter(Boolean).join(' > ')
           if (text) { categoryFromDetail = text; break }
@@ -349,9 +417,17 @@ function resolveStockQty(rows: [string, string][], stockQtyText: string): number
 function extractMallProductCodeFromUrl(url: string): string {
   try {
     const u = new URL(url)
-    for (const key of ['branduid', 'brandcode', 'goodsno', 'goods_no', 'product_no', 'productNo', 'idx', 'no']) {
+    // 알려진 파라미터 이름부터 — 없으면 "상품코드처럼 생긴" 파라미터를 이름 규칙으로 찾는다.
+    // 이름을 하나씩 늘리는 방식은 몰이 늘어날 때마다 또 빠진다(투비즈온의 `goodscd`가 이 목록에 없어
+    // 코드 칸에 URL 전체가 그대로 들어갔다, 2026-09-13 실사용 확인).
+    for (const key of ['branduid', 'brandcode', 'goodsno', 'goods_no', 'goodscd', 'goods_cd', 'product_no', 'productNo', 'idx', 'no']) {
       const v = u.searchParams.get(key)
       if (v) return v
+    }
+    for (const [key, value] of u.searchParams) {
+      if (!value) continue
+      // goods/product/item/prd + no/cd/code/id/seq 조합이면 상품 식별자로 본다.
+      if (/(goods|product|item|prd|gds)[_-]?(no|cd|code|id|idx|seq|num)$/i.test(key)) return value
     }
     const m = u.pathname.match(/(\d{3,})/)
     if (m) return m[1]

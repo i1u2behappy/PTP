@@ -48,15 +48,32 @@ let running = false
  * "스크랩 조정" 기능이 그 몰에 대해 학습해둔 추출 규칙(extractionRules)과, PTP 화면(일반모드와 같은 자리)
  * 의 AI모드 토글 상태(aiPreviewMode)/카테고리 불러오기 선택 목록(categoryUrls)도 같이 받아온다 — 확장은
  * PTP와 직접 연결돼 있지 않아(별도 실제 크롬 탭) 실행 시점마다 이 값들을 물어봐야 한다. */
+// lib/scraper.ts의 LOGOUT_URL_RE와 반드시 같은 값을 유지한다(같은 코드를 두 곳에 두는 이유는
+// NON_CATEGORY_TEXT_SRC와 동일 — Node 서버↔크롬 확장이 서로 import를 못 함). 개발자모드는 서버의
+// 헤드리스 사본이 아니라 **사용자의 진짜 크롬**에서 이 URL들을 방문하므로, 로그아웃 링크가 카테고리로
+// 한 번이라도 잘못 저장되면 사용자가 실제로 쓰던 로그인이 끊긴다 — 일반모드보다 피해가 크다.
+// 서버 쪽은 저장 시점(scanCategoryMenu/scanCategoryMenuFromHtml)과 방문 직전
+// (discoverCategoriesByVisitingLinks) 양쪽에서 거르는데, 확장에는 방문 직전 가드가 없었다.
+const LOGOUT_URL_RE = /(^|[/_?&=.-])(logout|log-out|log_out|signout|sign-out|sign_out|logoff)([/_?&=.-]|$)/i
+
 async function resolveSite(hostname) {
   const res = await fetch(`${RESOLVE_ENDPOINT}?host=${encodeURIComponent(hostname)}`)
   if (!res.ok) return null
   const data = await res.json()
   if (data.id == null) return null
+  // 카테고리 목록은 받아오는 이 한 곳에서 걸러둔다 — runExpandCategories(하위구조 확인)와
+  // runDetectSortOptions(정렬 감지)가 둘 다 이 목록을 그대로 방문하므로, 소비하는 쪽마다 거르면
+  // 새 소비자가 생겼을 때 또 빠진다.
+  const safeCategoryLinks = (data.categoryLinks || []).filter(c => {
+    if (!c || !c.href || !LOGOUT_URL_RE.test(c.href)) return true
+    console.warn('[PTP] 카테고리 목록에서 로그아웃 링크를 제외했습니다 — 방문하면 로그인이 끊깁니다:', c.href)
+    return false
+  })
   return {
     id: data.id, mode: data.mode === 'normal' ? 'normal' : 'devmode',
     extractionRules: data.extractionRules || {}, aiPreviewMode: !!data.aiPreviewMode,
-    categoryUrls: data.categoryUrls || [], categoryLinks: data.categoryLinks || [],
+    categoryUrls: (data.categoryUrls || []).filter(u => typeof u !== 'string' || !LOGOUT_URL_RE.test(u)),
+    categoryLinks: safeCategoryLinks,
     categorySettings: data.categorySettings || {}, sortOptions: data.sortOptions || [],
     masterLabels: data.masterLabels || {}, masterOrder: data.masterOrder || [], previewProduct: data.previewProduct || null,
     excludeUrls: data.excludeUrls || [],

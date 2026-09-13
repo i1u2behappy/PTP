@@ -30,9 +30,12 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 .dev-server.log
-.worker.log
+.worker*.log
 .worker-boot-status.json
 .restart-history.jsonl
+
+# 코드 리뷰/디버깅용으로 루트에 떠둔 일회성 diff 덤프(git show·diff 결과) — 소스 아님
+/*diff*.txt
 
 # env files (can opt-in for committing if needed)
 .env*

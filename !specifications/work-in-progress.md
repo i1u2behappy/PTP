@@ -46,9 +46,6 @@ _2026-09-13 기준: 없음. 소스 작업트리 깨끗하고 `29c6738`까지 커
   - 카테고리/정렬 탐지의 화면인식(비전 AI) 우선 전환 — 비전 좌표 추정이 불안정해 결국 헤더 아이콘
     전수 클릭(`discoverCategoryMenuByExhaustiveHeaderClick`)으로 대체한 경위. **해봤다가 접은 접근**이라
     기록해두지 않으면 다음에 같은 길을 다시 시도하게 된다.
-- **작업트리에 임시 파일 4개 미추적** — `.claude_review_diff.txt`, `.diff_review.txt`, `scraper_diff.txt`,
-  `.worker-test.log`. 전부 일회성 산출물로 보인다. `.gitignore`에 `.worker.log`는 있지만
-  `.worker-test.log`는 없다. 지울지 `.gitignore`에 넣을지 결정 필요.
 
 ## 최근 맥락 (커밋에 안 남는 것)
 

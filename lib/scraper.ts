@@ -3540,57 +3540,6 @@ export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResu
         }
       }
     }
-    // 위 tier들은 전부 <li> 기반이라, <li> 자체가 아예 없는 메가메뉴(Tailwind 그리드 등)에서는 후보를
-    // 하나도 못 찾는다 — 정글북 실사용 확인(2026-09-15, 사용자 지적 "왜 다 찾아내질 못했어?"): 실제 마크업이
-    // `<div class="min-w-0"><a class="font-bold">사료</a><a>건식사료</a><a>소프트사료</a>...</div>`처럼
-    // <li> 없이 <a> 형제가 나열되고, 첫 <a>만 글꼴이 굵어 대분류/하위분류를 구분한다 — <li> 기반 tier로는
-    // 구조적으로 인식 불가능해 전부 실패하고, 결국 href만 긁어모으는 AI 텍스트 폴백까지 떨어져 대/중분류
-    // 구분 없이 뒤섞인 일부 목록만 나왔다. "카테고리"류 트리거 근처에서만 이 패턴을 찾아, 무관한 곳(예:
-    // 푸터의 "회사소개/이용안내" 컬럼)을 카테고리로 오인하지 않게 범위를 좁힌다.
-    const flatColumns = (() => {
-      const triggerRe = /^(전체\s*)?카테고리$|^전체보기$|^menu$/i
-      const trigger = Array.from(document.querySelectorAll('button, a')).find(el => triggerRe.test((el.textContent || '').trim()))
-      if (!trigger) return null
-      // 트리거의 조상을 몇 단계 올라가며(가까운 것부터) 그 안에서 그리드형 컬럼을 찾는다 — 너무 위로
-      // 올라가면 페이지 전체(헤더+본문)까지 포함돼 무관한 링크가 섞일 수 있어 4단계로 제한한다.
-      let scope: Element | null = trigger.parentElement
-      for (let hop = 0; hop < 4 && scope; hop++, scope = scope.parentElement) {
-        const columns: { name: string; href: string }[][] = []
-        for (const container of Array.from(scope.querySelectorAll('div, li'))) {
-          const kids = Array.from(container.children)
-          if (kids.length < 3 || kids.length > 40) continue
-          if (!kids.every(k => k.tagName === 'A' && (k as HTMLAnchorElement).getAttribute('href'))) continue
-          const [head, ...rest] = kids as HTMLAnchorElement[]
-          const headText = (head.textContent || '').trim()
-          if (!isMeaningful(headText) || excludeRe.test(headText)) continue
-          const headStyle = getComputedStyle(head)
-          const headWeight = parseInt(headStyle.fontWeight, 10) || 400
-          const headSize = parseFloat(headStyle.fontSize) || 0
-          // 나머지 전부보다 글꼴이 굵거나(font-weight) 커야(font-size) "이건 그룹 제목" 신호로 인정한다 —
-          // 형제 <a>가 전부 같은 스타일이면(글꼴로 헤더를 구분하지 않는 몰) 이 패턴이 아니라고 본다.
-          const isHeaderStyle = rest.every(el => {
-            const s = getComputedStyle(el)
-            return headWeight > (parseInt(s.fontWeight, 10) || 400) || headSize > (parseFloat(s.fontSize) || 0)
-          })
-          if (!isHeaderStyle) continue
-          const items: { name: string; href: string }[] = []
-          for (const a of rest) {
-            const text = (a.textContent || '').trim()
-            if (!isMeaningful(text) || excludeRe.test(text) || !a.href || a.href.endsWith('#')) continue
-            items.push({ name: `${headText} > ${text}`, href: a.href })
-          }
-          if (items.length >= 2) columns.push(items)
-        }
-        // 컬럼이 최소 3개는 돼야 "카테고리 그리드"로 인정한다(오탐 방지) — 그보다 적으면 다음 조상 단계로.
-        if (columns.length >= 3) {
-          const seen = new Set<string>()
-          const links = columns.flat().filter(l => (seen.has(l.href) ? false : (seen.add(l.href), true)))
-          return { links, groupCount: columns.length }
-        }
-      }
-      return null
-    })()
-    if (flatColumns) return { links: flatColumns.links, textlessHrefs: [...new Set(textlessHrefs)], groupCount: flatColumns.groupCount }
     return { links: [], textlessHrefs: [...new Set(textlessHrefs)] }
   }, { excludeSrc: NON_CATEGORY_TEXT_RE.source }).catch(() => ({ links: [], textlessHrefs: [] }))
 }
@@ -4181,33 +4130,54 @@ async function findCategoryOverviewLink(page: Page): Promise<string | null> {
 }
 
 /** "카테고리 전체보기" 류 페이지에 흔한 구조 — scanCategoryMenu가 찾는 `<li>` 중첩 트리가 아니라,
- *  "짧은 제목 요소 바로 뒤에 링크 목록(ul/ol)이 따라오는" 짝이 대분류 개수만큼 페이지 안에 반복된다
- *  (findCategoryOverviewLink로 들어간 신우의 "카테고리 전체보기" 페이지 실사용 확인, 2026-08-26 —
- *  `<p class="cate_t"><a>양말＆세트</a></p><ul><li><a>...하위...</a></li>...</ul>` 형태가 9번 반복).
- *  특정 클래스명(cate_t, mapArea 등)이 아니라 "짧은 텍스트 하나 + 바로 뒤 형제 링크 목록"이라는 구조
- *  자체로 찾으므로, 클래스명이 몰마다 달라도 일반적으로 적용된다 — scanCategoryMenu가 부분 문자열
- *  클래스 매칭으로 일반화했던 것과 같은 원리를, 클래스명이 아예 없는(또는 무관한) 몰에도 확장한 것. */
-async function scanCategoryOverviewPage(page: Page): Promise<CategoryMenuLink[]> {
+ *  "짧은 제목 요소 바로 뒤에 링크 목록이 따라오는" 짝이 대분류 개수만큼 페이지 안에 반복된다. 제목은
+ *  `<p class="cate_t"><a>양말＆세트</a></p><ul><li><a>...하위...</a></li>...</ul>`처럼 텍스트 전용 태그일
+ *  수도(신우 실사용 확인, 2026-08-26, 9번 반복) 있지만, `<section><a class="...">사료<svg/></a>
+ *  <div class="grid grid-cols-2"><a>건식사료</a><a>소프트사료</a>...</div></section>`처럼 제목 자체가
+ *  링크(그 대분류 페이지로 이동)이고 목록도 ul/ol이 아닌 grid형 div일 수도 있다(정글북 /category 페이지
+ *  실측 확인, 2026-09-15 — 사용자 지적 "왜 다 찾아내질 못했어?"로 재진단; 첫 시도는 화면 캡처 없이 추측한
+ *  "굵은 글꼴로 구분되는 flat 형제 <a>" 패턴이었는데 실제 마크업과 달라 전혀 안 맞았다 — 반드시 실제
+ *  페이지를 열어 DOM을 확인한 뒤 고쳤다). 특정 태그/클래스명이 아니라 "짧은 텍스트 제목 + 바로 뒤 형제
+ *  링크 목록(≥2개)"이라는 구조 자체로 찾으므로, 몰마다 마크업이 달라도 일반적으로 적용된다. */
+export async function scanCategoryOverviewPage(page: Page): Promise<CategoryMenuLink[]> {
   const result = await page.evaluate(() => {
     const origin = location.origin
     const isShortLabel = (s: string) => {
       const t = s.trim()
       return t.length > 0 && t.length <= 20 && !/https?:\/\//.test(t)
     }
+    // ul/ol이 아니어도 "직계 자식 대부분이 링크인 컨테이너"면 목록으로 인정한다(정글북의
+    // <div class="grid grid-cols-2"><a>...</a><a>...</a>...</div> 참고) — 제목 후보(아래)가 이 목록 자신의
+    // 항목 하나를 잘못 짚었을 때도(예: "건식사료" 다음 형제가 "소프트사료" 하나뿐) kids.length<2라
+    // 자연히 걸러진다.
+    const looksLikeLinkGrid = (el: Element | null): el is Element => {
+      if (!el) return false
+      const kids = Array.from(el.children)
+      if (kids.length < 2) return false
+      const linkKids = kids.filter(k => k.tagName === 'A' && (k as HTMLAnchorElement).getAttribute('href'))
+      return linkKids.length >= 2 && linkKids.length >= kids.length * 0.8
+    }
     const result: { name: string; href: string }[] = []
     const seen = new Set<string>()
-    const headingCandidates = Array.from(document.querySelectorAll('p, h1, h2, h3, h4, h5, strong, b, dt'))
+    // 제목 태그에 'a'도 포함한다 — 대분류 이름 자체가 그 카테고리 페이지로 가는 링크인 몰이 흔하다
+    // (정글북처럼 아이콘+굵은 글씨+화살표가 전부 하나의 <a> 안에 있는 경우). 무관한 <a>(예: 하위 항목
+    // 자신, 사이트 전역 nav 링크)까지 전부 후보가 돼도 아래 "다음 형제가 링크 목록인가" 조건에서
+    // 대부분 걸러지고, 남은 오탐은 groupsFound>=2 + NON_CATEGORY_* 필터 + 호출부의 표본검증
+    // (looksLikeRealCategoryBatch)이 마저 걸러낸다.
+    const headingCandidates = Array.from(document.querySelectorAll('p, h1, h2, h3, h4, h5, strong, b, dt, a'))
       .filter(el => !el.querySelector('ul, ol') && isShortLabel(el.textContent || ''))
     let groupsFound = 0
     for (const heading of headingCandidates) {
       // 제목 바로 다음 형제가 목록이면 그걸 쓰고, 아니면(제목이 한 겹 더 감싸져 있는 마크업) 제목의
       // 부모 바로 다음 형제도 한 번 더 본다.
       let list: Element | null = heading.nextElementSibling
-      if (!list || (list.tagName !== 'UL' && list.tagName !== 'OL')) {
+      if (!(list?.tagName === 'UL' || list?.tagName === 'OL' || looksLikeLinkGrid(list))) {
         list = heading.parentElement?.nextElementSibling || null
       }
-      if (!list || (list.tagName !== 'UL' && list.tagName !== 'OL')) continue
-      const items = Array.from(list.querySelectorAll('a[href]')) as HTMLAnchorElement[]
+      if (!(list?.tagName === 'UL' || list?.tagName === 'OL' || looksLikeLinkGrid(list))) continue
+      const items = (list.tagName === 'UL' || list.tagName === 'OL')
+        ? Array.from(list.querySelectorAll('a[href]')) as HTMLAnchorElement[]
+        : Array.from(list.children).filter((k): k is HTMLAnchorElement => k.tagName === 'A')
       const validItems = items.filter(a => a.href.startsWith(origin) && (a.textContent || '').trim())
       if (validItems.length < 2) continue
       groupsFound++
@@ -7592,8 +7562,17 @@ async function expandCategoryHubs(
     let realChildren: CategoryMenuLink[]
     const subStart = Date.now()
     const sub = await scanCategoryMenuRobust(workerPage)
-    const subMs = Date.now() - subStart
     realChildren = sub.links.filter(s => !topLevelHrefSet.has(canonicalizeHref(s.href)))
+    // scanCategoryMenuRobust는 <li> 중첩 트리 기반이라, 이 허브 페이지 자체가 "제목+목록 반복" 구조인
+    // 카테고리 전체보기형 페이지면(discoverTopLevelCategoryLinks가 최상위 탐지에 쓰는
+    // scanCategoryOverviewPage와 같은 패턴) 아무것도 못 찾는다 — 정글북(id=30) 실사용 확인, 2026-09-15:
+    // "카테고리" 허브(/category)가 정확히 이 구조라 하위 51개를 전부 놓치고 "상품도 하위메뉴도 없다"며
+    // 통째로 제외됐다. 최상위 탐지와 같은 폴백을 여기서도 시도한다.
+    if (!realChildren.length) {
+      const overview = await scanCategoryOverviewPage(workerPage)
+      realChildren = overview.filter(s => !topLevelHrefSet.has(canonicalizeHref(s.href)))
+    }
+    const subMs = Date.now() - subStart
     let aiMs = 0
     if (!realChildren.length && allowOllamaHubAi && hubAiAttempts < MAX_HUB_AI_ATTEMPTS_PER_RUN) {
       hubAiAttempts++

@@ -2,7 +2,7 @@ import pool from '../db'
 import { profileMallStructure, profileMallStructureForScrape, type MallProfileSignals, type ScrapeOptions } from '../scraper'
 import { runAutoAnalysis } from './adjustment'
 import { checkCategoryAnomaly } from './categoryAnomalyCheck'
-import { mergeSortOptions } from './categoryCachePolicy'
+import { mergeSortOptions, shouldKeepPreviousCategoryLinks } from './categoryCachePolicy'
 import type { MallStructureReport, AiProviderId } from '../ai'
 import { ALL_AI_PROVIDERS } from '../ai'
 
@@ -147,7 +147,22 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
   // 유지한다(신우 몰 실사용 확인, 2026-08-25 — "몰구조분석을 다시 하니 '규칙 기반' + 무관한 카테고리만
   // 나온다"). deep=true도 예외 없이 적용한다 — 아래 개수 축소 가드(deep=false 전용)는 "실제로 카테고리가
   // 줄었을 수 있다"는 다른 문제를 다루는 것이라 별개다.
-  if (!next.categoryLinksAiUsed && prev?.categoryLinksAiUsed && prev.categoryLinks?.length) {
+  //
+  // 다만 "AI 채택 여부"만으로 판단하면 "규칙 기반이 AI보다 항상 못하다"고 단정하는 셈이라, 이번에 새로
+  // 찾은 개수가 예전보다 뚜렷이 많을 때도 무조건 예전(AI) 결과로 되돌리는 사고가 났다(정글북 실사용
+  // 확인, 2026-09-15 — scanCategoryMenu/scanCategoryOverviewPage를 고쳐 규칙 기반으로 79개를 정확히
+  // "대분류 > 중분류"까지 구분해 찾았는데도, 예전에 AI 텍스트 폴백이 뭉뚱그려 저장해둔 57개짜리 결과로
+  // 매번 되돌아가 "몰구조분석을 다시 해도 결과가 그대로"였다). "카테고리 불러오기"(app/api/scrape/
+  // categories/route.ts)가 바로 이 문제를 막으려고 만든 shouldKeepPreviousCategoryLinks(개수가 늘면 AI
+  // 여부와 무관하게 더 나은 결과로 봄)가 있는데 여기는 그 판단을 따로 손으로 다시 짜뒀던 게 원인이었다
+  // — 같은 판단을 두 곳에 따로 두면 이렇게 갈라진다는 게 실제로 확인됐으니, 이제 같은 함수를 쓴다.
+  if (shouldKeepPreviousCategoryLinks({
+    freshAiUsed: !!next.categoryLinksAiUsed,
+    freshLoginBlockedExpansion: false,
+    freshCategoryLinksCount: next.categoryLinks?.length ?? 0,
+    prevAiUsed: !!prev?.categoryLinksAiUsed,
+    prevCategoryLinksCount: prev?.categoryLinks?.length ?? 0,
+  }) && prev?.categoryLinks?.length) {
     next.categoryLinks = prev.categoryLinks
     next.categoryMenuNames = prev.categoryMenuNames
     next.categoryLinksAiUsed = prev.categoryLinksAiUsed

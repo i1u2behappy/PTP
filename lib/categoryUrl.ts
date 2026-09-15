@@ -31,3 +31,25 @@ export function isSamePageUrl(a: string, b: string): boolean {
   }
   return norm(a) === norm(b)
 }
+
+export interface CategoryTreeGroup {
+  top: string
+  children: { name: string; href: string }[]
+}
+
+/** categoryLinks(대분류 > 중분류 > ... 형태로 " > "를 구분자로 쓰는 경로)를 최상위 조각(대분류) 기준으로
+ *  묶는다 — "몰 구조분석" 결과 카드가 "카테고리 구조"를 "합계 N개" 한 줄 요약 대신 대분류별 개별 내역으로
+ *  구분해서 보여주는 데 쓴다(사용자 지시, 2026-09-15 — "요약하지 말고 개별 내역을 잘 구분해서 볼 수 있게").
+ *  화면(ScraperPanel.tsx)과 서버(lib/scraper.ts) 양쪽에서 쓸 수 있도록 이 client-safe 모듈에 둔다.
+ *  순수 함수라 테스트로 규칙을 고정해둔다. */
+export function buildCategoryTreeView(categoryLinks: { name: string; href: string }[] | undefined): CategoryTreeGroup[] {
+  if (!categoryLinks?.length) return []
+  const groups = new Map<string, { name: string; href: string }[]>()
+  for (const link of categoryLinks) {
+    const top = link.name.split(' > ')[0] || link.name
+    const list = groups.get(top)
+    if (list) list.push(link)
+    else groups.set(top, [link])
+  }
+  return [...groups.entries()].map(([top, children]) => ({ top, children }))
+}

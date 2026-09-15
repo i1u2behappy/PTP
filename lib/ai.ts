@@ -1437,6 +1437,151 @@ async function detectVisibleCategoryNamesWithOllamaVision(
   })
 }
 
+function buildVisibleCategoryHierarchyPrompt(mallName: string): string {
+  return `이 스크린샷은 한국 쇼핑몰 '${mallName}'에서 카테고리 메뉴를 열어본 화면이다. **사람이 이 화면을
+보듯이** 상품 대분류(그룹 제목)와 그 아래 딸린 하위 카테고리(중분류/소분류)를 그룹으로 묶어서 답해라 —
+각 그룹은 대분류 이름 하나와 그 아래 화면에 보이는 하위 카테고리 이름들(중분류뿐 아니라 그 아래 소분류가
+같이 보이면 그것도 모두 포함, 순서대로)로 이루어진다. 하위 카테고리가 화면에 안 보이고 대분류 이름만
+보이면 그 그룹의 하위 목록은 비워 둬도 된다. 다음은 카테고리가 아니므로 넣지 마라: 로그인/로그아웃/
+회원가입/장바구니/마이페이지/주문조회/고객센터/검색창/공지사항/이벤트 배너 문구/가격이나 숫자만 있는
+항목. 화면에 실제로 보이는 글자만 답하고, 안 보이는 것을 상상해서 채우지 마라.`
+}
+
+/** detectVisibleCategoryNames(평평한 이름 목록)는 "이 이름이 화면에 있냐 없냐"만 검증하는 용도라 대/중/
+ *  소분류가 서로 어떻게 묶이는지는 담지 않는다 — 사람이 화면을 보면 "이 대분류 아래 이런 하위 카테고리가
+ *  있다"는 구조까지 한눈에 파악되는데, 그 구조 자체를 사용자에게 보여줄 근거가 없었다(사용자 지시,
+ *  2026-09-15 — "사람과 같이 화면 전체를 캡쳐해서 보는 형태로 대분류/중소분류 및 정렬 구조를 파악").
+ *  이미 카테고리 메뉴가 열린 화면을 찍어둔 시점에 한 번 더(추가 캡처 없이) 물어 구조까지 받아온다.
+ *  detectVisibleCategoryNames는 그대로 두고(재검증 로직이 이미 그걸 쓰고 있음) 이 함수는 화면 대조
+ *  카드에 "화면에서 본 구조"를 같이 보여주는 용도로만 쓰인다.
+ *  null=두 공급자 다 실패(호출부는 구조 표시를 건너뛴다 — 없는 근거로 지어내지 않는다). */
+export async function detectVisibleCategoryHierarchy(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<{ group: string; items: string[] }[] | null> {
+  const viaGroq = await detectCategoryHierarchyWithGroqVision(mallName, imageBase64, mimeType, signal)
+  if (viaGroq !== null) return viaGroq
+  return await detectCategoryHierarchyWithOllamaVision(mallName, imageBase64, signal)
+}
+
+/** 비전이 돌려준 그룹 목록을 정리한다 — sanitizeVisibleCategoryNames와 같은 이유(길이 상한/중복 제거)로
+ *  순수 함수로 뽑아 테스트로 규칙을 고정해둔다. */
+export function sanitizeVisibleCategoryHierarchy(raw: unknown): { group: string; items: string[] }[] {
+  if (!Array.isArray(raw)) return []
+  const seenGroups = new Set<string>()
+  const out: { group: string; items: string[] }[] = []
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue
+    const groupRaw = (entry as { group?: unknown }).group
+    if (typeof groupRaw !== 'string') continue
+    const group = groupRaw.replace(/\s+/g, ' ').trim()
+    if (!group || group.length > 40 || seenGroups.has(group)) continue
+    const items = sanitizeVisibleCategoryNames((entry as { items?: unknown }).items)
+    seenGroups.add(group)
+    out.push({ group, items })
+    if (out.length >= 60) break
+  }
+  return out
+}
+
+async function detectCategoryHierarchyWithGroqVision(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<{ group: string; items: string[] }[] | null> {
+  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) return null
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(OLLAMA_TIMEOUT_MS)]) : AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
+      body: JSON.stringify({
+        model: GROQ_VISION_MODEL,
+        max_tokens: 1200,
+        temperature: 0,
+        reasoning_effort: 'none',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: buildVisibleCategoryHierarchyPrompt(mallName) },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_visible_category_hierarchy',
+            description: '화면에 보이는 대분류와 그 아래 하위 카테고리를 그룹으로 묶어 반환한다.',
+            parameters: {
+              type: 'object',
+              required: ['groups'],
+              properties: {
+                groups: {
+                  type: 'array',
+                  description: '대분류별 그룹 목록',
+                  items: {
+                    type: 'object',
+                    required: ['group', 'items'],
+                    properties: {
+                      group: { type: 'string', description: '대분류 이름' },
+                      items: { type: 'array', items: { type: 'string' }, description: '그 대분류 아래 보이는 하위 카테고리 이름들' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_visible_category_hierarchy' } },
+      }),
+    })
+    if (!res.ok) return null
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) return null
+    const groups = sanitizeVisibleCategoryHierarchy((JSON.parse(call.function.arguments) as { groups?: unknown }).groups)
+    return groups.length ? groups : null
+  } catch {
+    return null
+  }
+}
+
+async function detectCategoryHierarchyWithOllamaVision(
+  mallName: string, imageBase64: string, signal?: AbortSignal,
+): Promise<{ group: string; items: string[] }[] | null> {
+  if (!isAiProviderEnabled('ollama')) return null
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
+        body: JSON.stringify({
+          model: OLLAMA_VISION_MODEL,
+          stream: false,
+          options: OLLAMA_CHAT_OPTIONS,
+          keep_alive: '30m',
+          messages: [{
+            role: 'user',
+            // 이 모델은 도구 호출을 지원하지 않아(OLLAMA_VISION_MODEL 주석) 프롬프트로 JSON만 강제한다.
+            content: `${buildVisibleCategoryHierarchyPrompt(mallName)}\n\n다른 설명 없이 JSON 배열만 출력해라`
+              + `(예: [{"group":"여성의류","items":["원피스","블라우스"]},{"group":"가방","items":[]}]).`,
+            images: [imageBase64],
+          }],
+        }),
+      } as RequestInit)
+      if (!res.ok) return null
+      const content = (await res.json() as { message?: { content?: string } }).message?.content ?? ''
+      const match = content.match(/\[[\s\S]*\]/)
+      if (!match) return null
+      const groups = sanitizeVisibleCategoryHierarchy(JSON.parse(match[0]))
+      return groups.length ? groups : null
+    } catch {
+      return null
+    }
+  })
+}
+
 function buildProductListVisiblePrompt(mallName: string): string {
   return `이 스크린샷은 한국 쇼핑몰 '${mallName}'의 어떤 카테고리 페이지를 연 화면이다. **사람이 보기에 이
 화면에 판매 상품 목록이 있는가?** 상품 썸네일과 상품명/가격이 격자나 목록 형태로 여러 개 늘어서 있으면

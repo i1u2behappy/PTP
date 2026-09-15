@@ -13,7 +13,7 @@ import { chromium, type BrowserContext, type Page, type APIResponse, type Elemen
 import { load as loadHtml } from 'cheerio'
 import iconv from 'iconv-lite'
 import type { ExtractedProduct } from './ai'
-import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsFromScreenshot, detectCategoryMenuTriggerFromScreenshot, detectVisibleCategoryGroupCount, detectVisibleCategoryNames, detectProductListVisible, type MallStructureReport, type OptionCandidate, type AiProviderId, ALL_AI_PROVIDERS, runWithAiProviders } from './ai'
+import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsFromScreenshot, detectCategoryMenuTriggerFromScreenshot, detectVisibleCategoryGroupCount, detectVisibleCategoryNames, detectVisibleCategoryHierarchy, detectProductListVisible, type MallStructureReport, type OptionCandidate, type AiProviderId, ALL_AI_PROVIDERS, runWithAiProviders } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
@@ -1829,6 +1829,27 @@ async function siteInfo(siteId: number): Promise<{ name: string; url: string; lo
   }
 }
 
+/** 로그인 세션이 끊긴 것으로 보이는 순간(로그인 페이지로 리다이렉트됨 등) 저장된 아이디/비밀번호로
+ *  재로그인을 시도한다 — "몰 구조분석"의 여러 단계(카테고리 하위구조 확인/정렬 옵션 확인/샘플 상품 확인)가
+ *  공유한다(사용자 지시, 2026-09-15: "로그인 세션이 끊기면 기존 로그인 정보로 재로그인하고 로그아웃
+ *  이후의 작업을 재진행" — 뒤이어 "방법이 없다는거야?"라고 재확인해, 특정 단계 하나만이 아니라 세션이
+ *  어느 단계에서 끊기든 그 자리에서 복구하는 것을 목표로 모든 단계에 적용한다). siteId가 없거나 등록된
+ *  로그인 정보가 없으면(직접로그인 필수 몰 등) 시도 자체를 못 하므로 false. */
+async function recoverSessionLogin(page: Page, siteId: number | undefined, mallName: string, stepLabel: string): Promise<boolean> {
+  if (siteId == null) return false
+  const site = await siteInfo(siteId).catch(() => null)
+  if (!site?.loginId || !site?.loginPw) return false
+  const loginTarget = site.loginUrl || site.url
+  if (!loginTarget) return false
+  console.log(`[${stepLabel}:${mallName}] 로그인 세션이 끊긴 것으로 보여 저장된 로그인 정보로 재로그인을 시도합니다`)
+  await page.goto(loginTarget, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+  const submitted = await loginIfNeeded(page, { url: loginTarget, loginId: site.loginId, loginPw: site.loginPw }).catch(() => false)
+  if (submitted) await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {})
+  const recovered = await detectLoggedInSignal(page)
+  console.log(`[${stepLabel}:${mallName}] 재로그인 ${recovered === false ? '실패' : '완료'}`)
+  return recovered !== false
+}
+
 /** discoverTopLevelCategoryLinks가 "기억"으로 쓸 재료를 scrape_profile에서 읽어온다 — categoryUrlPattern은
  *  이전 탐지(규칙 기반이든 AI든)가 역산해둔 URL 패턴, manualCategorySamples는 사용자가 "카테고리 선택
  *  가져오기"로 직접 확인해 모은 URL이다(사용자 요청, 2026-08-26). 후자는 그 자체로 AI 프롬프트의 근거
@@ -2650,6 +2671,7 @@ async function sampleMallProfile(
   )
   let { links: categoryLinks, aiUsed: categoryLinksAiUsed } = discovery
   const categoryScreenNames = discovery.screenNames
+  const categoryScreenHierarchy = discovery.screenHierarchy
   const categoryMenuLinks = discovery.menuLinks
   // 이번에 카테고리를 찾았으면(어느 방법으로든) URL 패턴을 다시 역산해 "기억"을 최신 상태로 갱신한다 —
   // 카테고리 구성이 바뀐 몰도 계속 정확한 패턴을 유지하기 위함. 이번엔 하나도 못 찾았으면 새로 역산할
@@ -2700,7 +2722,7 @@ async function sampleMallProfile(
     const checked = await screenCheckAndRecover(
       context, mallName, categoryScreenNames, categoryMenuLinks, categoryLinks, categoryExclusions,
       platform === 'unknown' ? await detectMallPlatform(page).catch(() => 'unknown' as MallPlatform) : platform,
-      new URL(startUrl).origin, signal, prevCategoryLinks,
+      new URL(startUrl).origin, signal, prevCategoryLinks, categoryScreenHierarchy,
     )
     categoryLinks = checked.links
     categoryScreenCheck = checked.screenCheck
@@ -2719,6 +2741,10 @@ async function sampleMallProfile(
     // (전체를 다 훑진 않음, 무거운 작업이라 안전하게 상한을 둔다. 사용자 지시, 2026-08-23: "실지 상품이
     // 있는 카테고리라면 반드시 정렬이 여기 있을 것").
     let sampleCategoryUrl: string | null = null
+    // 이 단계도 앞선 카테고리 하위구조 확인처럼 로그인 세션이 끊긴 채로 계속 진행될 수 있다(사용자 지시,
+    // 2026-09-15 — "방법이 없다는거야?": 세션이 어느 단계에서 끊기든 그 자리에서 복구해야 한다). 재로그인은
+    // 이 단계 전체에서 한 번만 시도한다(이유는 recoverSessionLogin 호출부 공통 — hubExpansion 주석 참고).
+    let sortLoginRecoveryAttempted = false
     for (const link of categoryLinks.slice(0, 5)) {
       if (signal?.aborted) break
       const moved = await page.goto(link.href, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
@@ -2726,7 +2752,14 @@ async function sampleMallProfile(
         console.log(`[정렬탐지:진단:${mallName}] 카테고리 페이지 이동 실패(${link.href})`)
         continue
       }
-      const collected = await collectProductUrls(page, { maxPages: 1 }).catch(() => null)
+      let collected = await collectProductUrls(page, { maxPages: 1 }).catch(() => null)
+      if (collected?.needsLogin && !sortLoginRecoveryAttempted) {
+        sortLoginRecoveryAttempted = true
+        if (await recoverSessionLogin(page, siteId, mallName, '정렬탐지')) {
+          const movedAgain = await page.goto(link.href, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
+          if (movedAgain) collected = await collectProductUrls(page, { maxPages: 1 }).catch(() => null)
+        }
+      }
       console.log(`[정렬탐지:진단:${mallName}] ${link.name}(${link.href}) — 상품 URL ${collected?.urls.length ?? 0}개`)
       if (collected?.urls.length) { sampleCategoryUrl = link.href; break }
     }
@@ -2785,7 +2818,7 @@ async function sampleMallProfile(
   // 나머지 흐름은 계속한다.
   if (signal?.aborted) return null
   if (deep) step('회사정보/이용안내 페이지 확인 중...')
-  const contextText = deep ? await gatherMallContextText(page, context, signal).catch(() => '') : ''
+  const contextText = deep ? await gatherMallContextText(page, context, signal, siteId).catch(() => '') : ''
   if (signal?.aborted) return null
   // gatherMallContextText는 mapWithPageWorkers로 회사정보/배송조회 등 안내 링크를 동시에 훑는데, 그
   // 워커 중 하나가 공유 page(로그인 창이 열려있으면 사용자가 보고 있는 그 탭) 자신을 그대로 재사용한다
@@ -2855,6 +2888,14 @@ async function sampleMallProfile(
   let contextClaimed = false
 
   step(`샘플 상품 ${sampleUrls.length}건 확인 중...`)
+  // 세션이 끊긴 채 상품 페이지를 열면 로그인 페이지를 그대로 "상품"으로 오인해 빈 결과를 쌓는다 — 실제
+  // 스크랩 루프(scrapeOne)가 상품마다 이미 쓰는 것과 같은 loginIfNeeded 패턴을 여기도 적용한다(사용자
+  // 지시, 2026-09-15 — "방법이 없다는거야?": 세션이 어느 단계에서 끊기든 그 자리에서 복구). 여러 워커가
+  // 동시에 방문하지만 loginIfNeeded 자체가 "로그인폼이 보일 때만" 동작하는 멱등 호출이라(로그인폼이 없으면
+  // 즉시 false) 매 방문마다 걸어도 안전하다 — expandCategoryHubs처럼 별도의 single-flight가 필요 없다.
+  const sampleLoginCreds = siteId != null
+    ? await siteInfo(siteId).then(s => (s.loginId && s.loginPw ? { loginId: s.loginId, loginPw: s.loginPw } : null)).catch(() => null)
+    : null
   // 샘플 상품 방문(최대 MALL_PROFILE_SAMPLE_SIZE=6건)은 서로 완전히 독립적인 페이지라 순차 대신 여러
   // 탭으로 동시에 처리한다 — 모자사러처럼 카테고리/상품 페이지 로딩이 느린 몰에서 "몰 구조분석" 소요
   // 시간의 상당 부분이 이 순차 방문이었다(2026-08-22, 사용자 요청으로 병렬화). Set/카운터 갱신은 각
@@ -2866,6 +2907,9 @@ async function sampleMallProfile(
       // gotoViaLinkClick: gotoViaLinkClick 정의부 주석 참고(Sec-Fetch-Site: same-origin을 만들기 위해
       // page.goto() 대신 실제 <a> 클릭을 흉내낸다).
       await gotoViaLinkClick(workerPage, url, { waitUntil: 'load', timeout: 20_000 })
+      if (sampleLoginCreds && await loginIfNeeded(workerPage, { url, ...sampleLoginCreds }).catch(() => false)) {
+        await gotoViaLinkClick(workerPage, url, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+      }
       await waitForExtractableContent(workerPage)
       const product = await extractProductRuleBased(workerPage, url)
       const selectOptions = await scanSelectOptions(workerPage)
@@ -2909,7 +2953,7 @@ async function sampleMallProfile(
   if (deep) {
     step('AI로 결제/배송/업체정보 분석 중...')
     const aiStepStartedAt = Date.now()
-    const categoryPageHints = await gatherCategoryPageHints(context, page, categoryPageHintHrefs, signal).catch(() => '')
+    const categoryPageHints = await gatherCategoryPageHints(context, page, categoryPageHintHrefs, signal, siteId).catch(() => '')
     if (deep && page.url() !== startUrl) {
       await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
     }
@@ -2985,13 +3029,21 @@ function collectImageHintsScript(rootSelector: string | null): string[] {
  *  주는 게 더 빠르고 정확할 거라는 사용자 제안(2026-09-02, Ollama가 이 리포트 하나에 8분을 줘도 못
  *  끝내는 걸 실측으로 확인한 뒤 나온 아이디어). 최대 5개만 다시 방문한다(무한정 안 늘어나게 — 이미
  *  한 번 열어본 페이지를 또 여는 비용이 있다). */
-async function gatherCategoryPageHints(context: BrowserContext, page: Page, hrefs: string[], signal?: AbortSignal): Promise<string> {
+async function gatherCategoryPageHints(context: BrowserContext, page: Page, hrefs: string[], signal?: AbortSignal, siteId?: number): Promise<string> {
   const targets = hrefs.slice(0, 5)
   if (!targets.length) return ''
+  // 세션이 끊긴 채 방문하면 로그인 페이지 텍스트가 "참고자료"로 그대로 섞여 들어간다 — 샘플 상품 확인과
+  // 같은 이유로 방문마다 loginIfNeeded를 건다(사용자 지시, 2026-09-15).
+  const hintLoginCreds = siteId != null
+    ? await siteInfo(siteId).then(s => (s.loginId && s.loginPw ? { loginId: s.loginId, loginPw: s.loginPw } : null)).catch(() => null)
+    : null
   const sections: string[] = new Array(targets.length)
   await mapWithPageWorkers(context, page, targets, MALL_PROFILE_CONCURRENCY, async (href, i, workerPage) => {
     try {
       await gotoViaLinkClick(workerPage, href, { waitUntil: 'load', timeout: 15_000 })
+      if (hintLoginCreds && await loginIfNeeded(workerPage, { url: href, ...hintLoginCreds }).catch(() => false)) {
+        await gotoViaLinkClick(workerPage, href, { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+      }
       const text = await workerPage.evaluate(() => document.body.innerText).catch(() => '')
       if (text.trim()) sections[i] = `[카테고리 페이지(참고자료로 선별됨): ${href}]\n${text.replace(/\s+/g, ' ').trim().slice(0, 2_000)}`
     } catch { /* 다시 방문 실패해도 나머지 흐름은 계속 — 이건 보강 자료일 뿐이라 없어도 무방하다 */ }
@@ -2999,8 +3051,13 @@ async function gatherCategoryPageHints(context: BrowserContext, page: Page, href
   return sections.filter(Boolean).join('\n\n')
 }
 
-async function gatherMallContextText(page: Page, context: BrowserContext, signal?: AbortSignal): Promise<string> {
+async function gatherMallContextText(page: Page, context: BrowserContext, signal?: AbortSignal, siteId?: number): Promise<string> {
   const sections: string[] = []
+  // 이용안내/배송/회사소개 등 안내 페이지 방문 중 세션이 끊기면 로그인 페이지 텍스트가 "회사정보"로
+  // 잘못 섞여 들어간다 — 샘플 상품 확인과 같은 이유로 방문마다 loginIfNeeded를 건다(사용자 지시, 2026-09-15).
+  const infoLoginCreds = siteId != null
+    ? await siteInfo(siteId).then(s => (s.loginId && s.loginPw ? { loginId: s.loginId, loginPw: s.loginPw } : null)).catch(() => null)
+    : null
   const footerSelector = 'footer, #footer, .footer, .company_info, .footer_info'
   const footerText = await page.evaluate(sel => {
     const el = document.querySelector(sel)
@@ -3030,6 +3087,9 @@ async function gatherMallContextText(page: Page, context: BrowserContext, signal
     try {
       // gotoViaLinkClick: gotoViaLinkClick 정의부 주석 참고.
       await gotoViaLinkClick(workerPage, link.href, { waitUntil: 'load', timeout: 15_000 })
+      if (infoLoginCreds && await loginIfNeeded(workerPage, { url: link.href, ...infoLoginCreds }).catch(() => false)) {
+        await gotoViaLinkClick(workerPage, link.href, { waitUntil: 'load', timeout: 15_000 }).catch(() => {})
+      }
       const text = await workerPage.evaluate(() => document.body.innerText).catch(() => '')
       const parts: string[] = []
       if (text.trim()) parts.push(`[${link.text}]\n${text.replace(/\s+/g, ' ').trim().slice(0, 2_500)}`)
@@ -3293,7 +3353,9 @@ export interface CategoryMenuScanResult {
   groupCount?: number
 }
 
-async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResult> {
+// 실제 브라우저(getComputedStyle)가 있어야 검증 가능한 로직(플랫 앵커 그리드 패턴)이 있어, 테스트에서
+// 실제 페이지를 띄워 직접 호출할 수 있도록 export한다(nthHeaderIconCandidate와 같은 이유).
+export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResult> {
   return page.evaluate(({ excludeSrc }) => {
     const excludeRe = new RegExp(excludeSrc, 'i')
     // 이미지 스프라이트/아이콘 폰트 메뉴처럼 <li> 안에 글자가 전혀 없어 이름을 지을 수 없는 항목의 href만
@@ -3478,6 +3540,57 @@ async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResult> {
         }
       }
     }
+    // 위 tier들은 전부 <li> 기반이라, <li> 자체가 아예 없는 메가메뉴(Tailwind 그리드 등)에서는 후보를
+    // 하나도 못 찾는다 — 정글북 실사용 확인(2026-09-15, 사용자 지적 "왜 다 찾아내질 못했어?"): 실제 마크업이
+    // `<div class="min-w-0"><a class="font-bold">사료</a><a>건식사료</a><a>소프트사료</a>...</div>`처럼
+    // <li> 없이 <a> 형제가 나열되고, 첫 <a>만 글꼴이 굵어 대분류/하위분류를 구분한다 — <li> 기반 tier로는
+    // 구조적으로 인식 불가능해 전부 실패하고, 결국 href만 긁어모으는 AI 텍스트 폴백까지 떨어져 대/중분류
+    // 구분 없이 뒤섞인 일부 목록만 나왔다. "카테고리"류 트리거 근처에서만 이 패턴을 찾아, 무관한 곳(예:
+    // 푸터의 "회사소개/이용안내" 컬럼)을 카테고리로 오인하지 않게 범위를 좁힌다.
+    const flatColumns = (() => {
+      const triggerRe = /^(전체\s*)?카테고리$|^전체보기$|^menu$/i
+      const trigger = Array.from(document.querySelectorAll('button, a')).find(el => triggerRe.test((el.textContent || '').trim()))
+      if (!trigger) return null
+      // 트리거의 조상을 몇 단계 올라가며(가까운 것부터) 그 안에서 그리드형 컬럼을 찾는다 — 너무 위로
+      // 올라가면 페이지 전체(헤더+본문)까지 포함돼 무관한 링크가 섞일 수 있어 4단계로 제한한다.
+      let scope: Element | null = trigger.parentElement
+      for (let hop = 0; hop < 4 && scope; hop++, scope = scope.parentElement) {
+        const columns: { name: string; href: string }[][] = []
+        for (const container of Array.from(scope.querySelectorAll('div, li'))) {
+          const kids = Array.from(container.children)
+          if (kids.length < 3 || kids.length > 40) continue
+          if (!kids.every(k => k.tagName === 'A' && (k as HTMLAnchorElement).getAttribute('href'))) continue
+          const [head, ...rest] = kids as HTMLAnchorElement[]
+          const headText = (head.textContent || '').trim()
+          if (!isMeaningful(headText) || excludeRe.test(headText)) continue
+          const headStyle = getComputedStyle(head)
+          const headWeight = parseInt(headStyle.fontWeight, 10) || 400
+          const headSize = parseFloat(headStyle.fontSize) || 0
+          // 나머지 전부보다 글꼴이 굵거나(font-weight) 커야(font-size) "이건 그룹 제목" 신호로 인정한다 —
+          // 형제 <a>가 전부 같은 스타일이면(글꼴로 헤더를 구분하지 않는 몰) 이 패턴이 아니라고 본다.
+          const isHeaderStyle = rest.every(el => {
+            const s = getComputedStyle(el)
+            return headWeight > (parseInt(s.fontWeight, 10) || 400) || headSize > (parseFloat(s.fontSize) || 0)
+          })
+          if (!isHeaderStyle) continue
+          const items: { name: string; href: string }[] = []
+          for (const a of rest) {
+            const text = (a.textContent || '').trim()
+            if (!isMeaningful(text) || excludeRe.test(text) || !a.href || a.href.endsWith('#')) continue
+            items.push({ name: `${headText} > ${text}`, href: a.href })
+          }
+          if (items.length >= 2) columns.push(items)
+        }
+        // 컬럼이 최소 3개는 돼야 "카테고리 그리드"로 인정한다(오탐 방지) — 그보다 적으면 다음 조상 단계로.
+        if (columns.length >= 3) {
+          const seen = new Set<string>()
+          const links = columns.flat().filter(l => (seen.has(l.href) ? false : (seen.add(l.href), true)))
+          return { links, groupCount: columns.length }
+        }
+      }
+      return null
+    })()
+    if (flatColumns) return { links: flatColumns.links, textlessHrefs: [...new Set(textlessHrefs)], groupCount: flatColumns.groupCount }
     return { links: [], textlessHrefs: [...new Set(textlessHrefs)] }
   }, { excludeSrc: NON_CATEGORY_TEXT_RE.source }).catch(() => ({ links: [], textlessHrefs: [] }))
 }
@@ -4439,6 +4552,10 @@ interface CategoryMenuDiscovery {
   links: CategoryMenuLink[]
   groupCount: number
   screenNames: string[] | null
+  /** screenNames와 같은 화면에서 같이 받아온 "대분류→하위 카테고리" 그룹 구조 — 사람이 화면을 보듯
+   *  대/중/소분류가 어떻게 묶이는지까지 보여주는 용도(사용자 지시, 2026-09-15). screenNames와 달리
+   *  재검증(missing/extra) 판정에는 쓰이지 않는다 — 화면 대조 카드에 참고로 같이 보여주기만 한다. */
+  screenHierarchy?: { group: string; items: string[] }[] | null
   /** 메뉴가 열려 있던 그 화면의 모든 링크(텍스트+href) — 화면에서 읽은 이름만 있고 URL을 모르는
    *  누락 카테고리를 재검증하려면 그 이름의 링크를 찾아야 한다(recoverMissingCategories). 화면을
    *  캡처한 바로 그 순간에 같이 모아둔다 — 루프가 끝나면 그 DOM은 사라진다. */
@@ -4507,8 +4624,13 @@ async function discoverCategoryMenuByVision(
     const screenNames = completenessScreenshot
       ? await detectVisibleCategoryNames(mallName, completenessScreenshot.toString('base64'), 'image/jpeg', signal).catch(() => null)
       : null
+    // 같은 화면으로 "대분류 아래 하위 카테고리가 어떻게 묶이는지" 구조까지 받아둔다(사용자 지시,
+    // 2026-09-15 — 화면 대조 카드에 참고용으로만 쓰고, 위 screenNames의 missing/extra 판정은 그대로 둔다).
+    const screenHierarchy = completenessScreenshot
+      ? await detectVisibleCategoryHierarchy(mallName, completenessScreenshot.toString('base64'), 'image/jpeg', signal).catch(() => null)
+      : null
     const menuLinks = await collectAllPageLinks(page).catch(() => [])
-    return { links, groupCount: scannedGroupCount, screenNames, menuLinks }
+    return { links, groupCount: scannedGroupCount, screenNames, screenHierarchy, menuLinks }
   }
 
   // 시작 페이지(대개 홈 — "전체 카테고리" 트리거가 사는 곳)에서 먼저 여러 번 재시도한다(MAX_START_PAGE_
@@ -4690,14 +4812,17 @@ async function discoverCategoryMenuByExhaustiveHeaderClick(
   const screenNames = best?.shot
     ? await detectVisibleCategoryNames(mallName, best.shot.toString('base64'), 'image/jpeg', signal).catch(() => null)
     : null
-  return { links: best?.links ?? [], groupCount: best?.groupCount ?? 0, screenNames, menuLinks: best?.menuLinks ?? [] }
+  const screenHierarchy = best?.shot
+    ? await detectVisibleCategoryHierarchy(mallName, best.shot.toString('base64'), 'image/jpeg', signal).catch(() => null)
+    : null
+  return { links: best?.links ?? [], groupCount: best?.groupCount ?? 0, screenNames, screenHierarchy, menuLinks: best?.menuLinks ?? [] }
 }
 
 async function discoverTopLevelCategoryLinks(
   context: BrowserContext, page: Page, mallName: string, visitTextlessFallback: boolean, signal?: AbortSignal, useAi = true,
   categoryUrlPattern?: string | null, knownCategoryExamples?: string[], baseUrl?: string,
   platform: MallPlatform = 'unknown', productLinkSelector?: string | null,
-): Promise<{ links: CategoryMenuLink[]; textlessHrefs: string[]; aiUsed: boolean; screenNames?: string[] | null; menuLinks?: { text: string; href: string }[] }> {
+): Promise<{ links: CategoryMenuLink[]; textlessHrefs: string[]; aiUsed: boolean; screenNames?: string[] | null; screenHierarchy?: { group: string; items: string[] }[] | null; menuLinks?: { text: string; href: string }[] }> {
   if (categoryUrlPattern) {
     const patternLinks = await scanByKnownUrlPattern(page, categoryUrlPattern, PLATFORM_PROFILES[platform].detailUrlPattern?.source)
     if (patternLinks.length >= 2 && await looksLikeRealCategoryBatch(context, patternLinks, platform, productLinkSelector)) {
@@ -4749,7 +4874,7 @@ async function discoverTopLevelCategoryLinks(
   const aiCandidates = await collectAllPageLinks(page, baseUrl ? new URL(baseUrl).origin : undefined)
   const visionResult = await discoverCategoryMenuByVision(
     context, page, mallName, aiCandidates.map(c => c.href), platform, productLinkSelector, signal,
-  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0, screenNames: null, menuLinks: [] as { text: string; href: string }[] }))
+  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0, screenNames: null, screenHierarchy: null, menuLinks: [] as { text: string; href: string }[] }))
 
   // 비전이 "그럴듯하지만 일부만" 찾은 경우(표본검증은 통과하지만 실제로는 비슷하게 생긴 다른 아이콘을
   // 잘못 클릭한 것) 그 결과를 곧바로 받아들이지 않는다(사용자 지시, 2026-09-12 — "다른 방법으로 해") —
@@ -4759,7 +4884,7 @@ async function discoverTopLevelCategoryLinks(
   const visionScore = visionResult.links.length * Math.max(1, visionResult.groupCount)
   const VISION_CONFIDENT_GROUP_COUNT = 3
   if (visionResult.links.length && visionResult.groupCount >= VISION_CONFIDENT_GROUP_COUNT) {
-    return { links: visionResult.links, textlessHrefs, aiUsed: false, screenNames: visionResult.screenNames, menuLinks: visionResult.menuLinks }
+    return { links: visionResult.links, textlessHrefs, aiUsed: false, screenNames: visionResult.screenNames, screenHierarchy: visionResult.screenHierarchy, menuLinks: visionResult.menuLinks }
   }
 
   // 화면 인식이 실패했거나 그룹 수가 적어 못 미더울 때 — 비슷하게 생긴 아이콘이 여러 개라 비전이 계속
@@ -4767,13 +4892,13 @@ async function discoverTopLevelCategoryLinks(
   // 후보를 전부 실제로 클릭해보고 결과가 제일 좋은 것을 채택한다(discoverCategoryMenuByExhaustiveHeaderClick 참고).
   const exhaustiveResult = await discoverCategoryMenuByExhaustiveHeaderClick(
     context, page, mallName, startUrlBeforeVision, platform, productLinkSelector, signal,
-  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0, screenNames: null, menuLinks: [] as { text: string; href: string }[] }))
+  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0, screenNames: null, screenHierarchy: null, menuLinks: [] as { text: string; href: string }[] }))
   const exhaustiveScore = exhaustiveResult.links.length * Math.max(1, exhaustiveResult.groupCount)
 
   if (exhaustiveScore > 0 || visionScore > 0) {
     const winner = exhaustiveScore >= visionScore ? exhaustiveResult : visionResult
     console.log(`[카테고리탐지:진단:${mallName}] 화면 인식 ${visionResult.links.length}개(그룹 ${visionResult.groupCount}) vs 헤더 전수클릭 ${exhaustiveResult.links.length}개(그룹 ${exhaustiveResult.groupCount}) — ${exhaustiveScore >= visionScore ? '전수클릭' : '화면 인식'} 채택`)
-    return { links: winner.links, textlessHrefs, aiUsed: false, screenNames: winner.screenNames, menuLinks: winner.menuLinks }
+    return { links: winner.links, textlessHrefs, aiUsed: false, screenNames: winner.screenNames, screenHierarchy: winner.screenHierarchy, menuLinks: winner.menuLinks }
   }
 
   // 규칙 기반(화면 인식 포함)이 전부 실패했을 때만 AI 텍스트로 넘어간다 — 마지막 수단이라 시간을 넉넉히 준다.
@@ -6962,6 +7087,10 @@ export interface CategoryScreenCheck {
   missing: { name: string; reason: string }[]
   /** 최종 결과엔 있는데 화면에서는 못 읽은 것 — 비전이 놓쳤을 수도, 스크롤 밖이었을 수도 있어 참고용 */
   extra: string[]
+  /** 같은 화면에서 같이 받아온 "대분류→하위 카테고리" 그룹 구조(detectVisibleCategoryHierarchy) —
+   *  missing/extra 판정에는 안 쓰이고, 사용자에게 "화면에서 본 구조"를 참고로 같이 보여주는 용도뿐이다
+   *  (사용자 지시, 2026-09-15). 비전이 실패했거나 구조를 못 받았으면 없음. */
+  screenHierarchy?: { group: string; items: string[] }[]
   checkedAt: string
 }
 
@@ -7151,6 +7280,9 @@ async function screenCheckAndRecover(
   /** 직전 실행에서 확인된 카테고리(캐시) — "화면"과 별개의 두 번째 기준선이다. 화면 인식이 실패해
    *  screenNames가 없어도, 이 목록보다 줄어든 만큼은 재검증 대상이 된다(아래 주석 참고). */
   previousLinks?: CategoryMenuLink[],
+  /** screenNames와 같은 화면에서 같이 받아온 "대분류→하위 카테고리" 구조(detectVisibleCategoryHierarchy) —
+   *  missing/extra 재검증에는 안 쓰고, 최종 screenCheck에 참고용으로 그대로 실어 보낸다. */
+  screenHierarchy?: { group: string; items: string[] }[] | null,
 ): Promise<{ links: CategoryMenuLink[]; screenCheck: CategoryScreenCheck | null }> {
   // 이번 실행에서 사라진 "직전 결과의 카테고리"도 재검증 대상에 넣는다 — 실사용에서 같은 몰의 같은
   // 페이지가 실행마다 상품 0개로 보이기도 하고 25개로 보이기도 해(투비즈온, 2026-09-13: 51 → 49 → 46로
@@ -7162,7 +7294,7 @@ async function screenCheckAndRecover(
     console.log(`[이전결과대조:${mallName}] 직전에 있던 카테고리 ${droppedFromPrevious.length}개가 이번 결과엔 없음 — 재검증 대상에 포함: ${droppedFromPrevious.slice(0, 10).map(p => p.name).join(', ')}`)
   }
 
-  const first = buildCategoryScreenCheck(screenNames, links, exclusions)
+  const first = buildCategoryScreenCheck(screenNames, links, exclusions, screenHierarchy)
   if (!first) {
     // 화면 인식이 실패한 실행 — 화면 대조는 못 하지만 직전 결과 기준 재검증은 그대로 진행한다.
     if (!droppedFromPrevious.length || signal?.aborted) return { links, screenCheck: null }
@@ -7190,7 +7322,7 @@ async function screenCheckAndRecover(
     const known = new Set(links.map(c => canonicalizeHref(c.href)))
     nextLinks = [...links, ...recovered.filter(r => !known.has(canonicalizeHref(r.href))).map(r => ({ name: r.name, href: r.href }))]
   }
-  const after = buildCategoryScreenCheck(screenNames, nextLinks, exclusions)
+  const after = buildCategoryScreenCheck(screenNames, nextLinks, exclusions, screenHierarchy)
   if (!after) return { links: nextLinks, screenCheck: first }
   const candidateKeys = new Set(candidates.map(c => normalizeCategoryName(c.name)))
   return {
@@ -7213,6 +7345,7 @@ async function screenCheckAndRecover(
  *  screenNames가 비어 있으면(화면 인식 실패) null을 돌려줘 호출부가 대조 자체를 건너뛰게 한다. */
 export function buildCategoryScreenCheck(
   screenNames: string[] | null | undefined, finalLinks: CategoryMenuLink[], excluded: CategoryExclusion[],
+  screenHierarchy?: { group: string; items: string[] }[] | null,
 ): CategoryScreenCheck | null {
   if (!screenNames?.length) return null
   const finalKeys = new Set<string>()
@@ -7234,7 +7367,10 @@ export function buildCategoryScreenCheck(
     missing.push({ name, reason: excludedByKey.get(key) ?? '탐지 단계에서 이 카테고리를 찾지 못함(메뉴 스캔에 안 잡혔거나 화면 인식이 잘못 읽었을 수 있음)' })
   }
   const extra = finalLinks.map(l => l.name).filter(n => !screenKeys.has(normalizeCategoryName(n)))
-  return { screenNames, missing, extra, checkedAt: new Date().toISOString() }
+  return {
+    screenNames, missing, extra, checkedAt: new Date().toISOString(),
+    ...(screenHierarchy?.length ? { screenHierarchy } : {}),
+  }
 }
 
 interface CategoryExpansionResult {
@@ -7314,6 +7450,23 @@ async function expandCategoryHubs(
   let loginBlockedExpansion = false
   let hubAiAttempts = 0
   const relevantHrefsSeen = new Set<string>()
+  // 로그인 벽을 만나면 예전엔 그 카테고리를 미확장인 채로 남기고 넘어갈 뿐, 다시 로그인하지 않았다 —
+  // 그 뒤로 방문하는 모든 카테고리가 계속 로그인 벽에 막혀 결과가 통째로 부실해졌다(사용자 지시,
+  // 2026-09-15: "로그인 세션이 끊기면 기존 로그인 정보로 재로그인하고 로그아웃 이후의 작업을 재진행" —
+  // "로그아웃된 채 계속 진행되다 결국 제대로 분석이 안 됐다는 경고만 뜨는" 상황 자체를 없애는 게 목적).
+  // 이 실행 전체에서 재로그인 "시도"는 한 번만 한다 — 비밀번호가 실제로 틀렸거나 계정이 잠긴 경우까지
+  // 카테고리 수만큼 매번 다시 시도하면(로그인 페이지 이동+제출+대기로 한 번에 수 초~수십 초) 이미 망한
+  // 실행이 몇 배로 더 오래 걸리기만 한다. EXPAND_CONCURRENCY(기본 4)로 여러 카테고리를 동시에 확인하는
+  // 중이라 여러 워커가 거의 동시에 로그인 벽을 만날 수 있다 — 단순 boolean 플래그로만 막으면 "먼저 플래그를
+  // 켠 워커 하나만 재로그인하고, 그 순간 같이 걸려있던 다른 워커들은 그 결과를 기다리지 않고 곧장 실패로
+  // 단정"하는 경합이 생겨 일부 카테고리가 억울하게 로그인 벽 상태로 남는다 — 그러면 결국 이번 목적(경고
+  // 메시지 자체를 없애는 것)을 못 이룬다. 진행 중인 하나의 재로그인 Promise를 모든 워커가 함께 기다리게
+  // (single-flight) 해서, 동시에 걸린 워커들도 전부 같은 복구 결과를 보고 이어서 재확인할 수 있게 한다.
+  let loginRecoveryPromise: Promise<boolean> | null = null
+  function recoverLogin(workerPage: Page): Promise<boolean> {
+    if (!loginRecoveryPromise) loginRecoveryPromise = recoverSessionLogin(workerPage, siteId, mallName, '허브확장')
+    return loginRecoveryPromise
+  }
   // 확장을 시작하는 시점의 로그인 상태 — 아래 "빈 허브 배제" 직전에 이 값과 그 페이지의 상태를 비교해,
   // "로그인이 풀려서 비어 보이는 것"과 "진짜 빈 카테고리"를 구분한다(expandOne의 해당 분기 주석 참고).
   const loggedInAtStart = await detectLoggedInSignal(page)
@@ -7408,6 +7561,13 @@ async function expandCategoryHubs(
     // 세션이 끊긴 것으로 보임" 경고가 실제로는 멀쩡한 실행에서도 뜨는 문제가 있었다(2026-09-02, 걸스굽
     // 실사용 확인 — count>0인데도 매번 이 경고가 떴다). 진짜 로그인 벽은 상품이 0개인 페이지에서만
     // isLoginPage로 판단한다.
+    if (probe.isLoginPage && probe.count === 0) {
+      if (await recoverLogin(workerPage)) {
+        const t = Date.now()
+        probe = await probeOnce(workerPage, c.href, c.name)
+        probeMs += Date.now() - t
+      }
+    }
     if (probe.isLoginPage && probe.count === 0) loginBlockedExpansion = true
     if (probe.isLoginPage) { logIfSlow(`상품 ${probe.count}개`); return [c] }
     // count>0(이 카테고리 자체에도 상품이 있음)이어도 예전엔 여기서 곧장 반환해 하위 메뉴 자체를 아예
@@ -7596,7 +7756,7 @@ async function discoverCategoryLinksInner(opts: ScrapeOptions, signal: AbortSign
       const mallName = opts.siteId ? (await siteInfo(opts.siteId)).name : new URL(url).hostname
       const { pattern: categoryUrlPattern, manualSamples: knownCategoryExamples, prevCategoryLinks } = opts.siteId
         ? await getCategoryMemory(opts.siteId) : { pattern: null, manualSamples: [], prevCategoryLinks: [] as CategoryMenuLink[] }
-      const { links: topLevelLinks, aiUsed: topLevelAiUsed, screenNames, menuLinks } = await discoverTopLevelCategoryLinks(
+      const { links: topLevelLinks, aiUsed: topLevelAiUsed, screenNames, screenHierarchy, menuLinks } = await discoverTopLevelCategoryLinks(
         context, scanPage, mallName, true, signal, true, categoryUrlPattern, knownCategoryExamples, url,
         platform, opts.productLinkSelector,
       )
@@ -7616,7 +7776,7 @@ async function discoverCategoryLinksInner(opts: ScrapeOptions, signal: AbortSign
       // (사용자 지적, 2026-09-13: 몰구조분석 51개 vs 카테고리 불러오기 49개 — screenCheckAndRecover 주석).
       const checked = await screenCheckAndRecover(
         context, mallName, screenNames, menuLinks, expansion.links, expansion.excluded, platform, baseUrl, signal,
-        prevCategoryLinks,
+        prevCategoryLinks, screenHierarchy,
       )
       const links: CategoryLink[] = checked.links.map(c => ({ href: c.href, text: c.name }))
       return {

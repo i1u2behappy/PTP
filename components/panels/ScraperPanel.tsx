@@ -7,7 +7,7 @@ import { FIXED_FIELD_INFO } from '../../lib/master/schema'
 import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
 import RemoteScreenViewer from './RemoteScreenViewer'
 import { shortenCategoryUrlForDisplay } from '../../lib/urlDisplay'
-import { looksLikeMallHomeUrl } from '../../lib/categoryUrl'
+import { looksLikeMallHomeUrl, buildCategoryTreeView } from '../../lib/categoryUrl'
 
 // lib/extract.ts의 CLAIMED_INFO_LABEL_RE와 같은 목록 — 이 파일은 Playwright 등 서버 전용 코드를 담고
 // 있어 클라이언트 컴포넌트에서 직접 import하지 않고 그대로 복제해 둔다(둘 중 하나를 고치면 같이 맞출 것).
@@ -375,6 +375,9 @@ interface MallProfileSignals {
     recovered?: { name: string; href: string; evidence: string }[]
     missing: { name: string; reason: string }[]
     extra: string[]
+    /** 같은 화면에서 같이 받아온 "대분류→하위 카테고리" 구조(lib/scraper.ts의
+     *  detectVisibleCategoryHierarchy) — 사용자에게 "화면에서 본 구조"를 참고로 보여주는 용도(2026-09-15). */
+    screenHierarchy?: { group: string; items: string[] }[]
     checkedAt: string
   } | null
   /** 카테고리 체크리스트 컬럼용 — previewCatalog가 저장해둔 카테고리별 개수(href 기준, 사용자 요청 2026-08-17) */
@@ -508,20 +511,76 @@ const MALL_PROFILE_STEP_ORDER = [
 /** 몰구조분석 리포트의 "카테고리 구조" 문장은 AI가 간결하게 요약한 텍스트라 정확한 개수를 안 담는다
  *  (Groq 출력 토큰 예산 때문에 항목마다 대표 몇 개만 들고 "등"으로 줄이도록 일부러 지시해둠) — "카테고리
  *  불러오기" 체크리스트가 보여주는 숫자(발견된 카테고리 N개)와 눈으로 비교하기 어렵다는 지적(2026-09-08,
- *  소꿉노리 실사용 확인 — 58개인데 리포트 문장만 봐서는 일치하는지 알 수 없었음)으로, AI 요약 아래에
- *  실제 categoryLinks(같은 몰구조분석이 방금 찾아 저장한 것)를 대분류별로 직접 세어 보여준다. AI가
- *  "설명"한 게 아니라 실제 저장된 배열 길이를 그대로 세는 것이라 이 숫자는 항상 categoryLinks 총
- *  개수와 일치한다("카테고리 불러오기"가 같은 categoryLinks를 그대로 보여주므로 그 화면의 숫자와도
- *  일치해야 정상 — 다르면 그 자체가 캐시가 어긋났다는 신호). */
-function buildCategoryCountSummary(categoryLinks: { name: string; href: string }[] | undefined): string | null {
-  if (!categoryLinks?.length) return null
-  const counts = new Map<string, number>()
-  for (const { name } of categoryLinks) {
-    const top = name.split(' > ')[0]
-    counts.set(top, (counts.get(top) ?? 0) + 1)
-  }
-  const parts = [...counts.entries()].map(([top, n]) => `${top}(${n})`)
-  return `${parts.join(' · ')} → 합계 ${categoryLinks.length}개`
+ *  소꿉노리 실사용 확인 — 58개인데 리포트 문장만 봐서는 일치하는지 알 수 없었음)으로, AI 요약 문장 대신
+ *  실제 categoryLinks(같은 몰구조분석이 방금 찾아 저장한 것)를 대분류별로 개별 항목까지 그대로 보여준다.
+ *  예전엔 대분류별 "이름(개수)"만 한 줄로 뭉뚱그렸는데, 그러면 "카테고리(51)"처럼 몰의 최상위 메뉴 탭
+ *  이름(실제 대분류가 아니라 "카테고리 전체보기" 같은 포괄 탭 라벨인 경우가 흔함) 밑에 실제로 어떤
+ *  대/중/소분류 51개가 있는지 전혀 구분이 안 됐다(사용자 지적, 2026-09-15 — "합계로 요약하지 말고 개별
+ *  내역을 구분해서 볼 수 있게 표시해"). buildCategoryTreeView(lib/categoryUrl.ts)로 대분류별로 묶어 하위
+ *  항목 이름까지 나열한다 — AI가 "설명"한 게 아니라 실제 저장된 배열을 그대로 나열하는 것이라 항상
+ *  categoryLinks 총 개수와 일치한다. */
+function FieldTile({ icon, label, value }: { icon: string; label: string; value: string }) {
+  const notFound = !value || value === '확인 안됨'
+  return (
+    <div className="bg-gray-50 rounded-xl px-3 py-2.5 border border-gray-100">
+      <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-0.5">{icon} {label}</p>
+      <p className={`text-xs leading-relaxed ${notFound ? 'text-gray-400 italic' : 'text-gray-700'}`}>{value || '확인 안됨'}</p>
+    </div>
+  )
+}
+
+/** "카테고리 구조" 타일 — AI 요약 문장(report.categoryStructure) 대신 이번 몰구조분석이 실제로 찾은
+ *  categoryLinks를 대분류별로 묶어 개별 항목까지 **전부** 보여준다(사용자 지적, 2026-09-15 — "카테고리(51)
+ *  → 합계 57개"처럼 뭉뚱그리면 실제로 어떤 대/중/소분류 57개인지 구분이 안 됨. 이후 "…외 N개"로 일부만
+ *  보여준 것도 재지적 — "분석된 모든 카테고리를 확인 가능하게 모두 표시해": 개수 상한 없이 전부 나열한다).
+ *  categoryLinks가 아직 없는 몰(카테고리를 못 찾은 경우)만 기존 AI 요약 문장으로 대체한다. */
+function CategoryStructureTile({ categoryLinks, fallback }: { categoryLinks: { name: string; href: string }[] | undefined; fallback: string }) {
+  const tree = buildCategoryTreeView(categoryLinks)
+  return (
+    <div className="bg-gray-50 rounded-xl px-3 py-2.5 border border-gray-100 sm:col-span-2">
+      <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-1">🗂️ 카테고리 구조</p>
+      {tree.length ? (
+        <ul className="space-y-1.5"
+          title='AI 요약이 아니라, 이 몰구조분석이 방금 찾아 저장한 categoryLinks를 대분류별로 묶어 전부 그대로 나열한 것입니다 — "카테고리 불러오기"의 목록과 항상 일치해야 정상입니다.'>
+          {tree.map(g => (
+            <li key={g.top}>
+              <p className="text-xs font-medium text-gray-700">{g.top} <span className="font-normal text-gray-400">({g.children.length}개)</span></p>
+              <p className="mt-0.5 text-[11px] text-gray-600 leading-relaxed">
+                {g.children.map(c => c.name.split(' > ').slice(1).join(' > ') || c.name).join(' · ')}
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className={`text-xs leading-relaxed ${!fallback || fallback === '확인 안됨' ? 'text-gray-400 italic' : 'text-gray-700'}`}>{fallback || '확인 안됨'}</p>
+      )}
+    </div>
+  )
+}
+
+/** "정렬 구조" 타일 — 이미 클릭/URL 검증까지 거친 sortOptions 배열이 있으면 그걸 그대로 나열한다(AI가
+ *  20,000자 원문을 다시 문장으로 요약한 report.sortStructure보다 구조적으로 더 정확 — buildMallReportPrompt
+ *  주석 참고, sortHints 자체가 이미 "구조적으로 확정된 값"이라고 명시함). 없을 때만 그 문장으로 대체한다
+ *  (카테고리 구조 타일과 같은 원칙, 사용자 지시 2026-09-15). */
+function SortStructureTile({ sortOptions, fallback }: {
+  sortOptions?: ({ label: string; kind?: 'query'; paramsToAdd: Record<string, string> } | { label: string; kind: 'click'; clickText: string })[]
+  fallback: string
+}) {
+  return (
+    <div className="bg-gray-50 rounded-xl px-3 py-2.5 border border-gray-100">
+      <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-0.5">↕️ 정렬 구조</p>
+      {sortOptions?.length ? (
+        <ul className="text-xs leading-relaxed text-gray-700 space-y-0.5"
+          title="AI 요약 문장이 아니라, 실제로 클릭/URL 검증까지 거쳐 확인된 정렬 옵션 목록입니다.">
+          {sortOptions.map(o => (
+            <li key={o.label}>· {o.label}{o.kind === 'click' && <span className="text-gray-400"> (클릭: {o.clickText})</span>}</li>
+          ))}
+        </ul>
+      ) : (
+        <p className={`text-xs leading-relaxed ${!fallback || fallback === '확인 안됨' ? 'text-gray-400 italic' : 'text-gray-700'}`}>{fallback || '확인 안됨'}</p>
+      )}
+    </div>
+  )
 }
 
 function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, sinceMs }: { error: string; result: ProfileCheckResult | null; loading?: boolean; detail?: string; elapsedSec?: number | null; sinceMs?: number }) {
@@ -709,6 +768,24 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
               )}
             </div>
           )}
+          {/* 화면에서 본 구조 — screenNames(평평한 이름 목록)와 같은 화면에서 같이 받아온 "대분류→하위
+              카테고리" 그룹을 그대로 보여준다(사용자 지시, 2026-09-15: "사람과 같이 화면 전체를 캡쳐해서
+              보는 형태로 대분류/중소분류 구조를 파악"). 아래 "카테고리 구조" 타일(DOM 기준 트리)과 나란히
+              눈으로 대조할 수 있게 하는 참고용 정보라 missing/extra 판정에는 관여하지 않는다 — 비전이
+              실패했거나 구조를 못 받았으면 아무것도 안 보인다. */}
+          {!!result.signals.categoryScreenCheck?.screenHierarchy?.length && (
+            <div className="mb-3 text-xs rounded-lg px-3 py-2 text-sky-800 bg-sky-50">
+              <p className="font-medium mb-1">📸 화면에서 본 대/중/소분류 구조</p>
+              <ul className="space-y-1">
+                {result.signals.categoryScreenCheck.screenHierarchy.map(g => (
+                  <li key={g.group}>
+                    <span className="font-medium">{g.group}</span>
+                    {g.items.length > 0 && <span className="text-sky-700"> — {g.items.join(', ')}</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {result.autoRuleFields.length > 0 && (
             <p className="mb-3 text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2">
               ✓ 이 결과로 추출규칙 자동 생성됨: {result.autoRuleFields.join(', ')} — 이후 미리보기/스크랩부터 바로 적용됩니다.
@@ -716,10 +793,10 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
           )}
           {result.signals.report ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <FieldTile icon="🔗" label="URL 계층" value={result.signals.report.urlHierarchy} />
+              <CategoryStructureTile categoryLinks={result.signals.categoryLinks} fallback={result.signals.report.categoryStructure} />
+              <SortStructureTile sortOptions={result.signals.sortOptions} fallback={result.signals.report.sortStructure} />
               {([
-                ['🔗', 'URL 계층', result.signals.report.urlHierarchy],
-                ['🗂️', '카테고리 구조', result.signals.report.categoryStructure],
-                ['↕️', '정렬 구조', result.signals.report.sortStructure],
                 ['🏦', '은행명', result.signals.report.bankName],
                 ['🔢', '계좌번호', result.signals.report.accountNumber],
                 ['🚚', '배송 택배사', result.signals.report.shippingCourier],
@@ -729,24 +806,9 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
                 ['☎️', '업체 연락처', result.signals.report.companyContact],
                 ['🧩', '상품페이지 구조', result.signals.report.productPageStructure],
                 ['⚠️', '스크래핑 유의사항', result.signals.report.scrapingNeeds],
-              ] as const).map(([icon, label, value]) => {
-                // "카테고리 구조"는 AI 요약 문장 대신, categoryLinks를 직접 센 실제 개수(buildCategoryCountSummary
-                // 주석 참고)를 그대로 값으로 쓴다 — 사용자 지적(2026-09-09): AI 요약 문장과 실제 개수를 따로
-                // 두 줄로 보여줄 필요 없이, 어차피 카테고리 이름 옆에 숫자를 붙인 형태라 하나로 합쳐도 된다.
-                // categoryLinks가 아직 없는 몰(카테고리를 못 찾은 경우)만 기존 AI 요약 문장으로 대체한다.
-                const categoryCountSummary = label === '카테고리 구조' ? buildCategoryCountSummary(result.signals.categoryLinks) : null
-                const displayValue = categoryCountSummary || value
-                const notFound = !displayValue || displayValue === '확인 안됨'
-                return (
-                  <div key={label} className="bg-gray-50 rounded-xl px-3 py-2.5 border border-gray-100">
-                    <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-0.5">{icon} {label}</p>
-                    <p className={`text-xs leading-relaxed ${notFound ? 'text-gray-400 italic' : 'text-gray-700'}`}
-                      title={categoryCountSummary ? 'AI 요약이 아니라, 이 몰구조분석이 방금 찾아 저장한 categoryLinks를 대분류별로 직접 센 실제 개수입니다 — "카테고리 불러오기"의 발견된 카테고리 수와 항상 일치해야 정상입니다.' : undefined}>
-                      {displayValue || '확인 안됨'}
-                    </p>
-                  </div>
-                )
-              })}
+              ] as const).map(([icon, label, value]) => (
+                <FieldTile key={label} icon={icon} label={label} value={value} />
+              ))}
             </div>
           ) : (
             <p className="text-xs text-amber-600">AI 리포트를 만들지 못했습니다 (ANTHROPIC_API_KEY 미설정·크레딧 부족 등 API 호출 실패이거나 홈/게시판 원문을 못 모았습니다 — 서버 콘솔 로그 확인) — 아래 참고정보만 확인됩니다.</p>

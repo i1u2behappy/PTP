@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import fc from 'fast-check'
 import { buildCategoryScreenCheck, normalizeCategoryName, resolveMissingCategoryCandidates, findApproximateMatch } from '../../lib/scraper'
-import { sanitizeVisibleCategoryNames } from '../../lib/ai'
+import { sanitizeVisibleCategoryNames, sanitizeVisibleCategoryHierarchy } from '../../lib/ai'
 
 // "화면으로 카테고리를 파악했으면, 최종 결과가 그 화면과 맞는지·안 맞으면 왜인지 피드백해야 한다"는
 // 요구사항(2026-09-13, 투비즈온에서 메뉴에 보이는 '뷰티'/'바디/헤어'가 결과 목록에 없던 신고)을 코드로
@@ -76,6 +76,55 @@ describe('sanitizeVisibleCategoryNames', () => {
   it('임의 입력에서도 예외를 던지지 않는다', () => {
     fc.assert(fc.property(fc.anything(), (v) => {
       expect(() => sanitizeVisibleCategoryNames(v)).not.toThrow()
+    }))
+  })
+})
+
+// 화면에서 대분류→하위 카테고리 구조까지 같이 받아 "화면에서 본 구조" 카드에 보여준다(2026-09-15,
+// "사람과 같이 화면 전체를 캡쳐해서 보는 형태로 대/중/소분류 구조를 파악"). missing/extra 판정에는
+// 관여하지 않고 참고용으로만 실어 보내므로, buildCategoryScreenCheck가 그대로 통과시키는지만 확인한다.
+describe('buildCategoryScreenCheck — screenHierarchy 전달', () => {
+  const finalLinks = [{ name: '여성의류', href: 'https://m.com/1' }]
+
+  it('screenHierarchy를 넘기면 결과에 그대로 실린다', () => {
+    const hierarchy = [{ group: '여성의류', items: ['원피스', '블라우스'] }]
+    const check = buildCategoryScreenCheck(['여성의류'], finalLinks, [], hierarchy)
+    expect(check?.screenHierarchy).toEqual(hierarchy)
+  })
+
+  it('screenHierarchy를 안 넘기면 결과에 필드 자체가 없다', () => {
+    const check = buildCategoryScreenCheck(['여성의류'], finalLinks, [])
+    expect(check?.screenHierarchy).toBeUndefined()
+  })
+
+  it('빈 배열을 넘겨도 결과에 안 실린다(빈 구조는 "구조를 봤다"는 근거가 아니다)', () => {
+    const check = buildCategoryScreenCheck(['여성의류'], finalLinks, [], [])
+    expect(check?.screenHierarchy).toBeUndefined()
+  })
+})
+
+describe('sanitizeVisibleCategoryHierarchy', () => {
+  it('배열이 아니거나 group이 문자열이 아닌 항목은 버린다', () => {
+    expect(sanitizeVisibleCategoryHierarchy(null)).toEqual([])
+    expect(sanitizeVisibleCategoryHierarchy([{ group: '여성의류', items: ['원피스'] }, { group: 3, items: [] }, 'x']))
+      .toEqual([{ group: '여성의류', items: ['원피스'] }])
+  })
+
+  it('중복 그룹명/공백을 정리하고, 하위 items도 sanitizeVisibleCategoryNames 규칙을 그대로 적용한다', () => {
+    const out = sanitizeVisibleCategoryHierarchy([
+      { group: ' 여성의류 ', items: [' 원피스 ', '원피스'] },
+      { group: '여성의류', items: ['다른그룹같은이름'] },
+    ])
+    expect(out).toEqual([{ group: '여성의류', items: ['원피스'] }])
+  })
+
+  it('하위 items가 없거나 형식이 안 맞아도 그룹 이름만으로 항목을 만든다', () => {
+    expect(sanitizeVisibleCategoryHierarchy([{ group: '여성의류' }])).toEqual([{ group: '여성의류', items: [] }])
+  })
+
+  it('임의 입력에서도 예외를 던지지 않는다', () => {
+    fc.assert(fc.property(fc.anything(), (v) => {
+      expect(() => sanitizeVisibleCategoryHierarchy(v)).not.toThrow()
     }))
   })
 })

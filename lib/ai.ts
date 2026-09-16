@@ -52,7 +52,12 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:14b'
 // (같은 화면에서 Groq는 6개, 이 모델은 1개만 찾음, 2026-09-08 직접 비교), Groq가 실패했을 때만 쓰는
 // 안전망이다.
 const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || 'qwen2.5vl:7b'
-const OLLAMA_VISION_TIMEOUT_MS = 60_000
+// GROQ_VISION_MODEL이 계정에서 완전히 사라져(2026-09-16 실측 — /v1/models에 비전 모델 자체가 없음, vl류
+// 모델이 전부 목록에서 빠짐) 아래 모든 화면인식 함수가 사실상 이 로컬 모델 하나에 전부 의존하게 됐다.
+// 60초는 원래 "Groq가 실패했을 때만 쓰는 안전망"을 전제로 잡은 값이라, 유일한 경로가 된 지금은 복잡한
+// 프롬프트(예: detectVisibleCategoryHierarchy)에서 실제로 60초를 넘겨 타임아웃되는 게 확인됐다(도매신
+// 실사용 확인) — 여유를 더 준다.
+const OLLAMA_VISION_TIMEOUT_MS = 90_000
 
 /** Ollama는 이 PC에서 GPU 없이 CPU로만 추론한다(`ollama ps`의 `size_vram: 0`로 확인) — CPU 연산 자체인
  *  추론은 요청이 동시에 여러 개 들어오면 서로 CPU를 나눠 쓰며 배로(경우에 따라 수십 배까지, think 모드
@@ -1203,6 +1208,146 @@ export async function detectCategoryMenuTriggerFromScreenshot(
   return sanitizeCategoryMenuTrigger(await detectCategoryMenuTriggerWithOllamaVision(mallName, gridImage, signal))
 }
 
+/** detectCategoryMenuTriggerFromScreenshot과 같은 타입 모양이지만 별도 타입으로 둔다 — 이 파일의
+ *  트리거/그룹수/이름 계열 함수들이 전부 관심사별로 독립 복제돼 있는 기존 관례(공급자별 함수도 매번
+ *  새로 만듦)와 맞추기 위함이라, 굳이 공유 타입으로 합치는 리팩터링은 지금 범위가 아니다. */
+export type SortTriggerResult = { found: true; label: string; xPercent: number; yPercent: number } | { found: false }
+
+function sanitizeSortTrigger(result: SortTriggerResult | null): SortTriggerResult | null {
+  if (!result?.found) return result
+  if (result.xPercent < 0 || result.xPercent > 100 || result.yPercent < 0 || result.yPercent > 100) return { found: false }
+  return result
+}
+
+function buildSortTriggerScreenshotPrompt(mallName: string): string {
+  return `이 스크린샷은 한국 쇼핑몰 '${mallName}'의 상품 목록/카테고리 화면이다. 화면 위에는 빨간 격자선과
+각 칸의 이름(왼쪽 위부터 A1, A는 열(왼쪽→오른쪽 A~${String.fromCharCode(64 + CATEGORY_TRIGGER_GRID_COLS)}),
+숫자는 행(위→아래 1~${CATEGORY_TRIGGER_GRID_ROWS}))이 그려져 있다. 화면에서 상품 정렬 순서를 바꾸는
+버튼/드롭다운을 찾아라. 이 버튼은 두 가지 모양 중 하나다: ①"정렬"/"정렬방식"/"정렬기준"/"SORT" 같은
+고정 라벨만 있는 버튼(지금 어떤 정렬인지는 안 보임), ②지금 선택된 정렬 값과 화살표가 같이 보이는 버튼
+(예: "최신순 ▾", "인기순 ˅"). 둘 중 어느 쪽이든 그 버튼의 중심이 들어있는 칸의 이름을 답해라.
+
+중요1: 이건 카테고리 메뉴 버튼(전체 카테고리/메뉴 아이콘)이 아니다 — 카테고리는 "무엇을 보여줄지"를
+바꾸고, 이 버튼은 "이미 보이는 상품 목록을 어떤 순서로 보여줄지"만 바꾼다. 보통 상품 목록 영역 바로
+위, 상품 개수 표시("총 306개" 등) 근처나 오른쪽 끝에 있다.
+중요2: 그리드뷰/리스트뷰 전환 아이콘, 페이지 번호(페이지네이션), 필터/검색 아이콘과 헷갈리지 마라 —
+그런 것들은 정렬과 무관하다.
+
+화면에 이런 버튼이 안 보이면 found를 false로 답하라.`
+}
+
+/** detectCategoryMenuTriggerWithGroqVision과 같은 모델/제약 — 정렬 트리거도 텍스트 없이 화살표 아이콘만
+ *  있을 수 있어 격자 칸 좌표로 클릭한다(호출부 detectSortOptionsByScreenshot 참고). */
+async function detectSortTriggerWithGroqVision(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<SortTriggerResult | null> {
+  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) return null
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(OLLAMA_TIMEOUT_MS)]) : AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
+      body: JSON.stringify({
+        model: GROQ_VISION_MODEL,
+        max_tokens: 300,
+        temperature: 0,
+        reasoning_effort: 'none',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: buildSortTriggerScreenshotPrompt(mallName) },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_sort_trigger',
+            description: '화면에서 정렬 순서를 바꾸는 버튼이 들어있는 격자 칸을 반환한다. 안 보이면 found:false만 채운다.',
+            parameters: {
+              type: 'object',
+              required: ['found'],
+              properties: {
+                found: { type: 'boolean' },
+                label: { type: 'string', description: '버튼 위 텍스트(있으면 그대로), 아이콘만 있으면 빈 문자열' },
+                cell: { type: 'string', description: '버튼 중심이 들어있는 격자 칸 이름(예: "C2")' },
+              },
+            },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_sort_trigger' } },
+      }),
+    })
+    if (!res.ok) return null
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) return null
+    const args = JSON.parse(call.function.arguments) as { found?: boolean; label?: string; cell?: string }
+    if (!args.found || typeof args.cell !== 'string') return { found: false }
+    const percent = cellLabelToPercent(args.cell)
+    if (!percent) return { found: false }
+    return { found: true, label: typeof args.label === 'string' ? args.label : '', ...percent }
+  } catch {
+    return null
+  }
+}
+
+async function detectSortTriggerWithOllamaVision(
+  mallName: string, imageBase64: string, signal?: AbortSignal,
+): Promise<SortTriggerResult | null> {
+  if (!isAiProviderEnabled('ollama')) return null
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
+        body: JSON.stringify({
+          model: OLLAMA_VISION_MODEL,
+          stream: false,
+          options: OLLAMA_CHAT_OPTIONS,
+          keep_alive: '30m',
+          messages: [{
+            role: 'user',
+            content: `${buildSortTriggerScreenshotPrompt(mallName)}\n\n다른 설명 없이 JSON 객체 하나만 출력해라(예: {"found":true,"label":"정렬방식","cell":"F1"} 또는 {"found":false}).`,
+            images: [imageBase64],
+          }],
+        }),
+      } as RequestInit)
+      if (!res.ok) return null
+      const data = await res.json() as { message?: { content?: string } }
+      const match = (data.message?.content ?? '').match(/\{[\s\S]*\}/)
+      if (!match) return null
+      const parsed = JSON.parse(match[0]) as { found?: boolean; label?: string; cell?: string }
+      if (!parsed.found || typeof parsed.cell !== 'string') return { found: false }
+      const percent = cellLabelToPercent(parsed.cell)
+      if (!percent) return { found: false }
+      return { found: true, label: typeof parsed.label === 'string' ? parsed.label : '', ...percent }
+    } catch {
+      return null
+    }
+  })
+}
+
+/** 정렬 트리거가 "정렬방식"처럼 고정 라벨만 있고 지금 값이 화면에 안 보이는 경우를 찾는다
+ *  (detectSortOptionsFromScreenshot은 이미 열려 있거나 값이 보이는 경우만 읽을 수 있어 이 경우를
+ *  못 잡는다 — 도매신 실사용 확인, 2026-09-16). 호출부(detectSortOptionsByScreenshot)가 이 위치를
+ *  clickNearestClickableAtPoint로 클릭해 연 뒤 다시 스크린샷을 찍어 값을 읽는다.
+ *  null=두 공급자 다 실패(호출부는 이 신호 없이 기존 DOM 폴백으로 넘어가야 함). */
+export async function detectSortTriggerFromScreenshot(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<SortTriggerResult | null> {
+  const gridded = await overlayGridForVision(imageBase64)
+  const gridImage = gridded?.base64 ?? imageBase64
+  const gridMimeType = gridded?.mimeType ?? mimeType
+  const viaGroq = await detectSortTriggerWithGroqVision(mallName, gridImage, gridMimeType, signal)
+  if (viaGroq !== null) return sanitizeSortTrigger(viaGroq)
+  return sanitizeSortTrigger(await detectSortTriggerWithOllamaVision(mallName, gridImage, signal))
+}
+
 function buildCategoryGroupCountPrompt(mallName: string): string {
   return `이 스크린샷은 한국 쇼핑몰 '${mallName}'에서 "전체 카테고리" 메뉴를 방금 열어본 화면이다(제대로
 안 열렸을 수도 있다). 화면에 상품 대분류가 서로 다른 몇 개의 그룹(탭, 열, 컬럼 등 어떤 형태든)으로
@@ -1438,13 +1583,16 @@ async function detectVisibleCategoryNamesWithOllamaVision(
 }
 
 function buildVisibleCategoryHierarchyPrompt(mallName: string): string {
-  return `이 스크린샷은 한국 쇼핑몰 '${mallName}'에서 카테고리 메뉴를 열어본 화면이다. **사람이 이 화면을
-보듯이** 상품 대분류(그룹 제목)와 그 아래 딸린 하위 카테고리(중분류/소분류)를 그룹으로 묶어서 답해라 —
-각 그룹은 대분류 이름 하나와 그 아래 화면에 보이는 하위 카테고리 이름들(중분류뿐 아니라 그 아래 소분류가
-같이 보이면 그것도 모두 포함, 순서대로)로 이루어진다. 하위 카테고리가 화면에 안 보이고 대분류 이름만
-보이면 그 그룹의 하위 목록은 비워 둬도 된다. 다음은 카테고리가 아니므로 넣지 마라: 로그인/로그아웃/
-회원가입/장바구니/마이페이지/주문조회/고객센터/검색창/공지사항/이벤트 배너 문구/가격이나 숫자만 있는
-항목. 화면에 실제로 보이는 글자만 답하고, 안 보이는 것을 상상해서 채우지 마라.`
+  return `이 스크린샷은 한국 쇼핑몰 '${mallName}'의 화면이다 — 카테고리 메뉴를 클릭해서 열어본 화면일
+수도 있고, 클릭 없이도 상품 대분류들이 항상 가로 탭/세로 메뉴 형태로 이미 보이는 화면(홈페이지 헤더
+등)일 수도 있다. 어느 쪽이든 **사람이 이 화면을 보듯이** 같은 시각적 레벨에 나란히 나타난 상품
+대분류(그룹 제목)와 그 아래 딸린 하위 카테고리(중분류/소분류)를 그룹으로 묶어서 답해라 — 각 그룹은
+대분류 이름 하나와 그 아래 화면에 보이는 하위 카테고리 이름들(중분류뿐 아니라 그 아래 소분류가 같이
+보이면 그것도 모두 포함, 순서대로)로 이루어진다. 하위 카테고리가 화면에 안 보이고 대분류 이름만
+나란히 여러 개 보이면(예: 가로로 나열된 탭들) 각 이름을 그 자체로 하나의 그룹으로 삼고 하위 목록은
+비워 둬라. 다음은 카테고리가 아니므로 넣지 마라: 로그인/로그아웃/회원가입/장바구니/마이페이지/주문조회/
+고객센터/검색창/공지사항/이벤트 배너 문구/가격이나 숫자만 있는 항목. 화면에 실제로 보이는 글자만
+답하고, 안 보이는 것을 상상해서 채우지 마라.`
 }
 
 /** detectVisibleCategoryNames(평평한 이름 목록)는 "이 이름이 화면에 있냐 없냐"만 검증하는 용도라 대/중/
@@ -1881,13 +2029,16 @@ const GROQ_BASE_URL = 'https://api.groq.com/openai/v1'
 // 정확도 이유로 검증해둔 전례가 있다 — OLLAMA_MODEL 주석 — 와도 일관됨).
 const GROQ_MODEL = process.env.GROQ_MODEL || 'qwen/qwen3.8-27b'
 const MALL_REPORT_GROQ_TIMEOUT_MS = 20_000
-// 정렬 UI 화면 인식(detectSortOptionsFromScreenshot) 전용 — 위 GROQ_MODEL(qwen3.8-27b, 순수 텍스트)은
-// 이미지 입력을 못 받는다. qwen3.6-27b는 이 계정 /v1/models에 실제로 존재하고(2026-09-08 확인) 이미지
-// 입력(OpenAI 호환 image_url content)과 함수 호출을 동시에 지원하는 멀티모달 모델 — 실제 화면 스크린샷
-// 1장으로 직접 호출해 정렬 라벨을 정확히 뽑아내는 것까지 확인했다. 기본은 "추론 모델"이라 답 전에 <think>
-// 과정을 전부 토큰으로 생성해(위 OLLAMA_MODEL의 think:false와 같은 문제) 아주 짧은 질문에도 max_tokens를
-// 다 태우는 걸 실측했다 — reasoning_effort:'none'으로 꺼야 즉시 최종 답만 나온다.
-const GROQ_VISION_MODEL = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.6-27b'
+// 정렬 UI 화면 인식(detectSortOptionsFromScreenshot) 전용 — 원래 qwen3.6-27b(프리뷰 모델)를 썼는데
+// Groq가 이 모델을 완전히 폐기해(2026-09-16 확인 — /v1/models에서 사라짐, chat/completions 호출 시
+// 404 model_not_found) 화면인식 전체가 로컬 Ollama 폴백에만 의존하는 상태가 됐었다. Groq 공식 후속
+// 모델인 qwen3.8-27b(위 GROQ_MODEL과 같은 모델)로 교체 — 이것도 이미지 입력(OpenAI 호환 image_url
+// content)과 함수 호출을 **동시에** 지원하는 멀티모달 모델임을 직접 호출해 확인했다(2026-09-16, 작은
+// 테스트 이미지로 색상 인식 + tool_choice 강제 호출 둘 다 성공). GROQ_MODEL과 같은 모델이지만 상수를
+// 분리해 둔다 — Groq가 텍스트/비전 모델을 다시 따로 낼 경우 이 값만 바꾸면 되게. 기본은 "추론 모델"이라
+// 답 전에 <think> 과정을 전부 토큰으로 생성해(위 OLLAMA_MODEL의 think:false와 같은 문제) 아주 짧은
+// 질문에도 max_tokens를 다 태우는 걸 실측했다 — reasoning_effort:'none'으로 꺼야 즉시 최종 답만 나온다.
+const GROQ_VISION_MODEL = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.8-27b'
 
 // 무료 등급 계정 공통 분당 토큰(TPM) 한도가 8,000인 게 실측으로 확인됐다(2026-09-02 — 모델을
 // gpt-oss-120b/20b/qwen3.8-27b로 바꿔봐도 셋 다 똑같이 8,000에 걸림, 조직 단위 한도라 모델과 무관).

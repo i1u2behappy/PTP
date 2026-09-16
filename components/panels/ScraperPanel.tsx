@@ -7,7 +7,7 @@ import { FIXED_FIELD_INFO } from '../../lib/master/schema'
 import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
 import RemoteScreenViewer from './RemoteScreenViewer'
 import { shortenCategoryUrlForDisplay } from '../../lib/urlDisplay'
-import { looksLikeMallHomeUrl, buildCategoryTreeView } from '../../lib/categoryUrl'
+import { looksLikeMallHomeUrl, buildCategoryTree, countCategoryTreeEntries, type CategoryTreeNode } from '../../lib/categoryUrl'
 
 // lib/extract.ts의 CLAIMED_INFO_LABEL_RE와 같은 목록 — 이 파일은 Playwright 등 서버 전용 코드를 담고
 // 있어 클라이언트 컴포넌트에서 직접 import하지 않고 그대로 복제해 둔다(둘 중 하나를 고치면 같이 맞출 것).
@@ -367,6 +367,9 @@ interface MallProfileSignals {
   /** 몰 구조분석 도중/직후 로그인 세션이 끊긴 것으로 보이면 true — lib/scraper.ts의
    *  MallProfileSignals.sessionLostDuringAnalysis 주석 참고. */
   sessionLostDuringAnalysis?: boolean
+  /** 위 경고와 같은 검사가 false였지만 분석 시작 시점부터 이미 그랬던 경우(=이 몰은 로그인 여부를 화면에
+   *  드러내지 않는 몰) — lib/scraper.ts의 MallProfileSignals.loginSignalUnavailable 주석 참고. */
+  loginSignalUnavailable?: boolean
   /** lib/scraper.ts의 MallProfileSignals.categoryScreenCheck와 같은 모양 — 화면(비전)으로 읽은 카테고리와
    *  최종 결과의 대조 결과. 화면 인식을 안 탔거나 실패한 실행에서는 없다(그땐 아무것도 표시하지 않는다). */
   categoryScreenCheck?: {
@@ -516,9 +519,9 @@ const MALL_PROFILE_STEP_ORDER = [
  *  예전엔 대분류별 "이름(개수)"만 한 줄로 뭉뚱그렸는데, 그러면 "카테고리(51)"처럼 몰의 최상위 메뉴 탭
  *  이름(실제 대분류가 아니라 "카테고리 전체보기" 같은 포괄 탭 라벨인 경우가 흔함) 밑에 실제로 어떤
  *  대/중/소분류 51개가 있는지 전혀 구분이 안 됐다(사용자 지적, 2026-09-15 — "합계로 요약하지 말고 개별
- *  내역을 구분해서 볼 수 있게 표시해"). buildCategoryTreeView(lib/categoryUrl.ts)로 대분류별로 묶어 하위
- *  항목 이름까지 나열한다 — AI가 "설명"한 게 아니라 실제 저장된 배열을 그대로 나열하는 것이라 항상
- *  categoryLinks 총 개수와 일치한다. */
+ *  내역을 구분해서 볼 수 있게 표시해"). buildCategoryTree(lib/categoryUrl.ts)로 대/중/소분류 단계 그대로
+ *  중첩시켜 하위 항목 이름까지 나열한다 — AI가 "설명"한 게 아니라 실제 저장된 배열을 그대로 나열하는
+ *  것이라 항상 categoryLinks 총 개수와 일치한다. */
 function FieldTile({ icon, label, value }: { icon: string; label: string; value: string }) {
   const notFound = !value || value === '확인 안됨'
   return (
@@ -534,23 +537,39 @@ function FieldTile({ icon, label, value }: { icon: string; label: string; value:
  *  → 합계 57개"처럼 뭉뚱그리면 실제로 어떤 대/중/소분류 57개인지 구분이 안 됨. 이후 "…외 N개"로 일부만
  *  보여준 것도 재지적 — "분석된 모든 카테고리를 확인 가능하게 모두 표시해": 개수 상한 없이 전부 나열한다).
  *  categoryLinks가 아직 없는 몰(카테고리를 못 찾은 경우)만 기존 AI 요약 문장으로 대체한다. */
+// 자식이 있는 노드는 "이름[자식1·자식2·...]"로 대괄호를 열어 그 안에 하위 분류를 재귀적으로 담는다 —
+// 대분류 밑에 중분류, 그 밑에 다시 소분류가 있으면 괄호가 한 겹 더 열리는 식으로 실제 계층 깊이가 그대로
+// 드러난다(사용자 지시, 2026-09-16 — "대분류 중분류 소분류도 알 수 있으니 그 부분도 잘 정리할 수 있게").
+// 자식이 없는 리프는 이름만 그대로 쓴다.
+function renderCategoryTreeNode(node: CategoryTreeNode): string {
+  if (!node.children.length) return node.name
+  return `${node.name}[${node.children.map(renderCategoryTreeNode).join('·')}]`
+}
+
 function CategoryStructureTile({ categoryLinks, fallback }: { categoryLinks: { name: string; href: string }[] | undefined; fallback: string }) {
-  const tree = buildCategoryTreeView(categoryLinks)
+  const tree = buildCategoryTree(categoryLinks)
+  // 대분류마다 제목 줄 + 항목 줄로 따로 나누면(예전 방식) 대분류 수만큼 줄이 늘어난다(사용자 지시,
+  // 2026-09-15 — "최대한 줄 수를 줄여서 표시해줘. 대분류 구분을 그냥 '//' 이 두 줄로 구분해줘") — 대분류별
+  // 블록을 "대분류명(N개) 항목1·항목2·..." 한 덩어리로 만들고, 덩어리 사이만 " // "로 이어 붙여 한
+  // 문단으로 흘려보낸다. 개별 항목은 여전히 하나도 안 빠뜨리고 전부 나열한다(요약 아님, 위 설명 그대로).
+  const flat = tree.map(g => {
+    const body = g.children.length ? ` ${g.children.map(renderCategoryTreeNode).join('·')}` : ''
+    return `${g.name}(${countCategoryTreeEntries(g)})${body}`
+  }).join(' // ')
+  // 한 줄로 압축하면서 "총 몇 개"가 안 보이게 됐다는 지적(사용자, 2026-09-15) — 대분류별 개수 옆에,
+  // 제목에도 전체 합계를 같이 보여준다(categoryLinks.length와 항상 일치 — buildCategoryTree는
+  // 항목을 빠뜨리지 않고 트리로만 재배치하므로).
+  const totalCount = categoryLinks?.length ?? 0
   return (
     <div className="bg-gray-50 rounded-xl px-3 py-2.5 border border-gray-100 sm:col-span-2">
-      <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-1">🗂️ 카테고리 구조</p>
+      <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-1">
+        🗂️ 카테고리 구조{tree.length ? <span className="font-normal text-gray-400"> (총 {totalCount}개)</span> : null}
+      </p>
       {tree.length ? (
-        <ul className="space-y-1.5"
-          title='AI 요약이 아니라, 이 몰구조분석이 방금 찾아 저장한 categoryLinks를 대분류별로 묶어 전부 그대로 나열한 것입니다 — "카테고리 불러오기"의 목록과 항상 일치해야 정상입니다.'>
-          {tree.map(g => (
-            <li key={g.top}>
-              <p className="text-xs font-medium text-gray-700">{g.top} <span className="font-normal text-gray-400">({g.children.length}개)</span></p>
-              <p className="mt-0.5 text-[11px] text-gray-600 leading-relaxed">
-                {g.children.map(c => c.name.split(' > ').slice(1).join(' > ') || c.name).join(' · ')}
-              </p>
-            </li>
-          ))}
-        </ul>
+        <p className="text-[11px] text-gray-600 leading-relaxed break-words"
+          title='AI 요약이 아니라, 이 몰구조분석이 방금 찾아 저장한 categoryLinks를 대분류별로 묶어 전부 그대로 나열한 것입니다("//"가 대분류 구분) — "카테고리 불러오기"의 목록과 항상 일치해야 정상입니다.'>
+          {flat}
+        </p>
       ) : (
         <p className={`text-xs leading-relaxed ${!fallback || fallback === '확인 안됨' ? 'text-gray-400 italic' : 'text-gray-700'}`}>{fallback || '확인 안됨'}</p>
       )}
@@ -566,16 +585,19 @@ function SortStructureTile({ sortOptions, fallback }: {
   sortOptions?: ({ label: string; kind?: 'query'; paramsToAdd: Record<string, string> } | { label: string; kind: 'click'; clickText: string })[]
   fallback: string
 }) {
+  // 카테고리 구조 타일과 같은 이유로 세로 목록 대신 한 줄로 흘려보낸다(사용자 지시, 2026-09-15 — "정렬구조도
+  // 가로로 이어서 표시해줘") — 항목 사이는 " · "로만 구분한다(대분류가 없어 "//" 구분은 필요 없음).
+  const flat = sortOptions?.length
+    ? sortOptions.map(o => o.kind === 'click' ? `${o.label}(클릭: ${o.clickText})` : o.label).join(' · ')
+    : ''
   return (
     <div className="bg-gray-50 rounded-xl px-3 py-2.5 border border-gray-100">
       <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-0.5">↕️ 정렬 구조</p>
       {sortOptions?.length ? (
-        <ul className="text-xs leading-relaxed text-gray-700 space-y-0.5"
+        <p className="text-[11px] text-gray-600 leading-relaxed break-words"
           title="AI 요약 문장이 아니라, 실제로 클릭/URL 검증까지 거쳐 확인된 정렬 옵션 목록입니다.">
-          {sortOptions.map(o => (
-            <li key={o.label}>· {o.label}{o.kind === 'click' && <span className="text-gray-400"> (클릭: {o.clickText})</span>}</li>
-          ))}
-        </ul>
+          {flat}
+        </p>
       ) : (
         <p className={`text-xs leading-relaxed ${!fallback || fallback === '확인 안됨' ? 'text-gray-400 italic' : 'text-gray-700'}`}>{fallback || '확인 안됨'}</p>
       )}
@@ -720,6 +742,17 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
           {result.signals.sessionLostDuringAnalysis && (
             <p className="mb-3 text-xs text-rose-700 bg-rose-50 rounded-lg px-3 py-2">
               ⚠ 분석 도중 로그인 세션이 끊긴 것으로 보입니다 — 로그인 창을 다시 확인해주세요. 위/아래 결과 중 일부는 로그인 안 된 상태로 수집됐을 수 있습니다.
+            </p>
+          )}
+          {/* sessionLostDuringAnalysis와 같은 검사(로그아웃 문구/아이콘 못 찾음)가 걸렸지만, 분석을
+              시작하기도 전인 시점부터 이미 그랬던 경우 — "분석 도중 끊겼다"가 아니라 이 몰이 애초에
+              로그인 여부를 화면에 드러내지 않는 몰이라는 뜻이다(lib/scraper.ts의
+              classifySessionLossSignal/loginSignalUnavailable 주석 참고, 2026-09-15 사용자 지적 — "이런
+              몰의 경우 메시지를 수정해. 몰 특성 때문에 그렇다는 내용으로"). 경고가 아니라 안내라 rose 대신
+              중립 색을 쓴다. */}
+          {result.signals.loginSignalUnavailable && (
+            <p className="mb-3 text-xs text-slate-600 bg-slate-50 rounded-lg px-3 py-2">
+              ℹ️ 이 몰은 로그인 여부를 화면에서 확인할 수 있는 신호가 없어, 실제 로그인 상태와 무관하게 이 안내가 표시될 수 있습니다(몰 특성) — 결과 품질에는 영향이 없을 수 있습니다.
             </p>
           )}
           {result.diffs.length > 0 && (

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import fc from 'fast-check'
-import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern, scanCategoryMenuFromHtml, deriveDetailUrlPattern, LOGOUT_URL_RE, ACCOUNT_UNSAFE_URL_RE } from '../../lib/scraper'
+import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern, scanCategoryMenuFromHtml, deriveDetailUrlPattern, LOGOUT_URL_RE, ACCOUNT_UNSAFE_URL_RE, classifySessionLossSignal } from '../../lib/scraper'
 
 // diffQueryParams는 "카테고리별 정렬기준 설정" 기능의 핵심 — 정렬 후보 링크가 baseUrl과 같은 경로에서
 // 쿼리파라미터만 다른지 확인해, 다른 카테고리/상품 상세로 튀는 링크를 걸러낸다.
@@ -75,7 +75,7 @@ describe('diffQueryParams', () => {
 // looksLikeSortLabel — 2026-08-23 펫투비 실사용 중 발견한 사고(카테고리 사이드바 링크 "간식"/"배변용품"을
 // 로컬 Ollama가 정렬 옵션으로 잘못 골라 그대로 저장)를 재현하지 않는지 고정해두는 회귀 테스트.
 describe('looksLikeSortLabel', () => {
-  it.each(['낮은가격', '높은가격순', '신상품', '인기순', '판매량순', '리뷰많은순', '할인순'])(
+  it.each(['낮은가격', '높은가격순', '신상품', '인기순', '판매량순', '리뷰많은순', '할인순', '판매순', '상품명순'])(
     '"%s"는 정렬 라벨로 인정한다', (text) => {
       expect(looksLikeSortLabel(text)).toBe(true)
     },
@@ -86,6 +86,34 @@ describe('looksLikeSortLabel', () => {
       expect(looksLikeSortLabel(text)).toBe(false)
     },
   )
+})
+
+// classifySessionLossSignal — 정글북 실사용 확인(2026-09-15, 사용자 지적: "로그인이 끊겼다는 내용은
+// 맞는거야?" → "이런 몰의 경우 메시지를 수정해. 몰 특성 때문에 그렇다는 내용으로") — 로그인 여부를
+// 화면에 전혀 드러내지 않는 몰은 로그인 시도 직후(분석 시작 전)에도 이미 신호가 false라, "분석 도중
+// 끊겼다"와 구분해야 한다.
+describe('classifySessionLossSignal', () => {
+  it('시작 시점부터 신호가 없었으면(몰 특성) unavailable', () => {
+    expect(classifySessionLossSignal({ loggedInAtStart: false, loggedInAtEnd: false, hubExpansionHitLoginWall: false })).toBe('unavailable')
+  })
+
+  it('시작 시점엔 신호가 있었는데 끝에 사라졌으면 진짜로 lost', () => {
+    expect(classifySessionLossSignal({ loggedInAtStart: true, loggedInAtEnd: false, hubExpansionHitLoginWall: false })).toBe('lost')
+  })
+
+  it('시작 시점을 확인 안 했어도(null, 로그인 정보 없음 등) 끝에 false면 안전하게 lost로 본다', () => {
+    expect(classifySessionLossSignal({ loggedInAtStart: null, loggedInAtEnd: false, hubExpansionHitLoginWall: false })).toBe('lost')
+  })
+
+  it('카테고리 확장 중 실제로 로그인 벽을 만났으면 시작 신호와 무관하게 항상 lost', () => {
+    expect(classifySessionLossSignal({ loggedInAtStart: false, loggedInAtEnd: false, hubExpansionHitLoginWall: true })).toBe('lost')
+    expect(classifySessionLossSignal({ loggedInAtStart: true, loggedInAtEnd: true, hubExpansionHitLoginWall: true })).toBe('lost')
+  })
+
+  it('끝에 로그인됨(true)이거나 검사 자체가 실패(null)면 ok', () => {
+    expect(classifySessionLossSignal({ loggedInAtStart: false, loggedInAtEnd: true, hubExpansionHitLoginWall: false })).toBe('ok')
+    expect(classifySessionLossSignal({ loggedInAtStart: false, loggedInAtEnd: null, hubExpansionHitLoginWall: false })).toBe('ok')
+  })
 })
 
 describe('resetToFirstPage', () => {

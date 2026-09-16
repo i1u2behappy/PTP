@@ -13,7 +13,7 @@ import { chromium, type BrowserContext, type Page, type APIResponse, type Elemen
 import { load as loadHtml } from 'cheerio'
 import iconv from 'iconv-lite'
 import type { ExtractedProduct } from './ai'
-import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsFromScreenshot, detectCategoryMenuTriggerFromScreenshot, detectVisibleCategoryGroupCount, detectVisibleCategoryNames, detectVisibleCategoryHierarchy, detectProductListVisible, type MallStructureReport, type OptionCandidate, type AiProviderId, ALL_AI_PROVIDERS, runWithAiProviders } from './ai'
+import { extractProductFieldsWithAI, generateMallProfileReport, buildHeuristicMallReport, filterRealProductOptions, detectCategoryLinksWithAI, detectSortOptionsFromScreenshot, detectSortTriggerFromScreenshot, detectCategoryMenuTriggerFromScreenshot, detectVisibleCategoryGroupCount, detectVisibleCategoryNames, detectVisibleCategoryHierarchy, detectProductListVisible, type MallStructureReport, type OptionCandidate, type AiProviderId, ALL_AI_PROVIDERS, runWithAiProviders } from './ai'
 import { extractProductRuleBased, type ExtractSelectorOverrides } from './extract'
 import type { ExtractionRule } from './ai'
 import { solveRecaptchaV2, solveHCaptcha, solveImageCaptcha } from './captcha'
@@ -867,11 +867,21 @@ export function getOpenPageUrl(siteId: number): string | null {
  *  판정 수단은 아니라서, 화면에서도 이 결과를 확정("로그인 안 됨")이 아니라 경고로만 보여주고 흐름을
  *  막지 않는다(사용자 요청, 2026-08-31 — 걸스굽에서 "로그인 확인"을 눌렀는데 실제로는 로그인이 안 된
  *  채로 몰구조분석이 계속 로그인 페이지만 도는 사고가 있었는데, 기존 "확인" 버튼은 사용자가 눌렀다는
- *  것만 그대로 믿을 뿐 아무 것도 검증하지 않았다). */
-async function detectLoggedInSignal(page: Page): Promise<boolean | null> {
+ *  것만 그대로 믿을 뿐 아무 것도 검증하지 않았다).
+ *
+ *  <a> 태그의 화면 텍스트만 보던 게 실제로 "아이콘만 표시"(위 주석이 이미 알려진 한계로 적어뒀던
+ *  케이스) 몰에서 사고로 이어졌다(정글북 실사용 확인, 2026-09-15 — 사용자 질문 "로그인이 끊겼다는
+ *  내용은 맞는거야?"로 재확인: 로그아웃 컨트롤이 `<button aria-label="로그아웃">`처럼 텍스트 없이
+ *  아이콘뿐인 버튼이라, 실제로는 로그인된 채였을 실행에서도 몰구조분석마다 "로그인 세션이 끊긴 것으로
+ *  보임" 경고가 항상 떴다 — 로그인 복구 로직까지 매번 불필요하게 돌았을 수 있다). <a>뿐 아니라 <button>/
+ *  role=button도 보고, 화면 텍스트뿐 아니라 aria-label/title(스크린리더용 대체 텍스트)도 같이 본다. */
+export async function detectLoggedInSignal(page: Page): Promise<boolean | null> {
   try {
     return await page.evaluate(() =>
-      Array.from(document.querySelectorAll('a')).some(a => /로그아웃|logout/i.test(a.textContent || '')),
+      Array.from(document.querySelectorAll('a, button, [role="button"]')).some(el => {
+        const text = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`
+        return /로그아웃|logout/i.test(text)
+      }),
     )
   } catch {
     return null
@@ -1570,6 +1580,34 @@ export interface MallProfileSignals {
    *  뜻이라 false로 단정하지 않는다. DB에는 영구 저장하지 않는다(mallProfile.ts의 UPDATE 제외 목록
    *  참고) — 다음 실행의 세션 상태와 무관한, 이번 실행 한정 신호라 화면에 계속 남으면 오히려 헷갈린다. */
   sessionLostDuringAnalysis?: boolean
+  /** sessionLostDuringAnalysis와 같은 검사(detectLoggedInSignal)가 false를 냈지만, 이 실행의 "시작
+   *  시점"(로그인 시도 직후)에도 이미 같은 신호가 false였을 때 true — 즉 "분석 도중 끊긴 것"이 아니라
+   *  이 몰이 애초에 로그인 여부를 화면 요소(로그아웃 문구/아이콘)로 전혀 드러내지 않는 몰이라는 뜻이다
+   *  (정글북 실사용 확인, 2026-09-15 — 사용자 질문 "로그인이 끊겼다는 내용은 맞는거야?"로 재진단: 완전히
+   *  로그인 안 한 새 브라우저로 접속해도 "로그인됨"을 알려주는 요소가 화면 어디에도 없어, 이 검사가
+   *  로그인 성공 여부와 무관하게 항상 false만 내놓는 몰이었다). 이런 몰에서는 "다시 로그인해주세요"라는
+   *  경고가 사실과 다를 수 있으므로, 화면에서 다른 문구(몰 특성 안내)로 구분해 보여준다. */
+  loginSignalUnavailable?: boolean
+}
+
+/** deep(="몰 구조분석") 끝에서 로그인 신호가 약하게(false) 나왔을 때, 이걸 "분석 도중 세션이 끊겼다"로
+ *  볼지 "이 몰은 애초에 로그인 신호를 화면에 안 보여준다"로 볼지 가른다 — 순수 함수라 실제 브라우저 없이
+ *  테스트로 규칙을 고정해둔다. 판단 근거는 세 가지 독립 신호:
+ *  - hubExpansionHitLoginWall(카테고리 확장 중 실제로 로그인 페이지/차단을 만난 적 있음)은 "화면 요소가
+ *    있냐 없냐"와 무관한 훨씬 강한 증거라 항상 'lost'로 본다.
+ *  - loggedInAtEnd !== false(즉 true거나, 검사 자체가 실패해 null)면 애초에 이 판단을 부를 이유가
+ *    없지만, 방어적으로 'ok'를 돌려준다.
+ *  - loggedInAtStart(로그인 시도 직후, 분석을 시작하기도 전)가 이미 false였다면 — "분석 도중"에 뭔가
+ *    끊어진 게 아니라 시작부터 신호가 없었던 것이므로 'unavailable'(몰 특성)로 본다. loggedInAtStart가
+ *    true였는데 끝에 false가 됐을 때만 진짜 'lost'로 본다. */
+export function classifySessionLossSignal(input: {
+  loggedInAtStart: boolean | null
+  loggedInAtEnd: boolean | null
+  hubExpansionHitLoginWall: boolean
+}): 'lost' | 'unavailable' | 'ok' {
+  if (input.hubExpansionHitLoginWall) return 'lost'
+  if (input.loggedInAtEnd !== false) return 'ok'
+  return input.loggedInAtStart === false ? 'unavailable' : 'lost'
 }
 
 const MALL_PROFILE_SAMPLE_SIZE = 6
@@ -1735,6 +1773,12 @@ async function profileMallStructureInner(siteId: number, deep: boolean, aiProvid
   try {
     return await withContext({ siteId, url: site.url, allowStaleManualLoginProfile: true }, async (page, context) => {
       await page.goto(site.url, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+      // 아래 "신원 쿠키" 대기는 카페24 전용 쿠키 이름(login_provider_1/ec_mem_level)을 찾는다 — 플랫폼과
+      // 무관하게 항상 돌고 있었다(정글북 실사용 확인, 2026-09-15, 사용자 질문 "로그인이 끊겼다는 내용은
+      // 맞는거야?"로 재진단: 정글북은 카페24가 아닌 커스텀 React 몰이라 이 쿠키 자체가 존재할 수 없는데도
+      // 매번 30초를 꽉 채워 기다리다 "신원쿠키를 30초 안에 못 받음"을 내고, 필요 없는 재로그인까지
+      // 시도했다). 이 몰이 실제로 카페24인지 미리 확인해, 그 경우에만 이 카페24 전용 대기를 돈다.
+      const platformForLoginWait = await detectMallPlatform(page).catch(() => 'unknown' as MallPlatform)
       // 회원전용 도매몰(펫투비 등)은 저장된 로그인 세션이 만료돼 있으면 카테고리 목록/정렬 위젯이 있는
       // 페이지가 전부 로그인폼으로 리다이렉트된다 — sortOptions가 매번 빈 배열로 나온 실제 원인이 "AI가
       // 텍스트를 못 알아본 것"이 아니라 "정렬 링크 후보 자체가 0개"였음을 실사용(2026-08-23, 펫투비)으로
@@ -1782,7 +1826,7 @@ async function profileMallStructureInner(siteId: number, deep: boolean, aiProvid
       // 실측 확인돼(2026-09-02), 단순 새로고침보다 강한 회복 수단으로 로그인 자체를 한 번 더 재시도한다
       // — 새로고침은 "이미 로그인된 페이지가 비동기 스크립트를 다시 돌게" 하는 것뿐이라 애초에 로그인 자체가
       // 덜 된 경우엔 도움이 안 될 수 있어서다.
-      if (deep && site.loginId && site.loginPw) {
+      if (deep && site.loginId && site.loginPw && platformForLoginWait === 'cafe24') {
         const cookieWaitStart = Date.now()
         const cookieDeadline = cookieWaitStart + 30_000
         let gotIdCookie = false
@@ -1807,7 +1851,10 @@ async function profileMallStructureInner(siteId: number, deep: boolean, aiProvid
       }
       const startUrl = page.url()
       if (!startUrl || startUrl === 'about:blank') return null
-      return sampleMallProfile(page, context, startUrl, site.name, deep, controller.signal, siteId, aiProviders, categoryUrlPattern, knownCategoryExamples, prevSortOptions, prevCategoryLinks)
+      // classifySessionLossSignal의 기준선 — 로그인 시도가 끝난 직후, 분석을 시작하기도 전의 신호.
+      // deep이 아니거나 로그인 정보가 없으면 애초에 로그인을 시도하지 않았으니 null(판단 보류).
+      const loggedInAtStart = (deep && site.loginId && site.loginPw) ? await detectLoggedInSignal(page) : null
+      return sampleMallProfile(page, context, startUrl, site.name, deep, controller.signal, siteId, aiProviders, categoryUrlPattern, knownCategoryExamples, prevSortOptions, prevCategoryLinks, loggedInAtStart)
     }, deep ? '몰 구조분석' : '구조 변화 감지')
   } finally {
     // 이 실행이 등록해둔 컨트롤러가 그대로면(중간에 stopProfileAnalysis가 이미 지웠을 수도 있음) 지운다.
@@ -2604,6 +2651,9 @@ async function sampleMallProfile(
   prevSortOptions: MallSortOption[] = [],
   /** 직전 실행에서 확인된 카테고리 — screenCheckAndRecover의 두 번째 기준선(주석 참고). */
   prevCategoryLinks: CategoryMenuLink[] = [],
+  /** classifySessionLossSignal의 기준선(로그인 시도 직후 신호) — profileMallStructureInner에서만
+   *  넘어온다. 구조 변화 감지(deep=false) 등 로그인을 시도하지 않은 호출은 null. */
+  loggedInAtStart: boolean | null = null,
 ): Promise<MallProfileSignals | null> {
   // "몰 구조분석"이 항상 오래 걸리는데 label 하나("몰 구조분석")로는 지금 뭘 하고 있는지 알 방법이
   // 없다는 지적(2026-08-22)으로, 주요 단계 경계마다 setSiteLockDetail로 세부 문구를 남긴다 — siteId가
@@ -2988,14 +3038,35 @@ async function sampleMallProfile(
   // 시작마다 자동으로 도는 가벼운 구조 변화 감지)는 원래도 매번 이 페이지들을 훑고 지나가는 경로가 아니라
   // 세션이 끊길 만한 원인 자체가 다르고, 매번 추가로 한 번 더 확인하는 비용을 들일 만큼 값어치가 없다.
   if (deep) {
-    const loggedIn = await detectLoggedInSignal(page)
+    let loggedIn = await detectLoggedInSignal(page)
     // hubExpansionHitLoginWall: expandCategoryHubs 내부에서 카테고리 하나를 확인하던 중 이미 로그인
     // 페이지/봇차단을 만난 적이 있었는지(expandOne 참고) — 예전엔 이 신호를 그냥 버렸는데, 함수 끝의
     // detectLoggedInSignal만으론 못 잡는 경우(예: 되돌아간 시작 페이지 자체엔 "로그아웃" 링크가 있는
     // 형태가 아니어서 오탐 없이 통과하지만 실제로는 중간에 한 번 걸렸던 경우)를 보강한다.
-    if (loggedIn === false || hubExpansionHitLoginWall) {
+    //
+    // loggedIn===false 하나만으로 곧장 "세션이 끊겼다"고 단정하면, 애초에 로그인 여부를 화면에 전혀
+    // 드러내지 않는 몰(정글북 실사용 확인, 2026-09-15 — 사용자 질문 "로그인이 끊겼다는 내용은 맞는거야?"
+    // 로 재진단: 로그인 시도 직후에도 이미 이 신호가 false였다)에서는 매번 사실과 다른 "다시
+    // 로그인해주세요" 경고가 뜬다. classifySessionLossSignal로 "분석 도중 진짜로 끊긴 것"과 "이 몰은
+    // 애초에 신호가 없는 것"을 가른다.
+    //
+    // 시작 시점엔 true였는데 끝에서만 false인 경우(정글북 실사용 확인, 2026-09-16)는 또 다르다: 이
+    // 몰의 access_token 쿠키가 30분 만료 JWT라 새로고침 타이밍에 따라 "로그아웃" 버튼 유무가 실제 로그인
+    // 상태와 무관하게 갈릴 수 있음을 Playwright로 같은 세션에서 5회 연속 재확인해 확정했다(카테고리
+    // 확장 중 실제 로그인 차단은 hubExpansionHitLoginWall=false로 한 번도 없었는데 이 신호만 false).
+    // 이런 애매한 경우(카테고리 확장 중 실제 차단은 없었음)만 한 번 더 새로고침해 재확인한다 — 정말 끊긴
+    // 것이면 재확인에서도 false가 유지될 것이고, 타이밍 오탐이면 재확인에서 뒤집힌다.
+    if (loggedIn === false && loggedInAtStart === true && !hubExpansionHitLoginWall) {
+      await page.goto(startUrl, { waitUntil: 'load', timeout: 20_000 }).catch(() => {})
+      loggedIn = await detectLoggedInSignal(page)
+    }
+    const verdict = classifySessionLossSignal({ loggedInAtStart, loggedInAtEnd: loggedIn, hubExpansionHitLoginWall })
+    if (verdict === 'lost') {
       signals.sessionLostDuringAnalysis = true
-      console.log(`[몰구조분석:${mallName}] 로그인 세션이 끊긴 것으로 보임(종료 시점 로그인됨=${loggedIn}, 카테고리 확장 중 로그인차단=${hubExpansionHitLoginWall}) — 다시 로그인해주세요`)
+      console.log(`[몰구조분석:${mallName}] 로그인 세션이 끊긴 것으로 보임(시작 시점 로그인됨=${loggedInAtStart}, 종료 시점 로그인됨=${loggedIn}, 카테고리 확장 중 로그인차단=${hubExpansionHitLoginWall}) — 다시 로그인해주세요`)
+    } else if (verdict === 'unavailable') {
+      signals.loginSignalUnavailable = true
+      console.log(`[몰구조분석:${mallName}] 이 몰은 로그인 여부를 화면에서 확인할 신호가 없어 보임(시작 시점부터 로그인됨=${loggedInAtStart}) — 세션 끊김 경고 대신 몰 특성 안내로 대체`)
     }
   }
   logFinalStep()
@@ -3871,7 +3942,11 @@ async function collectSortCandidates(page: Page): Promise<{ text: string; href: 
 // 최저/최고는 "낮은가격"/"높은가격"만큼(혹은 그보다 더) 흔한 표현이다(실사용 확인, 2026-09-12 — 투비즈온
 // "최저 가격순"/"최고 가격순"이 이 패턴에 안 걸려 유일하게 매칭되던 "신규 상품순"(이미 기본 선택된 옵션이라
 // 다시 골라도 목록이 안 바뀜)만 시도되고 끝나버렸다 — 정렬이 진짜로 있는데도 전부 미확정으로 끝난 원인).
-const SORT_KEYWORD_PATTERN = '(신상|신규|최신|낮은\\s*가격|높은\\s*가격|최저|최고|인기|판매량|조회|클릭|리뷰|추천|할인|세일|낱개판매|기본순)'
+// "판매순"/"상품명순"은 "판매량"/(상품명 관련 키워드 없음)만으로는 안 걸린다(정글북 실사용 확인,
+// 2026-09-15 — 드롭다운에 최신순/판매순/낮은 가격순/높은 가격순/상품명순 5개가 있었는데 그중 2개가
+// 애초에 후보에도 안 들어갔었다) — "판매"/"상품명"만 넣으면 "판매가"/"상품명 검색"류를 오탐할 수 있어
+// "순"까지 붙은 형태로 좁힌다.
+const SORT_KEYWORD_PATTERN = '(신상|신규|최신|낮은\\s*가격|높은\\s*가격|최저|최고|인기|판매량|판매\\s*순|상품명\\s*순|조회|클릭|리뷰|추천|할인|세일|낱개판매|기본순)'
 
 /** SORT_KEYWORD_PATTERN을 쓰는 곳이 여러 자리라(sampleMallProfile의 AI 결과 사전 필터, 아래
  *  detectSortOptionsByClicking의 페이지 내부 스캔) 판정 로직을 하나로 모았다 — 순수 함수라
@@ -3919,6 +3994,45 @@ export function looksLikeSortLabel(text: string): boolean {
  *  둘 다 같은 방식으로 동작하게 한다 — MallSortOption의 kind:'click'/clickText 저장 형식은 그대로 두고
  *  (사용자가 저장된 정렬을 다시 쓸 때·개발자모드가 이 타입을 읽을 때 아무것도 안 바뀜), 클릭을 실행하는
  *  이 저수준 동작만 옵션 태그를 인식하도록 넓힌다. 후보 텍스트를 못 찾으면 false. */
+/** clickSortCandidateText가 찾는 정렬 라벨이 화면에 곧바로 없을 때의 마지막 수단 — 닫힌 드롭다운을
+ *  열어본다. 정글북 실사용 확인(2026-09-15, 사용자 지적: "정렬은 클릭한번 해보면 여러개의 정렬기준이
+ *  나오는데, 그걸 못해?") — "판매순"/"낮은 가격순"/"높은 가격순"/"상품명순"은 현재 선택된 정렬을 보여주는
+ *  `<button><span>최신순</span><svg/></button>` 트리거를 먼저 클릭해야 DOM에 나타나는 `<li><button>`
+ *  목록이었다. 트리거는 아이콘(svg) 있는 버튼 전부가 아니라 "텍스트 자체가 이미 정렬 키워드처럼 생긴
+ *  것"으로 좁혀 찾는다 — 안 그러면 "강아지"/"고양이" 같은 무관한 토글 버튼까지 잘못 열 수 있다(둘 다
+ *  짧은 텍스트+아이콘 버튼이지만 정렬 키워드는 아님). 열어도 원하는 텍스트가 끝내 안 나오면 그대로
+ *  실패 처리되므로(호출부가 이미 그 경우를 다룸) 엉뚱한 걸 잘못 열어도 안전하다.
+ *
+ *  이 트리거는 클릭할 때마다 열림/닫힘이 토글된다 — 같은 page에서 이 함수가 두 번 불리면(화면 인식
+ *  단계가 한 번 열어두고, 그 뒤 클릭 폴백 단계가 또 호출하는 식) 두 번째 호출이 방금 열린 걸 도로
+ *  닫아버려, 정작 후보를 스캔할 때는 닫힌 상태로 되돌아가 있었다(정글북 실사용 재확인, 2026-09-15 —
+ *  고친 뒤에도 "판매순"이 여전히 후보에 안 잡혀 원인 추적). "이미 열려 있는지"를 정렬 키워드 텍스트
+ *  개수로 추측해보려 했지만(2개 이상이면 열린 것으로 간주) 실패했다 — 사이트 공통 상단 메뉴("신상품",
+ *  "타임세일" 등)가 드롭다운이 닫힌 상태에서도 우연히 같은 키워드에 걸려, 닫혀 있는데도 "이미 열림"으로
+ *  잘못 판단해 다시 열지 않은 채 그대로 스캔해버렸다(정글북 실사용 재확인, 2026-09-15 — 로그로 직접
+ *  leafMatches=["신상품","타임세일","최신순"]을 확인). 대신 이 함수가 실제로 클릭에 성공했을 때만
+ *  document에 표시(marker attribute)를 남기고, 다음 호출은 그 표시만 보고 판단한다 — 같은 page(=같은
+ *  document, 중간에 goto 없음) 안에서만 유효하고, 다시 페이지를 불러오면(confirmSortCandidatesByClicking이
+ *  후보마다 baseUrl로 새로 열 때) 표시가 자연히 사라져 다음 후보에서도 정확히 다시 판단한다. */
+export async function openLikelySortDropdownTrigger(page: Page): Promise<boolean> {
+  return page.evaluate((pattern) => {
+    const marker = 'data-scraper-opened-sort-dropdown'
+    if (document.documentElement.hasAttribute(marker)) return true
+    const re = new RegExp(pattern)
+    const candidate = Array.from(document.querySelectorAll('button, [role="button"]')).find(el => {
+      const text = (el.textContent || '').trim()
+      if (!text || text.length > 12 || !re.test(text)) return false
+      if (!el.querySelector('svg')) return false
+      const rect = el.getBoundingClientRect()
+      return rect.width > 0 && rect.height > 0
+    }) as HTMLElement | undefined
+    if (!candidate) return false
+    candidate.click()
+    document.documentElement.setAttribute(marker, '1')
+    return true
+  }, SORT_KEYWORD_PATTERN).catch(() => false)
+}
+
 async function clickSortCandidateText(page: Page, text: string, waitMs = 5_000): Promise<boolean> {
   const locator = page.getByText(text, { exact: true }).first()
   // 정렬 위젯을 'load' 이후에 AJAX로 한 번 더 채워 넣는 몰이 있다 — 바로 아래 confirmSortCandidatesByClicking
@@ -3927,6 +4041,10 @@ async function clickSortCandidateText(page: Page, text: string, waitMs = 5_000):
   // 확인, 2026-09-13 — 미리보기 표본이 기본 정렬로 뽑힘). 같은 함정을 한쪽만 고쳐둔 상태였으므로, 대기를
   // 이 함수 안으로 넣어 두 경로가 함께 혜택을 보게 한다.
   const deadline = Date.now() + waitMs
+  if (await locator.count() === 0) {
+    // 곧바로 안 보이면 닫힌 드롭다운 안에 있을 수 있다 — 한 번 열어보고 아래 폴링에서 계속 찾는다.
+    await openLikelySortDropdownTrigger(page)
+  }
   while (await locator.count() === 0) {
     if (Date.now() >= deadline) return false
     await page.waitForTimeout(300)
@@ -3983,9 +4101,15 @@ async function confirmSortCandidatesByClicking(page: Page, baseUrl: string, cand
         console.log(`[정렬탐지:진단] "${text}" — 클릭 전 상품 목록을 못 읽어 검증 불가`)
         continue
       }
-      // AJAX 재정렬은 클릭 즉시 반영되지 않을 수 있어, 네트워크가 잠잠해질 때까지 우선 기다리고 그래도
-      // 못 잡으면 짧게 고정 대기로 대체한다.
-      await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(async () => { await page.waitForTimeout(800) })
+      // AJAX 재정렬은 클릭 즉시 반영되지 않을 수 있어, 네트워크가 잠잠해질 때까지 우선 기다린다. 다만
+      // "네트워크가 잠잠해짐"과 "화면(DOM)이 새 순서로 다 그려짐"은 별개다 — 정글북(id=30) 실사용 확인,
+      // 2026-09-15: fetch 자체는 거의 즉시 끝나 networkidle이 곧바로(수백 ms 안에) 성공하는데, React가
+      // 응답을 받아 실제로 목록을 다시 그리는 데는 그보다 조금 더 걸려, 곧바로 이어서 읽으면 아직 예전
+      // 순서 그대로였다(실제로 "낮은 가격순"을 클릭해 직접 확인해보면 상품 순서가 분명히 바뀌는데도 매번
+      // "목록 변화 없음"으로 폐기됨) — networkidle이 성공하든 타임아웃으로 실패하든 항상 짧게 한 번 더
+      // 기다린 뒤에야 다시 읽는다.
+      await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {})
+      await page.waitForTimeout(800)
       const after = (await collectProductUrls(page, { maxPages: 1 }).catch(() => null))?.urls.slice(0, 10) || []
       const changed = after.length && JSON.stringify(after) !== JSON.stringify(before)
       console.log(`[정렬탐지:진단] "${text}" — URL 동일(해시만 다를 수 있음), 목록 변화 ${changed ? '있음(확정)' : '없음(폐기)'} (before=${before.length}건, after=${after.length}건)`)
@@ -4004,6 +4128,10 @@ async function confirmSortCandidatesByClicking(page: Page, baseUrl: string, cand
  *  키워드와 비슷한 요소를 태그 종류 상관없이 후보로 삼아 하나씩 실제로 클릭해본다(confirmSortCandidatesByClicking
  *  참고). */
 async function detectSortOptionsByClicking(page: Page, baseUrl: string): Promise<MallSortOption[]> {
+  // 후보 스캔 자체가 닫힌 드롭다운 안의 옵션은 못 본다(정글북 실사용 확인, 2026-09-15 — openLikelySortDropdownTrigger
+  // 주석 참고: "판매순"/"낮은 가격순" 등은 현재 선택된 정렬 버튼을 눌러야 DOM에 나타남). 스캔 전에 한 번
+  // 열어본다 — 열 게 없으면(닫힌 드롭다운이 아닌 몰) 조용히 실패하고 기존 동작 그대로다.
+  if (await openLikelySortDropdownTrigger(page)) await page.waitForTimeout(300)
   const candidateTexts = await page.evaluate((pattern) => {
     const re = new RegExp(pattern)
     const seen = new Set<string>()
@@ -4032,9 +4160,33 @@ async function detectSortOptionsByClicking(page: Page, baseUrl: string): Promise
  *  호출부가 기존 href/키워드 기반 방식(collectSortCandidates+SORT_KEYWORD_PATTERN, detectSortOptionsByClicking)
  *  으로 이어서 시도한다 — 이 함수를 유일한 진실로 과신하지 않는다. */
 async function detectSortOptionsByScreenshot(page: Page, baseUrl: string, mallName: string, signal?: AbortSignal): Promise<MallSortOption[]> {
-  const screenshot = await page.screenshot({ type: 'jpeg', quality: 70 }).catch(() => null)
+  // 닫힌 드롭다운은 화면에 현재 선택된 라벨(예: "최신순") 하나만 보이고 나머지 옵션은 아예 안 보인다 —
+  // 스크린샷을 찍기 전에 한 번 열어본다(openLikelySortDropdownTrigger 주석 참고, 정글북 실사용 확인
+  // 2026-09-15). 열 게 없으면 조용히 실패하고 닫힌 상태 그대로 찍을 뿐이라 기존 동작과 같다. 이건 결정을
+  // 내리는 게 아니라 스크린샷 찍기 전에 내용을 더 드러내주는 저비용 보조 동작이라 "비전 우선" 원칙과
+  // 충돌하지 않는다 — 값 판정 자체는 여전히 아래 비전 호출이 한다.
+  if (await openLikelySortDropdownTrigger(page)) await page.waitForTimeout(300)
+  let screenshot = await page.screenshot({ type: 'jpeg', quality: 70 }).catch(() => null)
   if (!screenshot) return []
-  const labels = await detectSortOptionsFromScreenshot(mallName, screenshot.toString('base64'), 'image/jpeg', signal).catch(() => null)
+  let labels = await detectSortOptionsFromScreenshot(mallName, screenshot.toString('base64'), 'image/jpeg', signal).catch(() => null)
+  if (!labels?.length) {
+    // 값이 하나도 안 보이면, 트리거 자체가 "정렬방식"처럼 고정 라벨만 있고 지금 값이 화면에 없는
+    // 경우일 수 있다(도매신 실사용 확인, 2026-09-16 — openLikelySortDropdownTrigger는 트리거 자신의
+    // 텍스트가 이미 정렬 키워드일 때만 여는데, "정렬방식"은 그 키워드 목록에 없다). 사람이 화면을 보고
+    // 그 버튼을 찾아 눌러보듯, 비전으로 위치를 찾아 직접 클릭한 뒤 다시 읽는다.
+    const trigger = await detectSortTriggerFromScreenshot(mallName, screenshot.toString('base64'), 'image/jpeg', signal).catch(() => null)
+    if (trigger?.found) {
+      const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }))
+        .catch(() => page.viewportSize() ?? { width: 1280, height: 800 })
+      const x = viewport.width * (trigger.xPercent / 100)
+      const y = viewport.height * (trigger.yPercent / 100)
+      console.log(`[정렬탐지:진단:${mallName}] 화면 인식: 정렬 트리거 "${trigger.label || '(아이콘)'}" 발견(${trigger.xPercent}%,${trigger.yPercent}%) → (${x.toFixed(0)},${y.toFixed(0)}) 클릭`)
+      await clickNearestClickableAtPoint(page, x, y, mallName)
+      await page.waitForTimeout(300)
+      screenshot = await page.screenshot({ type: 'jpeg', quality: 70 }).catch(() => null)
+      labels = screenshot ? await detectSortOptionsFromScreenshot(mallName, screenshot.toString('base64'), 'image/jpeg', signal).catch(() => null) : null
+    }
+  }
   if (!labels?.length) return []
   return confirmSortCandidatesByClicking(page, baseUrl, labels)
 }
@@ -4532,6 +4684,11 @@ interface CategoryMenuDiscovery {
   menuLinks?: { text: string; href: string }[]
 }
 
+// 비전이 찾은 그룹 수가 이 이상이면 "그럴듯하지만 일부만"이 아니라 진짜로 여러 대분류를 다 찾은 것으로
+// 믿는다(discoverCategoryMenuByVision의 케이스 a/b, discoverTopLevelCategoryLinks의 비전-vs-전수클릭
+// 경쟁이 공유하는 기준선 — 사용자 지시, 2026-09-12 "다른 방법으로 해").
+const VISION_CONFIDENT_GROUP_COUNT = 3
+
 async function discoverCategoryMenuByVision(
   context: BrowserContext, page: Page, mallName: string, candidatePages: string[], platform: MallPlatform,
   productLinkSelector?: string | null, signal?: AbortSignal,
@@ -4553,7 +4710,32 @@ async function discoverCategoryMenuByVision(
       console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: 스크린샷 실패(${url}, 시도 ${attemptNo})`)
       return null
     }
-    const trigger = await detectCategoryMenuTriggerFromScreenshot(mallName, screenshot.toString('base64'), 'image/jpeg', signal).catch(() => null)
+    const screenshotBase64 = screenshot.toString('base64')
+    // 케이스 a: 클릭 없이 이미 화면에 카테고리가 보이는 경우(도매신처럼 항상 펼쳐진 가로 GNB 탭 —
+    // 실사용 확인, 2026-09-16) — 아래 트리거 클릭(케이스 b)보다 먼저, 같은 스크린샷 한 장으로 시도한다.
+    // "같은 시각적 레벨에 나란히 보이는 이름들 = 카테고리 후보 그룹"이라는 detectVisibleCategoryHierarchy의
+    // 스키마를 그대로 탐지 입력으로 쓴다(지금까지는 화면 대조 표시용으로만 썼다).
+    const hierarchy = await detectVisibleCategoryHierarchy(mallName, screenshotBase64, 'image/jpeg', signal).catch(() => null)
+    if (!hierarchy?.length) {
+      console.log(`[카테고리탐지:진단:${mallName}] 화면 인식(클릭 없이): ${hierarchy === null ? '두 공급자 다 실패' : '그룹 0개'} — 트리거 클릭도 마저 시도(${url}, 시도 ${attemptNo})`)
+    }
+    if (hierarchy?.length) {
+      const candidates = flattenVisibleCategoryHierarchy(hierarchy)
+      const pageLinks = await collectAllPageLinks(page).catch(() => [])
+      const matched = matchVisibleCategoryLinksToHrefs(candidates, pageLinks)
+        .filter(l => !NON_CATEGORY_TEXT_RE.test(l.name) && !NON_CATEGORY_PATH_RE.test(safePathname(l.href)))
+      if (!matched.length) {
+        console.log(`[카테고리탐지:진단:${mallName}] 화면 인식(클릭 없이): 그룹 ${hierarchy.length}개 읽었지만 DOM에서 href를 못 찾음 — 트리거 클릭도 마저 시도(${url}, 시도 ${attemptNo})`)
+      } else if (!await looksLikeRealCategoryBatch(context, matched, platform, productLinkSelector)) {
+        console.log(`[카테고리탐지:진단:${mallName}] 화면 인식(클릭 없이): ${matched.length}개 찾았지만 표본검증 실패 — 트리거 클릭도 마저 시도(${url}, 시도 ${attemptNo})`)
+      } else if (hierarchy.length < VISION_CONFIDENT_GROUP_COUNT) {
+        console.log(`[카테고리탐지:진단:${mallName}] 화면 인식(클릭 없이): 그룹 ${hierarchy.length}개뿐이라 못 미더움 — 트리거 클릭도 마저 시도(${url}, 시도 ${attemptNo})`)
+      } else {
+        console.log(`[카테고리탐지:진단:${mallName}] 화면 인식(클릭 없이 바로 읽음): "${hierarchy.map(h => h.group).join(', ')}" ${hierarchy.length}개 그룹 → ${matched.length}개 링크(표본검증 통과, 시도 ${attemptNo})`)
+        return { links: matched, groupCount: hierarchy.length, screenNames: candidates.map(c => c.leafText), screenHierarchy: hierarchy, menuLinks: pageLinks }
+      }
+    }
+    const trigger = await detectCategoryMenuTriggerFromScreenshot(mallName, screenshotBase64, 'image/jpeg', signal).catch(() => null)
     if (!trigger?.found) {
       console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: 트리거 못 찾음(${url}, 시도 ${attemptNo})`)
       return null
@@ -4804,6 +4986,45 @@ async function discoverTopLevelCategoryLinks(
     }
   }
 
+  // 사람이 화면을 보듯이 스크린샷을 먼저 분석해 카테고리를 찾는다(사용자 지시, 2026-09-16 — "화면
+  // 캡처한 것을 분석하고... 같은 레벨에 여럿이 나타나 있으면 카테고리로 보면 될 것... 무조건 이 방법을
+  // 우선 순위로"). DOM 텍스트/클래스 추측(아래 findCategoryOverviewLink 이하)은 비전이 실패했을 때만
+  // 쓰는 최후 수단으로 강등한다 — 새로 등록되는, 아직 본 적 없는 몰의 마크업에도 일반화되는 쪽은 클래스명
+  // 짐작이 아니라 실제 화면을 읽는 쪽이기 때문(도매신 실사용 확인, 2026-09-16 — "제목+목록" 추측이
+  // 무관한 "나의 쇼핑" 위젯을 카테고리로 오인해, 실제 GNB를 찾았을 아래 class 기반 스캔은 실행도 안 됐다).
+  const startUrlBeforeVision = page.url()
+  const aiCandidates = await collectAllPageLinks(page, baseUrl ? new URL(baseUrl).origin : undefined)
+  const visionResult = await discoverCategoryMenuByVision(
+    context, page, mallName, aiCandidates.map(c => c.href), platform, productLinkSelector, signal,
+  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0, screenNames: null, screenHierarchy: null, menuLinks: [] as { text: string; href: string }[] }))
+
+  // 비전이 "그럴듯하지만 일부만" 찾은 경우(표본검증은 통과하지만 실제로는 비슷하게 생긴 다른 아이콘을
+  // 잘못 클릭한 것) 그 결과를 곧바로 받아들이지 않는다(사용자 지시, 2026-09-12 — "다른 방법으로 해") —
+  // 비전 결과가 이미 충분히 커 보이면(그룹 3개 이상, 여러 대분류를 실제로 찾은 것으로 볼 만한 근거) 그대로
+  // 받아들이고, 그렇지 않으면(그룹 1~2개 — 부분 결과일 위험이 큼) 헤더 아이콘을 전부 실제로 클릭해보는
+  // 더 느리지만 확실한 방법도 마저 시도해 더 나은 쪽(찾은 개수×그룹 수가 더 큰 쪽)을 채택한다.
+  const visionScore = visionResult.links.length * Math.max(1, visionResult.groupCount)
+  if (visionResult.links.length && visionResult.groupCount >= VISION_CONFIDENT_GROUP_COUNT) {
+    return { links: visionResult.links, textlessHrefs: [], aiUsed: false, screenNames: visionResult.screenNames, screenHierarchy: visionResult.screenHierarchy, menuLinks: visionResult.menuLinks }
+  }
+
+  // 화면 인식이 실패했거나 그룹 수가 적어 못 미더울 때 — 비슷하게 생긴 아이콘이 여러 개라 비전이 계속
+  // 헷갈리는 몰(투비즈온 실사용 확인: 프롬프트를 세 번 바꿔도 매번 같은 오답)을 위해, 헤더의 아이콘
+  // 후보를 전부 실제로 클릭해보고 결과가 제일 좋은 것을 채택한다(discoverCategoryMenuByExhaustiveHeaderClick 참고).
+  // 이것도 "화면에서 실제로 클릭해보고 확인"이라는 점에서 비전과 같은 계열이라 DOM 추측보다 앞에 둔다.
+  const exhaustiveResult = await discoverCategoryMenuByExhaustiveHeaderClick(
+    context, page, mallName, startUrlBeforeVision, platform, productLinkSelector, signal,
+  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0, screenNames: null, screenHierarchy: null, menuLinks: [] as { text: string; href: string }[] }))
+  const exhaustiveScore = exhaustiveResult.links.length * Math.max(1, exhaustiveResult.groupCount)
+
+  if (exhaustiveScore > 0 || visionScore > 0) {
+    const winner = exhaustiveScore >= visionScore ? exhaustiveResult : visionResult
+    console.log(`[카테고리탐지:진단:${mallName}] 화면 인식 ${visionResult.links.length}개(그룹 ${visionResult.groupCount}) vs 헤더 전수클릭 ${exhaustiveResult.links.length}개(그룹 ${exhaustiveResult.groupCount}) — ${exhaustiveScore >= visionScore ? '전수클릭' : '화면 인식'} 채택`)
+    return { links: winner.links, textlessHrefs: [], aiUsed: false, screenNames: winner.screenNames, screenHierarchy: winner.screenHierarchy, menuLinks: winner.menuLinks }
+  }
+
+  // 비전(화면 인식)이 전부 실패했을 때만 DOM 텍스트/클래스 추측으로 넘어간다 — 최후 수단.
+  console.log(`[카테고리탐지:진단:${mallName}] 화면 인식 실패 → DOM 추측으로 넘어감`)
   const overviewUrl = await findCategoryOverviewLink(page)
   if (overviewUrl && overviewUrl.replace(/\/+$/, '') !== page.url().replace(/\/+$/, '')) {
     const moved = await page.goto(overviewUrl, { waitUntil: 'load', timeout: 15_000 }).then(() => true).catch(() => false)
@@ -4812,9 +5033,9 @@ async function discoverTopLevelCategoryLinks(
     console.log(`[카테고리탐지:진단:${mallName}] "카테고리" 단어가 든 링크를 못 찾음 — 지금 페이지(${page.url()}) 그대로 스캔`)
   }
 
-  // "카테고리 전체보기"류 페이지(제목+목록 반복 구조)부터 먼저 시도한다 — findCategoryOverviewLink가
-  // 방금 이런 페이지로 이동시켰을 가능성이 높고, scanCategoryMenuRobust(클래스명 기반)가 못 찾는
-  // 마크업(신우처럼 cat/lnb/gnb류 클래스가 아예 없는 몰)에서도 통한다.
+  // "카테고리 전체보기"류 페이지(제목+목록 반복 구조) — findCategoryOverviewLink가 방금 이런 페이지로
+  // 이동시켰을 가능성이 높고, scanCategoryMenuRobust(클래스명 기반)가 못 찾는 마크업(신우처럼
+  // cat/lnb/gnb류 클래스가 아예 없는 몰)에서도 통한다.
   const overviewLinks = await scanCategoryOverviewPage(page)
   if (overviewLinks.length && await looksLikeRealCategoryBatch(context, overviewLinks, platform, productLinkSelector)) {
     console.log(`[카테고리탐지:진단:${mallName}] "제목+목록" 구조로 ${overviewLinks.length}개 찾음(표본검증 통과)`)
@@ -4835,40 +5056,6 @@ async function discoverTopLevelCategoryLinks(
   }
   if (links.length && await looksLikeRealCategoryBatch(context, links, platform, productLinkSelector)) {
     return { links, textlessHrefs, aiUsed: false }
-  }
-
-  // DOM 텍스트/셀렉터 기반이 전부 실패했다 — AI 텍스트 폴백(아래)으로 넘어가기 전에, 화면 인식으로
-  // "전체 카테고리" 트리거를 찾아 직접 클릭해본다(discoverCategoryMenuByVision 참고, 2026-09-12 — 텍스트
-  // 자체가 없는(이미지뿐인) 메뉴는 AI 텍스트 폴백도 어차피 못 찾으므로 이게 이 경로에서 더 근본적인 수단).
-  const startUrlBeforeVision = page.url()
-  const aiCandidates = await collectAllPageLinks(page, baseUrl ? new URL(baseUrl).origin : undefined)
-  const visionResult = await discoverCategoryMenuByVision(
-    context, page, mallName, aiCandidates.map(c => c.href), platform, productLinkSelector, signal,
-  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0, screenNames: null, screenHierarchy: null, menuLinks: [] as { text: string; href: string }[] }))
-
-  // 비전이 "그럴듯하지만 일부만" 찾은 경우(표본검증은 통과하지만 실제로는 비슷하게 생긴 다른 아이콘을
-  // 잘못 클릭한 것) 그 결과를 곧바로 받아들이지 않는다(사용자 지시, 2026-09-12 — "다른 방법으로 해") —
-  // 비전 결과가 이미 충분히 커 보이면(그룹 3개 이상, 여러 대분류를 실제로 찾은 것으로 볼 만한 근거) 그대로
-  // 받아들이고, 그렇지 않으면(그룹 1~2개 — 부분 결과일 위험이 큼) 헤더 아이콘을 전부 실제로 클릭해보는
-  // 더 느리지만 확실한 방법도 마저 시도해 더 나은 쪽(찾은 개수×그룹 수가 더 큰 쪽)을 채택한다.
-  const visionScore = visionResult.links.length * Math.max(1, visionResult.groupCount)
-  const VISION_CONFIDENT_GROUP_COUNT = 3
-  if (visionResult.links.length && visionResult.groupCount >= VISION_CONFIDENT_GROUP_COUNT) {
-    return { links: visionResult.links, textlessHrefs, aiUsed: false, screenNames: visionResult.screenNames, screenHierarchy: visionResult.screenHierarchy, menuLinks: visionResult.menuLinks }
-  }
-
-  // 화면 인식이 실패했거나 그룹 수가 적어 못 미더울 때 — 비슷하게 생긴 아이콘이 여러 개라 비전이 계속
-  // 헷갈리는 몰(투비즈온 실사용 확인: 프롬프트를 세 번 바꿔도 매번 같은 오답)을 위해, 헤더의 아이콘
-  // 후보를 전부 실제로 클릭해보고 결과가 제일 좋은 것을 채택한다(discoverCategoryMenuByExhaustiveHeaderClick 참고).
-  const exhaustiveResult = await discoverCategoryMenuByExhaustiveHeaderClick(
-    context, page, mallName, startUrlBeforeVision, platform, productLinkSelector, signal,
-  ).catch(() => ({ links: [] as CategoryMenuLink[], groupCount: 0, screenNames: null, screenHierarchy: null, menuLinks: [] as { text: string; href: string }[] }))
-  const exhaustiveScore = exhaustiveResult.links.length * Math.max(1, exhaustiveResult.groupCount)
-
-  if (exhaustiveScore > 0 || visionScore > 0) {
-    const winner = exhaustiveScore >= visionScore ? exhaustiveResult : visionResult
-    console.log(`[카테고리탐지:진단:${mallName}] 화면 인식 ${visionResult.links.length}개(그룹 ${visionResult.groupCount}) vs 헤더 전수클릭 ${exhaustiveResult.links.length}개(그룹 ${exhaustiveResult.groupCount}) — ${exhaustiveScore >= visionScore ? '전수클릭' : '화면 인식'} 채택`)
-    return { links: winner.links, textlessHrefs, aiUsed: false, screenNames: winner.screenNames, screenHierarchy: winner.screenHierarchy, menuLinks: winner.menuLinks }
   }
 
   // 규칙 기반(화면 인식 포함)이 전부 실패했을 때만 AI 텍스트로 넘어간다 — 마지막 수단이라 시간을 넉넉히 준다.
@@ -5284,7 +5471,10 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
         console.log(`[정렬적용:${clicked ? '성공' : '실패'}] "${sortClickText}" — ${listingUrl}${clicked ? '' : ' (정렬 라벨을 화면에서 못 찾음 — 기본 정렬로 진행)'}`)
         if (clicked) {
           await workerPage.waitForLoadState('load', { timeout: 5_000 }).catch(() => {})
-          await workerPage.waitForLoadState('networkidle', { timeout: 3_000 }).catch(async () => { await workerPage.waitForTimeout(800) })
+          // confirmSortCandidatesByClicking과 같은 이유(2026-09-15, 정글북 실사용 확인) — networkidle이
+          // 성공하든 실패하든 화면이 새 순서로 다 그려지기까지 조금 더 걸릴 수 있어 항상 짧게 더 기다린다.
+          await workerPage.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {})
+          await workerPage.waitForTimeout(800)
           // kind:'click' 정렬은 정의상 AJAX라 URL이 전혀 안 바뀌어야 한다(detectSortOptionsByClicking이
           // 바로 이 조건 — afterUrl===baseUrl, 문자열 그대로 동일 — 으로 kind:'click'을 확정했다). 같은
           // 정렬 텍스트가 상품 뱃지("신상품" 등)나, 이 카테고리 페이지에만 있는 진짜 href 링크(다른
@@ -7102,6 +7292,63 @@ export function findApproximateMatch(key: string, keys: Iterable<string>): strin
     if (d <= allowed && (!best || d < best.d)) best = { k, d }
   }
   return best?.k ?? null
+}
+
+export interface VisibleCategoryCandidate { name: string; leafText: string }
+
+/** detectVisibleCategoryHierarchy가 돌려준 {group, items[]}[]("같은 시각적 레벨에 나란히 보이는 것 =
+ *  카테고리 후보 그룹")를 "이름 하나당 후보 하나"로 평평하게 편다. items가 없으면(도매신의 가로 탭처럼
+ *  하위 카테고리 없이 대분류 이름만 나란히 보이는 경우) 그룹 이름 자체를 리프로 삼고, items가 있으면
+ *  "그룹 > 항목"으로 경로를 만든다(scanCategoryOverviewPage의 이름 규칙과 동일). 순수 함수 — 화면인식/
+ *  DOM 없이 테스트 가능. */
+export function flattenVisibleCategoryHierarchy(groups: { group: string; items: string[] }[]): VisibleCategoryCandidate[] {
+  const out: VisibleCategoryCandidate[] = []
+  for (const { group, items } of groups) {
+    if (!group) continue
+    if (!items.length) {
+      out.push({ name: group, leafText: group })
+      continue
+    }
+    for (const item of items) {
+      if (!item) continue
+      out.push({ name: `${group} > ${item}`, leafText: item })
+    }
+  }
+  return out
+}
+
+/** 비전이 화면에서 읽은 카테고리 후보를, 같은 화면에서 같이 모아둔 링크(pageLinks) 중 이름이 일치하는
+ *  것과 짝지어 href를 되찾는다 — 화면에 보이는 텍스트라면 DOM에 진짜 앵커가 있다는 뜻이므로, 못 찾으면
+ *  좌표 클릭으로 지어내지 않고 그냥 버린다(resolveMissingCategoryCandidates와 같은 원칙 — "확인 못 하면
+ *  후보에서 뺀다"). 정확히 안 맞으면 findApproximateMatch로 한 번 더 시도한다(비전 OCR 오독 흡수, 같은
+ *  이유는 findApproximateMatch 주석 참고). 같은 href를 두 후보가 나눠 갖지 않도록 소비한 href는 뺀다. */
+export function matchVisibleCategoryLinksToHrefs(
+  candidates: VisibleCategoryCandidate[],
+  pageLinks: { text: string; href: string }[],
+): CategoryMenuLink[] {
+  const byName = new Map<string, string[]>()
+  for (const l of pageLinks) {
+    const key = normalizeCategoryName(l.text)
+    if (!key || !l.href) continue
+    const list = byName.get(key)
+    if (list) list.push(l.href)
+    else byName.set(key, [l.href])
+  }
+  const usedHrefs = new Set<string>()
+  const out: CategoryMenuLink[] = []
+  for (const c of candidates) {
+    const key = normalizeCategoryName(c.leafText)
+    if (!key) continue
+    let href = byName.get(key)?.find(h => !usedHrefs.has(h))
+    if (!href) {
+      const approx = findApproximateMatch(key, byName.keys())
+      if (approx) href = byName.get(approx)?.find(h => !usedHrefs.has(h))
+    }
+    if (!href) continue
+    usedHrefs.add(href)
+    out.push({ name: c.name, href })
+  }
+  return out
 }
 
 /** 재검증할 후보 — 화면에서 읽은 이름에 URL을 붙인 것. href를 못 찾으면 재검증 자체가 불가능하다. */

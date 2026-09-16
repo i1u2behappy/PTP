@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import fc from 'fast-check'
-import { buildCategoryScreenCheck, normalizeCategoryName, resolveMissingCategoryCandidates, findApproximateMatch } from '../../lib/scraper'
+import { buildCategoryScreenCheck, normalizeCategoryName, resolveMissingCategoryCandidates, findApproximateMatch, flattenVisibleCategoryHierarchy, matchVisibleCategoryLinksToHrefs } from '../../lib/scraper'
 import { sanitizeVisibleCategoryNames, sanitizeVisibleCategoryHierarchy } from '../../lib/ai'
 
 // "화면으로 카테고리를 파악했으면, 최종 결과가 그 화면과 맞는지·안 맞으면 왜인지 피드백해야 한다"는
@@ -222,5 +222,86 @@ describe('직전 결과 기준선 — 사라진 카테고리 골라내기', () =
   it('www 유무만 다른 같은 URL은 사라진 것으로 보지 않는다 — 같은 페이지다', () => {
     expect(dropped([{ name: '주방용품', href: 'https://www.m.com/list?ctno=064' }]).map(p => p.name))
       .toEqual(['여성의류', 'PC주변기기'])
+  })
+})
+
+// "화면을 사람이 보듯이" 먼저 읽어 카테고리를 찾는 설계(도매신 실사용, 2026-09-16 — 클릭 없이 이미
+// 보이는 가로 GNB 탭을 "제목+목록" DOM 추측이 무관한 위젯으로 오인했다)의 두 순수 함수.
+describe('flattenVisibleCategoryHierarchy', () => {
+  it('하위 항목이 없으면 그룹 이름 자체를 리프로 삼는다(도매신처럼 하위 없이 나란한 탭)', () => {
+    const out = flattenVisibleCategoryHierarchy([{ group: 'WOMEN SHOES', items: [] }, { group: 'MEN SHOES', items: [] }])
+    expect(out).toEqual([{ name: 'WOMEN SHOES', leafText: 'WOMEN SHOES' }, { name: 'MEN SHOES', leafText: 'MEN SHOES' }])
+  })
+
+  it('하위 항목이 있으면 "그룹 > 항목"으로 편다', () => {
+    const out = flattenVisibleCategoryHierarchy([{ group: '여성의류', items: ['원피스', '블라우스'] }])
+    expect(out).toEqual([
+      { name: '여성의류 > 원피스', leafText: '원피스' },
+      { name: '여성의류 > 블라우스', leafText: '블라우스' },
+    ])
+  })
+
+  it('빈 입력/빈 그룹 이름은 건너뛴다', () => {
+    expect(flattenVisibleCategoryHierarchy([])).toEqual([])
+    expect(flattenVisibleCategoryHierarchy([{ group: '', items: ['x'] }])).toEqual([])
+  })
+
+  it('임의 입력에서도 예외를 던지지 않고, 빈 문자열 항목은 결과에 남기지 않는다', () => {
+    fc.assert(fc.property(
+      fc.array(fc.record({ group: fc.string(), items: fc.array(fc.string(), { maxLength: 5 }) }), { maxLength: 10 }),
+      (groups) => {
+        const out = flattenVisibleCategoryHierarchy(groups)
+        expect(out.every(o => o.leafText.length > 0)).toBe(true)
+      },
+    ))
+  })
+})
+
+describe('matchVisibleCategoryLinksToHrefs', () => {
+  const pageLinks = [
+    { text: 'WOMEN SHOES', href: 'https://domesin.co.kr/product/list.html?cate_no=124' },
+    { text: 'MEN SHOES', href: 'https://domesin.co.kr/product/list.html?cate_no=125' },
+    { text: '좋아요', href: 'https://domesin.co.kr/myshop/likeit/product.html' },
+  ]
+
+  it('화면에서 읽은 이름과 정확히 일치하는 링크의 href를 되찾는다', () => {
+    const out = matchVisibleCategoryLinksToHrefs(
+      [{ name: 'WOMEN SHOES', leafText: 'WOMEN SHOES' }, { name: 'MEN SHOES', leafText: 'MEN SHOES' }],
+      pageLinks,
+    )
+    expect(out).toEqual([
+      { name: 'WOMEN SHOES', href: 'https://domesin.co.kr/product/list.html?cate_no=124' },
+      { name: 'MEN SHOES', href: 'https://domesin.co.kr/product/list.html?cate_no=125' },
+    ])
+  })
+
+  it('비전 오독은 findApproximateMatch로 흡수한다', () => {
+    const out = matchVisibleCategoryLinksToHrefs([{ name: 'WOMEN SHOE', leafText: 'WOMEN SHOE' }], pageLinks)
+    expect(out).toEqual([{ name: 'WOMEN SHOE', href: 'https://domesin.co.kr/product/list.html?cate_no=124' }])
+  })
+
+  it('DOM에서 href를 못 찾으면 좌표를 지어내지 않고 후보에서 뺀다', () => {
+    expect(matchVisibleCategoryLinksToHrefs([{ name: '없는메뉴', leafText: '없는메뉴' }], pageLinks)).toEqual([])
+  })
+
+  it('같은 href를 두 후보가 나눠 갖지 않는다', () => {
+    const links = [{ text: '신상품', href: 'https://m.com/a' }]
+    const out = matchVisibleCategoryLinksToHrefs(
+      [{ name: '신상품', leafText: '신상품' }, { name: '신상품2', leafText: '신상품' }],
+      links,
+    )
+    expect(out).toHaveLength(1)
+  })
+
+  it('임의 입력에서도 예외를 던지지 않고, 반환된 href는 항상 입력 pageLinks에서 온 것이다', () => {
+    fc.assert(fc.property(
+      fc.array(fc.record({ name: fc.string(), leafText: fc.string() }), { maxLength: 10 }),
+      fc.array(fc.record({ text: fc.string(), href: fc.webUrl() }), { maxLength: 10 }),
+      (candidates, links) => {
+        const out = matchVisibleCategoryLinksToHrefs(candidates, links)
+        const validHrefs = new Set(links.map(l => l.href))
+        expect(out.every(o => validHrefs.has(o.href))).toBe(true)
+      },
+    ))
   })
 })

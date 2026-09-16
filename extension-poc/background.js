@@ -485,8 +485,37 @@ const COLLECT_ALL_LINKS_EXPR = `(() => {
 // runDetectSortOptions가 evalInTab을 반복 호출해 하나씩 수행한다(클릭마다 원래 페이지로 복귀해야 해서
 // 이 evaluate 하나로 전부 끝낼 수 없다).
 // 최저/최고도 낮은가격/높은가격만큼 흔한 표현이다(lib/scraper.ts SORT_KEYWORD_PATTERN과 같은 이유로 추가,
-// 2026-09-12 — 두 곳이 갈라지지 않도록 항상 같이 반영).
-const SORT_KEYWORD_PATTERN = '(신상|신규|최신|낮은\\s*가격|높은\\s*가격|최저|최고|인기|판매량|조회|클릭|리뷰|추천|할인|세일|낱개판매|기본순)'
+// 2026-09-12 — 두 곳이 갈라지지 않도록 항상 같이 반영). 판매순/상품명순도 같은 이유로 추가(2026-09-15,
+// 정글북 실사용 확인 — "판매량"/(상품명 매칭 없음)만으로는 "판매순"/"상품명순"이 후보에도 안 들어갔다).
+const SORT_KEYWORD_PATTERN = '(신상|신규|최신|낮은\\s*가격|높은\\s*가격|최저|최고|인기|판매량|판매\\s*순|상품명\\s*순|조회|클릭|리뷰|추천|할인|세일|낱개판매|기본순)'
+
+// lib/scraper.ts의 openLikelySortDropdownTrigger와 같은 이유·같은 판정(2026-09-15, 정글북 실사용 확인 —
+// "판매순"/"낮은 가격순" 등은 현재 선택된 정렬(예: "최신순")을 보여주는 버튼을 먼저 클릭해야 DOM에
+// 나타나는 닫힌 드롭다운이었다. 스크린샷/구조 스캔 둘 다 열기 전 상태만 봐서 이 옵션들을 놓쳤다) — 텍스트
+// 자체가 이미 정렬 키워드처럼 생기고 아이콘(svg)을 동반한 버튼만 트리거로 본다(그래야 "강아지"/"고양이"
+// 같은 무관한 토글을 잘못 열지 않는다). 이 트리거는 클릭마다 열림/닫힘이 토글돼, 이미 열려 있는데 또
+// 부르면 도로 닫아버린다(정글북 재확인, 2026-09-15 — 스크린샷 단계가 열어둔 걸 클릭 폴백 단계가 또
+// 열려다 도로 닫음) — "정렬 키워드 텍스트가 이미 2개 이상 보이면 열린 것"으로 추측했다가 실패했다
+// (사이트 공통 상단 메뉴 "신상품"/"타임세일"이 닫힌 상태에서도 우연히 같은 키워드에 걸려 항상 2개 이상
+// 잡혔다 — 실제 로그로 확인). 대신 클릭에 성공했을 때만 document에 표시를 남기고 다음 호출은 그 표시만
+// 본다 — 같은 탭에서 페이지를 새로 불러오면(clickCandidatesAndCollectLinks가 후보마다 baseUrl로 되돌아갈
+// 때) 표시가 자연히 사라져 다음 후보에서도 정확히 다시 판단한다. 두 곳이 갈라지지 않도록 항상 같이 반영한다.
+const OPEN_SORT_DROPDOWN_EXPR = `(() => {
+  const marker = 'data-scraper-opened-sort-dropdown'
+  if (document.documentElement.hasAttribute(marker)) return true
+  const re = new RegExp(${JSON.stringify(SORT_KEYWORD_PATTERN)})
+  const candidate = Array.from(document.querySelectorAll('button, [role="button"]')).find(el => {
+    const text = (el.textContent || '').trim()
+    if (!text || text.length > 12 || !re.test(text)) return false
+    if (!el.querySelector('svg')) return false
+    const rect = el.getBoundingClientRect()
+    return rect.width > 0 && rect.height > 0
+  })
+  if (!candidate) return false
+  candidate.click()
+  document.documentElement.setAttribute(marker, '1')
+  return true
+})()`
 const COLLECT_SORT_KEYWORD_TEXTS_EXPR = `(() => {
   const re = new RegExp(${JSON.stringify(SORT_KEYWORD_PATTERN)})
   const seen = new Set()
@@ -524,19 +553,31 @@ const HAS_SORT_LINK_ON_PAGE_EXPR = `(() => {
 
 // 위에서 모은 후보 텍스트 하나를 실제로 클릭한다 — 정확히 그 텍스트를 직접 담은(자식이 아닌) 요소만
 // 찾아 클릭하고, 성공 여부만 boolean으로 돌려준다(클릭 이후 페이지 이동 여부는 호출부가
-// chrome.tabs.onUpdated로 별도 확인).
+// chrome.tabs.onUpdated로 별도 확인). 곧바로 못 찾으면 닫힌 드롭다운 안에 있을 수 있어(위
+// OPEN_SORT_DROPDOWN_EXPR 주석 참고) 한 번 열어보고 다시 찾는다 — evalInTab이 awaitPromise:true라
+// async IIFE + 짧은 대기(React 렌더 반영 시간)를 그대로 쓸 수 있다.
 function buildClickTextExpr(text) {
-  return `(() => {
+  return `(async () => {
     const target = ${JSON.stringify(text)}
-    for (const el of Array.from(document.querySelectorAll('a, button, li, span, div, label'))) {
-      const t = (el.textContent || '').trim()
-      if (t !== target) continue
-      const hasTextChild = Array.from(el.children).some(c => (c.textContent || '').trim() === t)
-      if (hasTextChild) continue
-      el.click()
-      return true
+    const find = () => {
+      for (const el of Array.from(document.querySelectorAll('a, button, li, span, div, label'))) {
+        const t = (el.textContent || '').trim()
+        if (t !== target) continue
+        const hasTextChild = Array.from(el.children).some(c => (c.textContent || '').trim() === t)
+        if (hasTextChild) continue
+        return el
+      }
+      return null
     }
-    return false
+    let el = find()
+    if (!el) {
+      ${OPEN_SORT_DROPDOWN_EXPR}
+      await new Promise(r => setTimeout(r, 300))
+      el = find()
+    }
+    if (!el) return false
+    el.click()
+    return true
   })()`
 }
 
@@ -1935,6 +1976,10 @@ async function runDetectSortOptions(tab, site) {
       // 폴백(href/select 원문 스캔, 최대 120개 — 상품/공지 등 무관 링크가 섞여있어 여전히 AI 분류가
       // 필요함)에서는 verified를 true로 두지 않는다).
       let verified = false
+      // 닫힌 드롭다운은 화면에 지금 선택된 라벨만 보이고 나머지 옵션은 안 보인다 — 스크린샷 전에 한 번
+      // 열어본다(OPEN_SORT_DROPDOWN_EXPR 주석 참고, 정글북 실사용 확인 2026-09-15). 열 게 없으면 조용히
+      // 실패하고 닫힌 상태 그대로일 뿐이라 기존 동작과 같다.
+      await evalInTab(tab.id, OPEN_SORT_DROPDOWN_EXPR).catch(() => false)
       const screenshotBase64 = await captureScreenshot(tab.id).catch(() => null)
       if (screenshotBase64) {
         const labels = await fetch(`${PTP_ORIGIN}/api/scrape/detect-sort-labels`, {
@@ -1944,6 +1989,37 @@ async function runDetectSortOptions(tab, site) {
         if (labels.length) {
           links = await clickCandidatesAndCollectLinks(tab.id, baseUrl, labels)
           verified = links.length > 0
+        }
+      }
+
+      // 1.5차: 값이 하나도 안 보이면, 트리거 자체가 "정렬방식"처럼 고정 라벨만 있고 지금 값은 화면에
+      // 없는 경우일 수 있다(도매신 실사용 확인, 2026-09-16 — OPEN_SORT_DROPDOWN_EXPR은 트리거 자신의
+      // 텍스트가 이미 정렬 키워드일 때만 여는데 "정렬방식"은 그 키워드 목록에 없다). 사람이 화면을 보고
+      // 그 버튼을 찾아 눌러보듯, 비전으로 위치를 찾아 직접 클릭한 뒤 다시 읽는다(lib/scraper.ts의
+      // detectSortOptionsByScreenshot과 같은 이유·같은 순서 — 두 곳이 갈라지지 않도록 항상 같이 반영한다).
+      if (!links.length && screenshotBase64) {
+        const trigger = await fetch(`${PTP_ORIGIN}/api/scrape/detect-sort-trigger`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mallName: site.name, imageBase64: screenshotBase64, mimeType: 'image/jpeg' }),
+        }).then(r => r.json()).then(d => d.trigger || { found: false }).catch(() => ({ found: false }))
+        if (trigger.found) {
+          // 이 파일엔 좌표 클릭 헬퍼가 없어(lib/scraper.ts의 clickNearestClickableAtPoint에 해당하는
+          // 것) evalInTab으로 elementFromPoint+click을 직접 실행한다 — 이 파일의 다른 모든 동작이
+          // evalInTab 기반인 것과 같은 패턴.
+          const viewport = await evalInTab(tab.id, '(() => ({ width: innerWidth, height: innerHeight }))()').catch(() => ({ width: 1280, height: 800 }))
+          const x = viewport.width * (trigger.xPercent / 100)
+          const y = viewport.height * (trigger.yPercent / 100)
+          await evalInTab(tab.id, `(() => { const el = document.elementFromPoint(${x}, ${y}); if (el) { el.click(); return true } return false })()`).catch(() => false)
+          await new Promise(r => setTimeout(r, 300))
+          const reshotBase64 = await captureScreenshot(tab.id).catch(() => null)
+          const labels2 = reshotBase64 ? await fetch(`${PTP_ORIGIN}/api/scrape/detect-sort-labels`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mallName: site.name, imageBase64: reshotBase64, mimeType: 'image/jpeg' }),
+          }).then(r => r.json()).then(d => d.labels || []).catch(() => []) : []
+          if (labels2.length) {
+            links = await clickCandidatesAndCollectLinks(tab.id, baseUrl, labels2)
+            verified = links.length > 0
+          }
         }
       }
 
@@ -1958,6 +2034,9 @@ async function runDetectSortOptions(tab, site) {
         const rawLinks = all.links
         const hasSortLabel = rawLinks.some(l => { const t = l.text.trim(); return t.length <= 10 && /순$/.test(t) })
         if (!hasSortLabel) {
+          // 위 스크린샷 이후 clickCandidatesAndCollectLinks가 baseUrl로 되돌아가며 페이지를 다시 불러와
+          // 드롭다운이 닫혔을 수 있다 — 키워드 스캔 전에도 같은 이유로 한 번 더 열어본다.
+          await evalInTab(tab.id, OPEN_SORT_DROPDOWN_EXPR).catch(() => false)
           const candidateTexts = await evalInTab(tab.id, COLLECT_SORT_KEYWORD_TEXTS_EXPR).catch(() => [])
           const clickedFallback = await clickCandidatesAndCollectLinks(tab.id, baseUrl, candidateTexts)
           if (clickedFallback.length) {

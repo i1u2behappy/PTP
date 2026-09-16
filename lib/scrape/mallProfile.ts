@@ -225,9 +225,10 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
   await pool.query(
     `UPDATE sites SET scrape_profile = $1, scrape_profile_updated_at = NOW() WHERE id = $2`,
     [JSON.stringify({
-      // sessionLostDuringAnalysis: undefined — 이번 실행 한정 신호라 저장 안 함(MallProfileSignals 주석
-      // 참고) — 안 그러면 다음에 이 몰을 선택했을 때(캐시 복원) 이미 지난 경고가 계속 남아있게 된다.
-      ...next, sampleProductPageText: undefined, sessionLostDuringAnalysis: undefined,
+      // sessionLostDuringAnalysis/loginSignalUnavailable: undefined — 둘 다 이번 실행 한정 신호라 저장
+      // 안 함(MallProfileSignals 주석 참고) — 안 그러면 다음에 이 몰을 선택했을 때(캐시 복원) 이미 지난
+      // 경고/안내가 계속 남아있게 된다.
+      ...next, sampleProductPageText: undefined, sessionLostDuringAnalysis: undefined, loginSignalUnavailable: undefined,
       categoryCounts: prev?.categoryCounts, excludedCategoryHrefs: prev?.excludedCategoryHrefs,
       newCategoryHrefs,
     }), siteId],

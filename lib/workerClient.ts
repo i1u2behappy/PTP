@@ -73,6 +73,7 @@ export const getCollectProgress = (sessionId: number) => callWorker<{ done: numb
 export const setCollectProgress = (sessionId: number, done: number, total: number) => callWorker<void>('setCollectProgress', [sessionId, done, total])
 export const getSiteLockStatus = (siteId: number) => callWorker<{ label: string; sinceMs: number; detail?: string } | null>('getSiteLockStatus', [siteId])
 export const setSiteLockDetail = (key: number | string, detail: string) => callWorker<void>('setSiteLockDetail', [key, detail])
+export const getSiteLastRunSignals = (siteId: number) => callWorker<{ aiReportAttempts?: MallProfileSignals['aiReportAttempts']; visionProviderLog?: MallProfileSignals['visionProviderLog'] } | null>('getSiteLastRunSignals', [siteId])
 export const isAnySiteBusy = () => callWorker<boolean>('isAnySiteBusy', [])
 export const getPreviewProgress = (siteId: number) => callWorker<{ done: number; total: number; result?: CatalogPreviewResult; earlyPreview?: ScrapeResult | null } | null>('getPreviewProgress', [siteId])
 export const stopProfileAnalysis = (siteId: number) => callWorker<boolean>('stopProfileAnalysis', [siteId])

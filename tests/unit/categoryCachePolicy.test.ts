@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { shouldKeepPreviousCategoryLinks, mergeSortOptions } from '../../lib/scrape/categoryCachePolicy'
+import { shouldKeepPreviousCategoryLinks, mergeSortOptions, hasMoreCategoryHierarchy } from '../../lib/scrape/categoryCachePolicy'
 
 // "다시 확인"이 로그인 벽에 막힌 부실한 결과로 확장이 방금 저장해둔 좋은 카테고리 캐시를 지워버리던
 // 버그(2026-08-29, 펫토리 실사용 확인)의 재발 방지 — 실제 원인은 이 판단 하나였다.
@@ -51,6 +51,35 @@ describe('shouldKeepPreviousCategoryLinks', () => {
   })
 })
 
+// mallProfile.ts의 "개수가 줄면 이전 결과를 지킨다" 가드가 "개수는 줄었지만 실제로는 더 정교해졌다"를
+// 구분 못 해 되돌려버리던 버그(2026-09-24, 걸스굽 실사용 확인)의 재발 방지 — 화면 인식이 "여성화 >
+// 가격대별 > 0 - 9,900"까지 계층을 잡았는데, 예전에 계층 없이 저장해둔 개수가 더 많다는 이유만으로
+// 그 평평한 결과로 되돌아갔다.
+describe('hasMoreCategoryHierarchy', () => {
+  it('계층 이름(">" 포함) 개수가 이번이 더 많으면 true', () => {
+    const prev = [{ name: '여성화' }, { name: 'FLAT & LOAFER' }, { name: 'SNEAKERS' }]
+    const next = [{ name: '여성화 > FLAT & LOAFER' }, { name: '여성화 > SNEAKERS' }]
+    expect(hasMoreCategoryHierarchy(prev, next)).toBe(true)
+  })
+
+  it('둘 다 계층이 없으면(진짜 개수 축소일 수 있음) false', () => {
+    const prev = [{ name: '여성화' }, { name: '남성화' }, { name: '아동화' }]
+    const next = [{ name: '여성화' }, { name: '남성화' }]
+    expect(hasMoreCategoryHierarchy(prev, next)).toBe(false)
+  })
+
+  it('이전에도 계층이 있었고 이번엔 그보다 적으면 false(진짜 축소로 본다)', () => {
+    const prev = [{ name: '여성화 > FLAT & LOAFER' }, { name: '여성화 > SNEAKERS' }, { name: '남성화 > LOAFER' }]
+    const next = [{ name: '여성화 > FLAT & LOAFER' }]
+    expect(hasMoreCategoryHierarchy(prev, next)).toBe(false)
+  })
+
+  it('prev/next가 없어도(undefined) 에러 없이 처리한다', () => {
+    expect(hasMoreCategoryHierarchy(undefined, [{ name: '여성화 > FLAT & LOAFER' }])).toBe(true)
+    expect(hasMoreCategoryHierarchy([{ name: '여성화 > FLAT & LOAFER' }], undefined)).toBe(false)
+  })
+})
+
 // "몰 구조분석" 한 번에 서버(sampleMallProfile)와 개발자모드 확장(runDetectSortOptions)이 병렬로 각자
 // 독립적으로 정렬 옵션을 찾아 같은 자리에 REPLACE로 써서 서로 덮어쓰던 버그(2026-09-09, 모자사러
 // 실사용 확인 — 서버는 [낮은가격,높은가격]을, 확장은 [상품명]을 찾았는데 나중에 쓴 쪽만 남았다)의
@@ -88,5 +117,27 @@ describe('mergeSortOptions', () => {
 
   it('둘 다 없으면 빈 배열을 돌려준다', () => {
     expect(mergeSortOptions(undefined, undefined)).toEqual([])
+  })
+
+  // 도매의신 실사용 확인(2026-09-18): diffQueryParams가 페이지 식별자 값(.html 등)을 걸러내는 규칙이
+  // 생기기 전에 저장된 낡은 sortOptions("인기1TV100197" 등 상품 링크가 정렬로 잘못 저장된 값)가, 그
+  // 뒤로 몇 번을 다시 실행해도 label이 안 겹친다는 이유만으로 이 merge에서 절대 안 빠져 "정렬구조가
+  // 그대로다"라는 혼란을 냈다 — prev/next 양쪽에서 이 모양의 값을 항상 걸러내야 한다.
+  it('페이지 식별자 값(.html 등)을 가진 낡은 오탐은 label이 안 겹쳐도 prev에서 걸러낸다', () => {
+    const prev = [
+      { label: '인기1TV100197', kind: 'query', paramsToAdd: { p: 'search4_itemdetail.html', q: 'TV100197' } },
+      { label: '상품명', kind: 'query', paramsToAdd: { sort_method: '1' } },
+    ]
+    const next: typeof prev = []
+    expect(mergeSortOptions(prev, next)).toEqual([{ label: '상품명', kind: 'query', paramsToAdd: { sort_method: '1' } }])
+  })
+
+  it('같은 모양의 오탐이 next에 새로 섞여 들어와도 걸러낸다', () => {
+    const prev: { label: string; kind: string; paramsToAdd: Record<string, string> }[] = []
+    const next: typeof prev = [
+      { label: '최신상품순', kind: 'query', paramsToAdd: { sort: 'new' } },
+      { label: '인기2TV100460', kind: 'query', paramsToAdd: { p: 'search4_itemdetail.html', q: 'TV100460' } },
+    ]
+    expect(mergeSortOptions(prev, next)).toEqual([{ label: '최신상품순', kind: 'query', paramsToAdd: { sort: 'new' } }])
   })
 })

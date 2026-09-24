@@ -1,8 +1,8 @@
 import pool from '../db'
-import { profileMallStructure, profileMallStructureForScrape, type MallProfileSignals, type ScrapeOptions } from '../scraper'
+import { profileMallStructure, profileMallStructureForScrape, setSiteLastRunSignals, type MallProfileSignals, type ScrapeOptions } from '../scraper'
 import { runAutoAnalysis } from './adjustment'
 import { checkCategoryAnomaly } from './categoryAnomalyCheck'
-import { mergeSortOptions, shouldKeepPreviousCategoryLinks } from './categoryCachePolicy'
+import { mergeSortOptions, shouldKeepPreviousCategoryLinks, hasMoreCategoryHierarchy } from './categoryCachePolicy'
 import type { MallStructureReport, AiProviderId } from '../ai'
 import { ALL_AI_PROVIDERS } from '../ai'
 
@@ -172,7 +172,10 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
     // 다른(엉뚱한 게시판 등) 링크를 찾아오게 된다. categoryLinks를 되돌릴 땐 패턴도 같이 되돌린다
     // (오토카필 몰 실사용 확인, 2026-08-29 — "몰 구조분석"과 "카테고리 불러오기" 결과가 전혀 다름).
     next.categoryUrlPattern = prev.categoryUrlPattern
-  } else if (prev?.categoryLinks?.length && next.categoryLinks.length < prev.categoryLinks.length) {
+  } else if (
+    prev?.categoryLinks?.length && next.categoryLinks.length < prev.categoryLinks.length &&
+    !hasMoreCategoryHierarchy(prev.categoryLinks, next.categoryLinks)
+  ) {
     // categoryLinks는 deep=false("구조 변화 감지", 로그인 확인/스크랩 시작마다 자동으로 돎)에서도 매번
     // 다시(얕게) 계산된다 — 개발자모드 확장의 "카테고리 하위구조 자동확인"(runExpandCategories)이 펼쳐둔
     // 하위 카테고리 목록의 권위 있는 갱신 창구가 아니므로, 그 결과가 이전보다 얕아졌으면(개수가 줄었으면)
@@ -187,6 +190,10 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
     // 구조 축소"와 "이번 탐지가 실패함"을 이 개수 비교만으로는 구분할 수 없으니, deep 여부와 무관하게
     // 안전한 쪽(줄었으면 일단 지킨다)을 택한다 — 진짜 축소를 반영하고 싶으면 "카테고리 불러오기 다시
     // 확인"(shouldKeepPreviousCategoryLinks, 개수가 늘 때만 명확히 덮어씀)을 쓰면 된다.
+    // 다만 개수만 보고 품질(계층 깊이)은 안 보는 게 또 다른 사고를 냈다(hasMoreCategoryHierarchy 주석
+    // 참고, 걸스굽 2026-09-24) — 화면 인식이 이번엔 "대분류 > 중분류"까지 정확히 잡았는데 예전(평평한
+    // 이름) 개수가 더 많다는 이유만으로 그 평평한 결과로 되돌아갔다. 계층 이름 개수가 이번이 더 많으면
+    // (진짜 축소라면 같이 줄어야 하므로) 이 되돌리기 자체를 건너뛴다.
     next.categoryLinks = prev.categoryLinks
     next.categoryMenuNames = prev.categoryMenuNames
     next.categoryUrlPattern = prev.categoryUrlPattern
@@ -225,10 +232,12 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
   await pool.query(
     `UPDATE sites SET scrape_profile = $1, scrape_profile_updated_at = NOW() WHERE id = $2`,
     [JSON.stringify({
-      // sessionLostDuringAnalysis/loginSignalUnavailable: undefined — 둘 다 이번 실행 한정 신호라 저장
-      // 안 함(MallProfileSignals 주석 참고) — 안 그러면 다음에 이 몰을 선택했을 때(캐시 복원) 이미 지난
-      // 경고/안내가 계속 남아있게 된다.
+      // sessionLostDuringAnalysis/loginSignalUnavailable/visionProviderLog/aiReportAttempts: undefined —
+      // 넷 다 이번 실행 한정 신호라 저장 안 함(MallProfileSignals 주석 참고) — 안 그러면 다음에 이 몰을
+      // 선택했을 때(캐시 복원) 이미 지난 경고/안내나, 이제는 다를 수 있는 지난 실행의 공급자 정보가
+      // 계속 남아있게 된다.
       ...next, sampleProductPageText: undefined, sessionLostDuringAnalysis: undefined, loginSignalUnavailable: undefined,
+      visionProviderLog: undefined, aiReportAttempts: undefined,
       categoryCounts: prev?.categoryCounts, excludedCategoryHrefs: prev?.excludedCategoryHrefs,
       newCategoryHrefs,
     }), siteId],
@@ -293,6 +302,10 @@ export async function runMallStructureReport(siteId: number, aiProviders: AiProv
   const next = await profileMallStructure(siteId, true, aiProviders)
   if (!next) return null
   const result = await applyProfileResult(siteId, next, true)
+  // setSiteLastRunSignals 주석 참고 — 개발자모드는 이 함수의 반환값을 직접 못 받으므로, PTP 탭이 나중에
+  // 폴링으로 대신 가져갈 수 있게 여기서 한 번 더 남겨둔다(일반모드는 이미 이 반환값을 그대로 받으니
+  // 원래도 문제없었다).
+  setSiteLastRunSignals(siteId, { aiReportAttempts: next.aiReportAttempts, visionProviderLog: next.visionProviderLog })
 
   if (next.sampleProductPageText) {
     try {

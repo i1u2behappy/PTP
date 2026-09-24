@@ -20,7 +20,14 @@ export async function POST(req: NextRequest) {
   }
   const { siteId, url, name } = parsed.data
   try {
-    const result = await expandCategoryChildren({ siteId, url }, url, name || '')
+    // allowStaleManualLoginProfile: 개발자모드(직접로그인 필수) 몰은 사용자가 실제 크롬을 켜둔 채 쓰는 게
+    // 정상 상태라, 프로필 복사 시 세션 파일 잠금으로 완전한 복사가 실패하는 게 흔하다 — 이 플래그가 없으면
+    // withContext가 그 실패를 그대로 던져 이 라우트가 500을 낸다. 같은 이유로 이미 고친 4곳(!specifications/
+    // manual-login-required-malls.md "버그 2" 참고: categories/route.ts, mall-structure-check/route.ts,
+    // recheck/route.ts, products/[id]/rescrape/route.ts)과 같은 패턴인데 이 라우트("카테고리 선택
+    // 가져오기(반복)"의 하위 카테고리 확인)만 빠져 있었다(펫토리 실사용 확인, 2026-09-19 — 시스템 상태는
+    // 전부 정상인데 이 라우트만 500이 나던 원인).
+    const result = await expandCategoryChildren({ siteId, url, allowStaleManualLoginProfile: true }, url, name || '')
     return NextResponse.json(result)
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 })

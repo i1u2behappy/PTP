@@ -28,7 +28,10 @@ export async function POST(req: NextRequest) {
   if (existing?.length) return NextResponse.json({ sortOptions: existing, cached: true })
 
   try {
-    const sortOptions = await detectSortOptionsForCategory({ siteId }, url)
+    // allowStaleManualLoginProfile: 바로 위 app/api/scrape/categories/expand/route.ts와 같은 이유(같은
+    // "카테고리 선택 가져오기(반복)" 탭이 부르는 자매 라우트라 같은 개발자모드 몰에서 같은 방식으로
+    // 500이 난다) — !specifications/manual-login-required-malls.md "버그 2" 패턴의 또 다른 누락 지점.
+    const sortOptions = await detectSortOptionsForCategory({ siteId, allowStaleManualLoginProfile: true }, url)
     if (sortOptions.length) {
       // report.sortStructure도 같이 맞춘다 — app/api/sites/[id]/sort-options/route.ts와 같은 이유(이전에
       // "몰 구조분석"이 정렬을 못 찾아 report.sortStructure="확인 안됨"으로 저장해뒀다면, 이 라우트가

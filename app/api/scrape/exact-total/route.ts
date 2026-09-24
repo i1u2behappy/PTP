@@ -37,7 +37,12 @@ export async function POST(req: NextRequest) {
     // 종료) 그 신호를 두 번째 인자(signal)로 넘겨야 callWorker가 워커로 보낸 fetch도 같이 끊는다 —
     // opts 안에 stopSignal로 얹으면 AbortSignal이 JSON 직렬화가 안 돼 아무 효과가 없다(preview-catalog/
     // route.ts와 같은 버그, 2026-09-06 발견).
-    const result = await countDedupedProductUrls(parsed.data, req.signal)
+    // allowStaleManualLoginProfile: "정확한 총 개수 확인" 버튼은 mallMode 구분 없이 항상 노출돼(devmode
+    // 미리보기 결과에도 같은 categoryCounts/버튼이 뜬다) 직접로그인 필수 몰에서도 눌린다 — 이 플래그가
+    // 없으면 사용자의 실제 크롬이 켜져 있을 때(개발자모드의 정상 상태) 프로필 복사가 실패해 500이 난다.
+    // app/api/scrape/categories/expand/route.ts와 같은 버그 클래스(!specifications/
+    // manual-login-required-malls.md "버그 2" 참고), 펫토리 실사용 확인 계기로 같이 발견해 고침(2026-09-19).
+    const result = await countDedupedProductUrls({ ...parsed.data, allowStaleManualLoginProfile: true }, req.signal)
     return NextResponse.json(result)
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 })

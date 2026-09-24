@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import fc from 'fast-check'
-import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern, scanCategoryMenuFromHtml, deriveDetailUrlPattern, LOGOUT_URL_RE, ACCOUNT_UNSAFE_URL_RE, classifySessionLossSignal } from '../../lib/scraper'
+import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern, scanCategoryMenuFromHtml, deriveDetailUrlPattern, LOGOUT_URL_RE, ACCOUNT_UNSAFE_URL_RE, classifySessionLossSignal, isBrokenPlaceholderCategoryName, isNonCategoryCandidate } from '../../lib/scraper'
 
 // diffQueryParams는 "카테고리별 정렬기준 설정" 기능의 핵심 — 정렬 후보 링크가 baseUrl과 같은 경로에서
 // 쿼리파라미터만 다른지 확인해, 다른 카테고리/상품 상세로 튀는 링크를 걸러낸다.
@@ -64,6 +64,26 @@ describe('diffQueryParams', () => {
 
   it('쿼리파라미터가 완전히 같으면(변화 없음) null을 반환한다', () => {
     const diff = diffQueryParams('https://mall.com/list.php?cate_no=1', 'https://mall.com/list.php?cate_no=1')
+    expect(diff).toBeNull()
+  })
+
+  // 실제 재발 사고(도매의신, 2026-09-18): "실제 화면(목록/상세)이 어느 쪽인지"를 pathname이 아니라
+  // 쿼리파라미터 값으로 넘기는 몰(?p=xxx.html)에서, 홈 화면 "인기상품" 위젯의 상품 링크(상세페이지로
+  // 이동)가 pathname은 같고 쿼리만 다르다는 이유로 정렬 옵션 10개로 잘못 저장됐다. 값이 페이지 파일명
+  // 처럼 생겼으면(sort 값(asc/price_low 등)일 수 없음) 화면 자체가 바뀐 것으로 보고 전체를 무효화한다.
+  it('바뀐 파라미터 값이 페이지 파일명처럼 생기면(다른 화면으로 이동) null을 반환한다', () => {
+    const diff = diffQueryParams(
+      'https://mall.com/shop.html?p=best_list.html',
+      'https://mall.com/shop.html?p=search4_itemdetail.html&q=TV100197',
+    )
+    expect(diff).toBeNull()
+  })
+
+  it('페이지 파일명 값이 진짜 정렬 파라미터와 함께 와도 전체를 무효화한다(다른 파라미터로 착각해 살리지 않음)', () => {
+    const diff = diffQueryParams(
+      'https://mall.com/shop.html?p=best_list.html',
+      'https://mall.com/shop.html?p=search4_itemdetail.html&sort=price',
+    )
     expect(diff).toBeNull()
   })
 
@@ -328,5 +348,50 @@ describe('deriveDetailUrlPattern', () => {
     fc.assert(fc.property(fc.array(fc.string(), { maxLength: 20 }), (urls) => {
       expect(() => deriveDetailUrlPattern(urls)).not.toThrow()
     }))
+  })
+})
+
+// 빈 배너 위젯의 미렌더링 템플릿 토큰/placeholder 앵커 텍스트가 "직전 결과 대조" 복구에서 href만 보고
+// (상품이 있다) 되살아나 영원히 안 없어지던 문제(도매신 실사용 확인, 2026-09-17: "WOMEN SHOES > 링크 >
+// 링크"/"WOMEN SHOES > {$js-banner}")를 막는 판정.
+describe('isBrokenPlaceholderCategoryName', () => {
+  it('경로 끝(리프)이 정확히 "링크"뿐이면 깨진 배너로 본다', () => {
+    expect(isBrokenPlaceholderCategoryName('WOMEN SHOES > 링크 > 링크')).toBe(true)
+    expect(isBrokenPlaceholderCategoryName('링크')).toBe(true)
+  })
+
+  it('미렌더링 템플릿 토큰이 이름에 남아있으면 깨진 배너로 본다', () => {
+    expect(isBrokenPlaceholderCategoryName('WOMEN SHOES > {$js-banner}')).toBe(true)
+    expect(isBrokenPlaceholderCategoryName('%7B%24js-href%7D')).toBe(true)
+  })
+
+  it('진짜 카테고리 이름은 그대로 통과시킨다', () => {
+    expect(isBrokenPlaceholderCategoryName('WOMEN SHOES > 부츠/털신발')).toBe(false)
+    expect(isBrokenPlaceholderCategoryName('링크모음')).toBe(false) // 리프 전체 일치만 걸러낸다
+  })
+
+  it('임의 입력에서도 예외를 던지지 않는다', () => {
+    fc.assert(fc.property(fc.string(), s => { expect(() => isBrokenPlaceholderCategoryName(s)).not.toThrow() }))
+  })
+})
+
+// 이름/경로/깨진 배너 판정 3가지를 한 곳에 묶은 공용 게이트 — 카테고리 탐지 파이프라인 곳곳(비전/AI/DOM
+// 스캔/하위 카테고리 확장)에 각자 따로 있던 필터 중 하나(expandCategoryChildren)가 빠뜨려 실제 사고가
+// 났다(도매신, 2026-09-17: "하위 카테고리"로 WOMEN SHOES를 펼쳤더니 "샘플 기획전"/깨진 배너가 딸려옴).
+describe('isNonCategoryCandidate', () => {
+  it('"기획전" 라벨은 경로가 goods_exhibit이 아니어도 걸러낸다', () => {
+    expect(isNonCategoryCandidate('샘플 기획전', 'https://m.com/product/project.html?cate_no=104')).toBe(true)
+  })
+
+  it('깨진 배너 placeholder도 걸러낸다', () => {
+    expect(isNonCategoryCandidate('링크', 'https://m.com/_wg/import/sub/page_01.html')).toBe(true)
+  })
+
+  it('게시판 경로도 걸러낸다', () => {
+    expect(isNonCategoryCandidate('공지사항 아닌 척', 'https://m.com/board/list.php')).toBe(true)
+  })
+
+  it('진짜 카테고리는 통과시킨다', () => {
+    expect(isNonCategoryCandidate('스니커즈/슬립온', 'https://m.com/product/list.html?cate_no=106')).toBe(false)
   })
 })

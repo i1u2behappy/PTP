@@ -30,7 +30,9 @@ export async function POST(req: NextRequest) {
   try {
     // exact-total/route.ts와 같은 이유로 signal은 두 번째 인자로 넘긴다(opts.stopSignal은 효과 없음,
     // 2026-09-06 발견).
-    const result = await countCategoryOverlap(parsed.data, req.signal)
+    // allowStaleManualLoginProfile: exact-total/route.ts와 같은 이유(같은 버튼이 카테고리 2개 이상일 때
+    // 이 라우트를 대신 부른다) — !specifications/manual-login-required-malls.md "버그 2" 패턴.
+    const result = await countCategoryOverlap({ ...parsed.data, allowStaleManualLoginProfile: true }, req.signal)
     return NextResponse.json(result)
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 })

@@ -22,6 +22,21 @@ export { ALL_AI_PROVIDERS, runWithAiProviders } from './aiProviderGate'
 import type { AiProviderId } from './aiProviderGate'
 import { ALL_AI_PROVIDERS, isAiProviderEnabled } from './aiProviderGate'
 
+/** "몰 구조분석"이 카테고리/정렬 화면인식에 실제로 어느 공급자(Groq/로컬 Ollama)를 썼는지 화면에 보여주기
+ *  위한 기록(사용자 지시, 2026-09-22 — "Groq 토큰 문제가 발생하면 로컬로 넘어가는 건데, 어느 걸 쓰고
+ *  있는지 화면에 표시해줄 수 있어?"). 호출부가 배열 하나를 만들어 아래로 넘기면, 실제로 성공한 화면인식
+ *  함수들이 자기 몫을 그 배열에 追加한다 — 반환 타입을 안 바꾸고도(기존 호출부를 안 건드리고도) 부가
+ *  정보만 곁다리로 모을 수 있다. 카테고리/정렬처럼 한 번의 몰구조분석 안에서도 항목마다 다른 공급자가
+ *  성공할 수 있어(예: 카테고리는 Groq, 정렬은 한도초과로 로컬) 단일 값이 아니라 배열로 둔다.*/
+export interface VisionAttempt { task: string; provider: 'groq' | 'ollama' }
+
+/** generateMallProfileReport가 Anthropic→Gemini→Groq→Ollama 순으로 폴백하며 실제로 시도한 각 공급자의
+ *  결과 — 최종 화면 배지("AI 호출 실패"/"AI 분석 성공(이전 리포트 유지 중)")만 봐서는 "어느 공급자가 왜
+ *  실패했는지"(크레딧 부족·레이트리밋·타임아웃 등)를 알 수 없다는 지적(2026-09-23)으로 기록한다.
+ *  VisionAttempt와 같은 이유로 반환 타입은 안 바꾸고 호출부가 넘긴 배열에 追加하는 방식 — 이번 실행
+ *  전용 신호라 DB에는 저장하지 않는다(lib/scrape/mallProfile.ts의 DB UPDATE 제외 목록 참고). */
+export interface AiReportAttempt { provider: AiProviderId; model: string; elapsedMs: number; success: boolean; error?: string }
+
 // 매 호출마다 새로 생성 — 모듈 로드 시점에 키를 고정하면 .env 값을 나중에 바꿔도
 // (dev 서버가 모듈을 재평가하지 않는 한) 예전 키가 계속 쓰이는 문제가 있었다.
 function getClient() {
@@ -41,10 +56,21 @@ const GEMINI_MODEL = 'gemini-flash-latest'
 
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
-// qwen3:8b는 실측 비교(2026-08-30)에서 봇차단 페이지 링크를 카테고리로 오인하는 사고를 놓쳐 로컬에서
-// 삭제하고 qwen3:14b로 교체했다(.env.local의 OLLAMA_MODEL) — 이 하드코드 기본값도 실제 설치된 모델과
-// 맞춰둔다(env var가 없는 환경에서 이미 지운 8b를 다시 찾는 걸 방지).
+// qwen3:8b는 실측 비교(2026-08-30)에서 봇차단 페이지 링크를 카테고리로 오인하는 사고를 놓쳐(이상 탐지
+// 판단 작업, detectCategoryAnomalyOllama — 이후 2026-09-03에 폴백에서 아예 빠짐) 로컬에서 삭제하고
+// qwen3:14b로 교체했었다. 지금 이 상수를 실제로 쓰는 곳은 pickIndicesWithOllamaOnce(후보 목록에서
+// 인덱스 고르기) 하나뿐인데, 이건 그 이상 탐지 작업과 다른 종류의(더 단순한) 판단이라 8b가 거기서도
+// 약했는지는 확인된 바 없다 — 새 증거 없이 되돌릴 이유가 없어 14b를 그대로 둔다. 몰 구조분석 리포트
+// 생성은 아래 OLLAMA_REPORT_MODEL로 분리됐다(2026-09-23).
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:14b'
+// "몰 구조분석 리포트"(generateMallProfileReportOllama, 12개 항목을 한 번에 채우는 무거운 생성 작업)
+// 전용 — 위 OLLAMA_MODEL(14b)로는 이 작업 하나가 모델 재로드(138초)+prefill(128초)+decode(2.9토큰/초)를
+// 다 합쳐도 8분(MALL_REPORT_OLLAMA_TIMEOUT_MS) 안에 못 끝내는 게 실측으로 확인됐다(2026-09-23, 시즌백
+// 실사용 — TimeoutError로 매번 실패해 규칙 기반으로 떨어짐). 같은 조건(원문 길이·필드 개수)으로 8b를
+// 직접 테스트해보니 235.7초 만에 성공하고 추출 내용도 정확해(사용자 지시로 재검증) 이 작업 전용으로
+// 채택 — 위 OLLAMA_MODEL을 8b로 통째로 바꾸지 않는 이유는, 이상 탐지 계열 작업에서 8b가 약하다는 전례
+// (바로 위 주석)가 있어 그쪽까지 같이 흔들 근거는 없기 때문이다(작업별로 강점이 다른 모델을 쓴다).
+const OLLAMA_REPORT_MODEL = process.env.OLLAMA_REPORT_MODEL || 'qwen3:8b'
 // 정렬 UI 화면 인식(detectSortOptionsFromScreenshot) 전용 — OLLAMA_MODEL(qwen3, 텍스트 전용)은 이미지
 // 입력 자체를 못 받는다. 신규 설치(2026-09-08, 사용자 지시로 pull) — Ollama가 "does not support tools"로
 // 거부해 함수 호출은 못 쓰고 텍스트로 JSON 배열만 답하게 프롬프트로 강제한다(detectSortLabelsWithOllamaVision
@@ -137,18 +163,23 @@ const OLLAMA_CHAT_OPTIONS = { num_ctx: OLLAMA_NUM_CTX }
 /** signal(선택)을 넘기면 "몰 구조분석 중지" 버튼이 이 호출까지 실제로 끊는다 — CPU 연산 자체인 로컬
  *  추론은 끊자마자 Ollama(llama-server)도 그 요청의 생성을 멈춘다(fetch abort 시 서버가 요청 컨텍스트
  *  취소를 감지하는 표준 동작, 2026-08-22 사용자 요청: "중지를 누르면 llama-server 작업도 멈추게"). */
+// 반환을 number[](성공, 빈 배열도 "확신 없어 안 고름"이라는 유효한 성공 응답)과 null(호출 자체가
+// 안 됐거나 실패)로 구분한다 — detectXWithOllamaVision과 같은 계약(VisionAttempt 로그가 null이 아닐
+// 때만 "이 공급자가 성공했다"고 기록하는 것과 동일)이라야, 이 함수를 쓰는 detectCategoryLinksWithAI/
+// detectSortOptionsWithAI/detectLastPageLinkWithAI도 같은 방식으로 "Ollama(14b)가 실제로 쓰였는지"를
+// 기록할 수 있다(사용자 지시, 2026-09-23 — "14b가 쓰인건지 확인 가능하게"). 예전엔 항상 number[]만
+// 반환해 실패와 "성공했지만 빈 결과"를 구분할 방법이 없었다.
 function pickIndicesWithOllama(
   prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal, timeoutMs = OLLAMA_TIMEOUT_MS,
-): Promise<number[]> {
-  // 화면에서 Ollama 체크를 끄면 로컬 추론을 아예 시작하지 않는다 — 빈 배열은 "AI가 못 골랐다"와 같은
-  // 의미라 호출부가 기존 히스틱으로 그대로 폴백한다(aiProviderGate.ts 주석 참고).
-  if (!isAiProviderEnabled('ollama')) return Promise.resolve([])
+): Promise<number[] | null> {
+  // 화면에서 Ollama 체크를 끄면 로컬 추론을 아예 시작하지 않는다.
+  if (!isAiProviderEnabled('ollama')) return Promise.resolve(null)
   return withOllamaQueue(() => pickIndicesWithOllamaOnce(prompt, toolName, toolDescription, signal, timeoutMs))
 }
 
 async function pickIndicesWithOllamaOnce(
   prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal, timeoutMs = OLLAMA_TIMEOUT_MS,
-): Promise<number[]> {
+): Promise<number[] | null> {
   // AbortSignal.timeout()과 호출부의 signal(중지 버튼) 둘 중 먼저 오는 쪽으로 끊는다 — 이 호출이 정상
   // 범위(수 초~십수 초)를 넘기면 모델이 텍스트로 새고 있다고 보고 자른다. AbortSignal.any는 Node 20+.
   const timeoutSignal = AbortSignal.timeout(timeoutMs)
@@ -182,18 +213,17 @@ async function pickIndicesWithOllamaOnce(
         }],
       }),
     } as RequestInit)
-    if (!res.ok) return []
+    if (!res.ok) return null
     const data = await res.json() as { message?: { tool_calls?: { function: { name: string; arguments: unknown } }[] } }
     const call = data.message?.tool_calls?.[0]
-    if (!call) return []
+    if (!call) return null
     // Ollama는 arguments를 이미 파싱된 객체로 주지만, 혹시 문자열로 오는 경우까지 방어적으로 처리한다.
     const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments
     const indices = (args as { indices?: unknown } | null)?.indices
     return Array.isArray(indices) ? indices.filter((i): i is number => Number.isInteger(i)) : []
   } catch {
-    // 위 timeoutSignal이 끊은 경우도 여기로 온다 — 호출부는 빈 배열을 기존 히스틱/미검출 폴백과
-    // 똑같이 취급하므로 "느려서 포기"와 "원래 실패"를 구분할 필요가 없다.
-    return []
+    // 위 timeoutSignal이 끊은 경우도 여기로 온다.
+    return null
   }
 }
 
@@ -641,6 +671,9 @@ export async function detectCategoryLinksWithAI(
    *  최대 60초씩 전역 Ollama 대기열에 쌓여 몰 구조분석이 20분 넘게 걸림) 실패해도 정렬체크 안전망이
    *  있으니 더 짧은 타임아웃을 넘겨 최악의 소요시간 자체를 줄인다. */
   timeoutMs: number = CATEGORY_AI_TIMEOUT_MS,
+  /** VisionAttempt 재사용 — 화면인식과 같은 "Groq 먼저, 실패하면 로컬 Ollama" 경쟁 구조라 같은 로그
+   *  모양을 그대로 쓴다(사용자 지시, 2026-09-23 — "14b가 쓰인건지 확인 가능하게"). */
+  log?: VisionAttempt[],
 ): Promise<CategoryLinkCandidate[]> {
   if (!linkCandidates.length) return []
   // 후보가 많을수록(실사용 확인: 몰 하나에 100개 넘는 링크도 흔함) 프롬프트가 길어져 CPU 전용 로컬
@@ -672,7 +705,9 @@ ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
     '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
     signal,
   )
-  if (indices === null) {
+  if (indices !== null) {
+    log?.push({ task: '카테고리 후보 선별', provider: 'groq' })
+  } else {
     // Groq가 키 없음/한도 초과/오류로 실패했을 때만 로컬 Ollama를 시도한다 — Groq가 "성공적으로 빈
     // 배열"을 반환했을 때(확신 없어 안 고름)는 이미 유효한 답이므로 Ollama로 다시 물어보지 않는다
     // (detectLastPageLinkWithAI와 같은 패턴, 2026-09-07 — 사용자 요청으로 카테고리/정렬 판별에도 Qwen을
@@ -682,7 +717,9 @@ ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
     indices = await pickIndicesWithOllama(prompt, 'set_category_link_indices',
       '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
       signal, timeoutMs)
+    if (indices !== null) log?.push({ task: '카테고리 후보 선별', provider: 'ollama' })
   }
+  indices = indices ?? []
   const seen = new Set<number>()
   return indices
     .filter(i => i >= 0 && i < candidates.length && !seen.has(i) && seen.add(i))
@@ -782,7 +819,7 @@ export async function detectLastPageLinkWithAI(
     // 반환했을 때(확신 없어 안 고름)는 이미 유효한 답이므로 Ollama로 다시 물어보지 않는다.
     indices = await pickIndicesWithOllama(prompt, 'set_last_page_link_index', LAST_PAGE_TOOL_DESCRIPTION, signal)
   }
-  const i = indices[0]
+  const i = (indices ?? [])[0]
   return (i != null && i >= 0 && i < candidates.length) ? { href: candidates[i].href } : null
 }
 
@@ -845,26 +882,46 @@ ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
     )
   }
   const seen = new Set<number>()
-  return indices
+  return (indices ?? [])
     .filter(i => i >= 0 && i < candidates.length && !seen.has(i) && seen.add(i))
     .map(i => ({ label: candidates[i].text, href: candidates[i].href }))
 }
 
-function buildSortLabelScreenshotPrompt(mallName: string): string {
+function buildSortLabelScreenshotPrompt(mallName: string, knownExamples?: string[]): string {
+  const examplesSection = knownExamples?.length
+    ? `\n\n참고 — 이 몰에서 예전에 실제로 확인된 정렬 옵션 예시: ${knownExamples.join(', ')}. 화면에 이
+예시와 완전히 같은 문구가 안 보여도 괜찮다(디자인이 바뀌었을 수 있음) — 다만 이런 종류의 선택지를 찾고
+있다는 감을 잡는 데 참고만 해라.`
+    : ''
   return `이 스크린샷은 한국 쇼핑몰 '${mallName}'의 상품 목록(카테고리) 페이지다. 화면에 상품 정렬 옵션
 (상품이 나열되는 순서를 바꾸는 선택지 — 예: 추천순, 인기순, 낮은가격순, 높은가격순, 신상품순, 리뷰순,
 판매량순, 최신순 등)이 보이면 그 각각의 정확한 화면 텍스트를 그대로 나열하라(줄임/의역 금지, 화면에 적힌
 그대로). 안 보이면 빈 배열을 반환하라. 카테고리 메뉴, 브랜드/가격대 필터, 페이지당 개수(10개씩보기 등)는
-정렬이 아니니 포함하지 마라.`
+정렬이 아니니 포함하지 마라.
+
+중요: "정렬"/"정렬방식"/"정렬기준"/"SORT"라는 낱말 자체는 실제 순서를 알려주지 않는 버튼/드롭다운의
+이름표일 뿐이니, 그 낱말 하나만 단독으로 쓰여 있다면(예: "정렬 ▾", "정렬방식 ▾") 그건 정렬 옵션이 아니다
+— 절대 포함하지 마라. 이렇게 이름표만 보이고 실제 선택지(추천순 등)는 안 보인다면(드롭다운이 닫혀있는 것)
+옵션이 하나도 안 보이는 것으로 보고 빈 배열을 반환하라 — 옵션 목록을 보려면 그 트리거를 먼저 열어야
+한다는 뜻이다.
+
+다만 닫힌 드롭다운이라도 지금 선택된 값이 그 낱말과 같이 붙어서 보이는 경우가 흔하다(예: "최신상품순
+정렬 ▾", "낮은가격순 정렬 ▾" — "정렬"은 꼬리표고 "최신상품순"/"낮은가격순"이 실제 선택된 값이다). 이런
+식으로 실제 순서 기준을 나타내는 단어(최신/신상품/인기/추천/가격/리뷰/판매량/이름 등)가 "정렬"이라는
+낱말과 함께 붙어 있으면, 그건 이미 하나의 값이 화면에 보이는 것이니 빈 배열로 처리하지 말고 그 값을
+옵션으로 반환하라(꼬리표 "정렬"만 뗀 나머지 부분, 예: "최신상품순").${examplesSection}`
 }
 
 /** Groq(qwen/qwen3.6-27b, 빠름) 경로 — 실패(키 없음/요청 실패/한도 초과 등)하면 null, 호출부가 로컬
  *  Ollama vision으로 넘어간다. reasoning_effort:'none' 필수(위 GROQ_VISION_MODEL 주석 참고 — 안 끄면
  *  <think> 과정만으로 max_tokens를 다 태워 정작 도구 호출까지 못 감). */
 async function detectSortLabelsWithGroqVision(
-  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal, knownExamples?: string[],
 ): Promise<string[] | null> {
-  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) return null
+  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) {
+    console.log(`[AI:groq] 정렬 화면 인식 건너뜀(${mallName}) — ${!isAiProviderEnabled('groq') ? '공급자 꺼짐' : 'API 키 없음'}`)
+    return null
+  }
   try {
     const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -877,7 +934,7 @@ async function detectSortLabelsWithGroqVision(
         messages: [{
           role: 'user',
           content: [
-            { type: 'text', text: buildSortLabelScreenshotPrompt(mallName) },
+            { type: 'text', text: buildSortLabelScreenshotPrompt(mallName, knownExamples) },
             { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
           ],
         }],
@@ -896,13 +953,22 @@ async function detectSortLabelsWithGroqVision(
         tool_choice: { type: 'function', function: { name: 'set_sort_labels' } },
       }),
     })
-    if (!res.ok) return null
+    if (!res.ok) {
+      console.log(`[AI:groq] 정렬 화면 인식 실패(${mallName}) — HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`)
+      return null
+    }
     const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
     const call = data.choices?.[0]?.message?.tool_calls?.[0]
-    if (!call) return null
+    if (!call) {
+      console.log(`[AI:groq] 정렬 화면 인식 실패(${mallName}) — 도구 호출 없이 응답함`)
+      return null
+    }
     const args = JSON.parse(call.function.arguments) as { labels?: unknown }
-    return Array.isArray(args.labels) ? args.labels.filter((l): l is string => typeof l === 'string') : []
-  } catch {
+    const labels = Array.isArray(args.labels) ? args.labels.filter((l): l is string => typeof l === 'string') : []
+    console.log(`[AI:groq] 정렬 화면 인식(${mallName}) — 라벨 ${labels.length}개: ${JSON.stringify(labels)}`)
+    return labels
+  } catch (e) {
+    console.log(`[AI:groq] 정렬 화면 인식 실패(${mallName}) — ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`)
     return null
   }
 }
@@ -913,9 +979,12 @@ async function detectSortLabelsWithGroqVision(
  *  같은 큐(withOllamaQueue)를 거쳐 CPU 경합을 피한다. 이미지 처리 자체가 텍스트보다 훨씬 느려(7B 기준
  *  실측 약 40초/장) 전용 타임아웃(OLLAMA_VISION_TIMEOUT_MS)을 따로 쓴다. */
 async function detectSortLabelsWithOllamaVision(
-  mallName: string, imageBase64: string, signal?: AbortSignal,
+  mallName: string, imageBase64: string, signal?: AbortSignal, knownExamples?: string[],
 ): Promise<string[] | null> {
-  if (!isAiProviderEnabled('ollama')) return null
+  if (!isAiProviderEnabled('ollama')) {
+    console.log(`[AI:ollama] 정렬 화면 인식 건너뜀(${mallName}) — 공급자 꺼짐`)
+    return null
+  }
   return withOllamaQueue(async () => {
     const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
     const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
@@ -932,18 +1001,27 @@ async function detectSortLabelsWithOllamaVision(
           keep_alive: '30m',
           messages: [{
             role: 'user',
-            content: `${buildSortLabelScreenshotPrompt(mallName)}\n\n다른 설명 없이 JSON 배열만 출력해라(예: ["추천순","인기순"]).`,
+            content: `${buildSortLabelScreenshotPrompt(mallName, knownExamples)}\n\n다른 설명 없이 JSON 배열만 출력해라(예: ["추천순","인기순"]).`,
             images: [imageBase64],
           }],
         }),
       } as RequestInit)
-      if (!res.ok) return null
+      if (!res.ok) {
+        console.log(`[AI:ollama] 정렬 화면 인식 실패(${mallName}) — HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`)
+        return null
+      }
       const data = await res.json() as { message?: { content?: string } }
       const match = (data.message?.content ?? '').match(/\[[\s\S]*\]/)
-      if (!match) return []
+      if (!match) {
+        console.log(`[AI:ollama] 정렬 화면 인식(${mallName}) — 배열 형식 응답 없음, 빈 배열로 처리. 답 앞부분: ${JSON.stringify((data.message?.content ?? '').slice(0, 120))}`)
+        return []
+      }
       const parsed = JSON.parse(match[0]) as unknown
-      return Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === 'string') : []
-    } catch {
+      const labels = Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === 'string') : []
+      console.log(`[AI:ollama] 정렬 화면 인식(${mallName}) — 라벨 ${labels.length}개: ${JSON.stringify(labels)}`)
+      return labels
+    } catch (e) {
+      console.log(`[AI:ollama] 정렬 화면 인식 실패(${mallName}) — ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`)
       return null
     }
   })
@@ -980,10 +1058,20 @@ async function detectSortLabelsWithOllamaVision(
  */
 export async function detectSortOptionsFromScreenshot(
   mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+  /** 이 몰에서 예전에 실제로 확인된 정렬 옵션 라벨(있으면) — 프롬프트에 예시로 얹어 비전이 "이런 종류의
+   *  선택지를 찾는 것"이라는 감을 더 쉽게 잡게 한다(사용자 지시, 2026-09-18 — "기존에 정상적으로 정렬을
+   *  찾은 내역이 있으면 더 확인하기 쉬울 것 아니야"). 강제하지 않는다 — 화면이 그새 바뀌었을 수 있어
+   *  프롬프트 자체에도 "안 보여도 참고만" 이라고 명시해뒀다(buildSortLabelScreenshotPrompt 참고). */
+  knownExamples?: string[], log?: VisionAttempt[],
 ): Promise<string[] | null> {
-  const viaGroq = await detectSortLabelsWithGroqVision(mallName, imageBase64, mimeType, signal)
-  if (viaGroq !== null) return viaGroq
-  return await detectSortLabelsWithOllamaVision(mallName, imageBase64, signal)
+  const viaGroq = await detectSortLabelsWithGroqVision(mallName, imageBase64, mimeType, signal, knownExamples)
+  if (viaGroq !== null) {
+    log?.push({ task: '정렬 라벨', provider: 'groq' })
+    return viaGroq
+  }
+  const viaOllama = await detectSortLabelsWithOllamaVision(mallName, imageBase64, signal, knownExamples)
+  if (viaOllama !== null) log?.push({ task: '정렬 라벨', provider: 'ollama' })
+  return viaOllama
 }
 
 /** null=이 함수 자체를 확정 못 함(호출부가 다음 페이지로 넘어가거나 폴백해야 함), found:false=이 화면엔
@@ -1198,14 +1286,19 @@ function sanitizeCategoryMenuTrigger(result: CategoryMenuTriggerResult | null): 
 }
 
 export async function detectCategoryMenuTriggerFromScreenshot(
-  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal, log?: VisionAttempt[],
 ): Promise<CategoryMenuTriggerResult | null> {
   const gridded = await overlayGridForVision(imageBase64)
   const gridImage = gridded?.base64 ?? imageBase64
   const gridMimeType = gridded?.mimeType ?? mimeType
   const viaGroq = await detectCategoryMenuTriggerWithGroqVision(mallName, gridImage, gridMimeType, signal)
-  if (viaGroq !== null) return sanitizeCategoryMenuTrigger(viaGroq)
-  return sanitizeCategoryMenuTrigger(await detectCategoryMenuTriggerWithOllamaVision(mallName, gridImage, signal))
+  if (viaGroq !== null) {
+    log?.push({ task: '카테고리 메뉴 트리거', provider: 'groq' })
+    return sanitizeCategoryMenuTrigger(viaGroq)
+  }
+  const viaOllama = await detectCategoryMenuTriggerWithOllamaVision(mallName, gridImage, signal)
+  if (viaOllama !== null) log?.push({ task: '카테고리 메뉴 트리거', provider: 'ollama' })
+  return sanitizeCategoryMenuTrigger(viaOllama)
 }
 
 /** detectCategoryMenuTriggerFromScreenshot과 같은 타입 모양이지만 별도 타입으로 둔다 — 이 파일의
@@ -1338,14 +1431,19 @@ async function detectSortTriggerWithOllamaVision(
  *  clickNearestClickableAtPoint로 클릭해 연 뒤 다시 스크린샷을 찍어 값을 읽는다.
  *  null=두 공급자 다 실패(호출부는 이 신호 없이 기존 DOM 폴백으로 넘어가야 함). */
 export async function detectSortTriggerFromScreenshot(
-  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal, log?: VisionAttempt[],
 ): Promise<SortTriggerResult | null> {
   const gridded = await overlayGridForVision(imageBase64)
   const gridImage = gridded?.base64 ?? imageBase64
   const gridMimeType = gridded?.mimeType ?? mimeType
   const viaGroq = await detectSortTriggerWithGroqVision(mallName, gridImage, gridMimeType, signal)
-  if (viaGroq !== null) return sanitizeSortTrigger(viaGroq)
-  return sanitizeSortTrigger(await detectSortTriggerWithOllamaVision(mallName, gridImage, signal))
+  if (viaGroq !== null) {
+    log?.push({ task: '정렬 트리거', provider: 'groq' })
+    return sanitizeSortTrigger(viaGroq)
+  }
+  const viaOllama = await detectSortTriggerWithOllamaVision(mallName, gridImage, signal)
+  if (viaOllama !== null) log?.push({ task: '정렬 트리거', provider: 'ollama' })
+  return sanitizeSortTrigger(viaOllama)
 }
 
 function buildCategoryGroupCountPrompt(mallName: string): string {
@@ -1604,11 +1702,16 @@ function buildVisibleCategoryHierarchyPrompt(mallName: string): string {
  *  카드에 "화면에서 본 구조"를 같이 보여주는 용도로만 쓰인다.
  *  null=두 공급자 다 실패(호출부는 구조 표시를 건너뛴다 — 없는 근거로 지어내지 않는다). */
 export async function detectVisibleCategoryHierarchy(
-  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal, log?: VisionAttempt[],
 ): Promise<{ group: string; items: string[] }[] | null> {
   const viaGroq = await detectCategoryHierarchyWithGroqVision(mallName, imageBase64, mimeType, signal)
-  if (viaGroq !== null) return viaGroq
-  return await detectCategoryHierarchyWithOllamaVision(mallName, imageBase64, signal)
+  if (viaGroq !== null) {
+    log?.push({ task: '카테고리 계층', provider: 'groq' })
+    return viaGroq
+  }
+  const viaOllama = await detectCategoryHierarchyWithOllamaVision(mallName, imageBase64, signal)
+  if (viaOllama !== null) log?.push({ task: '카테고리 계층', provider: 'ollama' })
+  return viaOllama
 }
 
 /** 비전이 돌려준 그룹 목록을 정리한다 — sanitizeVisibleCategoryNames와 같은 이유(길이 상한/중복 제거)로
@@ -1634,7 +1737,10 @@ export function sanitizeVisibleCategoryHierarchy(raw: unknown): { group: string;
 async function detectCategoryHierarchyWithGroqVision(
   mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
 ): Promise<{ group: string; items: string[] }[] | null> {
-  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) return null
+  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) {
+    console.log(`[AI:groq] 카테고리 계층 화면 인식 건너뜀(${mallName}) — ${!isAiProviderEnabled('groq') ? '공급자 꺼짐' : 'API 키 없음'}`)
+    return null
+  }
   try {
     const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -1680,13 +1786,21 @@ async function detectCategoryHierarchyWithGroqVision(
         tool_choice: { type: 'function', function: { name: 'set_visible_category_hierarchy' } },
       }),
     })
-    if (!res.ok) return null
+    if (!res.ok) {
+      console.log(`[AI:groq] 카테고리 계층 화면 인식 실패(${mallName}) — HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`)
+      return null
+    }
     const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
     const call = data.choices?.[0]?.message?.tool_calls?.[0]
-    if (!call) return null
+    if (!call) {
+      console.log(`[AI:groq] 카테고리 계층 화면 인식 실패(${mallName}) — 도구 호출 없이 응답함`)
+      return null
+    }
     const groups = sanitizeVisibleCategoryHierarchy((JSON.parse(call.function.arguments) as { groups?: unknown }).groups)
+    console.log(`[AI:groq] 카테고리 계층 화면 인식(${mallName}) — 그룹 ${groups.length}개: ${JSON.stringify(groups.map(g => ({ group: g.group, items: g.items.length })))}`)
     return groups.length ? groups : null
-  } catch {
+  } catch (e) {
+    console.log(`[AI:groq] 카테고리 계층 화면 인식 실패(${mallName}) — ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`)
     return null
   }
 }
@@ -1694,7 +1808,10 @@ async function detectCategoryHierarchyWithGroqVision(
 async function detectCategoryHierarchyWithOllamaVision(
   mallName: string, imageBase64: string, signal?: AbortSignal,
 ): Promise<{ group: string; items: string[] }[] | null> {
-  if (!isAiProviderEnabled('ollama')) return null
+  if (!isAiProviderEnabled('ollama')) {
+    console.log(`[AI:ollama] 카테고리 계층 화면 인식 건너뜀(${mallName}) — 공급자 꺼짐`)
+    return null
+  }
   return withOllamaQueue(async () => {
     const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
     const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
@@ -1718,13 +1835,21 @@ async function detectCategoryHierarchyWithOllamaVision(
           }],
         }),
       } as RequestInit)
-      if (!res.ok) return null
+      if (!res.ok) {
+        console.log(`[AI:ollama] 카테고리 계층 화면 인식 실패(${mallName}) — HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`)
+        return null
+      }
       const content = (await res.json() as { message?: { content?: string } }).message?.content ?? ''
       const match = content.match(/\[[\s\S]*\]/)
-      if (!match) return null
+      if (!match) {
+        console.log(`[AI:ollama] 카테고리 계층 화면 인식(${mallName}) — 배열 형식 응답 없음. 답 앞부분: ${JSON.stringify(content.slice(0, 120))}`)
+        return null
+      }
       const groups = sanitizeVisibleCategoryHierarchy(JSON.parse(match[0]))
+      console.log(`[AI:ollama] 카테고리 계층 화면 인식(${mallName}) — 그룹 ${groups.length}개: ${JSON.stringify(groups.map(g => ({ group: g.group, items: g.items.length })))}`)
       return groups.length ? groups : null
-    } catch {
+    } catch (e) {
+      console.log(`[AI:ollama] 카테고리 계층 화면 인식 실패(${mallName}) — ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`)
       return null
     }
   })
@@ -1933,11 +2058,56 @@ function reportAiSignal(timeoutMs: number, signal?: AbortSignal): AbortSignal {
   return signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs)
 }
 
+/** Anthropic/Groq 에러가 "400 {\"type\":\"error\",\"error\":{\"message\":\"...\"}}" 형태의 원문 그대로
+ *  넘어오면(SDK가 상태코드+본문을 그대로 이어붙인 message, Groq HTTP 에러 응답 본문) 화면(onError, 이번
+ *  실행의 AiReportAttempt.error)에 보여주기엔 너무 길고 사람이 읽기 어렵다 — 본문 JSON 안에 있는 실제
+ *  사람이 읽을 메시지만 뽑아 보여준다. JSON이 아니거나 그 안에 message가 없으면 원문을 그대로 쓴다
+ *  (2026-09-23, 실사용 확인 — Anthropic 크레딧 소진 사유가 이 형태로 왔다). */
+function extractReadableApiError(raw: string): string {
+  const jsonStart = raw.indexOf('{')
+  if (jsonStart === -1) return raw
+  try {
+    const parsed = JSON.parse(raw.slice(jsonStart)) as { error?: unknown; message?: unknown }
+    // Anthropic/Groq는 error가 {message: "..."} 객체, Ollama는 error가 그냥 문자열이다 — 둘 다 커버한다.
+    const errorField = parsed?.error
+    const message = typeof errorField === 'string' ? errorField
+      : (errorField as { message?: unknown } | undefined)?.message ?? parsed?.message
+    if (typeof message === 'string' && message.trim()) return message
+  } catch { /* JSON이 아니면 원문 그대로 */ }
+  return raw
+}
+
+/** extractReadableApiError로 뽑아낸 메시지가 여전히 영어 원문(공급자 API가 영어로 응답)이라, 화면 나머지가
+ *  전부 한국어인 이 툴에서 그대로 보여주면 어색하다는 지적(사용자 지시, 2026-09-23 — "AI 호출 상세" 패널에
+ *  영어 원문이 그대로 뜬 걸 보고). 자주 나오는 몇 가지 패턴만 한국어 설명으로 바꾼다 — 매핑에 없는 낯선
+ *  에러까지 억지로 번역하면 오히려 원인을 왜곡해 감출 수 있어, 그런 경우는 원문을 그대로 둔다(이미
+ *  onError가 넘기는 값 중 "API 키 없음"/"분석할 원문이 수집되지 않음" 같은 건 이미 한국어라 아래 패턴에
+ *  안 걸리고 그대로 통과한다). */
+export function translateAiErrorReason(raw: string): string {
+  const patterns: [RegExp, string][] = [
+    [/credit balance is too low/i, '크레딧 잔액 부족 — 결제/충전이 필요합니다'],
+    [/currently experiencing high demand/i, '일시적 과부하 — 나중에 다시 시도하면 될 수 있습니다'],
+    [/tokens per day \(TPD\)/i, '일일 토큰 한도 초과 — 무료 등급 하루치를 다 써서 하루 지나야 복구됩니다'],
+    [/tokens per minute \(I?TPM\)|output tokens per minute \(OTPM\)/i, '분당 토큰 한도 초과 — 잠시 후 재시도하면 될 수 있습니다'],
+    [/free_tier_requests|RESOURCE_EXHAUSTED/i, '일일 무료 요청 한도 초과 — 하루 지나야 복구됩니다'],
+    [/aborted due to timeout/i, '처리 시간 초과 — 이 PC(로컬)가 제한 시간 안에 응답을 못 만들었습니다'],
+    [/model_not_found|does not exist/i, '모델을 찾을 수 없음 — 모델명이 바뀌었거나 이 계정에서 못 씀'],
+  ]
+  for (const [re, ko] of patterns) if (re.test(raw)) return ko
+  return raw
+}
+
 async function generateMallProfileReportAnthropic(
   mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
   signal?: AbortSignal,
+  // AiReportAttempt 주석 참고 — 이 함수는 실패를 전부 내부에서 삼키고 null만 반환해왔다(호출부가 던지는
+  // 예외를 못 잡으니 generateMallProfileReport의 catch로는 "왜" 실패했는지 알 수 없었다, 2026-09-23 실사용
+  // 확인 — 화면에 "결과 없음"만 뜨고 실제 원인인 크레딧 부족은 안 보였음). null을 반환하는 모든 지점에서
+  // 이 콜백으로 이유를 같이 알린다.
+  onError?: (reason: string) => void,
 ): Promise<MallStructureReport | null> {
-  if (!process.env.ANTHROPIC_API_KEY || !contextText.trim()) return null
+  if (!process.env.ANTHROPIC_API_KEY) { onError?.('API 키 없음'); return null }
+  if (!contextText.trim()) { onError?.('분석할 원문이 수집되지 않음'); return null }
 
   const properties: Record<string, { type: string; description: string }> = {}
   MALL_REPORT_FIELDS.forEach(f => {
@@ -1958,10 +2128,12 @@ async function generateMallProfileReportAnthropic(
       messages: [{ role: 'user', content: prompt }],
     }, { signal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal) })
     const toolUse = response.content.find(b => b.type === 'tool_use')
-    if (!toolUse || toolUse.type !== 'tool_use') return null
+    if (!toolUse || toolUse.type !== 'tool_use') { onError?.('도구 호출 없이 응답함(빈 응답 또는 스키마 불일치)'); return null }
     return { ...(toolUse.input as Omit<MallStructureReport, 'generatedBy'>), generatedBy: 'ai' }
   } catch (e) {
-    console.error('[generateMallProfileReportAnthropic] API call failed:', e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : e)
+    const rawMessage = e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : String(e)
+    console.error('[generateMallProfileReportAnthropic] API call failed:', rawMessage)
+    onError?.(extractReadableApiError(rawMessage))
     return null
   }
 }
@@ -1971,8 +2143,11 @@ async function generateMallProfileReportAnthropic(
 async function generateMallProfileReportGemini(
   mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
   signal?: AbortSignal,
+  // generateMallProfileReportAnthropic의 onError 주석 참고 — 같은 이유로 실패 지점마다 이유를 알린다.
+  onError?: (reason: string) => void,
 ): Promise<MallStructureReport | null> {
-  if (!process.env.GEMINI_API_KEY || !contextText.trim()) return null
+  if (!process.env.GEMINI_API_KEY) { onError?.('API 키 없음'); return null }
+  if (!contextText.trim()) { onError?.('분석할 원문이 수집되지 않음'); return null }
 
   const properties: Record<string, Schema> = {}
   MALL_REPORT_FIELDS.forEach(f => {
@@ -1995,10 +2170,12 @@ async function generateMallProfileReportGemini(
       },
     })
     const call = response.functionCalls?.[0]
-    if (!call) return null
+    if (!call) { onError?.('functionCall 없이 응답함(빈 응답 또는 스키마 불일치)'); return null }
     return { ...(call.args as Omit<MallStructureReport, 'generatedBy'>), generatedBy: 'ai' }
   } catch (e) {
-    console.error('[generateMallProfileReportGemini] API call failed:', e instanceof Error ? e.message : e)
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    console.error('[generateMallProfileReportGemini] API call failed:', rawMessage)
+    onError?.(extractReadableApiError(rawMessage))
     return null
   }
 }
@@ -2112,8 +2289,12 @@ function buildCategoryHintSummary(categoryHints: string[]): string {
 async function generateMallProfileReportGroq(
   mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
   signal?: AbortSignal,
+  // generateMallProfileReportAnthropic의 onError 주석 참고 — 같은 이유로 실패 지점마다 이유를 알린다.
+  onError?: (reason: string) => void,
 ): Promise<MallStructureReport | null> {
-  if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY || !contextText.trim()) return null
+  if (!isAiProviderEnabled('groq')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GROQ_API_KEY) { onError?.('API 키 없음'); return null }
+  if (!contextText.trim()) { onError?.('분석할 원문이 수집되지 않음'); return null }
   const properties: Record<string, { type: string; description: string }> = {}
   MALL_REPORT_FIELDS.forEach(f => {
     properties[f.key] = { type: 'string', description: `${f.label} — ${f.hint}. 확인 못하면 "확인 안됨"만 답한다(추측 금지).` }
@@ -2145,23 +2326,28 @@ async function generateMallProfileReportGroq(
       }),
     })
     if (!res.ok) {
-      console.error(`[generateMallProfileReportGroq] API call failed: ${res.status} ${await res.text().catch(() => '')}`)
+      const detail = await res.text().catch(() => '')
+      console.error(`[generateMallProfileReportGroq] API call failed: ${res.status} ${detail}`)
+      onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail).slice(0, 150)}` : ''}`)
       return null
     }
     const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { name: string; arguments: string } }[] }, finish_reason?: string }[] }
     const call = data.choices?.[0]?.message?.tool_calls?.[0]
-    if (!call) return null
-    if (data.choices?.[0]?.finish_reason === 'length') {
+    const finishReason = data.choices?.[0]?.finish_reason
+    if (!call) { onError?.(`도구 호출 없이 응답함${finishReason ? `(finish_reason=${finishReason})` : ''}`); return null }
+    if (finishReason === 'length') {
       // GROQ_MAX_OUTPUT_TOKENS 안에 다 못 채웠다는 뜻 — 실제로 이 몰의 답변이 예상보다 길었던 경우다.
       // arguments가 잘린 JSON일 가능성이 높아 아래 JSON.parse가 대개 실패하지만, 혹시 우연히 필드
       // 경계에서 끊겨 파싱에 성공하더라도 일부 필드가 통째로 빠졌을 수 있다는 걸 로그로 남겨둔다.
       console.error('[generateMallProfileReportGroq] 응답이 max_tokens에 걸려 잘렸을 수 있음(finish_reason=length)')
     }
     const args = JSON.parse(call.function.arguments)
-    if (!args || typeof args !== 'object') return null
+    if (!args || typeof args !== 'object') { onError?.('도구 인자가 객체가 아님'); return null }
     return { ...(args as Omit<MallStructureReport, 'generatedBy'>), generatedBy: 'groq' }
   } catch (e) {
-    console.error('[generateMallProfileReportGroq] API call failed:', e instanceof Error ? e.message : e)
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    console.error('[generateMallProfileReportGroq] API call failed:', rawMessage)
+    onError?.(extractReadableApiError(rawMessage))
     return null
   }
 }
@@ -2175,8 +2361,11 @@ async function generateMallProfileReportGroq(
 async function generateMallProfileReportOllama(
   mallName: string, platform: string, categoryHints: string[], sortHints: string[], sampleProductUrl: string, contextText: string,
   signal?: AbortSignal,
+  // generateMallProfileReportAnthropic의 onError 주석 참고 — 같은 이유로 실패 지점마다 이유를 알린다.
+  onError?: (reason: string) => void,
 ): Promise<MallStructureReport | null> {
-  if (!isAiProviderEnabled('ollama') || !contextText.trim()) return null
+  if (!isAiProviderEnabled('ollama')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!contextText.trim()) { onError?.('분석할 원문이 수집되지 않음'); return null }
   const properties: Record<string, { type: string; description: string }> = {}
   MALL_REPORT_FIELDS.forEach(f => {
     properties[f.key] = { type: 'string', description: `${f.label} — ${f.hint}. 아래 원문에서 확인할 수 없으면 반드시 "확인 안됨"이라고만 답한다(추측 금지).` }
@@ -2191,7 +2380,7 @@ async function generateMallProfileReportOllama(
         signal: reportAiSignal(MALL_REPORT_OLLAMA_TIMEOUT_MS, signal),
         dispatcher: ollamaDispatcher,
         body: JSON.stringify({
-          model: OLLAMA_MODEL,
+          model: OLLAMA_REPORT_MODEL,
           stream: false,
           think: false,
           options: OLLAMA_CHAT_OPTIONS,
@@ -2211,7 +2400,9 @@ async function generateMallProfileReportOllama(
       // 화면엔 "AI 호출 실패"만 뜨고 이유는 어디에도 안 남았다 — 2026-09-13 투비즈온 조사에서 원인
       // (num_ctx 초과로 프롬프트가 잘려 도구 호출이 아예 안 나옴)을 찾는 데 로그가 하나도 도움이 안 됐다.
       if (!res.ok) {
-        console.log(`[AI:ollama] 몰 구조분석 리포트 실패 — HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`)
+        const detail = (await res.text().catch(() => '')).slice(0, 200)
+        console.log(`[AI:ollama] 몰 구조분석 리포트 실패 — HTTP ${res.status}: ${detail}`)
+        onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail)}` : ''}`)
         return null
       }
       const data = await res.json() as {
@@ -2221,18 +2412,22 @@ async function generateMallProfileReportOllama(
       const call = data.message?.tool_calls?.[0]
       if (!call) {
         console.log(`[AI:ollama] 몰 구조분석 리포트 실패 — 도구 호출 없이 일반 텍스트로 답함(입력 ${data.prompt_eval_count ?? '?'}토큰, num_ctx ${OLLAMA_NUM_CTX}). 답 앞부분: ${JSON.stringify((data.message?.content || '').slice(0, 120))}`)
+        onError?.(`도구 호출 없이 일반 텍스트로 답함(입력 ${data.prompt_eval_count ?? '?'}토큰이 num_ctx ${OLLAMA_NUM_CTX} 초과했을 수 있음)`)
         return null
       }
       const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments
       if (!args || typeof args !== 'object') {
         console.log('[AI:ollama] 몰 구조분석 리포트 실패 — 도구 인자가 객체가 아님')
+        onError?.('도구 인자가 객체가 아님')
         return null
       }
       return { ...(args as Omit<MallStructureReport, 'generatedBy'>), generatedBy: 'ollama' }
     } catch (e) {
       // fetch failed(UND_ERR_HEADERS_TIMEOUT)라면 ollamaDispatcher가 제대로 안 붙은 것이다 —
       // 그 상수 주석 참고.
-      console.log(`[AI:ollama] 몰 구조분석 리포트 실패 — ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`)
+      const message = e instanceof Error ? `${e.name}: ${e.message}` : String(e)
+      console.log(`[AI:ollama] 몰 구조분석 리포트 실패 — ${message}`)
+      onError?.(message)
       return null
     }
   })
@@ -2246,6 +2441,16 @@ async function generateMallProfileReportOllama(
  * (Anthropic → Gemini → Groq → 로컬 Ollama — 유료 둘을 먼저, 그다음 무료 중 빠른 Groq, 느린 로컬
  * Ollama는 맨 마지막)대로 하나씩 시도해 처음 성공한 결과를 쓴다 — 전부 실패하거나 enabledProviders가
  * 비었거나 원문을 하나도 못 모았으면 null(호출부가 규칙 기반으로 대체). */
+/** AiReportAttempt.model을 채우는 데 쓴다 — 공급자 하나당 리포트 생성에 실제로 쓰는 모델이 고정 하나뿐이라
+ *  (Ollama만 다른 함수(pickIndicesWithOllamaOnce)에서는 별도로 OLLAMA_MODEL을 쓰지만, 이 리포트 생성
+ *  함수는 항상 OLLAMA_REPORT_MODEL만 쓴다) 정적으로 매핑해도 어긋날 일이 없다. */
+const AI_REPORT_PROVIDER_MODEL: Record<AiProviderId, string> = {
+  anthropic: 'claude-haiku-4-5-20251001',
+  gemini: GEMINI_MODEL,
+  groq: GROQ_MODEL,
+  ollama: OLLAMA_REPORT_MODEL,
+}
+
 export async function generateMallProfileReport(
   mallName: string,
   platform: string,
@@ -2255,24 +2460,46 @@ export async function generateMallProfileReport(
   contextText: string,
   enabledProviders: AiProviderId[] = ALL_AI_PROVIDERS,
   signal?: AbortSignal,
+  // AiReportAttempt 주석 참고 — 진행 중 화면 표시(onEvent)와 최종 상세 요약(log) 둘 다 이 호출 하나가
+  // 채운다. 둘 다 없어도(기존 호출부) 동작은 그대로라 하위호환 안 깨짐.
+  log?: AiReportAttempt[],
+  onEvent?: (event: { provider: AiProviderId; model: string; phase: 'start' } | ({ phase: 'done' } & AiReportAttempt)) => void,
 ): Promise<MallStructureReport | null> {
-  const providers: { id: AiProviderId; fn: () => Promise<MallStructureReport | null> }[] = [
-    { id: 'anthropic', fn: () => generateMallProfileReportAnthropic(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText, signal) },
-    { id: 'gemini', fn: () => generateMallProfileReportGemini(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText, signal) },
-    { id: 'groq', fn: () => generateMallProfileReportGroq(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText, signal) },
-    { id: 'ollama', fn: () => generateMallProfileReportOllama(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText, signal) },
+  // 각 generateMallProfileReportXxx가 실패를 전부 내부에서 삼키고 null만 반환해왔다(호출부가 던지는
+  // 예외를 못 잡으니 여기 catch로는 "왜" 실패했는지 알 수 없었다, 2026-09-13/2026-09-23 실사용 확인 —
+  // 화면엔 "AI 호출 실패"만 뜨고 실제 원인인 크레딧 부족/한도 초과는 안 보였음). 그래서 4개 함수 모두
+  // 마지막 인자로 onError를 받아 null을 반환하는 모든 지점에서 이유를 직접 알려준다 — 아래 fn 클로저가
+  // 그 콜백을 받아 넘긴다.
+  const providers: { id: AiProviderId; fn: (onError: (reason: string) => void) => Promise<MallStructureReport | null> }[] = [
+    { id: 'anthropic', fn: (onError) => generateMallProfileReportAnthropic(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText, signal, onError) },
+    { id: 'gemini', fn: (onError) => generateMallProfileReportGemini(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText, signal, onError) },
+    { id: 'groq', fn: (onError) => generateMallProfileReportGroq(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText, signal, onError) },
+    { id: 'ollama', fn: (onError) => generateMallProfileReportOllama(mallName, platform, categoryHints, sortHints, sampleProductUrl, contextText, signal, onError) },
   ]
   for (const p of providers) {
     // 몰구조분석 중지/PTP 탭 종료로 이미 취소됐으면 다음 공급자로 폴백을 계속 시도할 이유가 없다 —
     // 어차피 그 결과도 곧 버려질 것이므로 남은 API 호출(과금/무료한도 소모)을 아낀다.
     if (signal?.aborted) return null
     if (!enabledProviders.includes(p.id)) continue
-    // 공급자별 실패 이유를 남긴다 — 예전엔 여기서도 통째로 삼켜, 화면의 "AI 호출 실패"가 "키가 없어서"인지
-    // "한도 초과"인지 "타임아웃"인지 사용자도 나중에 보는 사람도 알 방법이 없었다(2026-09-13).
-    const result = await p.fn().catch((e: unknown) => {
-      console.log(`[AI:${p.id}] 몰 구조분석 리포트 실패 — ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`)
+    onEvent?.({ provider: p.id, model: AI_REPORT_PROVIDER_MODEL[p.id], phase: 'start' })
+    const startedAt = Date.now()
+    let errorMsg: string | undefined
+    const result = await p.fn(reason => { errorMsg = reason }).catch((e: unknown) => {
+      // 이 catch는 onError가 못 잡는 경우(함수 자체가 예외를 던지는, 지금은 없지만 앞으로 생길 수 있는
+      // 경로)를 위한 안전망 — onError가 이미 채웠으면 그 값을 우선한다.
+      errorMsg = errorMsg ?? (e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+      console.log(`[AI:${p.id}] 몰 구조분석 리포트 실패 — ${errorMsg}`)
       return null
     })
+    const attempt: AiReportAttempt = {
+      provider: p.id,
+      model: AI_REPORT_PROVIDER_MODEL[p.id],
+      elapsedMs: Date.now() - startedAt,
+      success: !!result,
+      error: result ? undefined : translateAiErrorReason(errorMsg ?? '결과 없음(원인 미상)'),
+    }
+    log?.push(attempt)
+    onEvent?.({ ...attempt, phase: 'done' })
     if (result) return result
     console.log(`[AI:${p.id}] 몰 구조분석 리포트를 못 만듦 — 다음 공급자로 넘어감(남은 공급자: ${providers.slice(providers.indexOf(p) + 1).filter(n => enabledProviders.includes(n.id)).map(n => n.id).join(', ') || '없음 → 규칙 기반으로 대체'})`)
   }

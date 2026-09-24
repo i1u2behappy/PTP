@@ -35,6 +35,7 @@ export function registerAll() {
   reg('setCollectProgress', scraper.setCollectProgress)
   reg('getSiteLockStatus', scraper.getSiteLockStatus)
   reg('setSiteLockDetail', scraper.setSiteLockDetail)
+  reg('getSiteLastRunSignals', scraper.getSiteLastRunSignals)
   reg('isAnySiteBusy', scraper.isAnySiteBusy)
   // scripts/restart-dev-server.ps1이 워커를 강제종료하기 전에 이 RPC로 먼저 불러 열린 로그인 세션을
   // 정상 종료시킨다(2026-09-01) — lib/workerRestart.ts의 restartWorker()는 이미 이 함수를 같은 프로세스

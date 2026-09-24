@@ -31,6 +31,7 @@ describe('화면에 표기된 AI 모델명', () => {
     GROQ_MODEL: constValue('GROQ_MODEL'),
     GROQ_VISION_MODEL: constValue('GROQ_VISION_MODEL'),
     OLLAMA_MODEL: constValue('OLLAMA_MODEL'),
+    OLLAMA_REPORT_MODEL: constValue('OLLAMA_REPORT_MODEL'),
     OLLAMA_VISION_MODEL: constValue('OLLAMA_VISION_MODEL'),
     GEMINI_MODEL: constValue('GEMINI_MODEL'),
   }
@@ -47,7 +48,10 @@ describe('화면에 표기된 AI 모델명', () => {
 
   it('결과 배지 툴팁이 이미 교체된 옛 모델명을 안내하지 않는다', () => {
     // 실제로 났던 사고를 그대로 못 박아 둔다 — 이 이름들은 이 계정에서 쓸 수 없는 것으로 확인된 모델이다.
-    for (const stale of ['Llama 3.3 70B', 'llama-3.3-70b-versatile', 'qwen3:8b']) {
+    // qwen3:8b는 한때 이 목록에 있었다(이상 탐지 작업에서 14b보다 약해 삭제됐던 전례) — 2026-09-23에
+    // "몰 구조분석 리포트" 생성 전용(OLLAMA_REPORT_MODEL)으로, 실측 근거(235.7초 성공 vs 14b 타임아웃)를
+    // 갖고 의도적으로 재도입했으므로 더 이상 stale이 아니다. 착오로 다시 이 목록에 넣지 않는다.
+    for (const stale of ['Llama 3.3 70B', 'llama-3.3-70b-versatile']) {
       expect(SCRAPER_PANEL).not.toContain(stale)
       expect(SITE_DETAIL_PANEL).not.toContain(stale)
     }
@@ -58,5 +62,11 @@ describe('화면에 표기된 AI 모델명', () => {
     const bare = models.GROQ_MODEL.replace(/^[^/]+\//, '')
     expect(SCRAPER_PANEL).toContain(bare)
     expect(SITE_DETAIL_PANEL).toContain(bare)
+  })
+
+  it('Ollama 결과 배지가 실제 리포트 생성 모델(OLLAMA_REPORT_MODEL)을 안내한다', () => {
+    // generateMallProfileReportOllama가 실제로 부르는 모델은 OLLAMA_MODEL(14b, 후보 선별 전용)이 아니라
+    // OLLAMA_REPORT_MODEL(8b)이다 — 배지가 둘을 헷갈려 옛 14b를 안내하면 안 된다.
+    expect(SCRAPER_PANEL).toContain(models.OLLAMA_REPORT_MODEL)
   })
 })

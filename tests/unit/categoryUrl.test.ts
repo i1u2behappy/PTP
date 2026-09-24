@@ -91,8 +91,11 @@ describe('buildCategoryTree (카테고리 구조 카드의 대/중/소분류 중
   })
 
   it('트리 전체의 항목 수 합이 입력 개수와 항상 같다(속성 테스트, 공백 아닌 겹치지 않는 이름일 때)', () => {
+    // buildCategoryTree는 각 경로 조각을 trim()해서 키로 쓰므로, 원본 문자열이 달라도(예: " $c" vs "$c")
+    // trim 후 같으면 같은 노드로 합쳐진다 — uniqueArray의 유일성도 trim 후 값 기준으로 맞춰야 이 정당한
+    // 병합을 "버그"로 오탐하지 않는다(fast-check가 실제로 이 반례를 찾아냈다, 2026-09-18).
     fc.assert(fc.property(
-      fc.uniqueArray(fc.string({ minLength: 1 }).filter(s => s.trim().length > 0), { maxLength: 30 })
+      fc.uniqueArray(fc.string({ minLength: 1 }).filter(s => s.trim().length > 0), { maxLength: 30, selector: s => s.trim() })
         .map(names => names.map((n, i) => ({ name: n, href: `/${i}` }))),
       links => {
         const tree = buildCategoryTree(links)

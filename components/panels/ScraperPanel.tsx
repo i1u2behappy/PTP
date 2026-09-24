@@ -8,6 +8,7 @@ import { useRegisteredFieldKeys } from './shared/useRegisteredFieldKeys'
 import RemoteScreenViewer from './RemoteScreenViewer'
 import { shortenCategoryUrlForDisplay } from '../../lib/urlDisplay'
 import { looksLikeMallHomeUrl, buildCategoryTree, countCategoryTreeEntries, type CategoryTreeNode } from '../../lib/categoryUrl'
+import { LoginModeBadgeEditor } from './shared/LoginModeBadgeEditor'
 
 // lib/extract.ts의 CLAIMED_INFO_LABEL_RE와 같은 목록 — 이 파일은 Playwright 등 서버 전용 코드를 담고
 // 있어 클라이언트 컴포넌트에서 직접 import하지 않고 그대로 복제해 둔다(둘 중 하나를 고치면 같이 맞출 것).
@@ -66,16 +67,11 @@ const SITE_PICKER_COLUMNS: SitePickerColumnDef[] = [
   { key: 'name', label: 'Mall 이름', getValue: s => s.name || '', className: 'text-gray-800 font-medium whitespace-nowrap', render: s => (
     <>
       {s.name || '(이름 없음)'}
-      {s.manual_login_required === true && (
-        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold whitespace-nowrap" title="Windows Hello/WebAuthn(PC인증) 등으로 자동 로그인이 안 되는 몰 — 크롬 확장(개발자모드)으로 스크랩">
-          🧩 개발자모드
-        </span>
-      )}
-      {s.manual_login_required === null && (
-        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold whitespace-nowrap" title="아직 스크랩 방식이 정해지지 않았습니다 — 일단 일반모드로 진행되고, 차단이 반복되면 전환을 제안받습니다">
-          ❔ 미정
-        </span>
-      )}
+      {/* 원래 이 "몰 선택 그리드"에 넣어달라던 요청이었다(사용자 지적, 2026-09-20 — "스크래핑 설정에
+          몰 선택 그리드에 구현하라고 한건데, 어디다가 했다는거야?") — 처음엔 Mall 상세관리 목록에만
+          넣었다가 뒤늦게 옮겨왔다. Mall 상세관리와 같은 컴포넌트(LoginModeBadgeEditor)를 그대로 써서
+          클릭 한 번으로 일반모드/개발자모드/미정을 바로 바꿀 수 있다 — 읽기 전용 배지가 아니다. */}
+      <LoginModeBadgeEditor site={s} className="ml-1.5" />
     </>
   ) },
   { key: 'main_items', label: '메인 품목', getValue: s => s.main_items || '', render: s => s.main_items || '-', className: 'text-gray-500' },
@@ -302,7 +298,7 @@ const AI_PROVIDER_OPTIONS: { id: AiProviderId; label: string; title: string }[] 
   { id: 'anthropic', label: 'Anthropic(Haiku 4.5)', title: 'claude-haiku-4-5-20251001 — 유료 API(크레딧 필요), 웹.' },
   { id: 'gemini', label: 'Gemini(Flash)', title: 'gemini-flash-latest — 무료 티어(일일 한도 있음), 웹.' },
   { id: 'groq', label: 'Groq(qwen 27b·웹)', title: '텍스트 qwen/qwen3.8-27b, 화면인식 qwen/qwen3.6-27b — 무료 등급(분당 토큰 한도 있음), 웹.' },
-  { id: 'ollama', label: 'Ollama(qwen 14b·로컬)', title: '텍스트 qwen3:14b, 화면인식 qwen2.5vl:7b — 이 PC에서 직접 실행(요금 없음, CPU 사용).' },
+  { id: 'ollama', label: 'Ollama(qwen 14b/8b·로컬)', title: '텍스트 qwen3:14b(후보 선별)·qwen3:8b(몰 구조분석 리포트), 화면인식 qwen2.5vl:7b — 이 PC에서 직접 실행(요금 없음, CPU 사용).' },
 ]
 
 /** lib/ai.ts의 MallStructureReport와 같은 모양. */
@@ -388,7 +384,26 @@ interface MallProfileSignals {
   /** 지난번 categoryLinks 갱신 때 새로 나타난 href 목록 — "발견된 카테고리 N개" 배지의 "새 카테고리 M개"용
    *  (사용자 요청, 2026-09-05, lib/scraper.ts의 MallProfileSignals와 같은 모양). */
   newCategoryHrefs?: string[]
+  /** lib/scraper.ts의 MallProfileSignals.visionProviderLog와 같은 모양 — 카테고리/정렬 화면인식이 이번
+   *  실행에서 실제로 Groq/로컬 Ollama 중 뭘 썼는지(사용자 지시, 2026-09-22). */
+  visionProviderLog?: { task: string; provider: 'groq' | 'ollama' }[]
+  /** lib/scraper.ts의 MallProfileSignals.aiReportAttempts와 같은 모양 — "몰 구조분석" AI 리포트가
+   *  Anthropic→Gemini→Groq→Ollama 순으로 폴백하며 이번 실행에서 실제로 시도한 각 공급자의 결과
+   *  (성공/실패·원인·걸린 시간, 사용자 지시 2026-09-23). */
+  aiReportAttempts?: { provider: AiProviderId; model: string; elapsedMs: number; success: boolean; error?: string }[]
 }
+
+/** /api/scrape/site-lock-status의 응답 모양 — lastRunSignals는 busy:false일 때만 실려 온다(lib/scraper.ts의
+ *  getSiteLastRunSignals 주석 참고: 개발자모드는 "몰 구조분석" HTTP 응답을 확장이 직접 받아가 PTP 탭이
+ *  못 보므로, 이 폴링의 busy→false 전이에서 대신 가져가는 용도). */
+interface SiteLockStatusInfo {
+  busy: boolean
+  label?: string
+  sinceMs?: number
+  detail?: string
+  lastRunSignals?: { aiReportAttempts?: MallProfileSignals['aiReportAttempts']; visionProviderLog?: MallProfileSignals['visionProviderLog'] }
+}
+
 interface ProfileCheckResult {
   signals: MallProfileSignals
   diffs: string[]
@@ -537,39 +552,98 @@ function FieldTile({ icon, label, value }: { icon: string; label: string; value:
  *  → 합계 57개"처럼 뭉뚱그리면 실제로 어떤 대/중/소분류 57개인지 구분이 안 됨. 이후 "…외 N개"로 일부만
  *  보여준 것도 재지적 — "분석된 모든 카테고리를 확인 가능하게 모두 표시해": 개수 상한 없이 전부 나열한다).
  *  categoryLinks가 아직 없는 몰(카테고리를 못 찾은 경우)만 기존 AI 요약 문장으로 대체한다. */
-// 자식이 있는 노드는 "이름[자식1·자식2·...]"로 대괄호를 열어 그 안에 하위 분류를 재귀적으로 담는다 —
-// 대분류 밑에 중분류, 그 밑에 다시 소분류가 있으면 괄호가 한 겹 더 열리는 식으로 실제 계층 깊이가 그대로
-// 드러난다(사용자 지시, 2026-09-16 — "대분류 중분류 소분류도 알 수 있으니 그 부분도 잘 정리할 수 있게").
-// 자식이 없는 리프는 이름만 그대로 쓴다.
-function renderCategoryTreeNode(node: CategoryTreeNode): string {
-  if (!node.children.length) return node.name
-  return `${node.name}[${node.children.map(renderCategoryTreeNode).join('·')}]`
+// "대분류/중분류/소분류" 단계 이름에 집착하지 말고, 순전히 트리 구조(자식이 있는지)만으로 규칙을 정하라는
+// 지시로 최종 확정(사용자 지시, 2026-09-24 — "대중소 분류에 집착하지말고, 중분류더라도 마지막 위치의
+// 카테고리면 가로로 나열을 해. 다음 중분류면 다음 줄부터 시작을 해서 표시를 해. 그래야 실제 몰과 ptp
+// 정렬을 쉽게 비교해서 맞는지 확인을 하기 쉬워"). 이전엔 "대분류/중분류는 몇 단이든 항상 자기 줄, 그
+// 아래만 가로로" 식으로 단(레벨) 번호에 규칙을 고정해뒀는데, 그러면 실제 몰 메뉴 순서와 화면 표시 순서가
+// 어긋나 보여(리프를 레벨별로 다시 묶어 재배치했으므로) 실제 몰과 나란히 비교하기 어려웠다.
+// 새 규칙(각 형제 목록 안에서 원래 순서 그대로 훑으며): 자식이 없는(리프) 형제가 연달아 나오면 그만큼
+// 한 줄에 "/"로 이어붙이고, 자식이 있는(브랜치) 형제를 만나면 그 지점에서 줄을 새로 잡아 자기 이름을
+// 쓰고 그 아래에 같은 규칙을 재귀 적용한다 — 어느 깊이에서든 완전히 같은 규칙 하나만 적용되므로 "이건
+// 중분류라서/소분류라서"를 따로 구분할 필요가 없다. 예전에 "리프를 아무 깊이에서나 가로로 묶는 방식"이
+// 한 번 반려된 적이 있는데(주석 기록상 대분류 자체가 리프인 몰에서 서로 다른 부모의 리프가 한 줄에
+// 섞여버림), 이번엔 항상 "같은 부모의 형제끼리만" 묶어(CategoryTreeRows가 한 번에 한 부모의 자식
+// 목록만 받아 재귀) 그 문제를 재현하지 않는다.
+/** nodes(같은 부모를 공유하는 형제 목록) 하나를 원래 순서 그대로 훑으며 그린다 — 연속된 리프는 한 줄에
+ *  "/"로 묶고, 브랜치를 만나면 새 줄로 끊어 자기 이름 + 재귀 렌더링. 자식 목록을 받을 때마다 새로
+ *  호출되므로 서로 다른 부모의 항목이 한 줄에 섞이는 일은 구조적으로 없다. */
+function CategoryTreeRows({ nodes }: { nodes: CategoryTreeNode[] }) {
+  const rows: React.ReactNode[] = []
+  let pendingLeaves: CategoryTreeNode[] = []
+  const flushLeaves = () => {
+    if (!pendingLeaves.length) return
+    const leaves = pendingLeaves
+    rows.push(
+      <p key={`leaves-${rows.length}`} className="text-gray-700">
+        {leaves.map((g, i) => (
+          <span key={i}>{g.name}{i < leaves.length - 1 ? <span className="text-gray-300"> / </span> : null}</span>
+        ))}
+      </p>,
+    )
+    pendingLeaves = []
+  }
+  nodes.forEach(node => {
+    if (!node.children.length) {
+      pendingLeaves.push(node)
+      return
+    }
+    flushLeaves()
+    rows.push(
+      <div key={`branch-${rows.length}`}>
+        <span className="font-medium text-gray-700">{node.name}</span>
+        <span className="font-normal text-gray-400"> ({countCategoryTreeEntries(node)})</span>
+        <div className="pl-3 mt-0.5 border-l border-gray-200 space-y-0.5">
+          <CategoryTreeRows nodes={node.children} />
+        </div>
+      </div>,
+    )
+  })
+  flushLeaves()
+  return <>{rows}</>
 }
 
-function CategoryStructureTile({ categoryLinks, fallback }: { categoryLinks: { name: string; href: string }[] | undefined; fallback: string }) {
+/** 몰구조분석의 화면인식(카테고리/정렬)이 이번 실행에서 실제로 Groq/로컬 Ollama 중 뭘 썼는지 배지로
+ *  보여준다(사용자 지시, 2026-09-22 — "Groq 토큰 문제가 생기면 로컬로 넘어가는 건데, 어느 걸 쓰고
+ *  있는지 화면에 표시해줄 수 있어?"). visionProviderLog는 화면인식 함수별로 성공한 공급자를 담은
+ *  기록이라(MallProfileSignals.visionProviderLog 주석 참고), 이 타일과 관련된 task 이름들만 걸러
+ *  요약한다 — 관련 화면인식이 하나도 성공 못 했으면(전부 실패해 AI 텍스트/DOM 폴백으로 처리됨) 배지
+ *  없이 조용히 넘어간다(성공하지도 않은 걸 지어내지 않는다). */
+function VisionProviderBadge({ log, tasks }: { log?: { task: string; provider: 'groq' | 'ollama' }[]; tasks: string[] }) {
+  const matched = log?.filter(e => tasks.includes(e.task)) ?? []
+  if (!matched.length) return null
+  const usedGroq = matched.some(e => e.provider === 'groq')
+  const usedOllama = matched.some(e => e.provider === 'ollama')
+  const label = usedGroq && usedOllama ? 'Groq+로컬' : usedGroq ? 'Groq' : '로컬(Ollama)'
+  const cls = usedGroq && !usedOllama ? 'bg-emerald-100 text-emerald-700' : usedOllama && !usedGroq ? 'bg-amber-100 text-amber-700' : 'bg-sky-100 text-sky-700'
+  return (
+    <span className={`ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-semibold ${cls}`}
+      title="이번 몰구조분석에서 이 화면인식에 실제로 성공한 AI 공급자 — Groq가 한도 초과 등으로 실패하면 자동으로 로컬 Ollama로 넘어간다.">
+      {label}
+    </span>
+  )
+}
+
+function CategoryStructureTile({ categoryLinks, fallback, visionProviderLog }: {
+  categoryLinks: { name: string; href: string }[] | undefined; fallback: string
+  visionProviderLog?: { task: string; provider: 'groq' | 'ollama' }[]
+}) {
   const tree = buildCategoryTree(categoryLinks)
-  // 대분류마다 제목 줄 + 항목 줄로 따로 나누면(예전 방식) 대분류 수만큼 줄이 늘어난다(사용자 지시,
-  // 2026-09-15 — "최대한 줄 수를 줄여서 표시해줘. 대분류 구분을 그냥 '//' 이 두 줄로 구분해줘") — 대분류별
-  // 블록을 "대분류명(N개) 항목1·항목2·..." 한 덩어리로 만들고, 덩어리 사이만 " // "로 이어 붙여 한
-  // 문단으로 흘려보낸다. 개별 항목은 여전히 하나도 안 빠뜨리고 전부 나열한다(요약 아님, 위 설명 그대로).
-  const flat = tree.map(g => {
-    const body = g.children.length ? ` ${g.children.map(renderCategoryTreeNode).join('·')}` : ''
-    return `${g.name}(${countCategoryTreeEntries(g)})${body}`
-  }).join(' // ')
-  // 한 줄로 압축하면서 "총 몇 개"가 안 보이게 됐다는 지적(사용자, 2026-09-15) — 대분류별 개수 옆에,
-  // 제목에도 전체 합계를 같이 보여준다(categoryLinks.length와 항상 일치 — buildCategoryTree는
-  // 항목을 빠뜨리지 않고 트리로만 재배치하므로).
+  // 총 몇 개인지가 안 보이면 안 된다는 지적(사용자, 2026-09-15) — 대분류별 개수 옆에, 제목에도 전체
+  // 합계를 같이 보여준다(categoryLinks.length와 항상 일치 — buildCategoryTree는 항목을 빠뜨리지 않고
+  // 트리로만 재배치하므로).
   const totalCount = categoryLinks?.length ?? 0
   return (
     <div className="bg-gray-50 rounded-xl px-3 py-2.5 border border-gray-100 sm:col-span-2">
       <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-1">
         🗂️ 카테고리 구조{tree.length ? <span className="font-normal text-gray-400"> (총 {totalCount}개)</span> : null}
+        <VisionProviderBadge log={visionProviderLog} tasks={['카테고리 계층', '카테고리 메뉴 트리거', '카테고리 후보 선별']} />
       </p>
       {tree.length ? (
-        <p className="text-[11px] text-gray-600 leading-relaxed break-words"
-          title='AI 요약이 아니라, 이 몰구조분석이 방금 찾아 저장한 categoryLinks를 대분류별로 묶어 전부 그대로 나열한 것입니다("//"가 대분류 구분) — "카테고리 불러오기"의 목록과 항상 일치해야 정상입니다.'>
-          {flat}
-        </p>
+        <div className="text-[11px] text-gray-600 leading-relaxed space-y-1.5 max-h-56 overflow-y-auto pr-1"
+          title='AI 요약이 아니라, 이 몰구조분석이 방금 찾아 저장한 categoryLinks를 원래 순서 그대로 펼친 것입니다(하위가 없는 항목은 "/"로 가로로 이어붙이고, 하위가 있는 항목만 자기 줄을 받아 그 아래를 같은 규칙으로 펼침) — "카테고리 불러오기"의 목록과 항상 일치해야 정상입니다.'>
+          <CategoryTreeRows nodes={tree} />
+        </div>
       ) : (
         <p className={`text-xs leading-relaxed ${!fallback || fallback === '확인 안됨' ? 'text-gray-400 italic' : 'text-gray-700'}`}>{fallback || '확인 안됨'}</p>
       )}
@@ -581,9 +655,10 @@ function CategoryStructureTile({ categoryLinks, fallback }: { categoryLinks: { n
  *  20,000자 원문을 다시 문장으로 요약한 report.sortStructure보다 구조적으로 더 정확 — buildMallReportPrompt
  *  주석 참고, sortHints 자체가 이미 "구조적으로 확정된 값"이라고 명시함). 없을 때만 그 문장으로 대체한다
  *  (카테고리 구조 타일과 같은 원칙, 사용자 지시 2026-09-15). */
-function SortStructureTile({ sortOptions, fallback }: {
+function SortStructureTile({ sortOptions, fallback, visionProviderLog }: {
   sortOptions?: ({ label: string; kind?: 'query'; paramsToAdd: Record<string, string> } | { label: string; kind: 'click'; clickText: string })[]
   fallback: string
+  visionProviderLog?: { task: string; provider: 'groq' | 'ollama' }[]
 }) {
   // 카테고리 구조 타일과 같은 이유로 세로 목록 대신 한 줄로 흘려보낸다(사용자 지시, 2026-09-15 — "정렬구조도
   // 가로로 이어서 표시해줘") — 항목 사이는 " · "로만 구분한다(대분류가 없어 "//" 구분은 필요 없음).
@@ -592,7 +667,10 @@ function SortStructureTile({ sortOptions, fallback }: {
     : ''
   return (
     <div className="bg-gray-50 rounded-xl px-3 py-2.5 border border-gray-100">
-      <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-0.5">↕️ 정렬 구조</p>
+      <p className="text-[11px] font-semibold text-gray-500 tracking-wide mb-0.5">
+        ↕️ 정렬 구조
+        <VisionProviderBadge log={visionProviderLog} tasks={['정렬 라벨', '정렬 트리거']} />
+      </p>
       {sortOptions?.length ? (
         <p className="text-[11px] text-gray-600 leading-relaxed break-words"
           title="AI 요약 문장이 아니라, 실제로 클릭/URL 검증까지 거쳐 확인된 정렬 옵션 목록입니다.">
@@ -723,7 +801,7 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
                 </span>
               ) : result.signals.report.generatedBy === 'ollama' ? (
                 <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-sky-100 text-sky-700"
-                  title="Anthropic/Gemini/Groq 호출이 모두 실패해 로컬 Ollama(qwen3:14b)로 대신 분석했습니다 — 클라우드 AI보다 이런 종합 추출 정확도가 낮을 수 있습니다.">
+                  title="Anthropic/Gemini/Groq 호출이 모두 실패해 로컬 Ollama(qwen3:8b)로 대신 분석했습니다 — 클라우드 AI보다 이런 종합 추출 정확도가 낮을 수 있습니다.">
                   🖥️ 로컬 AI(Ollama) 분석{elapsedSuffix}
                 </span>
               ) : (
@@ -734,6 +812,29 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
               )
             })()}
           </div>
+          {/* "AI 호출 실패"/"AI 분석 성공(이전 리포트 유지 중)" 배지만 봐서는 어느 공급자가 왜 실패했는지
+              (크레딧 부족/레이트리밋/타임아웃 등) 알 수 없다는 지적(사용자 지시, 2026-09-23)으로, 이번
+              실행에서 실제로 시도한 공급자별 결과를 펼쳐볼 수 있게 한다 — 시도가 하나도 없으면(aiProviders를
+              전부 꺼둔 채 곧장 규칙 기반으로 간 경우) 아무것도 안 보인다. */}
+          {result.signals.aiReportAttempts && result.signals.aiReportAttempts.length > 0 && (
+            <details className="mb-3 text-xs bg-gray-50 rounded-lg px-3 py-2">
+              <summary className="cursor-pointer font-semibold text-gray-500">AI 호출 상세 ({result.signals.aiReportAttempts.length}개 공급자 시도)</summary>
+              <ul className="mt-1.5 space-y-0.5">
+                {result.signals.aiReportAttempts.map((a, i) => {
+                  // 공급자 라벨(AI_PROVIDER_OPTIONS)엔 Ollama처럼 작업에 따라 모델이 갈리는 경우가 있어
+                  // (14b는 후보 선별, 8b는 이 리포트 생성) 라벨의 괄호 설명 대신 이번 시도가 실제로 쓴
+                  // 모델(a.model)을 직접 붙인다 — "Ollama(qwen3:8b)"처럼 어느 모델이 쓰였는지 헷갈리지 않게.
+                  const providerName = AI_PROVIDER_OPTIONS.find(o => o.id === a.provider)?.label.split('(')[0].trim() ?? a.provider
+                  return (
+                    <li key={i} className={a.success ? 'text-teal-700' : 'text-rose-600'}>
+                      {a.success ? '✓' : '✗'} {providerName}({a.model})
+                      {' · '}{(a.elapsedMs / 1000).toFixed(1)}초{!a.success && a.error ? ` · ${a.error}` : ''}
+                    </li>
+                  )
+                })}
+              </ul>
+            </details>
+          )}
           {/* 분석 도중/직후 로그인 세션이 끊긴 것으로 보이는 경우 — lib/scraper.ts의
               MallProfileSignals.sessionLostDuringAnalysis 주석 참고. 원인은 아직 정확히 확정되지 않았고
               (걸스굽 실사용 확인, 2026-09-01) 이 경고 자체가 약한 신호(로그아웃 링크를 못 찾음)라 확정
@@ -764,61 +865,59 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
               되짚어 보여준다(사용자 지시, 2026-09-13: "화면을 통해 카테고리를 파악했으면, 마지막 결과가
               그 화면의 카테고리와 맞는지, 안 맞는 건 어떤 건지 왜 그런지 피드백을 줄 수 있게 해야지").
               화면 인식을 안 탔거나 실패한 실행에서는 categoryScreenCheck 자체가 없어 아무것도 안 보인다. */}
-          {result.signals.categoryScreenCheck && (
-            <div className={`mb-3 text-xs rounded-lg px-3 py-2 ${result.signals.categoryScreenCheck.missing.length ? 'text-amber-800 bg-amber-50' : 'text-emerald-800 bg-emerald-50'}`}>
-              {/* 재검증으로 되살린 카테고리 — "화면엔 보이는데 결과에 없으면 다른 방법으로 다시 확인하라"는
-                  지시(2026-09-13)에 따라 추가된 단계의 결과다. 무엇을 근거로 되살렸는지까지 보여준다. */}
-              {!!result.signals.categoryScreenCheck.recovered?.length && (
-                <div className="mb-2 pb-2 border-b border-current/20">
-                  <p className="font-medium">🛟 화면에는 있는데 빠졌던 카테고리 {result.signals.categoryScreenCheck.recovered.length}개를 재검증으로 되살렸습니다</p>
-                  <ul className="mt-0.5 space-y-0.5">
-                    {result.signals.categoryScreenCheck.recovered.slice(0, 12).map(r => (
-                      <li key={r.href}>· <span className="font-medium">{r.name}</span> — {r.evidence}</li>
-                    ))}
-                  </ul>
-                  {result.signals.categoryScreenCheck.recovered.length > 12 && (
-                    <p className="mt-0.5">…외 {result.signals.categoryScreenCheck.recovered.length - 12}개</p>
-                  )}
-                </div>
-              )}
-              {result.signals.categoryScreenCheck.missing.length === 0 ? (
-                <p>✓ 화면에서 읽은 카테고리 {result.signals.categoryScreenCheck.screenNames.length}개가 모두 결과에 담겼습니다.</p>
-              ) : (
-                <>
-                  <p className="font-medium mb-1">
-                    ⚠ 화면에는 보이는데 결과에 없는 카테고리 {result.signals.categoryScreenCheck.missing.length}개
-                    <span className="font-normal text-amber-700"> (화면에서 읽은 {result.signals.categoryScreenCheck.screenNames.length}개 기준)</span>
-                  </p>
-                  <ul className="space-y-0.5">
-                    {result.signals.categoryScreenCheck.missing.slice(0, 12).map(m => (
-                      <li key={m.name}>· <span className="font-medium">{m.name}</span> — {m.reason}</li>
-                    ))}
-                  </ul>
-                  {result.signals.categoryScreenCheck.missing.length > 12 && (
-                    <p className="mt-1 text-amber-700">…외 {result.signals.categoryScreenCheck.missing.length - 12}개</p>
-                  )}
-                </>
-              )}
-            </div>
-          )}
-          {/* 화면에서 본 구조 — screenNames(평평한 이름 목록)와 같은 화면에서 같이 받아온 "대분류→하위
-              카테고리" 그룹을 그대로 보여준다(사용자 지시, 2026-09-15: "사람과 같이 화면 전체를 캡쳐해서
-              보는 형태로 대분류/중소분류 구조를 파악"). 아래 "카테고리 구조" 타일(DOM 기준 트리)과 나란히
-              눈으로 대조할 수 있게 하는 참고용 정보라 missing/extra 판정에는 관여하지 않는다 — 비전이
-              실패했거나 구조를 못 받았으면 아무것도 안 보인다. */}
-          {!!result.signals.categoryScreenCheck?.screenHierarchy?.length && (
-            <div className="mb-3 text-xs rounded-lg px-3 py-2 text-sky-800 bg-sky-50">
-              <p className="font-medium mb-1">📸 화면에서 본 대/중/소분류 구조</p>
-              <ul className="space-y-1">
-                {result.signals.categoryScreenCheck.screenHierarchy.map(g => (
-                  <li key={g.group}>
-                    <span className="font-medium">{g.group}</span>
-                    {g.items.length > 0 && <span className="text-sky-700"> — {g.items.join(', ')}</span>}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+          {result.signals.categoryScreenCheck && (() => {
+            // "화면의 대분류 탭(그룹 제목)일 뿐 링크가 없어 저장 안 함(정상)"은 buildCategoryScreenCheck가
+            // 이미 확정적으로 "문제 없음"이라고 판정해준 것이다 — 그런데도 ⚠ 경고 스타일로 항목까지 일일이
+            // 늘어놓으면, 열어볼 때마다 "확인할 게 없는데 확인하라"는 걸로 보인다(사용자 지적, 2026-09-23 —
+            // "이 내용은 특별히 확인할 내용이 없어... 제거해"). 진짜 원인 불명(탐지 실패) 또는 excluded 사유가
+            // 붙은 항목만 "확인이 필요한 missing"으로 걸러 보여주고, 전부 (정상)뿐이면 다 담긴 것과 똑같이
+            // 취급한다 — recovered(재검증으로 되살린 카테고리)는 반대로 "1차 탐지가 실제로 놓쳤다"는 신호라
+            // 그대로 둔다(정상 판정이 없다).
+            const realMissing = result.signals.categoryScreenCheck.missing.filter(m => !m.reason.endsWith('(정상)'))
+            const recovered = result.signals.categoryScreenCheck.recovered ?? []
+            // 문제/조치가 하나도 없으면(재검증으로 되살린 것도, 진짜 missing도 없음) "✓ 다 담겼습니다"라는
+            // 안심 문구조차 안 보여준다 — 그 문구도 확인할 게 없는데 매번 보게 되는 내용이라는 지적(사용자
+            // 지시, 2026-09-23)과 같은 이유. 실제로 뭔가 있을 때만(되살림 또는 진짜 누락) 이 박스 자체가 뜬다.
+            if (!recovered.length && !realMissing.length) return null
+            return (
+              <div className={`mb-3 text-xs rounded-lg px-3 py-2 ${realMissing.length ? 'text-amber-800 bg-amber-50' : 'text-emerald-800 bg-emerald-50'}`}>
+                {/* 재검증으로 되살린 카테고리 — "화면엔 보이는데 결과에 없으면 다른 방법으로 다시 확인하라"는
+                    지시(2026-09-13)에 따라 추가된 단계의 결과다. 무엇을 근거로 되살렸는지까지 보여준다.
+                    노이즈는 아니지만(1차 탐지가 실행마다 다르게 나온다는 실제 신호) 매번 펼쳐진 채로 항목을
+                    다 늘어놓으면 화면을 많이 차지한다는 지적(사용자 지시, 2026-09-23 — "펼치면 보는 형태로
+                    해")으로, 개수만 항상 보이고 목록은 기본 접어둔다. */}
+                {!!recovered.length && (
+                  <details className={`${realMissing.length ? 'mb-2 pb-2 border-b border-current/20' : ''}`}>
+                    <summary className="font-medium cursor-pointer select-none">🛟 화면에는 있는데 빠졌던 카테고리 {recovered.length}개를 재검증으로 되살렸습니다</summary>
+                    <ul className="mt-0.5 space-y-0.5">
+                      {recovered.slice(0, 12).map(r => (
+                        <li key={r.href}>· <span className="font-medium">{r.name}</span> — {r.evidence}</li>
+                      ))}
+                    </ul>
+                    {recovered.length > 12 && (
+                      <p className="mt-0.5">…외 {recovered.length - 12}개</p>
+                    )}
+                  </details>
+                )}
+                {!!realMissing.length && (
+                  <>
+                    <p className="font-medium mb-1">
+                      ⚠ 화면에는 보이는데 결과에 없는 카테고리 {realMissing.length}개
+                      <span className="font-normal text-amber-700"> (화면에서 읽은 {result.signals.categoryScreenCheck.screenNames.length}개 기준)</span>
+                    </p>
+                    <ul className="space-y-0.5">
+                      {realMissing.slice(0, 12).map(m => (
+                        <li key={m.name}>· <span className="font-medium">{m.name}</span> — {m.reason}</li>
+                      ))}
+                    </ul>
+                    {realMissing.length > 12 && (
+                      <p className="mt-1 text-amber-700">…외 {realMissing.length - 12}개</p>
+                    )}
+                  </>
+                )}
+              </div>
+            )
+          })()}
           {result.autoRuleFields.length > 0 && (
             <p className="mb-3 text-xs text-teal-700 bg-teal-50 rounded-lg px-3 py-2">
               ✓ 이 결과로 추출규칙 자동 생성됨: {result.autoRuleFields.join(', ')} — 이후 미리보기/스크랩부터 바로 적용됩니다.
@@ -827,8 +926,8 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
           {result.signals.report ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <FieldTile icon="🔗" label="URL 계층" value={result.signals.report.urlHierarchy} />
-              <CategoryStructureTile categoryLinks={result.signals.categoryLinks} fallback={result.signals.report.categoryStructure} />
-              <SortStructureTile sortOptions={result.signals.sortOptions} fallback={result.signals.report.sortStructure} />
+              <CategoryStructureTile categoryLinks={result.signals.categoryLinks} fallback={result.signals.report.categoryStructure} visionProviderLog={result.signals.visionProviderLog} />
+              <SortStructureTile sortOptions={result.signals.sortOptions} fallback={result.signals.report.sortStructure} visionProviderLog={result.signals.visionProviderLog} />
               {([
                 ['🏦', '은행명', result.signals.report.bankName],
                 ['🔢', '계좌번호', result.signals.report.accountNumber],
@@ -1258,7 +1357,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 있으면, 여기서 누르는 버튼도 그게 끝날 때까지 순서를 기다린다(lib/scraper.ts의 withSiteLock 참고) —
   // 예전엔 이걸 알 방법이 없어 "왜 이렇게 오래 걸리냐"는 질문으로 매번 서버 로그를 뒤져야 했다. 몰을
   // 선택해두는 동안 짧은 주기로 폴링해, 대기 중이면 화면에 바로 보여준다.
-  const [siteLockStatus, setSiteLockStatus] = useState<{ busy: boolean; label?: string; sinceMs?: number; detail?: string } | null>(null)
+  const [siteLockStatus, setSiteLockStatus] = useState<SiteLockStatusInfo | null>(null)
   // "스크래핑 시작"/"미리보기"를 누른 시각 — 그 뒤 이 몰의 락이 그 시각 이후에 잡혔으면 그건 방금 내가
   // 시작한 그 작업 자신이 쥔 락이다(아래 배너가 "다른 작업이 진행 중"이라고 스스로를 가리키며 혼란을
   // 주지 않게 구분하는 용도, 2026-08-11 실사용 확인 — 내 작업이 실제로 잘 돌고 있는데도 계속 "다른
@@ -1659,7 +1758,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     const siteId = selectedSite.id
     function poll() {
       fetch(`/api/scrape/site-lock-status?siteId=${siteId}`).then(r => r.json())
-        .then((d: { busy: boolean; label?: string; sinceMs?: number; detail?: string }) => {
+        .then((d: SiteLockStatusInfo) => {
           setSiteLockStatus(d)
           // 확장이 실제로 분석 요청을 서버에 보내 락이 잡히면(=사용자가 몰 창에서 확장 아이콘을 찾아
           // 눌렀다는 뜻) "🔍 몰 구조분석" 버튼의 대기 강조(awaitingDevProfileAction)는 더 이상 필요
@@ -1749,8 +1848,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       setManualCategoryUrlsText('')
       const p = full.scrape_profile
       if (!p || !p.sampleCount) return
+      // aiReportAttempts/visionProviderLog는 이번 실행 전용 신호라 DB(scrape_profile)엔 없다 — 방금
+      // busy→false로 바뀐 이 폴링 응답에 같이 실려온 lastRunSignals(site-lock-status 라우트 주석 참고)로
+      // 보충한다(사용자 지적, 2026-09-24 — "개발자모드에서... 왜 어떤 llm이 사용되는지 안보이지?").
       setProfileResult({
-        signals: p, diffs: [], isFirstTime: false, autoRuleFields: [],
+        signals: { ...p, ...siteLockStatus?.lastRunSignals }, diffs: [], isFirstTime: false, autoRuleFields: [],
         thisRunReportSource: p.lastRunReportSource ?? null, isCachedRestore: false,
       })
       setProfileElapsedSec(null)
@@ -3225,9 +3327,20 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     activateManualMode()
     setExpandingHref(href)
     try {
+      // 이 대분류의 이름을 안 넘기면 서버(detectCategoryLinksWithAI)가 "지금 보고 있는 카테고리"라는
+      // 빈 이름으로 AI에게 물어야 해서, AI가 어느 대분류의 하위 메뉴를 골라야 하는지 전혀 구분하지
+      // 못한다 — 몰 전체 메가메뉴가 모든 페이지에 다 실려 있는 몰(도매신)에서, MEN SHOES 페이지를
+      // 확장했는데 WOMEN SHOES의 하위 카테고리(부츠/털신발·펌프스/힐)가 섞여 들어온 사고로 발견됨
+      // (사용자 지적, 2026-09-17). 서버(expandCategoryChildren)는 이 이름이 scrape_profile.categoryLinks의
+      // "이름 > " 접두사와 정확히 문자열이 같아야만 몰구조분석 캐시를 찾아 쓰므로, categories(몰구조분석/
+      // "전체 가져오기"가 채운 상태 — categoryLinks와 1:1로 항상 같은 텍스트)를 최우선으로 쓴다.
+      // categoryInfo.label은 "카테고리별 상품 개수 확인" 때 별도로 저장된 값이라 살짝 다르게 포맷됐거나
+      // (그 기능을 아직 안 돌렸으면 아예 없거나) 오래된 몰구조분석 실행의 라벨일 수 있어, categories에
+      // 없는 href(사용자가 직접 입력한 URL 등)에 대한 보조 수단으로만 쓴다.
+      const label = categories.find(c => c.href === href)?.text || categoryInfo[sortedCategoryUrl(href)]?.label || ''
       const res = await fetch('/api/scrape/categories/expand', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ siteId: selectedSite.id, url: href }),
+        body: JSON.stringify({ siteId: selectedSite.id, url: href, name: label || undefined }),
       })
       const d = await res.json() as { links?: { href: string; text: string }[]; error?: string }
       if (!res.ok) { alert(`하위 카테고리 확인 실패: ${d.error || res.status}`); return }
@@ -4313,13 +4426,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
 
           {/* 위 총계는 카테고리별로 각자 세서 더한 값이라, "가격대별"처럼 서로 겹치는 분류를 여러 개
               선택하면 실제보다 많게 나올 수 있다 — 정확히 몇 개가 스크랩될지는 실제 스크랩과 같은 방식
-              (URL을 모아 중복 제거)으로만 알 수 있어 느릴 수 있으므로, 카테고리가 2개 이상일 때만 버튼으로
-              둔다(사용자 요청, 2026-08-17). */}
-          {categoryCounts.length > 1 && (
+              (URL을 모아 중복 제거)으로만 알 수 있어 느릴 수 있으므로 자동으로 하지 않고 버튼으로 둔다
+              (사용자 요청, 2026-08-17). 원래는 "카테고리 간 중복 제거"가 목적이라 카테고리 2개 이상일
+              때만 노출했는데, 카테고리 1개만 선택해도 그 미리보기 개수 자체가 확인 상한(PREVIEW_PAGE_BUDGET)에
+              걸려 "N개 이상"으로만 나올 수 있어 실제 개수가 궁금할 수 있다(사용자 요청, 2026-09-16) —
+              중복 제거 여부와 무관하게 카테고리가 1개 이상이면 항상 노출한다. */}
+          {categoryCounts.length >= 1 && (
             <div className="flex items-center gap-2 mb-2 flex-wrap">
               <button type="button" onClick={handleCheckExactTotal} disabled={exactTotalLoading}
                 className="px-4 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-sm font-bold rounded-full disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
-                {exactTotalLoading ? '중복 제거 확인 중...' : '🎯 정확한 총 개수 확인(중복 제거)'}
+                {exactTotalLoading ? '정확히 세는 중...' : categoryCounts.length > 1 ? '🎯 정확한 총 개수 확인(중복 제거)' : '🎯 정확한 개수 확인'}
               </button>
               {exactTotalLoading && (
                 <button type="button" onClick={handleStopExactTotal}
@@ -4329,7 +4445,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               )}
               {exactTotal && (
                 <span className="text-xs text-gray-600">
-                  → 실제로는 정확히 <strong>{exactTotal.total.toLocaleString()}</strong>개(중복 제거)
+                  → 실제로는 정확히 <strong>{exactTotal.total.toLocaleString()}</strong>개
+                  {categoryCounts.length > 1 && '(중복 제거)'}
                   {exactTotal.needsLogin && <span className="text-amber-600"> ⚠ 로그인 세션이 끊긴 상태로 확인된 것 같습니다</span>}
                 </span>
               )}

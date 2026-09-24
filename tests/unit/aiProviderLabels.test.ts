@@ -34,6 +34,7 @@ describe('화면에 표기된 AI 모델명', () => {
     OLLAMA_REPORT_MODEL: constValue('OLLAMA_REPORT_MODEL'),
     OLLAMA_VISION_MODEL: constValue('OLLAMA_VISION_MODEL'),
     GEMINI_MODEL: constValue('GEMINI_MODEL'),
+    GEMINI_VISION_MODEL: constValue('GEMINI_VISION_MODEL'),
   }
 
   it.each(Object.entries(models))('%s(%s)가 공급자 체크박스 설명에 그대로 적혀 있다', (_name, value) => {

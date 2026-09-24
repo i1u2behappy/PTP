@@ -296,8 +296,8 @@ type AiProviderId = 'anthropic' | 'gemini' | 'groq' | 'ollama'
 // 루프에서 이걸 강제한다(예전에 Groq 툴팁이 이미 교체된 옛 모델명을 열흘 넘게 계속 안내하던 사고).
 const AI_PROVIDER_OPTIONS: { id: AiProviderId; label: string; title: string }[] = [
   { id: 'anthropic', label: 'Anthropic(Haiku 4.5)', title: 'claude-haiku-4-5-20251001 — 유료 API(크레딧 필요), 웹.' },
-  { id: 'gemini', label: 'Gemini(Flash)', title: 'gemini-flash-latest — 무료 티어(일일 한도 있음), 웹.' },
-  { id: 'groq', label: 'Groq(qwen 27b·웹)', title: '텍스트 qwen/qwen3.8-27b, 화면인식 qwen/qwen3.6-27b — 무료 등급(분당 토큰 한도 있음), 웹.' },
+  { id: 'gemini', label: 'Gemini(Flash)', title: '텍스트 gemini-flash-latest, 화면인식 gemini-3.6-flash(Groq 실패 시 2차) — 무료 티어(모델별 일일 한도 있음), 웹.' },
+  { id: 'groq', label: 'Groq(qwen 27b·웹)', title: '텍스트/화면인식 모두 qwen/qwen3.8-27b — 무료 등급(분당·일일 토큰 한도 있음), 웹.' },
   { id: 'ollama', label: 'Ollama(qwen 14b/8b·로컬)', title: '텍스트 qwen3:14b(후보 선별)·qwen3:8b(몰 구조분석 리포트), 화면인식 qwen2.5vl:7b — 이 PC에서 직접 실행(요금 없음, CPU 사용).' },
 ]
 
@@ -385,8 +385,8 @@ interface MallProfileSignals {
    *  (사용자 요청, 2026-09-05, lib/scraper.ts의 MallProfileSignals와 같은 모양). */
   newCategoryHrefs?: string[]
   /** lib/scraper.ts의 MallProfileSignals.visionProviderLog와 같은 모양 — 카테고리/정렬 화면인식이 이번
-   *  실행에서 실제로 Groq/로컬 Ollama 중 뭘 썼는지(사용자 지시, 2026-09-22). */
-  visionProviderLog?: { task: string; provider: 'groq' | 'ollama' }[]
+   *  실행에서 실제로 Groq/Gemini/로컬 Ollama 중 뭘 썼는지(사용자 지시, 2026-09-22). */
+  visionProviderLog?: { task: string; provider: 'groq' | 'gemini' | 'ollama' }[]
   /** lib/scraper.ts의 MallProfileSignals.aiReportAttempts와 같은 모양 — "몰 구조분석" AI 리포트가
    *  Anthropic→Gemini→Groq→Ollama 순으로 폴백하며 이번 실행에서 실제로 시도한 각 공급자의 결과
    *  (성공/실패·원인·걸린 시간, 사용자 지시 2026-09-23). */
@@ -603,22 +603,27 @@ function CategoryTreeRows({ nodes }: { nodes: CategoryTreeNode[] }) {
   return <>{rows}</>
 }
 
-/** 몰구조분석의 화면인식(카테고리/정렬)이 이번 실행에서 실제로 Groq/로컬 Ollama 중 뭘 썼는지 배지로
- *  보여준다(사용자 지시, 2026-09-22 — "Groq 토큰 문제가 생기면 로컬로 넘어가는 건데, 어느 걸 쓰고
+/** 몰구조분석의 화면인식(카테고리/정렬)이 이번 실행에서 실제로 Groq/Gemini/로컬 Ollama 중 뭘 썼는지
+ *  배지로 보여준다(사용자 지시, 2026-09-22 — "Groq 토큰 문제가 생기면 로컬로 넘어가는 건데, 어느 걸 쓰고
  *  있는지 화면에 표시해줄 수 있어?"). visionProviderLog는 화면인식 함수별로 성공한 공급자를 담은
  *  기록이라(MallProfileSignals.visionProviderLog 주석 참고), 이 타일과 관련된 task 이름들만 걸러
  *  요약한다 — 관련 화면인식이 하나도 성공 못 했으면(전부 실패해 AI 텍스트/DOM 폴백으로 처리됨) 배지
- *  없이 조용히 넘어간다(성공하지도 않은 걸 지어내지 않는다). */
-function VisionProviderBadge({ log, tasks }: { log?: { task: string; provider: 'groq' | 'ollama' }[]; tasks: string[] }) {
+ *  없이 조용히 넘어간다(성공하지도 않은 걸 지어내지 않는다). Gemini는 Groq가 하루 한도에 걸렸을 때의
+ *  2차 폴백으로 2026-09-25 추가(lib/ai.ts의 GEMINI_VISION_MODEL 주석 참고). */
+const VISION_PROVIDER_BADGE: Record<'groq' | 'gemini' | 'ollama', { label: string; cls: string }> = {
+  groq: { label: 'Groq', cls: 'bg-emerald-100 text-emerald-700' },
+  gemini: { label: 'Gemini', cls: 'bg-indigo-100 text-indigo-700' },
+  ollama: { label: '로컬(Ollama)', cls: 'bg-amber-100 text-amber-700' },
+}
+function VisionProviderBadge({ log, tasks }: { log?: { task: string; provider: 'groq' | 'gemini' | 'ollama' }[]; tasks: string[] }) {
   const matched = log?.filter(e => tasks.includes(e.task)) ?? []
   if (!matched.length) return null
-  const usedGroq = matched.some(e => e.provider === 'groq')
-  const usedOllama = matched.some(e => e.provider === 'ollama')
-  const label = usedGroq && usedOllama ? 'Groq+로컬' : usedGroq ? 'Groq' : '로컬(Ollama)'
-  const cls = usedGroq && !usedOllama ? 'bg-emerald-100 text-emerald-700' : usedOllama && !usedGroq ? 'bg-amber-100 text-amber-700' : 'bg-sky-100 text-sky-700'
+  const used = [...new Set(matched.map(e => e.provider))]
+  const label = used.map(p => VISION_PROVIDER_BADGE[p].label).join('+')
+  const cls = used.length === 1 ? VISION_PROVIDER_BADGE[used[0]].cls : 'bg-sky-100 text-sky-700'
   return (
     <span className={`ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-semibold ${cls}`}
-      title="이번 몰구조분석에서 이 화면인식에 실제로 성공한 AI 공급자 — Groq가 한도 초과 등으로 실패하면 자동으로 로컬 Ollama로 넘어간다.">
+      title="이번 몰구조분석에서 이 화면인식에 실제로 성공한 AI 공급자 — Groq가 한도 초과 등으로 실패하면 Gemini로, 그마저 안 되면 자동으로 로컬 Ollama로 넘어간다.">
       {label}
     </span>
   )
@@ -626,7 +631,7 @@ function VisionProviderBadge({ log, tasks }: { log?: { task: string; provider: '
 
 function CategoryStructureTile({ categoryLinks, fallback, visionProviderLog }: {
   categoryLinks: { name: string; href: string }[] | undefined; fallback: string
-  visionProviderLog?: { task: string; provider: 'groq' | 'ollama' }[]
+  visionProviderLog?: { task: string; provider: 'groq' | 'gemini' | 'ollama' }[]
 }) {
   const tree = buildCategoryTree(categoryLinks)
   // 총 몇 개인지가 안 보이면 안 된다는 지적(사용자, 2026-09-15) — 대분류별 개수 옆에, 제목에도 전체
@@ -658,7 +663,7 @@ function CategoryStructureTile({ categoryLinks, fallback, visionProviderLog }: {
 function SortStructureTile({ sortOptions, fallback, visionProviderLog }: {
   sortOptions?: ({ label: string; kind?: 'query'; paramsToAdd: Record<string, string> } | { label: string; kind: 'click'; clickText: string })[]
   fallback: string
-  visionProviderLog?: { task: string; provider: 'groq' | 'ollama' }[]
+  visionProviderLog?: { task: string; provider: 'groq' | 'gemini' | 'ollama' }[]
 }) {
   // 카테고리 구조 타일과 같은 이유로 세로 목록 대신 한 줄로 흘려보낸다(사용자 지시, 2026-09-15 — "정렬구조도
   // 가로로 이어서 표시해줘") — 항목 사이는 " · "로만 구분한다(대분류가 없어 "//" 구분은 필요 없음).

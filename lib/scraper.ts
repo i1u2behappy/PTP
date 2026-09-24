@@ -1608,12 +1608,12 @@ export interface MallProfileSignals {
    *  로그인 성공 여부와 무관하게 항상 false만 내놓는 몰이었다). 이런 몰에서는 "다시 로그인해주세요"라는
    *  경고가 사실과 다를 수 있으므로, 화면에서 다른 문구(몰 특성 안내)로 구분해 보여준다. */
   loginSignalUnavailable?: boolean
-  /** 카테고리/정렬 화면인식이 이번 실행에서 실제로 어느 공급자(Groq/로컬 Ollama)로 성공했는지 — 화면에서
-   *  "지금 뭘 쓰고 있는지 알 수 없다"는 지적으로 추가(사용자 지시, 2026-09-22). sessionLostDuringAnalysis와
-   *  같은 이유로 DB에는 영구 저장하지 않는다(mallProfile.ts의 UPDATE 제외 목록 참고) — 다음 실행엔 Groq가
-   *  다시 살아날 수도 있는, 이번 실행 한정 신호라 화면에 계속 남으면 오히려 헷갈린다. 성공한 화면인식이
-   *  하나도 없으면(전부 실패해 DOM/AI 텍스트 폴백으로만 처리됨) 빈 배열. */
-  visionProviderLog?: { task: string; provider: 'groq' | 'ollama' }[]
+  /** 카테고리/정렬 화면인식이 이번 실행에서 실제로 어느 공급자(Groq/Gemini/로컬 Ollama)로 성공했는지 —
+   *  화면에서 "지금 뭘 쓰고 있는지 알 수 없다"는 지적으로 추가(사용자 지시, 2026-09-22).
+   *  sessionLostDuringAnalysis와 같은 이유로 DB에는 영구 저장하지 않는다(mallProfile.ts의 UPDATE 제외
+   *  목록 참고) — 다음 실행엔 Groq가 다시 살아날 수도 있는, 이번 실행 한정 신호라 화면에 계속 남으면
+   *  오히려 헷갈린다. 성공한 화면인식이 하나도 없으면(전부 실패해 DOM/AI 텍스트 폴백으로만 처리됨) 빈 배열. */
+  visionProviderLog?: VisionAttempt[]
   /** "몰 구조분석" AI 리포트(generateMallProfileReport)가 Anthropic→Gemini→Groq→Ollama 순으로 폴백하며
    *  이번 실행에서 실제로 시도한 각 공급자의 결과 — "AI 호출 실패"/"AI 분석 성공(이전 리포트 유지 중)"
    *  배지만 봐서는 어느 공급자가 왜(크레딧 부족/레이트리밋/타임아웃 등) 실패했는지 알 길이 없다는 지적

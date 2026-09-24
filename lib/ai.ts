@@ -22,13 +22,14 @@ export { ALL_AI_PROVIDERS, runWithAiProviders } from './aiProviderGate'
 import type { AiProviderId } from './aiProviderGate'
 import { ALL_AI_PROVIDERS, isAiProviderEnabled } from './aiProviderGate'
 
-/** "몰 구조분석"이 카테고리/정렬 화면인식에 실제로 어느 공급자(Groq/로컬 Ollama)를 썼는지 화면에 보여주기
- *  위한 기록(사용자 지시, 2026-09-22 — "Groq 토큰 문제가 발생하면 로컬로 넘어가는 건데, 어느 걸 쓰고
- *  있는지 화면에 표시해줄 수 있어?"). 호출부가 배열 하나를 만들어 아래로 넘기면, 실제로 성공한 화면인식
+/** "몰 구조분석"이 카테고리/정렬 화면인식에 실제로 어느 공급자(Groq/Gemini/로컬 Ollama)를 썼는지 화면에
+ *  보여주기 위한 기록(사용자 지시, 2026-09-22 — "Groq 토큰 문제가 발생하면 로컬로 넘어가는 건데, 어느 걸
+ *  쓰고 있는지 화면에 표시해줄 수 있어?"). 호출부가 배열 하나를 만들어 아래로 넘기면, 실제로 성공한 화면인식
  *  함수들이 자기 몫을 그 배열에 追加한다 — 반환 타입을 안 바꾸고도(기존 호출부를 안 건드리고도) 부가
  *  정보만 곁다리로 모을 수 있다. 카테고리/정렬처럼 한 번의 몰구조분석 안에서도 항목마다 다른 공급자가
- *  성공할 수 있어(예: 카테고리는 Groq, 정렬은 한도초과로 로컬) 단일 값이 아니라 배열로 둔다.*/
-export interface VisionAttempt { task: string; provider: 'groq' | 'ollama' }
+ *  성공할 수 있어(예: 카테고리는 Groq, 정렬은 한도초과로 로컬) 단일 값이 아니라 배열로 둔다. 'gemini'는
+ *  2026-09-25 Groq 일일 한도 대응으로 Groq/Ollama 사이에 추가됨(GEMINI_VISION_MODEL 주석 참고).*/
+export interface VisionAttempt { task: string; provider: 'groq' | 'gemini' | 'ollama' }
 
 /** generateMallProfileReport가 Anthropic→Gemini→Groq→Ollama 순으로 폴백하며 실제로 시도한 각 공급자의
  *  결과 — 최종 화면 배지("AI 호출 실패"/"AI 분석 성공(이전 리포트 유지 중)")만 봐서는 "어느 공급자가 왜
@@ -53,6 +54,19 @@ function getGeminiClient() {
 // 'gemini-2.5-flash'는 신규 사용자에게 더는 제공되지 않아(실제 API 호출로 확인, 2026-07-26)
 // 항상 최신 flash 모델을 가리키는 별칭을 쓴다 — 특정 버전이 나중에 또 폐기돼도 코드를 안 고쳐도 된다.
 const GEMINI_MODEL = 'gemini-flash-latest'
+// 카테고리/정렬 화면인식(비전) 전용 — Groq(qwen/qwen3.8-27b)가 하루 토큰 한도(TPD 20만)에 걸리는 날
+// (2026-09-24 실사용 확인 — 걸스굽/시즌백/진짜양말을 하루에 몰아 분석하다 소진)의 2차 폴백으로 추가함
+// (사용자 지시, 2026-09-25). Gemini 무료 티어는 **모델별로 별도** 하루 요청 한도가 있다(실제 429 응답
+// 본문으로 직접 확인, 2026-09-24: `quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier,
+// limit: 20, model: gemini-3.8-flash` — GEMINI_MODEL이 이미 이 한도를 거의 매번 소진하고 있었다). 그래서
+// 위 GEMINI_MODEL과 다른 구체적인 모델을 골라 별도의 20회/일 한도를 새로 받는다 — 별칭(-latest)을 또
+// 쓰면 그게 마침 GEMINI_MODEL이 가리키는 것과 같은 실제 모델로 풀려 한도를 다시 나눠 쓰게 될 위험이
+// 있다. 직접 스크린샷+함수호출로 라이브 검증(2026-09-24, 걸스굽): gemini-flash-latest는 5번 다 503(서버
+// 과부하)로 실패했지만, 이 모델은 21초 만에 성공해 대분류 8개를 정확히 읽었다. 20회/일은 넉넉하지 않다
+// (카테고리 하나 분석에도 화면인식 호출이 여러 번 나갈 수 있음) — "완전한 대체"가 아니라 "Groq가 막힌
+// 순간에 몇 번 더 버티게 해주는 쿠션"으로 기대치를 잡는다. 그마저 안 되면 기존대로 로컬 Ollama가 받는다.
+const GEMINI_VISION_MODEL = 'gemini-3.6-flash'
+const GEMINI_VISION_TIMEOUT_MS = 45_000
 
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
@@ -978,6 +992,54 @@ async function detectSortLabelsWithGroqVision(
  *  답하도록 프롬프트로 강제하고 정규식으로 잘라내 파싱한다 — 다른 Ollama 호출(pickIndicesWithOllama)과
  *  같은 큐(withOllamaQueue)를 거쳐 CPU 경합을 피한다. 이미지 처리 자체가 텍스트보다 훨씬 느려(7B 기준
  *  실측 약 40초/장) 전용 타임아웃(OLLAMA_VISION_TIMEOUT_MS)을 따로 쓴다. */
+
+/** Groq가 실패했을 때의 2차 경로 — GEMINI_VISION_MODEL 주석 참고. */
+async function detectSortLabelsWithGeminiVision(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal, knownExamples?: string[],
+): Promise<string[] | null> {
+  if (!isAiProviderEnabled('gemini') || !process.env.GEMINI_API_KEY) {
+    console.log(`[AI:gemini] 정렬 화면 인식 건너뜀(${mallName}) — ${!isAiProviderEnabled('gemini') ? '공급자 꺼짐' : 'API 키 없음'}`)
+    return null
+  }
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_VISION_MODEL,
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: buildSortLabelScreenshotPrompt(mallName, knownExamples) },
+          { inlineData: { data: imageBase64, mimeType } },
+        ],
+      }],
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_sort_labels',
+          description: '화면에서 실제로 보이는 정렬 옵션 라벨 텍스트만 반환한다. 안 보이면 빈 배열.',
+          parameters: {
+            type: Type.OBJECT,
+            required: ['labels'],
+            properties: { labels: { type: Type.ARRAY, items: { type: Type.STRING }, description: '화면에 보이는 정렬 옵션 텍스트 그대로' } },
+          },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_sort_labels'] } },
+        abortSignal: reportAiSignal(GEMINI_VISION_TIMEOUT_MS, signal),
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) {
+      console.log(`[AI:gemini] 정렬 화면 인식 실패(${mallName}) — functionCall 없이 응답함`)
+      return null
+    }
+    const rawLabels = (call.args as { labels?: unknown } | undefined)?.labels
+    const labels = Array.isArray(rawLabels) ? rawLabels.filter((l): l is string => typeof l === 'string') : []
+    console.log(`[AI:gemini] 정렬 화면 인식(${mallName}) — 라벨 ${labels.length}개: ${JSON.stringify(labels)}`)
+    return labels
+  } catch (e) {
+    console.log(`[AI:gemini] 정렬 화면 인식 실패(${mallName}) — ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`)
+    return null
+  }
+}
+
 async function detectSortLabelsWithOllamaVision(
   mallName: string, imageBase64: string, signal?: AbortSignal, knownExamples?: string[],
 ): Promise<string[] | null> {
@@ -1042,15 +1104,17 @@ async function detectSortLabelsWithOllamaVision(
  * 참고) — 비전 AI도 화면을 잘못 읽을 수 있으니, "화면에 보임"과 "실제로 동작함"이라는 독립된 두 증거를
  * 요구하는 게 안전하다.
  *
- * Anthropic(Claude)도 Gemini도 아니라 Groq(qwen/qwen3.6-27b)를 1차로 쓴다 — 이 프로젝트는 Anthropic API
- * 크레딧을 충전하지 않기로 이미 확정돼 있어(generateProductName 등 기존 Claude 호출도 대부분 크레딧
- * 부족으로 실패, 2026-09-08 재확인) Claude vision을 쓸 수 없고, Gemini는 (사용자 지적, 2026-09-08) 이미
- * 다른 기능에서 무료 티어 일일 한도에 걸린 전례(위 withOllamaQueue 주석)가 있어 새 기능의 1차로 또 얹기엔
- * 부담스럽다. Groq는 이 계정에서 실제로 qwen3.6-27b라는 멀티모달(텍스트+이미지) 모델을 제공하는 것과
- * 실제 화면 인식 정확도(직접 비교, 2026-09-08 — 같은 스크린샷에서 Groq 6개 정탐 vs 로컬 qwen2.5vl:7b
- * 1개만 인식)까지 실측으로 확인했다. 실패하면(한도 초과 등) 과금 없는 로컬 Ollama vision으로,
- * 그마저 실패하면 null(호출부의 기존 href/키워드 기반 방식 폴백)로 이어진다 — 이 파일의 다른 "인덱스
- * 고르기" 함수들(detectSortOptionsWithAI 등)과 같은 Groq→Ollama 폴백 체인 패턴.
+ * Anthropic(Claude)이 아니라 Groq(qwen/qwen3.6-27b)를 1차로 쓴다 — 이 프로젝트는 Anthropic API 크레딧을
+ * 충전하지 않기로 이미 확정돼 있어(generateProductName 등 기존 Claude 호출도 대부분 크레딧 부족으로 실패,
+ * 2026-09-08 재확인) Claude vision을 쓸 수 없다. Groq는 이 계정에서 실제로 qwen3.6-27b라는 멀티모달
+ * (텍스트+이미지) 모델을 제공하는 것과 실제 화면 인식 정확도(직접 비교, 2026-09-08 — 같은 스크린샷에서
+ * Groq 6개 정탐 vs 로컬 qwen2.5vl:7b 1개만 인식)까지 실측으로 확인했다. Gemini는 (사용자 지적,
+ * 2026-09-08 당시) 이미 다른 기능에서 무료 티어 일일 한도에 걸린 전례(위 withOllamaQueue 주석)가 있어
+ * 그때는 1차로 얹기 부담스러웠지만, GEMINI_VISION_MODEL 주석 참고 — 한도가 모델별로 따로 매겨진다는 걸
+ * 나중에 확인해 2026-09-25에 **2차**(Groq 실패 시)로 끼워 넣었다. 실패하면(한도 초과 등) 과금 없는
+ * 로컬 Ollama vision으로, 그마저 실패하면 null(호출부의 기존 href/키워드 기반 방식 폴백)로 이어진다 —
+ * 이 파일의 다른 "인덱스 고르기" 함수들(detectSortOptionsWithAI 등)과 같은 Groq→Ollama 폴백 체인 패턴에
+ * Gemini 한 단계가 끼어든 것.
  *
  * null=1차·2차 둘 다 실패(호출부가 기존 href/키워드 기반 방식으로 폴백해야 함) — []=화면에 정렬 UI가 안
  * 보인다는 확정된 답. 다만 화면 인식이 완벽하지 않을 수 있으니, []가 와도 호출부는 안전하게 기존 방식을
@@ -1068,6 +1132,11 @@ export async function detectSortOptionsFromScreenshot(
   if (viaGroq !== null) {
     log?.push({ task: '정렬 라벨', provider: 'groq' })
     return viaGroq
+  }
+  const viaGemini = await detectSortLabelsWithGeminiVision(mallName, imageBase64, mimeType, signal, knownExamples)
+  if (viaGemini !== null) {
+    log?.push({ task: '정렬 라벨', provider: 'gemini' })
+    return viaGemini
   }
   const viaOllama = await detectSortLabelsWithOllamaVision(mallName, imageBase64, signal, knownExamples)
   if (viaOllama !== null) log?.push({ task: '정렬 라벨', provider: 'ollama' })
@@ -1224,6 +1293,51 @@ async function detectCategoryMenuTriggerWithGroqVision(
   }
 }
 
+/** Groq가 실패했을 때의 2차 경로 — GEMINI_VISION_MODEL 주석 참고. */
+async function detectCategoryMenuTriggerWithGeminiVision(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<CategoryMenuTriggerResult | null> {
+  if (!isAiProviderEnabled('gemini') || !process.env.GEMINI_API_KEY) return null
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_VISION_MODEL,
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: buildCategoryMenuTriggerScreenshotPrompt(mallName) },
+          { inlineData: { data: imageBase64, mimeType } },
+        ],
+      }],
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_category_menu_trigger',
+          description: '화면에서 전체 카테고리 메뉴를 여는 버튼이 들어있는 격자 칸을 반환한다. 안 보이면 found:false만 채운다.',
+          parameters: {
+            type: Type.OBJECT,
+            required: ['found'],
+            properties: {
+              found: { type: Type.BOOLEAN },
+              label: { type: Type.STRING, description: '버튼 위 텍스트(있으면 그대로), 아이콘만 있으면 빈 문자열' },
+              cell: { type: Type.STRING, description: '버튼 중심이 들어있는 격자 칸 이름(예: "C2")' },
+            },
+          },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_category_menu_trigger'] } },
+        abortSignal: reportAiSignal(GEMINI_VISION_TIMEOUT_MS, signal),
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) return null
+    const args = call.args as { found?: boolean; label?: string; cell?: string }
+    if (!args.found || typeof args.cell !== 'string') return { found: false }
+    const percent = cellLabelToPercent(args.cell)
+    if (!percent) return { found: false }
+    return { found: true, label: typeof args.label === 'string' ? args.label : '', ...percent }
+  } catch {
+    return null
+  }
+}
+
 /** detectSortLabelsWithOllamaVision과 같은 이유(이 모델은 함수 호출을 거부해 텍스트 JSON으로 강제)·같은
  *  큐(withOllamaQueue)·같은 타임아웃을 쓴다. */
 async function detectCategoryMenuTriggerWithOllamaVision(
@@ -1295,6 +1409,11 @@ export async function detectCategoryMenuTriggerFromScreenshot(
   if (viaGroq !== null) {
     log?.push({ task: '카테고리 메뉴 트리거', provider: 'groq' })
     return sanitizeCategoryMenuTrigger(viaGroq)
+  }
+  const viaGemini = await detectCategoryMenuTriggerWithGeminiVision(mallName, gridImage, gridMimeType, signal)
+  if (viaGemini !== null) {
+    log?.push({ task: '카테고리 메뉴 트리거', provider: 'gemini' })
+    return sanitizeCategoryMenuTrigger(viaGemini)
   }
   const viaOllama = await detectCategoryMenuTriggerWithOllamaVision(mallName, gridImage, signal)
   if (viaOllama !== null) log?.push({ task: '카테고리 메뉴 트리거', provider: 'ollama' })
@@ -1385,6 +1504,51 @@ async function detectSortTriggerWithGroqVision(
   }
 }
 
+/** Groq가 실패했을 때의 2차 경로 — GEMINI_VISION_MODEL 주석 참고. */
+async function detectSortTriggerWithGeminiVision(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<SortTriggerResult | null> {
+  if (!isAiProviderEnabled('gemini') || !process.env.GEMINI_API_KEY) return null
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_VISION_MODEL,
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: buildSortTriggerScreenshotPrompt(mallName) },
+          { inlineData: { data: imageBase64, mimeType } },
+        ],
+      }],
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_sort_trigger',
+          description: '화면에서 정렬 순서를 바꾸는 버튼이 들어있는 격자 칸을 반환한다. 안 보이면 found:false만 채운다.',
+          parameters: {
+            type: Type.OBJECT,
+            required: ['found'],
+            properties: {
+              found: { type: Type.BOOLEAN },
+              label: { type: Type.STRING, description: '버튼 위 텍스트(있으면 그대로), 아이콘만 있으면 빈 문자열' },
+              cell: { type: Type.STRING, description: '버튼 중심이 들어있는 격자 칸 이름(예: "C2")' },
+            },
+          },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_sort_trigger'] } },
+        abortSignal: reportAiSignal(GEMINI_VISION_TIMEOUT_MS, signal),
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) return null
+    const args = call.args as { found?: boolean; label?: string; cell?: string }
+    if (!args.found || typeof args.cell !== 'string') return { found: false }
+    const percent = cellLabelToPercent(args.cell)
+    if (!percent) return { found: false }
+    return { found: true, label: typeof args.label === 'string' ? args.label : '', ...percent }
+  } catch {
+    return null
+  }
+}
+
 async function detectSortTriggerWithOllamaVision(
   mallName: string, imageBase64: string, signal?: AbortSignal,
 ): Promise<SortTriggerResult | null> {
@@ -1440,6 +1604,11 @@ export async function detectSortTriggerFromScreenshot(
   if (viaGroq !== null) {
     log?.push({ task: '정렬 트리거', provider: 'groq' })
     return sanitizeSortTrigger(viaGroq)
+  }
+  const viaGemini = await detectSortTriggerWithGeminiVision(mallName, gridImage, gridMimeType, signal)
+  if (viaGemini !== null) {
+    log?.push({ task: '정렬 트리거', provider: 'gemini' })
+    return sanitizeSortTrigger(viaGemini)
   }
   const viaOllama = await detectSortTriggerWithOllamaVision(mallName, gridImage, signal)
   if (viaOllama !== null) log?.push({ task: '정렬 트리거', provider: 'ollama' })
@@ -1709,6 +1878,11 @@ export async function detectVisibleCategoryHierarchy(
     log?.push({ task: '카테고리 계층', provider: 'groq' })
     return viaGroq
   }
+  const viaGemini = await detectCategoryHierarchyWithGeminiVision(mallName, imageBase64, mimeType, signal)
+  if (viaGemini !== null) {
+    log?.push({ task: '카테고리 계층', provider: 'gemini' })
+    return viaGemini
+  }
   const viaOllama = await detectCategoryHierarchyWithOllamaVision(mallName, imageBase64, signal)
   if (viaOllama !== null) log?.push({ task: '카테고리 계층', provider: 'ollama' })
   return viaOllama
@@ -1801,6 +1975,65 @@ async function detectCategoryHierarchyWithGroqVision(
     return groups.length ? groups : null
   } catch (e) {
     console.log(`[AI:groq] 카테고리 계층 화면 인식 실패(${mallName}) — ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`)
+    return null
+  }
+}
+
+/** Groq가 실패했을 때의 2차 경로 — GEMINI_VISION_MODEL 주석 참고. */
+async function detectCategoryHierarchyWithGeminiVision(
+  mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal,
+): Promise<{ group: string; items: string[] }[] | null> {
+  if (!isAiProviderEnabled('gemini') || !process.env.GEMINI_API_KEY) {
+    console.log(`[AI:gemini] 카테고리 계층 화면 인식 건너뜀(${mallName}) — ${!isAiProviderEnabled('gemini') ? '공급자 꺼짐' : 'API 키 없음'}`)
+    return null
+  }
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_VISION_MODEL,
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: buildVisibleCategoryHierarchyPrompt(mallName) },
+          { inlineData: { data: imageBase64, mimeType } },
+        ],
+      }],
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_visible_category_hierarchy',
+          description: '화면에 보이는 대분류와 그 아래 하위 카테고리를 그룹으로 묶어 반환한다.',
+          parameters: {
+            type: Type.OBJECT,
+            required: ['groups'],
+            properties: {
+              groups: {
+                type: Type.ARRAY,
+                description: '대분류별 그룹 목록',
+                items: {
+                  type: Type.OBJECT,
+                  required: ['group', 'items'],
+                  properties: {
+                    group: { type: Type.STRING, description: '대분류 이름' },
+                    items: { type: Type.ARRAY, items: { type: Type.STRING }, description: '그 대분류 아래 보이는 하위 카테고리 이름들' },
+                  },
+                },
+              },
+            },
+          },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_visible_category_hierarchy'] } },
+        abortSignal: reportAiSignal(GEMINI_VISION_TIMEOUT_MS, signal),
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) {
+      console.log(`[AI:gemini] 카테고리 계층 화면 인식 실패(${mallName}) — functionCall 없이 응답함`)
+      return null
+    }
+    const groups = sanitizeVisibleCategoryHierarchy((call.args as { groups?: unknown } | undefined)?.groups)
+    console.log(`[AI:gemini] 카테고리 계층 화면 인식(${mallName}) — 그룹 ${groups.length}개: ${JSON.stringify(groups.map(g => ({ group: g.group, items: g.items.length })))}`)
+    return groups.length ? groups : null
+  } catch (e) {
+    console.log(`[AI:gemini] 카테고리 계층 화면 인식 실패(${mallName}) — ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`)
     return null
   }
 }

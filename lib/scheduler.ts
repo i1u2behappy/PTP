@@ -1,6 +1,8 @@
 import pool, { decryptSecret } from './db'
 import { runScraping, isAnySiteBusy } from './workerClient'
 import { restartPtpServer, isRestartInFlight } from './systemRestart'
+import { restartWorker, isWorkerRestartInFlight } from './workerRestart'
+import { checkWorkerFreshness } from './workerFreshness'
 import { ensureStartedOnce } from './onceGlobally'
 
 // ponytail: 단일 프로세스 in-memory 스케줄러. 여러 서버 인스턴스로 스케일하면 각자 따로 돌아 중복 실행될 수 있음.
@@ -14,6 +16,7 @@ export function startScheduler() {
   ensureStartedOnce('scheduler', () => {
     setInterval(() => { checkSchedules().catch(() => {}) }, 60_000)
     setInterval(() => { checkMemoryAndAutoRestart().catch(() => {}) }, 60_000)
+    setInterval(() => { checkWorkerFreshnessAndAutoRestart().catch(() => {}) }, 60_000)
   })
 }
 
@@ -40,6 +43,28 @@ async function checkMemoryAndAutoRestart() {
   }
   console.log(`[autoRestart] 메모리 ${Math.round(rssMB)}MB로 임계치(${MEMORY_RESTART_THRESHOLD_MB}MB) 초과 + 유휴 상태 확인 — 자동 재시작`)
   await restartPtpServer('auto')
+}
+
+/** 워커(worker/index.ts)는 tsx로 뜨고 파일 변경을 스스로 감지해 재시작하지 않는다(lib/workerFreshness.ts
+ *  참고) — lib/scraper.ts·lib/ai.ts 등을 고쳐도 사람이 "워커 재시작" 버튼을 누르기 전까지 예전 코드가
+ *  계속 돈다. 예전엔 이 감지를 "시스템 상태" 배지로 사람에게 알리기만 하고 실제로 재시작하는 루프가 없어
+ *  매번 수동으로 눌러야 했다(사용자 지적, 2026-09-23 — "왜 워커 정상화가 자동으로 안되는거야?"). 위
+ *  checkMemoryAndAutoRestart와 똑같은 유휴-확인 패턴을 그대로 재사용한다 — 스크랩 작업 중간에 끼어들어
+ *  진행상황을 날리지 않는 게 최우선이라, 코드가 낡았어도 몰 작업이 도는 동안은 기다렸다가 다음 유휴
+ *  순간에 재시작한다. 재시작 자체가 새 워커를 최신 코드로 띄우므로, 재시작 뒤엔 stale:false가 되어
+ *  당장 또 걸릴 일이 없다(메모리 자동재시작과 같은 자기제한적 구조). */
+async function checkWorkerFreshnessAndAutoRestart() {
+  if (isWorkerRestartInFlight()) return
+  const freshness = await checkWorkerFreshness()
+  if (!freshness.ok || !freshness.stale) return
+  if (await isAnySiteBusy()) {
+    console.log(`[autoRestart] 워커 코드 ${freshness.staleFileCount}개 파일 변경됨(낡음) — 진행 중인 몰 작업이 있어 이번엔 건너뜀`)
+    return
+  }
+  console.log(`[autoRestart] 워커 코드 ${freshness.staleFileCount}개 파일 변경됨(낡음) + 유휴 상태 확인 — 자동 재시작`)
+  await restartWorker('auto').catch(e => {
+    console.error('[autoRestart] 워커 자동 재시작 실패:', e instanceof Error ? e.message : e)
+  })
 }
 
 interface DueSite {

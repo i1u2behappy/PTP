@@ -6,6 +6,7 @@
     "dev": "next dev --webpack",
     "dev:clean": "node -e \"require('fs').rmSync('.next',{recursive:true,force:true})\" && next dev --webpack",
     "worker": "node --env-file=.env.local --import tsx ./worker/index.ts",
+    "restart-worker": "node --env-file=.env.local --import tsx ./scripts/restart-worker.ts",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",

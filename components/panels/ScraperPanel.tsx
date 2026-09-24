@@ -615,10 +615,16 @@ function CategoryTreeRows({ nodes }: { nodes: CategoryTreeNode[] }) {
  *  요약한다 — 관련 화면인식이 하나도 성공 못 했으면(전부 실패해 AI 텍스트/DOM 폴백으로 처리됨) 배지
  *  없이 조용히 넘어간다(성공하지도 않은 걸 지어내지 않는다). Gemini는 Groq가 하루 한도에 걸렸을 때의
  *  2차 폴백으로 2026-09-25 추가(lib/ai.ts의 GEMINI_VISION_MODEL 주석 참고). */
+// 라벨에 모델명까지 적는 건 AI_PROVIDER_OPTIONS/"AI 호출 상세" 패널과 같은 이유(2026-09-12 사용자
+// 지시) — "Gemini"만 보이면 리포트용(gemini-flash-latest)인지 화면인식 전용(gemini-3.6-flash)인지
+// 구분이 안 된다(사용자 지적, 2026-09-25 — "버전도 표시해줘"). 화면인식 4종은 공급자별로 모델이 고정
+// (작업마다 안 바뀜)이라 AiReportAttempt처럼 실행마다 값을 들고 다닐 필요 없이 정적 표로 충분하다.
+// 모델명은 lib/ai.ts의 GROQ_VISION_MODEL/GEMINI_VISION_MODEL/OLLAMA_VISION_MODEL과 반드시 일치해야
+// 한다 — tests/unit/aiProviderLabels.test.ts가 검증 루프에서 이걸 강제한다.
 const VISION_PROVIDER_BADGE: Record<'groq' | 'gemini' | 'ollama', { label: string; cls: string }> = {
-  groq: { label: 'Groq', cls: 'bg-emerald-100 text-emerald-700' },
-  gemini: { label: 'Gemini', cls: 'bg-indigo-100 text-indigo-700' },
-  ollama: { label: '로컬(Ollama)', cls: 'bg-amber-100 text-amber-700' },
+  groq: { label: 'Groq(qwen3.8-27b)', cls: 'bg-emerald-100 text-emerald-700' },
+  gemini: { label: 'Gemini(3.6-flash)', cls: 'bg-indigo-100 text-indigo-700' },
+  ollama: { label: '로컬(qwen2.5vl:7b)', cls: 'bg-amber-100 text-amber-700' },
 }
 function VisionProviderBadge({ log, tasks }: { log?: { task: string; provider: 'groq' | 'gemini' | 'ollama' }[]; tasks: string[] }) {
   const matched = log?.filter(e => tasks.includes(e.task)) ?? []

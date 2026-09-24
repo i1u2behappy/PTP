@@ -3659,15 +3659,41 @@ export interface CategoryMenuScanResult {
 
 // 실제 브라우저(getComputedStyle)가 있어야 검증 가능한 로직(플랫 앵커 그리드 패턴)이 있어, 테스트에서
 // 실제 페이지를 띄워 직접 호출할 수 있도록 export한다(nthHeaderIconCandidate와 같은 이유).
-export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResult> {
-  return page.evaluate(({ excludeSrc }) => {
+/** tsx(esbuild `--keep-names`)는 이 파일의 함수를 컴파일할 때 이름이 있는 내부 함수/상수마다
+ *  `__name(fn, "fn")` 헬퍼 호출을 소스에 끼워넣는다(함수가 번들 과정에서 리네임되더라도 `.name`을
+ *  보존하기 위한 esbuild의 의도된 동작). 문제는 Playwright의 `page.evaluate(fn, arg)`가 `fn`을
+ *  `Function.prototype.toString()`으로 문자열로 뜬 뒤 그 문자열을 브라우저 컨텍스트에서 그대로 다시
+ *  실행한다는 점이다 — 브라우저 쪽엔 `__name`이 없으니 `ReferenceError: __name is not defined`로
+ *  터진다. 이 프로젝트에서 실제로 걸린 사례: `scanCategoryMenu`가 이 문제로 호출할 때마다 조용히
+ *  실패해(자체 `.catch()`가 삼킴, 에러 로그 한 줄도 안 남음) 카테고리 계층(대분류>중분류)을 한 번도
+ *  못 읽고 있었다 — 걸스굽 몰구조분석 결과가 계층 없이 평평하게 나온 진짜 원인(2026-09-24, 직접 재현
+ *  확인: `scanCategoryMenu`/`collectAllPageLinks`를 실제로 호출해 같은 에러 재현). tsx 메인테이너도
+ *  "고칠 버그가 아니라 알려진 제약"이라고 답한 사안이다(https://github.com/privatenumber/tsx/issues/113).
+ *
+ *  해결: 함수 소스를 **런타임에 일반 문자열로부터** `new Function(...)`으로 만들면, esbuild는 그
+ *  문자열의 "내용"까지는 코드로 취급해 변환하지 않으므로(문자열은 esbuild 입장에서 그냥 데이터) `__name`이
+ *  안 끼어든다 — 동시에 실제 `Function` 인스턴스이므로 Playwright가 `typeof fn === 'function'`으로
+ *  판별해 인자를 정상적으로 넘겨 호출한다(문자열을 직접 `page.evaluate(str, arg)`로 넘기면 Playwright가
+ *  `isFunction:false`로 취급해 호출 자체를 안 하고 `arg`도 무시한다 — 직접 실측 확인, 2026-09-24).
+ *  대가: 문자열 안에서는 TypeScript 타입 표기를 못 쓴다(순수 JS여야 함) — 이 함수 하나만 우선 이 패턴으로
+ *  옮긴다(사용자 지시, 2026-09-24 — 범위는 좁게, 다른 곳은 나중에 필요할 때 같은 패턴을 재사용). */
+function compileBrowserEvalFn<Arg, R>(jsSource: string): (arg: Arg) => R | Promise<R> {
+  // new Function은 위 주석 참고 — 의도적으로 esbuild의 정적 변환(과 그로 인한 __name 주입)을 피하기 위함
+  return new Function(`return (${jsSource})`)() as (arg: Arg) => R | Promise<R>
+}
+
+// scanCategoryMenu의 page.evaluate 콜백 — compileBrowserEvalFn 주석 참고. 원래 TypeScript로 쓰여 있던
+// 것과 로직은 동일하고(타입 표기만 제거, 템플릿 리터럴 2곳만 문자열 접합으로 변경 — 이 문자열 자체가
+// 백틱으로 감싸이므로 안쪽에 백틱을 못 쓴다), 그 외 주석/조건/순서는 원본 그대로 보존한다.
+const SCAN_CATEGORY_MENU_FN = compileBrowserEvalFn<{ excludeSrc: string }, CategoryMenuScanResult>(`
+  ({ excludeSrc }) => {
     const excludeRe = new RegExp(excludeSrc, 'i')
     // 이미지 스프라이트/아이콘 폰트 메뉴처럼 <li> 안에 글자가 전혀 없어 이름을 지을 수 없는 항목의 href만
     // 따로 모아둔다 — 예전엔 이 경우 그냥 버렸는데, 같은 몰의 다른 메뉴 영역이 텍스트로 잘 읽혀 카테고리를
     // 이미 몇 개 찾았어도(그러면 아래 tier loop가 그 tier에서 멈춤) 이 그룹 자체는 항목 전부가 이미지뿐이라
     // "최소 2개 이상의 텍스트" 조건에 걸려 통째로 버려지므로, 그 안의 카테고리들이 영원히 누락됐다
     // (진짜양말 실사용 확인, 2026-08-13 — "신발"/"업데이트" 카테고리가 이 방식으로 빠짐).
-    const textlessHrefs: string[] = []
+    const textlessHrefs = []
     // 몰마다(플랫폼/테마마다) 카테고리 메뉴 래퍼의 정확한 class/id가 제각각이라(고도몰 .ovmenu, 카페24
     // 커스텀테마 df-lnb-category, 도매의신 div_cat 등) 매번 실제 몰을 열어보고 하드코딩 셀렉터를 하나씩
     // 추가해왔다 — 근본적으로는 정확한 이름을 다 알 수 없으므로, 이름의 "일부"(부분 문자열)로 넓게
@@ -3681,13 +3707,13 @@ export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResu
       '[class*="lnb" i], [id*="lnb" i], [class*="snb" i], [id*="snb" i], [class*="ovmenu" i]',
       '[class*="gnb" i], [id*="gnb" i], nav',
     ]
-    const isMeaningful = (s: string) => !!s && /[가-힣a-zA-Z0-9]/.test(s)
+    const isMeaningful = (s) => !!s && /[가-힣a-zA-Z0-9]/.test(s)
     // li 자신의 라벨은 거의 항상 li 바로 아래 <a>(카테고리 링크) 안에 있다 — 그 링크 하나만 콕 집어
     // 읽으면 하위 서브메뉴가 어떤 모양(ul/li, dl/dd, 장식용 div 등)이든 안전하게 걸러진다(모자사러
     // 실사용 확인, 2026-08-16 — 하위 메뉴가 <div><dl><dd>라 ul/ol만 지우는 예전 방식으론 "캡모자" 옆에
     // 하위 이름들과 깨진 이미지 placeholder("undefined")까지 그대로 섞여 들어왔다). 링크가 없는 몰(라벨이
     // 그냥 텍스트인 경우)만 기존 방식(사본에서 중첩 목록 제거 후 읽기)으로 대체한다.
-    function ownText(li: Element): string {
+    function ownText(li) {
       const ownAnchor = li.querySelector(':scope > a')
       if (ownAnchor) {
         const anchorText = (ownAnchor.textContent || '').trim()
@@ -3696,10 +3722,10 @@ export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResu
         // 실사용 확인(2026-08-16): 이 몰은 카테고리 목록 페이지 자체가 회원 전용(로그인 리다이렉트)이라
         // 방문해서 이름을 되찾는 기존 폴백(discoverCategoriesByVisitingLinks)도 항상 "로그인"만 읽어와
         // 실패했다 — alt에 이미 진짜 이름이 있으니 방문할 필요 없이 여기서 바로 쓴다.
-        const imgAlt = (ownAnchor.querySelector('img[alt]') as HTMLImageElement | null)?.alt.trim()
+        const imgAlt = (ownAnchor.querySelector('img[alt]'))?.alt.trim()
         if (imgAlt) return imgAlt
       }
-      const clone = li.cloneNode(true) as Element
+      const clone = li.cloneNode(true)
       clone.querySelectorAll('ul, ol').forEach(n => n.remove())
       return (clone.textContent || '').trim()
     }
@@ -3711,16 +3737,16 @@ export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResu
     // ?p=list.html&cid=632';">처럼 <a> 태그 없이 JS onclick만으로 이동한다(메뉴 자체는 display:none일
     // 뿐 최초 HTML에 이미 다 있어, JS 실행 없이 속성만 읽으면 된다). li 자신에 없으면 안쪽 자손도 한 번
     // 더 살펴본다(라벨이 span 등 다른 태그에 onclick을 다는 몰 대비).
-    function hrefFromOnclick(el: Element): string {
+    function hrefFromOnclick(el) {
       const raw = el.getAttribute('onclick') || el.querySelector('[onclick]')?.getAttribute('onclick') || ''
-      const m = raw.match(/location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/)
+      const m = raw.match(/location(?:\\.href)?\\s*=\\s*['"]([^'"]+)['"]/)
       if (!m) return ''
       try { return new URL(m[1], location.href).href } catch { return '' }
     }
-    function ownHref(li: Element): string {
-      const clone = li.cloneNode(true) as Element
+    function ownHref(li) {
+      const clone = li.cloneNode(true)
       clone.querySelectorAll('ul, ol').forEach(n => n.remove())
-      const href = (clone.querySelector('a[href]') as HTMLAnchorElement | null)?.href || ''
+      const href = (clone.querySelector('a[href]'))?.href || ''
       // href="#"(빈 프래그먼트만 있는, 실제로는 아무 데도 안 가는 드롭다운 토글/장식용 링크)는 .href로
       // 읽으면 "현재 페이지 URL + #"으로 resolve된다 — 이걸 실제 카테고리로 취급하면, 하필 그 페이지가
       // (홈페이지처럼) 그 자체로 상품 목록이기도 한 몰에서는 "홈페이지 전체"가 가짜 카테고리 하나로
@@ -3735,17 +3761,17 @@ export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResu
     // 믿으면, 실제로는 leaf인 2단계 카테고리(예: "패션 양말")가 이 빈 자리표시자 하나 때문에 "그 아래로
     // 내려가라"는 판정을 받고, 정작 내려간 자리표시자 자체는 이름도 href도 못 써서 아무것도 안 남아 결국
     // "패션 양말" 자체가 통째로 사라진다(진짜양말 실사용 확인, 2026-09-06 — AI가 대분류만 찾고 하위
-        // 메뉴를 하나도 못 찾음). 자식으로 인정하려면 이름이 있거나, href가 있어도 이 자리표시자 패턴(쿼리
+    // 메뉴를 하나도 못 찾음). 자식으로 인정하려면 이름이 있거나, href가 있어도 이 자리표시자 패턴(쿼리
     // 파라미터 값이 비어 "="로 끝남)이 아니어야 한다.
-    function isPlaceholderHref(href: string): boolean {
-      return /[?&][\w-]+=$/.test(href)
+    function isPlaceholderHref(href) {
+      return /[?&][\\w-]+=$/.test(href)
     }
-    function isRealChildCandidate(el: Element): boolean {
+    function isRealChildCandidate(el) {
       if (isMeaningful(ownText(el))) return true
       const href = ownHref(el)
       return !!href && !isPlaceholderHref(href)
     }
-    function buildPaths(li: Element, prefix: string[], depth: number, out: { name: string; href: string }[]) {
+    function buildPaths(li, prefix, depth, out) {
       if (depth > 3 || out.length > 200) return
       const childLis = Array.from(li.querySelectorAll(':scope > ul > li, :scope > div > ul > li'))
       const hasRealChildLis = childLis.some(isRealChildCandidate)
@@ -3776,11 +3802,11 @@ export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResu
     // 후보 root가 탭 위젯(예: el-tab류 — <li data-tabid="tab1"><a>강아지</a></li> + <div id="tab1">그 탭
     // 내용</div>) 안에 있으면, 그 탭 버튼의 라벨을 찾아 돌려준다. 못 찾으면 null(이 몰이 탭 구조가
     // 아니거나 못 알아본 스킨) — 그러면 호출부가 그냥 이름을 안 건드리고 그대로 쓴다.
-    function findTabLabel(root: Element): string | null {
-      let el: Element | null = root
+    function findTabLabel(root) {
+      let el = root
       while (el) {
         if (el.id) {
-          const label = document.querySelector(`[data-tabid="${el.id}"]`)?.textContent?.trim()
+          const label = document.querySelector('[data-tabid="' + el.id + '"]')?.textContent?.trim()
           if (label) return label
         }
         el = el.parentElement
@@ -3788,7 +3814,7 @@ export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResu
       return null
     }
     for (const tierSelector of SELECTOR_TIERS) {
-      let candidates: Element[]
+      let candidates
       try { candidates = Array.from(document.querySelectorAll(tierSelector)) } catch { continue }
       // 한 티어 안에서도 후보가 여러 개 나올 수 있다 — 헤더 카테고리 + 전체메뉴 플라이아웃 사본처럼 같은
       // 메뉴의 중복일 수도 있고(아래 href dedup으로 걸러짐), 펫투비처럼 "강아지"/"고양이" 탭마다 완전히
@@ -3796,8 +3822,8 @@ export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResu
       // 항상 DOM에 있음, 2026-08-10 실사용 확인 — 후보 하나만 골라 버리면 다른 탭 카테고리를 통째로
       // 놓쳤다). "최소 2개 이상" 조건으로 노이즈(카테고리 메뉴가 아닌 다른 위젯)를 거른 뒤, 통과한
       // 후보는 전부 합친다(href 기준 dedup — 이름이 같아도 href가 다르면 별개 카테고리로 본다).
-      const groups: { label: string | null; items: { name: string; href: string }[] }[] = []
-      const groupLabels = new Set<string>()
+      const groups = []
+      const groupLabels = new Set()
       for (const root of candidates) {
         // slick.js 등 캐러셀 라이브러리가 상단 카테고리 목록에 적용되면(실사용 확인: 오토카필 —
         // 5개 대분류+서브카테고리 전체가 <ul class="... gnb_menu0">인데 slick이 초기화되면서
@@ -3815,9 +3841,9 @@ export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResu
           const firstUl = root.querySelector('ul')
           if (firstUl) topLis = Array.from(firstUl.querySelectorAll(':scope > li'))
         }
-        const out: { name: string; href: string }[] = []
+        const out = []
         topLis.forEach(li => buildPaths(li, [], 0, out))
-        const seenNames = new Set<string>()
+        const seenNames = new Set()
         const uniq = out.filter(o => (seenNames.has(o.name) ? false : (seenNames.add(o.name), true)))
         if (uniq.length < 2) continue
         const label = findTabLabel(root)
@@ -3827,13 +3853,13 @@ export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResu
       // 합쳐진 후보가 서로 다른 탭(라벨) 2개 이상에서 왔을 때만 이름 앞에 그 탭 라벨을 붙인다 — "사료"가
       // 강아지/고양이 양쪽에 다 있으면 이름만 보고는 구분이 안 되므로(2026-08-11 실사용 확인). 탭 구조가
       // 아닌 몰(대부분)은 groupLabels가 비어있어 이름을 그대로 둔다.
-      const merged: { name: string; href: string }[] = []
-      const seenHrefs = new Set<string>()
+      const merged = []
+      const seenHrefs = new Set()
       for (const { label, items } of groups) {
         for (const o of items) {
           if (seenHrefs.has(o.href)) continue
           seenHrefs.add(o.href)
-          merged.push({ name: groupLabels.size > 1 && label ? `${label} > ${o.name}` : o.name, href: o.href })
+          merged.push({ name: groupLabels.size > 1 && label ? (label + ' > ' + o.name) : o.name, href: o.href })
         }
       }
       if (merged.length) {
@@ -3845,7 +3871,12 @@ export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResu
       }
     }
     return { links: [], textlessHrefs: [...new Set(textlessHrefs)] }
-  }, { excludeSrc: NON_CATEGORY_TEXT_RE.source }).catch(() => ({ links: [], textlessHrefs: [] }))
+  }
+`)
+
+export async function scanCategoryMenu(page: Page): Promise<CategoryMenuScanResult> {
+  return page.evaluate(SCAN_CATEGORY_MENU_FN, { excludeSrc: NON_CATEGORY_TEXT_RE.source })
+    .catch(() => ({ links: [], textlessHrefs: [] }))
 }
 
 /** scanCategoryMenu의 무(無)브라우저 버전 — 서버가 최초에 내려준 원본 HTML을 cheerio로 파싱해 같은

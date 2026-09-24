@@ -286,7 +286,7 @@ function previewValueFor(product: PreviewProduct, sourceUrl: string, fieldKey: s
  *  가져오는 lib/ai.ts를 클라이언트 컴포넌트에서 직접 import하면 그 SDK까지 브라우저 번들에 실리므로,
  *  이 작은 목록만 따로 들고 있는다(이 파일의 다른 lib/scraper.ts 타입 중복과 같은 이유). 새 AI 공급자를
  *  추가하려면 lib/ai.ts의 ALL_AI_PROVIDERS/generateMallProfileReport와 이 목록을 같이 맞춰야 한다. */
-type AiProviderId = 'anthropic' | 'gemini' | 'groq' | 'ollama'
+type AiProviderId = 'anthropic' | 'groq' | 'gemini' | 'ollama'
 // 라벨엔 공급자 이름만 적지 않고 **실제로 도는 모델명**까지 적는다(2026-09-12 사용자 지시) — "Groq"만
 // 봐서는 그게 웹인지 로컬인지, 어떤 모델인지 알 수 없어 "지금 qwen 14b로 도는 것 같은데 Ollama는 왜
 // 꺼져 있냐" 같은 혼동이 실제로 있었다. 괄호는 "모델·실행위치" 한 축으로 통일한다 — 예전엔 Groq만
@@ -296,8 +296,13 @@ type AiProviderId = 'anthropic' | 'gemini' | 'groq' | 'ollama'
 // 루프에서 이걸 강제한다(예전에 Groq 툴팁이 이미 교체된 옛 모델명을 열흘 넘게 계속 안내하던 사고).
 const AI_PROVIDER_OPTIONS: { id: AiProviderId; label: string; title: string }[] = [
   { id: 'anthropic', label: 'Anthropic(Haiku 4.5)', title: 'claude-haiku-4-5-20251001 — 유료 API(크레딧 필요), 웹.' },
-  { id: 'gemini', label: 'Gemini(Flash)', title: '텍스트 gemini-flash-latest, 화면인식 gemini-3.6-flash(Groq 실패 시 2차) — 무료 티어(모델별 일일 한도 있음), 웹.' },
   { id: 'groq', label: 'Groq(qwen 27b·웹)', title: '텍스트/화면인식 모두 qwen/qwen3.8-27b — 무료 등급(분당·일일 토큰 한도 있음), 웹.' },
+  // 카테고리/정렬 화면인식에서 Groq 다음 2차로 시도되는 순서 그대로 Groq 바로 다음에 배치(사용자 지시,
+  // 2026-09-25 — "gemini 버전이 다른 게 들어왔으니, 이 버전도 groq 다음에 위치에 맞게 표시해줘").
+  // "몰 구조분석 리포트" 생성에서는 이 순서와 무관하게 Gemini가 Groq보다 먼저 시도된다(자체 목록,
+  // lib/ai.ts의 generateMallProfileReport 참고) — 체크박스 하나가 두 기능을 같이 켜고 끄므로 순서는
+  // 화면인식(비전) 쪽 기준으로 통일한다.
+  { id: 'gemini', label: 'Gemini(Flash)', title: '텍스트 gemini-flash-latest, 화면인식 gemini-3.6-flash(Groq 실패 시 2차) — 무료 티어(모델별 일일 한도 있음), 웹.' },
   { id: 'ollama', label: 'Ollama(qwen 14b/8b·로컬)', title: '텍스트 qwen3:14b(후보 선별)·qwen3:8b(몰 구조분석 리포트), 화면인식 qwen2.5vl:7b — 이 PC에서 직접 실행(요금 없음, CPU 사용).' },
 ]
 

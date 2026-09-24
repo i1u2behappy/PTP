@@ -26,10 +26,15 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks'
 
-/** 화면 체크박스와 1:1로 대응하는 AI 공급자 — 순서가 그대로 체크박스 순서이자 폴백 시도 순서다.
- *  lib/ai.ts가 이 둘을 그대로 re-export하므로 기존 import 경로(`from './ai'`)는 바뀌지 않는다. */
-export type AiProviderId = 'anthropic' | 'gemini' | 'groq' | 'ollama'
-export const ALL_AI_PROVIDERS: AiProviderId[] = ['anthropic', 'gemini', 'groq', 'ollama']
+/** 화면 체크박스와 1:1로 대응하는 AI 공급자 — 순서가 그대로 체크박스 순서다. lib/ai.ts가 이 둘을 그대로
+ *  re-export하므로 기존 import 경로(`from './ai'`)는 바뀌지 않는다.
+ *  카테고리/정렬 화면인식(비전)의 실제 시도 순서(Groq→Gemini→Ollama)에 맞춰 Gemini를 Groq 다음으로
+ *  옮김(사용자 지시, 2026-09-25 — GEMINI_VISION_MODEL 추가에 맞춰 체크박스 위치도 갱신). "몰 구조분석
+ *  리포트" 생성(generateMallProfileReport)은 이 배열 순서를 안 쓰고 자체 목록(Anthropic→Gemini→Groq→
+ *  Ollama, 유료 우선)을 따로 갖고 있어 영향받지 않는다 — 두 기능의 실제 폴백 순서가 서로 달라, 체크박스
+ *  하나로 둘 다 완벽히 표현할 수는 없다. */
+export type AiProviderId = 'anthropic' | 'groq' | 'gemini' | 'ollama'
+export const ALL_AI_PROVIDERS: AiProviderId[] = ['anthropic', 'groq', 'gemini', 'ollama']
 
 declare global {
   var __aiProviderStore: AsyncLocalStorage<ReadonlySet<AiProviderId>> | undefined

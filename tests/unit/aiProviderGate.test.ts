@@ -24,7 +24,9 @@ describe('AI 공급자 관문', () => {
     runWithAiProviders(['anthropic', 'gemini', 'groq'], () => {
       expect(isAiProviderEnabled('groq')).toBe(true)
       expect(isAiProviderEnabled('ollama')).toBe(false)
-      expect(enabledAiProviders()).toEqual(['anthropic', 'gemini', 'groq'])
+      // enabledAiProviders()는 넘긴 인자 순서가 아니라 ALL_AI_PROVIDERS의 고정 순서(현재
+      // anthropic→groq→gemini→ollama, 2026-09-25 화면인식 순서에 맞춰 재배치됨)로 필터링해 돌려준다.
+      expect(enabledAiProviders()).toEqual(['anthropic', 'groq', 'gemini'])
     })
   })
 

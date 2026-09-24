@@ -118,19 +118,26 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
 
 /** 스크래핑 화면에서 "일반모드/개발자모드" 중 하나를 확정하거나, 개발자모드 미리보기의 AI모드를 켤 때 쓰는
  * 최소 갱신 — 로그인정보/셀렉터 등 전체 필드를 요구하는 PUT과 달리 이 값들만 바꾼다(그 화면은 다른 필드를
- * 갖고 있지 않아, PUT을 그대로 쓰면 나머지 필드를 실수로 지울 위험이 있다). */
+ * 갖고 있지 않아, PUT을 그대로 쓰면 나머지 필드를 실수로 지울 위험이 있다). Mall 목록(SitesListPanel)의
+ * 배지를 눌러 바로 바꾸는 기능도 이 라우트를 그대로 재사용한다(사용자 요청, 2026-09-20 — "몰 상세관리의
+ * 수정 화면을 통해서만 설정되는데, 밖으로 빼").
+ * manualLoginRequired는 "❔ 아직 모름"(null)으로도 되돌릴 수 있어야 해서(SiteDetailPanel의 3단 선택과
+ * 동일), typeof로만 판별하면 null이 "필드를 안 보냄"과 구분이 안 된다 — 바디에 키가 실제로 있는지로
+ * 판별한다. */
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const b = await req.json() as {
-    manualLoginRequired?: boolean
+    manualLoginRequired?: boolean | null
     devmodeAiPreview?: boolean
     devmodeCategoryUrls?: string[]
     devmodeCategorySettings?: Record<string, { sortLabel?: string; limitMode?: 'count' | 'pages'; limitValue?: number }>
   }
-  if (typeof b.manualLoginRequired !== 'boolean' && typeof b.devmodeAiPreview !== 'boolean' && !b.devmodeCategoryUrls && !b.devmodeCategorySettings) {
+  const hasManualLoginRequired = 'manualLoginRequired' in b
+    && (b.manualLoginRequired === null || typeof b.manualLoginRequired === 'boolean')
+  if (!hasManualLoginRequired && typeof b.devmodeAiPreview !== 'boolean' && !b.devmodeCategoryUrls && !b.devmodeCategorySettings) {
     return NextResponse.json({ error: 'manualLoginRequired, devmodeAiPreview, devmodeCategoryUrls, devmodeCategorySettings 중 하나가 필요합니다' }, { status: 400 })
   }
-  if (typeof b.manualLoginRequired === 'boolean') {
+  if (hasManualLoginRequired) {
     await pool.query(`UPDATE sites SET manual_login_required=$1 WHERE id=$2`, [b.manualLoginRequired, id])
   }
   if (typeof b.devmodeAiPreview === 'boolean') {

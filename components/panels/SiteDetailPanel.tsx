@@ -256,7 +256,9 @@ export function SiteDetailPanel({ params }: Props) {
           </label>
           <label className="block">
             <span className="block text-xs text-gray-500 mb-1">비밀번호</span>
-            <input type="password" value={loginPw} onChange={e => setLoginPw(e.target.value)}
+            {/* 몰 상세관리는 관리자 본인만 보는 화면이라 가리는 실익이 없고, 오히려 값을 확인/수정하기
+                불편했다(사용자 요청, 2026-09-20) — type="text"로 평문 표시. */}
+            <input type="text" value={loginPw} onChange={e => setLoginPw(e.target.value)}
               autoComplete="new-password"
               className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
           </label>

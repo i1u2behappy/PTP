@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState, useCallback } from 'react'
 import { useTabs } from '../shell/TabsContext'
 import { useCurrentUser } from '../shell/CurrentUserContext'
 import { ClientMallFilterBar } from './shared/ClientMallFilterBar'
+import { LoginModeBadgeEditor, loginModeLabel } from './shared/LoginModeBadgeEditor'
 import { SITES_LIST_TAB } from '../shell/menuTabs'
 
 interface Site {
@@ -27,20 +28,6 @@ const PLATFORM_LABELS: Record<string, string> = {
   cafe24: '카페24', makeshop: '메이크샵', godomall: '고도몰', domesin: '도매의신', unknown: '알 수 없음',
 }
 
-/** name 컬럼의 ❔ 미정 배지와 같은 기준(manual_login_required)의 텍스트 버전. */
-function loginModeLabel(s: Site): string {
-  if (s.manual_login_required === true) return '개발자모드'
-  if (s.manual_login_required === false) return '일반모드'
-  return '미정'
-}
-
-/** 몰 유형 컬럼에서 로그인 방식을 색으로 바로 구분: 일반모드=초록, 개발자모드=노랑, 미정=회색. */
-const LOGIN_MODE_BADGE_CLASS: Record<string, string> = {
-  '일반모드': 'bg-emerald-100 text-emerald-700',
-  '개발자모드': 'bg-amber-100 text-amber-700',
-  '미정': 'bg-gray-100 text-gray-500',
-}
-
 interface ColumnDef {
   key: string
   label: string
@@ -53,23 +40,20 @@ const COLUMNS: ColumnDef[] = [
   { key: 'name', label: 'Mall 이름', getValue: s => s.name || '', className: 'text-gray-800 font-medium', render: s => (
     <>
       {s.name || '(이름 없음)'}
-      {s.manual_login_required === null && (
-        <span className="ml-1.5 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold whitespace-nowrap" title="아직 스크랩 방식이 정해지지 않았습니다 — 스크래핑 화면에서 처음 스크랩할 때 선택하세요">
-          ❔ 미정
-        </span>
-      )}
+      {/* "몰 유형" 컬럼까지 스크롤하지 않아도 여기서 바로 정할 수 있게 — 이름 옆이 항상 보이는 자리라
+          "미정"만 여기 남겨두면 오른쪽으로 스크롤해야만 바꿀 수 있었다(사용자 요청, 2026-09-20). 이미
+          정해진 몰은 예전처럼 여기엔 표시하지 않는다 — "몰 유형" 컬럼의 배지가 그 역할을 계속 맡는다. */}
+      {s.manual_login_required === null && <LoginModeBadgeEditor site={s} className="ml-1.5" />}
     </>
   ) },
   { key: 'main_items', label: '메인 품목', getValue: s => s.main_items || '', render: s => s.main_items || '-', className: 'text-gray-500' },
   { key: 'url', label: 'URL', getValue: s => s.url, render: s => s.url, className: 'text-gray-500' },
   { key: 'mall_platform', label: '몰 유형',
-    getValue: s => `${s.mall_platform ? (PLATFORM_LABELS[s.mall_platform] || s.mall_platform) : '-'} (${loginModeLabel(s)})`,
+    getValue: s => `${s.mall_platform ? (PLATFORM_LABELS[s.mall_platform] || s.mall_platform) : '-'} (${loginModeLabel(s.manual_login_required)})`,
     render: s => (
       <>
         {s.mall_platform ? (PLATFORM_LABELS[s.mall_platform] || s.mall_platform) : '-'}{' '}
-        <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold whitespace-nowrap ${LOGIN_MODE_BADGE_CLASS[loginModeLabel(s)]}`}>
-          {loginModeLabel(s)}
-        </span>
+        <LoginModeBadgeEditor site={s} />
       </>
     ),
     className: 'text-gray-500' },

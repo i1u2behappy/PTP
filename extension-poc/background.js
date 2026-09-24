@@ -927,7 +927,14 @@ function buildExtractExpr(rules) {
     if (part.type === 'fixed') return part.value
     if (part.type === 'label') return infoValue(new RegExp(part.value)) || null
     const el = document.querySelector(part.value)
-    return el ? (el.textContent || '').trim() : null
+    if (!el) return null
+    // <select>는 예외 — 옵션1~3 같은 필드를 <select> 자체에 클릭 지정하면(lib/scraper.ts의
+    // selectOptionsDisplayText와 항상 같이 반영) textContent를 그대로 읽었을 때 안내문+모든 옵션이
+    // 구분자 없이 뭉쳐 나온다. 실제 선택 가능한 옵션 값만 쉼표로 구분해 합친다.
+    if (el.tagName === 'SELECT') {
+      return Array.from(el.options).filter(o => o.value).map(o => (o.textContent || '').trim()).filter(Boolean).join(', ')
+    }
+    return (el.textContent || '').trim()
   }
   const extractionRules = ${JSON.stringify(rules)}
   for (const [field, rule] of Object.entries(extractionRules)) {
@@ -2092,6 +2099,14 @@ function pickerBindingListener(source, method, params) {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
     }).catch(() => {})
     session?.pendingSaves.push(save)
+  } else if (params.name === 'ptpDeleteField') {
+    // "✕(지우기)" — ptpSavePick(병합)과 달리 같은 라우트에 delete:true를 실어 규칙 자체를 jsonb에서
+    // 완전히 없앤다(lib/scraper.ts의 ptpDeleteField와 항상 같이 반영).
+    const payload = JSON.parse(params.payload)
+    const del = fetch(`${SITE_API_BASE}/${payload.siteId}/picker/rule`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ field: payload.field, delete: true }),
+    }).catch(() => {})
+    session?.pendingSaves.push(del)
   } else if (params.name === 'ptpPickerClose') {
     (async () => {
       if (session) await Promise.all(session.pendingSaves)
@@ -2136,7 +2151,10 @@ function pickerPageScript(seed) {
   let newFieldNameDraft = ''
   let newFieldValueDraft = ''
   const lastValueLocal = {}
-  const expandedInputs = new Set()
+  // 기존 필드 줄에도 "새 컬럼 만들기"와 같은 [컬럼명 칸+지정 버튼]을 추가한다(lib/scraper.ts와 항상 같이
+  // 반영, 사용자 지시 2026-09-17). 저장되는 규칙 자체(필드 키)에는 영향 없는 로컬 참고용 값이다.
+  const columnNameLocal = {}
+  let armingColumnNameField = null
 
   const masterLabels = seed?.masterLabels || {}
   const PICKER_TO_MASTER_KEY = {
@@ -2174,6 +2192,11 @@ function pickerPageScript(seed) {
     return idxA - idxB
   })
   const IMAGE_FIELDS = new Set(['thumbnail_urls', 'detail_image_urls'])
+  // 옵션1~3은 extractOptionsFromDom이 <select>를 스캔해 자동으로 채우는 값이라(currentValue 참고, lib/scraper.ts와
+  // 항상 같이 반영) 클릭 지정 자체를 막는다 — 네이티브 select 드롭다운은 열려 있어도 OS가 그리는 팝업이라
+  // 페이지 스크립트가 개별 <option>을 못 잡고, 실제로 클릭해보면 매번 <select> 전체(안내문+모든 옵션 텍스트가
+  // 구분자 없이 뭉친 것)만 잡혀 "여러 번 클릭 = 결합"이 될수록 오히려 더 망가진다(실사용 확인, 도매신).
+  const AUTO_OPTION_FIELDS = new Set(['1_option', '2_option', '3_option'])
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
@@ -2192,6 +2215,16 @@ function pickerPageScript(seed) {
       case 'name': case 'category': case 'brand': case 'manufacturer': case 'origin':
       case 'stock_status': case 'english_name': case 'summary_info':
         return p[field] || ''
+      // 옵션1~3은 몰 화면에 클릭할 단일 요소가 없다 — extractOptionsFromDom이 <select>를 스캔해 자동으로
+      // 채우는 값이다(lib/scraper.ts와 항상 같이 반영 — ScraperPanel.tsx 그리드 렌더링과 동일한 규칙,
+      // product.options[N].values). 이 자동값을 안 보여주면 "미지정"으로만 보여 사용자가 굳이 라벨/셀렉터를
+      // 손으로 지정하게 되는데, 정답 요소(<select> 값 목록)가 아닌 엉뚱한 것을 가리키면 이미 맞던 자동값을
+      // 깨진 값으로 덮어써버린다(실사용 확인, 도매신).
+      case '1_option': case '2_option': case '3_option': {
+        const idx = { '1_option': 0, '2_option': 1, '3_option': 2 }[field]
+        const opts = Array.isArray(p.options) ? p.options : []
+        return opts[idx]?.values?.join(', ') || ''
+      }
       default: {
         const custom = p.custom_fields
         return custom?.[field] || ''
@@ -2325,6 +2358,10 @@ function pickerPageScript(seed) {
     if (armingNewFieldName) {
       statusEl.textContent = '👉 새 컬럼명 지정 중 — 몰 화면에서 라벨을 클릭하세요'
       statusEl.style.display = 'block'
+    } else if (armingColumnNameField) {
+      const label = (CANONICAL_FIELDS.find(([k]) => k === armingColumnNameField)?.[1]) || armingColumnNameField
+      statusEl.textContent = `👉 "${label}" 컬럼명 지정 중 — 몰 화면에서 라벨을 클릭하세요`
+      statusEl.style.display = 'block'
     } else if (armedField) {
       const label = (CANONICAL_FIELDS.find(([k]) => k === armedField)?.[1]) || armedField
       statusEl.textContent = `👉 "${label}" 지정 중 — 몰 화면에서 값을 클릭하세요`
@@ -2351,21 +2388,22 @@ function pickerPageScript(seed) {
     logLine(`🚫 ${field}`)
   }
 
-  function appendOrSaveField(field, part, displayValue) {
-    const existing = rulesLocal[field]
-    if (!existing || IMAGE_FIELDS.has(field)) {
-      saveField(field, part.type, part.value, displayValue)
-      return
-    }
-    let parts
-    if (existing.type === 'multi') {
-      try { parts = JSON.parse(existing.value) } catch { parts = [] }
-    } else {
-      parts = [{ type: existing.type, value: existing.value }]
-    }
-    parts.push(part)
-    const combinedDisplay = [lastValueLocal[field], displayValue].filter(Boolean).join(' ')
-    saveField(field, 'multi', JSON.stringify(parts), combinedDisplay)
+  // "✕"(규칙 지우기) — forceEmpty와 다르다(lib/scraper.ts의 deleteField와 항상 같이 반영). "항상 빈
+  // 값"으로 고정하는 게 아니라 규칙 자체를 지워 자동/AI 추출로 되돌린다. 예전엔 ✕가 forceEmpty를 그대로
+  // 불러 지운 뒤에도 "값 없음 고정"에 갇혀 사용자가 "왜 안 바뀌지"를 겪었다(2026-09-17).
+  function deleteField(field) {
+    delete rulesLocal[field]
+    delete lastValueLocal[field]
+    window.ptpDeleteField(JSON.stringify({ field, siteId: siteIdLocal }))
+    logLine(`🗑 ${field}`)
+  }
+
+  // 클릭(또는 직접 입력)으로 값을 (다시) 지정하면 항상 새 값으로 교체한다(lib/scraper.ts와 항상 같이
+  // 반영) — 예전엔 이미 지정된 필드를 다시 지정하면 기존 값에 새 요소를 이어붙였는데("N개 결합"), 여러
+  // 번 클릭할수록 값이 뭉쳐서 안내문+옵션 텍스트가 겹겹이 쌓이는 사고가 반복됐다(사용자 지시로
+  // 2026-09-17에 교체 방식으로 되돌림). 대표/상세이미지는 이 대상이 아니다 — appendImagePart를 그대로 쓴다.
+  function saveFieldValue(field, part, displayValue) {
+    saveField(field, part.type, part.value, displayValue)
   }
 
   function appendImagePart(field, selector) {
@@ -2391,13 +2429,28 @@ function pickerPageScript(seed) {
     return (clone.textContent || '').trim().slice(0, 60)
   }
 
+  // <select>를 클릭하면(네이티브 드롭다운은 옵션이 열려 있어도 OS가 그리는 팝업이라 개별 <option>이 아니라
+  // 이 <select> 자체가 클릭 대상으로 잡힌다) elementDisplayText처럼 통째로 textContent를 읽으면 안내문+
+  // 모든 옵션이 구분자 없이 뭉쳐 나온다(lib/scraper.ts와 항상 같이 반영 — 도매신 실사용 확인, 2026-09-17).
+  // 실제 선택 가능한 <option> 값들만 쉼표로 구분해 자동값과 같은 형태로 보여준다.
+  function selectOptionsDisplayText(select) {
+    return Array.from(select.options).filter(o => o.value).map(o => (o.textContent || '').trim()).filter(Boolean).join(', ')
+  }
+
   function renderFieldList() {
     const extraFields = Object.keys(rulesLocal).filter(k => !CANONICAL_FIELDS.some(([key]) => key === k))
     const allFields = [...CANONICAL_FIELDS.map(([k, l]) => ({ key: k, label: l })), ...extraFields.map(k => ({ key: k, label: k }))]
+    // "새 컬럼 만들기"의 값 지정 버튼(#ptp-new-field-arm)도 다른 모든 지정 버튼(.ptp-row-arm,
+    // #ptp-new-field-name-arm)과 똑같이 armed 상태를 색/문구로 보여줘야 한다(lib/scraper.ts와 항상 같이
+    // 반영) — 예전엔 항상 파란 "🎯 클릭해서 지정하기"로 고정돼 있어 눌러도 지정 대기 중인지 전혀 알 수
+    // 없었다(사용자 지적, 2026-09-17 — "완전히 이상하게 돼 있어").
+    const newFieldTrimmedName = newFieldNameDraft.trim()
+    const newFieldArmed = !!newFieldTrimmedName && armedField === newFieldTrimmedName
     const rowsHtml = allFields.map(({ key, label }) => {
       const rule = rulesLocal[key]
       const armed = armedField === key
-      const expanded = expandedInputs.has(key)
+      const columnNameArmed = armingColumnNameField === key
+      const displayedColumnName = columnNameLocal[key] ?? label
       const rowBg = armed ? '#eff6ff' : rule ? '#f0fdfa' : '#fff'
       const rowBorder = armed ? '#60a5fa' : rule ? '#5eead4' : '#eee'
       const isForcedEmpty = rule?.type === 'fixed' && rule.value === ''
@@ -2416,47 +2469,65 @@ function pickerPageScript(seed) {
         ? `<span style="font-size:12px;background:#fff;color:#0d9488;border:1px solid #5eead4;border-radius:8px;padding:1px 6px;white-space:nowrap">${badgeText}</span>`
         : ''
       const autoValue = !rule ? currentValue(key) : ''
-      const valueLine = isForcedEmpty
-        ? `<div style="font-size:12px;color:#e11d48;font-weight:600;margin:3px 0">항상 빈 값 (자동/AI 추출 안 함)</div>`
+      const valueBoxColor = isForcedEmpty ? '#e11d48' : rule ? '#0d9488' : '#333'
+      // 값을 먼저, "미지정 · 자동값" 라벨은 옅은 글씨로 뒤에 붙인다 — 값 자체는 필드 라벨과 같은 굵기로
+      // 보이게 한다(lib/scraper.ts와 항상 같이 반영, 2026-09-17).
+      const valueBoxText = isForcedEmpty
+        ? '항상 빈 값 (자동/AI 추출 안 함)'
         : rule
-          ? `<div style="font-size:12px;color:#0d9488;font-weight:600;margin:3px 0;word-break:break-all">${esc(lastValueLocal[key] ?? currentValue(key)) || '(값 없음)'}</div>`
+          ? (esc(lastValueLocal[key] ?? currentValue(key)) || '(값 없음)')
           : autoValue
-            ? `<div style="font-size:12px;color:#bbb;margin:3px 0">미지정 · 자동값: <span style="color:#888">${esc(autoValue)}</span></div>`
-            : `<div style="font-size:12px;color:#bbb;margin:3px 0">미지정</div>`
+            ? `${esc(autoValue)} <span style="font-weight:400;color:#999">(미지정 · 자동값)</span>`
+            : '미지정'
+      // ✕는 규칙을 완전히 지워 자동/AI 추출로 되돌린다(deleteField) — forceEmpty("항상 빈 값 고정")와는
+      // 별개 버튼이다(lib/scraper.ts와 항상 같이 반영, 2026-09-17).
+      const clearAutoBtn = `<button class="ptp-row-clear-auto" data-field="${esc(key)}" title="자동으로 잡힌 값을 무시하고 항상 빈 값으로 고정합니다"
+              style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:12px;cursor:pointer;white-space:nowrap">🚫 항상 빈값</button>`
       const delBtn = rule
-        ? `<button class="ptp-row-del" data-field="${esc(key)}" title="삭제" style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:12px;cursor:pointer">✕</button>`
-        : autoValue
-          ? `<button class="ptp-row-clear-auto" data-field="${esc(key)}" title="자동으로 잡힌 값을 무시하고 항상 빈 값으로 고정합니다"
-              style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:12px;cursor:pointer">🚫 자동값 제거</button>`
-          : ''
-      const armBtnStyle = armed
-        ? 'flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb'
-        : rule
-          ? 'background:#fff;color:#2563eb;border:1px solid #2563eb'
-          : 'flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb'
-      const inputRow = expanded ? `
+        ? `<button class="ptp-row-del" data-field="${esc(key)}" title="${isForcedEmpty ? '이 필드를 다시 자동/AI 추출이 채우도록 되돌립니다' : '지정한 규칙을 지우고 자동/AI 추출로 되돌립니다'}"
+            style="background:#fff;color:#e11d48;border:1px solid #fca5a5;border-radius:5px;padding:3px 7px;font-size:12px;cursor:pointer;white-space:nowrap">${isForcedEmpty ? '↩ 고정 해제' : '✕ 지우기'}</button>${!isForcedEmpty ? clearAutoBtn : ''}`
+        : autoValue ? clearAutoBtn : ''
+      // 버튼은 "새 컬럼 만들기"처럼 항상 자연폭이고(flex:1 없음), 값 표시칸(flex:1)이 남는 공간을 전부
+      // 가져간다(lib/scraper.ts와 항상 같이 반영).
+      const armBtnStyle = armed || !rule
+        ? 'background:#2563eb;color:#fff;border:1px solid #2563eb'
+        : 'background:#fff;color:#2563eb;border:1px solid #2563eb'
+      // "값 직접 입력" 입력칸+저장 버튼을 "새 컬럼 만들기"처럼 접었다 펴는 링크 없이 항상 펼쳐 보여준다
+      // (lib/scraper.ts와 항상 같이 반영, 사용자 지시 2026-09-17).
+      const inputRow = `
           <div style="display:flex;gap:4px;margin-top:5px">
             <input class="ptp-row-input" data-field="${esc(key)}" placeholder="값 입력" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:12px" />
             <button class="ptp-row-save" data-field="${esc(key)}" style="background:#14b8a6;color:#fff;border:0;border-radius:5px;padding:3px 8px;font-size:12px;cursor:pointer">저장</button>
-          </div>` : ''
+          </div>`
+      // "새 컬럼 만들기"의 컬럼명 줄과 완전히 같은 [입력칸+지정 버튼]을 기존 필드에도 그대로 추가한다
+      // (lib/scraper.ts와 항상 같이 반영, 사용자 지시 2026-09-17).
+      const columnNameRow = `
+          <div style="display:flex;gap:4px;margin-top:5px">
+            <input class="ptp-row-name-input" data-field="${esc(key)}" value="${esc(displayedColumnName)}" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:12px;box-sizing:border-box" />
+            <button class="ptp-row-name-arm" data-field="${esc(key)}"
+              style="${columnNameArmed ? 'background:#2563eb;color:#fff;border:1px solid #2563eb' : 'background:#fff;color:#2563eb;border:1px solid #2563eb'};border-radius:5px;padding:3px 8px;font-size:12px;cursor:pointer;white-space:nowrap">
+              ${columnNameArmed ? '❌ 클릭 대기 취소' : '🎯 컬럼 지정'}
+            </button>
+          </div>`
+      // "새 컬럼 만들기"와 같은 [표시칸(좌)]+[지정 버튼(우)] 형태로 통일한다(lib/scraper.ts와 항상 같이
+      // 반영, 사용자 지시 2026-09-17 — "이 새컬럼 만들기 형태를 다른 컬럼도 모두 적용을 하라").
+      const valueBoxStyle = `flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:12px;font-weight:600;box-sizing:border-box;background:#f9fafb;color:${valueBoxColor};word-break:break-all`
       return `
         <div style="padding:7px 7px;margin:3px 0;border:1px solid ${rowBorder};background:${rowBg};border-radius:8px">
           <div style="display:flex;justify-content:space-between;gap:4px;align-items:baseline">
             <span style="font-size:12px">${rule ? '✅' : '⬜'} <b style="font-size:12px">${esc(label)}</b></span>
             ${badge}
           </div>
-          ${valueLine}
-          <div style="display:flex;gap:4px;align-items:center;margin-top:2px">
+          ${columnNameRow}
+          <div style="display:flex;gap:4px;margin-top:5px">
+            <div style="${valueBoxStyle}">${valueBoxText}</div>
             <button class="ptp-row-arm" data-field="${esc(key)}"
-              title="${rule ? '이미 지정된 값에 새 요소(이미지)를 이어붙입니다 — 바꾸려면 먼저 ✕로 지우세요' : ''}"
-              style="${armBtnStyle};border-radius:5px;padding:4px 6px;font-size:12px;cursor:pointer">
-              ${armed ? '❌ 클릭 대기 취소' : !rule ? '🎯 클릭해서 지정하기' : IMAGE_FIELDS.has(key) ? '🎯 이미지 추가' : '🎯 요소 추가'}
-            </button>
-            ${delBtn}
+                  title="${AUTO_OPTION_FIELDS.has(key) ? '색상/사이즈 등 select 옵션은 위 자동값이 이미 정확한 경우가 많습니다 — 그래도 클릭으로 다시 지정하면, 클릭한 요소가 <select>면 그 옵션 전체를 자동값과 같은 방식(쉼표로 구분)으로 읽어옵니다.' : rule && IMAGE_FIELDS.has(key) ? '이미 지정된 값에 새 요소(이미지)를 이어붙입니다' : rule ? '다시 클릭하면 지금 값을 새로 클릭한 값으로 바꿉니다' : ''}"
+                  style="${armBtnStyle};border-radius:5px;padding:4px 6px;font-size:12px;cursor:pointer;white-space:nowrap">
+                  ${armed ? '❌ 클릭 대기 취소' : IMAGE_FIELDS.has(key) && rule ? '🎯 이미지 추가' : '🎯 값 지정'}
+                </button>
           </div>
-          <a class="ptp-row-toggle" data-field="${esc(key)}" style="display:inline-block;margin-top:4px;font-size:12px;color:#888;text-decoration:underline;cursor:pointer">
-            ${expanded ? '접기' : '값 직접 입력하기'}
-          </a>
+          ${delBtn ? `<div style="display:flex;gap:4px;margin-top:4px">${delBtn}</div>` : ''}
           ${inputRow}
         </div>
       `
@@ -2468,11 +2539,16 @@ function pickerPageScript(seed) {
           <button id="ptp-new-field-name-arm"
             style="${armingNewFieldName ? 'background:#2563eb;color:#fff;border:1px solid #2563eb' : 'background:#fff;color:#2563eb;border:1px solid #2563eb'};border-radius:5px;padding:3px 8px;font-size:12px;cursor:pointer;white-space:nowrap"
             title="몰 화면에서 라벨(예: '도매가 (29개 이상)')을 클릭해 컬럼명으로 바로 채웁니다 — 조건별로 여러 공급가를 보여주는 몰에서 조건마다 새 컬럼을 만들 때 씁니다.">
-            ${armingNewFieldName ? '❌ 클릭 대기 취소' : '🎯 지정'}
+            ${armingNewFieldName ? '❌ 클릭 대기 취소' : '🎯 컬럼 지정'}
           </button>
         </div>
         <div style="display:flex;gap:4px">
-          <button id="ptp-new-field-arm" style="flex:1;background:#2563eb;color:#fff;border:1px solid #2563eb;border-radius:5px;padding:4px 6px;font-size:12px;cursor:pointer">🎯 클릭해서 지정하기</button>
+          <div style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:12px;box-sizing:border-box;background:#f9fafb;color:${newFieldTrimmedName && lastValueLocal[newFieldTrimmedName] ? '#0d9488' : '#bbb'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title="${esc(lastValueLocal[newFieldTrimmedName] || '')}">${esc(lastValueLocal[newFieldTrimmedName] || '(지정된 값 없음)')}</div>
+          <button id="ptp-new-field-arm"
+            style="${newFieldArmed ? 'background:#2563eb;color:#fff;border:1px solid #2563eb' : 'background:#fff;color:#2563eb;border:1px solid #2563eb'};border-radius:5px;padding:3px 8px;font-size:12px;cursor:pointer;white-space:nowrap">
+            ${newFieldArmed ? '❌ 클릭 대기 취소' : '🎯 값 지정'}
+          </button>
         </div>
         <div style="display:flex;gap:4px;margin-top:4px">
           <input id="ptp-new-field-value" placeholder="또는 값 직접 입력" value="${esc(newFieldValueDraft)}" style="flex:1;min-width:0;padding:3px 5px;border:1px solid #ccc;border-radius:5px;font-size:12px" />
@@ -2489,16 +2565,26 @@ function pickerPageScript(seed) {
         const field = btn.dataset.field
         armedField = armedField === field ? null : field
         armingNewFieldName = false
+        armingColumnNameField = null
         if (hovered) { hovered.style.outline = ''; hovered = null }
         renderFieldList()
         updateStatus()
       })
     })
-    fieldListEl.querySelectorAll('.ptp-row-toggle').forEach(btn => {
+    fieldListEl.querySelectorAll('.ptp-row-name-arm').forEach(btn => {
       btn.addEventListener('click', () => {
         const field = btn.dataset.field
-        if (expandedInputs.has(field)) expandedInputs.delete(field); else expandedInputs.add(field)
+        armingColumnNameField = armingColumnNameField === field ? null : field
+        armedField = null
+        armingNewFieldName = false
+        if (hovered) { hovered.style.outline = ''; hovered = null }
         renderFieldList()
+        updateStatus()
+      })
+    })
+    fieldListEl.querySelectorAll('.ptp-row-name-input').forEach(input => {
+      input.addEventListener('input', () => {
+        columnNameLocal[input.dataset.field] = input.value
       })
     })
     fieldListEl.querySelectorAll('.ptp-row-save').forEach(btn => {
@@ -2507,13 +2593,12 @@ function pickerPageScript(seed) {
         const input = fieldListEl.querySelector(`.ptp-row-input[data-field="${CSS.escape(field)}"]`)
         const value = input?.value.trim()
         if (!value) return
-        appendOrSaveField(field, { type: 'fixed', value }, value)
-        expandedInputs.delete(field)
+        saveFieldValue(field, { type: 'fixed', value }, value)
         renderFieldList()
       })
     })
     fieldListEl.querySelectorAll('.ptp-row-del').forEach(btn => {
-      btn.addEventListener('click', () => { forceEmpty(btn.dataset.field); renderFieldList() })
+      btn.addEventListener('click', () => { deleteField(btn.dataset.field); renderFieldList() })
     })
     fieldListEl.querySelectorAll('.ptp-row-clear-auto').forEach(btn => {
       btn.addEventListener('click', () => { forceEmpty(btn.dataset.field); renderFieldList() })
@@ -2526,7 +2611,7 @@ function pickerPageScript(seed) {
     })
     fieldListEl.querySelector('#ptp-new-field-name-arm').addEventListener('click', () => {
       armingNewFieldName = !armingNewFieldName
-      if (armingNewFieldName) armedField = null
+      if (armingNewFieldName) { armedField = null; armingColumnNameField = null }
       if (hovered) { hovered.style.outline = ''; hovered = null }
       renderFieldList()
       updateStatus()
@@ -2537,6 +2622,7 @@ function pickerPageScript(seed) {
       if (!field) { nameEl.focus(); return }
       armedField = armedField === field ? null : field
       armingNewFieldName = false
+      armingColumnNameField = null
       if (hovered) { hovered.style.outline = ''; hovered = null }
       renderFieldList()
       updateStatus()
@@ -2547,7 +2633,7 @@ function pickerPageScript(seed) {
       const field = nameEl.value.trim()
       const value = valueEl.value.trim()
       if (!field || !value) return
-      appendOrSaveField(field, { type: 'fixed', value }, value)
+      saveFieldValue(field, { type: 'fixed', value }, value)
       newFieldNameDraft = ''
       newFieldValueDraft = ''
       renderFieldList()
@@ -2569,16 +2655,31 @@ function pickerPageScript(seed) {
       if (hovered) { hovered.style.outline = ''; hovered = null }
       return
     }
+    if (armingColumnNameField) {
+      // 기존 필드의 "컬럼 지정" — lib/scraper.ts의 onClick과 동일 동작. 규칙을 저장하지 않고 그 필드의
+      // columnNameLocal(로컬 참고용 컬럼명)만 클릭한 텍스트로 바꿔치기한다.
+      e.preventDefault()
+      e.stopPropagation()
+      columnNameLocal[armingColumnNameField] = elementDisplayText(el)
+      armingColumnNameField = null
+      renderFieldList()
+      updateStatus()
+      if (hovered) { hovered.style.outline = ''; hovered = null }
+      return
+    }
     if (!armedField) return
     e.preventDefault()
     e.stopPropagation()
 
     if (IMAGE_FIELDS.has(armedField)) {
       appendImagePart(armedField, computeGallerySelector(el))
+    } else if (el.tagName === 'SELECT') {
+      const rule = { type: 'selector', value: computeSelector(el) }
+      saveFieldValue(armedField, rule, selectOptionsDisplayText(el))
     } else {
       const label = detectLabel(el)
       const rule = label ? { type: 'label', value: label } : { type: 'selector', value: computeSelector(el) }
-      appendOrSaveField(armedField, rule, elementDisplayText(el))
+      saveFieldValue(armedField, rule, elementDisplayText(el))
     }
     armedField = null
     renderFieldList()
@@ -2595,12 +2696,12 @@ function pickerPageScript(seed) {
   w.__ptpPickerTeardown = () => {
     fieldListEl.querySelectorAll('.ptp-row-input').forEach(input => {
       const value = input.value.trim()
-      if (value) appendOrSaveField(input.dataset.field, { type: 'fixed', value }, value)
+      if (value) saveFieldValue(input.dataset.field, { type: 'fixed', value }, value)
     })
     const newNameEl = fieldListEl.querySelector('#ptp-new-field-name')
     const newValueEl = fieldListEl.querySelector('#ptp-new-field-value')
     if (newNameEl?.value.trim() && newValueEl?.value.trim()) {
-      appendOrSaveField(newNameEl.value.trim(), { type: 'fixed', value: newValueEl.value.trim() }, newValueEl.value.trim())
+      saveFieldValue(newNameEl.value.trim(), { type: 'fixed', value: newValueEl.value.trim() }, newValueEl.value.trim())
     }
     document.removeEventListener('mouseover', onMouseOver, true)
     document.removeEventListener('click', onClick, true)
@@ -2657,6 +2758,7 @@ async function runPicker(tab, site) {
     // evalInTab과 같은 이유로 타임아웃을 건다 — 이 두 호출도 chrome.debugger.sendCommand라 자체
     // 타임아웃이 없다(2026-08-15, 같은 종류 문제 재발 방지).
     await withTimeout(chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.addBinding', { name: 'ptpSavePick' }), 10_000, 'Runtime.addBinding(ptpSavePick)')
+    await withTimeout(chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.addBinding', { name: 'ptpDeleteField' }), 10_000, 'Runtime.addBinding(ptpDeleteField)')
     await withTimeout(chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.addBinding', { name: 'ptpPickerClose' }), 10_000, 'Runtime.addBinding(ptpPickerClose)')
     pickerSessions.set(tab.id, { siteId: site.id, pendingSaves: [] })
     const seed = { previewProduct: site.previewProduct, extractionRules: site.extractionRules, masterLabels: site.masterLabels, masterOrder: site.masterOrder, siteId: site.id }

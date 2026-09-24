@@ -456,7 +456,18 @@ async function resolveLabelOrSelector(
   }
   // textContent를 그대로 읽으면 가방쟁이 배송비처럼 display:none 팝업(지역별 추가배송비 목록 등)이
   // 값에 섞여든다 — 라벨 방식(infoRows)이 이미 받는 cleanText 처리를 셀렉터 방식에도 동일하게 적용.
+  // <select>는 예외 — "스크랩 대상 직접지정"에서 옵션1~3 같은 필드를 <select> 자체에 클릭 지정하면
+  // (lib/scraper.ts의 selectOptionsDisplayText와 항상 같이 반영) 그 셀렉터가 여기 저장되는데, 그대로
+  // textContent를 읽으면 안내문+모든 <option>이 구분자 없이 뭉쳐 나온다(도매신 실사용 확인, 2026-09-17) —
+  // 실제 선택 가능한 옵션 값만 쉼표로 구분해 합친다(scanSelectOptions와 같은 규칙).
   return page.locator(part.value).first().evaluate((el: Element) => {
+    if (el.tagName === 'SELECT') {
+      return Array.from((el as HTMLSelectElement).options)
+        .filter(o => o.value)
+        .map(o => (o.textContent || '').trim())
+        .filter(Boolean)
+        .join(', ')
+    }
     const clone = el.cloneNode(true) as Element
     clone.querySelectorAll('.layer_area, [style*="display:none" i], [style*="display: none" i]').forEach(n => n.remove())
     return (clone.textContent || '').trim()

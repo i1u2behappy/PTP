@@ -47,12 +47,34 @@ _2026-09-24 기준: 없음 — 이 세션의 변경분은 전부 커밋됐다(�
   탭 전환 클릭이 안정적으로 안 먹혀 무산됐다 — 코드/유닛테스트는 통과했지만 화면에서 "연속된 리프는
   한 줄에 /로, 자식 있는 노드는 새 줄+들여쓰기로 재귀"가 실제로 그렇게 보이는지는 아직 아무도 확인 안 함.
   **다음 한 걸음**: 워커가 유휴일 때 아무 몰이나 골라 "카테고리 구조" 카드를 직접 열어본다.
-- **`hasMoreCategoryHierarchy` 가드 수정(`lib/scrape/categoryCachePolicy.ts`, 커밋 `8a15913`) 걸스굽
-  재실행 검증 안 됨.** 계기가 된 원본 버그(대분류>소분류 계층이 평평한 캐시로 되돌아가던 것)를
-  실제로 재현했던 걸스굽 몰에서, 수정 이후 "몰 구조분석"을 다시 돌려 `categoryLinks`에 `" > "`가 포함된
-  계층 이름이 유지되는지 DB로 직접 확인한 적이 아직 없다. **다음 한 걸음**: 워커 재시작(오늘 커밋된
-  `lib/scraper.ts`/`lib/ai.ts`/`lib/scrape/*.ts` 변경분 반영 확인 겸) → 걸스굽 몰구조분석 재실행 → 결과
-  카테고리에 계층 이름이 보이는지 확인.
+- **[중요] tsx/esbuild `--keep-names`가 `page.evaluate()` 내부 이름 있는 함수를 매번 조용히 깨뜨리는
+  버그 발견 — `scanCategoryMenu`만 우선 수정, 나머지 46곳 미조사(2026-09-24).** 걸스굽 카테고리가
+  계층 없이 평평하게 나온 진짜 원인은 `hasMoreCategoryHierarchy` 가드(어제 수정분)가 아니라 이거였다 —
+  실제 몰 DOM엔 "여성화 > FLAT & LOAFER" 같은 제대로 된 중첩 구조가 있는데, 그걸 읽는
+  `scanCategoryMenu`(`buildPaths`)가 호출될 때마다 `ReferenceError: __name is not defined`로 터지고
+  있었다(직접 재현 확인: `scanCategoryMenu`/`collectAllPageLinks` 둘 다 동일 증상). 원인: 워커가 쓰는
+  tsx가 esbuild `--keep-names`로 내부 함수마다 `__name(...)` 헬퍼 호출을 끼워넣는데, Playwright의
+  `page.evaluate(fn, arg)`는 `fn`을 문자열로 떠서 브라우저에서 그대로 재실행하며 브라우저엔 `__name`이
+  없다 — 알려진 tsx 제약(https://github.com/privatenumber/tsx/issues/113, 메인테이너 답변: "고칠
+  버그가 아님"). 실패가 각 함수 자체의 `.catch(() => 빈 결과)`로 조용히 삼켜져 에러 로그가 하나도
+  안 남는다는 게 가장 위험한 부분 — 지금까지 아무도 못 봤다.
+  **고친 것**: `scanCategoryMenu`만(`lib/scraper.ts`) — 새 헬퍼 `compileBrowserEvalFn`으로 함수 소스를
+  런타임에 순수 JS 문자열에서 `new Function(...)`으로 만들면 esbuild가 그 문자열 "내용"까지는 변환 안
+  해서 `__name`이 안 끼고, 동시에 진짜 `Function` 인스턴스라 Playwright가 인자를 정상적으로 넘겨
+  호출한다(문자열을 그대로 `page.evaluate(str, arg)`로 넘기면 Playwright가 `isFunction:false`로 취급해
+  호출 자체를 안 하고 `arg`도 무시함 — 이것도 직접 실측 확인). 걸스굽에서 라이브로 재검증:
+  55개 링크 중 52개가 `"여성화 > BASIC HEEL LINE > 1 ~ 3cm"`처럼 3단계까지 정확히 계층화됨(수정 전:
+  66개 중 1개만 계층 있음). tsc/lint/test:unit(385개) 통과.
+  **의도적으로 범위를 좁힘(사용자 지시)** — `lib/scraper.ts`에 `page.evaluate(` 호출이 47곳 있고, 이
+  중 내부에 이름 있는 함수(`function foo(){}` 또는 `const foo = () => {}`)를 쓰는 다른 곳들도 같은 방식
+  으로 조용히 실패하고 있을 가능성이 높다(`collectAllPageLinks`는 직접 확인함 — 실패). **다음 한 걸음
+  (다른 대화에서, 필요할 때)**: 47곳을 하나씩 점검해(가장 쉬운 확인법: 그 함수를 import해서 실제 페이지에
+  직접 호출해보고 `console.log`로 내부 값 확인 — `.catch()`가 있으면 에러가 안 보이므로 반드시 직접
+  호출해야 함) 걸린 곳마다 같은 `compileBrowserEvalFn` 패턴 적용. 범위가 크므로 한 세션에 몰아서 하기보다
+  발견되는 대로(다른 몰에서 이상 증상 보고될 때마다) 점진적으로 고치는 것을 권장.
+  **아직 안 끝난 것**: 이 수정은 코드에만 있고, 걸스굽의 실제 DB `categoryLinks`는 여전히 평평한 옛
+  값이다 — 워커 재시작(이 코드 변경분 반영) → 걸스굽 "몰 구조분석" 재실행 → DB에 계층 이름이 저장되는지
+  확인이 아직 안 끝났다.
 - **시스템 상태 자동복구 — 사용자에게 제안만 하고 승인/구현 안 됨(2026-09-24).** 사용자 요청("검토해서
   알려줘")에 따라 구현 없이 방향만 제시했다: 워커 코드-낡음 자동재시작은 이미 이번 세션에 구현·커밋됨
   (`a036490`). PTP 서버 메모리 임계치 자동재시작도 기존에 이미 있음(그대로 유지 권장). DB/Docker

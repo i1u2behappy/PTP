@@ -71,6 +71,9 @@ export function Sidebar() {
         <div className={`h-16 flex items-center shrink-0 ${sidebarCollapsed ? 'justify-center px-0' : 'justify-between px-5'}`}>
           <button onClick={() => { openTab(DASHBOARD_TAB); setMobileSidebarOpen(false) }} aria-label="첫페이지로 이동" title="첫페이지로 이동"
             className="flex items-center h-full text-left hover:opacity-80 active:opacity-70 transition-opacity cursor-pointer">
+            {/* 이 이미지만 인라인 style로 땜질하는 시도는 이미 한 번 했다가 반려된 방식이다(app/layout.tsx의
+                FOUC_GUARD_SCRIPT 주석 참고 — "그게 아니라 그 화면 자체가 안 뜨게 하라"). 근본 수정은
+                그쪽에 있다 — 여기는 원래대로 className만 쓴다. */}
             <Image src="/logo.jpg" alt="ILDA:Bridge" width={600} height={566} className="h-10 w-auto" priority />
           </button>
           {/* 데스크톱 전용 접기/펼치기 토글 — 모바일은 바깥 탭/햄버거로 여닫으므로 이 버튼이 필요 없다. */}

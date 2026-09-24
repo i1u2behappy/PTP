@@ -6,6 +6,12 @@ import pool from './db'
 import type { RawMasterImage } from './db'
 import { fetchImageViaBrowser } from './workerClient'
 
+// public/scraped는 코드상으론 그대로지만, 실제로는 디렉터리 접합(junction)이라 실제 바이트는
+// E:\!Project\scrape\scraped에 저장된다(사용자 지시, 2026-09-22 — "C드라이브에 저장되는 이미지를
+// E드라이브로"). C 드라이브 여유공간이 늘 빠듯해(이 세션에서 Ollama 32B 모델 다운로드 때도 같은 이유로
+// E:\ollama-models로 옮긴 전례 있음) 코드는 그대로 두고 OS 수준에서 저장 위치만 옮겼다 — Next.js 정적
+// 서빙(/scraped/...)과 파일 탐색기로 열기(open-image-folder)가 둘 다 접합을 투명하게 따라가므로 아래
+// 로직은 하나도 안 바꿔도 된다(실사용 확인: Node fs 쓰기/읽기, Next 정적 서빙 둘 다 재검증 완료).
 const SAVE_ROOT = path.join(process.cwd(), 'public', 'scraped')
 const MAX_DIMENSION = 1200
 const JPEG_QUALITY = 85

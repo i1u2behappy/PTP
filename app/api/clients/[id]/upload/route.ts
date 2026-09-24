@@ -3,6 +3,8 @@ import fs from 'fs'
 import path from 'path'
 import pool from '@/lib/db'
 
+// lib/images.ts의 SAVE_ROOT 주석과 같은 이유 — public/client-docs도 디렉터리 접합(junction)으로
+// E:\!Project\scrape\client-docs를 가리킨다(2026-09-22). 코드는 그대로 둔다.
 const SAVE_ROOT = path.join(process.cwd(), 'public', 'client-docs')
 const MAX_SIZE_BYTES = 10 * 1024 * 1024
 const ALLOWED_EXT = ['.pdf', '.jpg', '.jpeg', '.png', '.webp']

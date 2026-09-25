@@ -8773,8 +8773,22 @@ async function expandOneLevel(
   // "지금 보고 있는 카테고리"라는 빈 이름으로 물어야 해서 AI가 어느 대분류인지 전혀 구분 못 하고, 몰
   // 전체 메가메뉴가 모든 페이지에 실려 있는 몰(도매신)에서는 다른 대분류의 하위 카테고리(부츠/털신발·
   // 펌프스/힐이 MEN SHOES 확장에 섞여 들어옴)까지 잘못 집어왔다(사용자 지적, 2026-09-17).
-  if (parentName && opts.siteId) {
-    const { prevCategoryLinks } = await getCategoryMemory(opts.siteId)
+  // prevCategoryLinks(몰구조분석이 마지막으로 저장해둔 전체 카테고리 기억)를 두 가지 용도로 쓴다: (1)
+  // 바로 아래 있던 기존 캐시 단축 경로, (2) 그걸로도 부족해 AI/DOM으로 새로 찾아야 할 때 "이미 아는
+  // 대분류들"의 href 집합(topLevelHrefSet) — expandCategoryHubs가 같은 문제(topLevelHrefSet 주석 참고,
+  // 모자사러 2026-08-17)를 막으려고 쓰는 것과 똑같은 안전장치를 여기(expandCategoryChildren 경로)에도
+  // 추가한다. 이 함수는 어느 카테고리 페이지를 열어도 사이트 전체 대분류 메뉴(GNB)가 그대로 떠 있는 몰에서
+  // "하위 메뉴가 없는 리프"를 확장 대상으로 체크해도 매번 그 GNB를 통째로 "하위"로 오인해왔다 — 걸스굽
+  // 실사용 확인(2026-09-25, 사용자 지적 — "하위카테고리 불러오기 했는데, 하위카테고리가 아닌데?"):
+  // 숄더백(리프, 실제 하위 없음)을 확장했더니 AI가 "가격대별"의 세부 구간(0-9,900 등)을 하위로 집어왔고,
+  // expandDescendants가 그 오탐까지 또 "하위"로 보고 재귀 확장하며 "스페셜분류 1 > BAG&CLOTHES > 토트백 >
+  // 전체상품보기 > 가격대별 > 0 - 9,900 > 가격대별 > 가격대별 > 0 - 9,900"처럼 무관한 이름이 겹겹이
+  // 이어붙는 사고로 번졌다. expandCategoryHubs와 달리 이 함수는 전체 대분류 목록을 인자로 안 받으므로
+  // (사용자가 URL 하나만 골라 뿌리로 삼는 게 이 함수의 설계 의도 — 위 함수 doc 참고) DB에 저장된 캐시에서
+  // 같은 정보를 구한다 — 아직 몰구조분석을 한 번도 안 돌린 몰이면 이 캐시가 비어있어 이 안전장치가 못
+  // 걸리는 한계는 있지만, 안 하는 것보다는 낫다.
+  const prevCategoryLinks = opts.siteId ? (await getCategoryMemory(opts.siteId)).prevCategoryLinks : []
+  if (parentName) {
     const prefix = `${parentName} > `
     const cached = prevCategoryLinks.filter(c => c.name.startsWith(prefix))
     if (cached.length) {
@@ -8782,6 +8796,9 @@ async function expandOneLevel(
       return { platform: 'unknown', links: cached.map(c => ({ href: c.href, text: c.name })), aiUsed: false }
     }
   }
+  const topLevelHrefSet = new Set(
+    prevCategoryLinks.filter(c => !c.name.includes(' > ')).map(c => canonicalizeHref(c.href)),
+  )
   await scanPage.goto(parentUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 })
   await loginIfNeeded(scanPage, { url: parentUrl, ...opts })
   if (opts.loginId && scanPage.url() !== parentUrl) {
@@ -8809,7 +8826,11 @@ async function expandOneLevel(
   // scanCategoryMenuRobust가 대분류 메뉴(GNB)를 다시 찾아버리면 방문한 그 페이지 자신으로 되돌아오는
   // 항목이 섞일 수 있다(discoverCategoryLinks의 expandWorker와 같은 이유) — 자기 자신은 제외한다.
   const parentNorm = parentUrl.replace(/\/+$/, '')
-  children = children.filter(c => c.href.replace(/\/+$/, '') !== parentNorm)
+  const beforeTopLevelFilter = children.length
+  children = children.filter(c => c.href.replace(/\/+$/, '') !== parentNorm && !topLevelHrefSet.has(canonicalizeHref(c.href)))
+  if (topLevelHrefSet.size && children.length < beforeTopLevelFilter) {
+    console.log(`[하위카테고리:진단:${mallName}] 이미 아는 대분류 GNB 재검출 ${beforeTopLevelFilter - children.length}개 제외(진짜 하위 후보 ${children.length}개 남음)`)
+  }
   let links: CategoryLink[] = children.map(c => ({ href: c.href, text: parentName ? `${parentName} > ${c.name}` : c.name }))
   // 둘 다 실패했으면(하위 카테고리 정보가 이 페이지 자체엔 아예 없는 몰일 수 있다 — expandCategoryChildrenByVision
   // 주석 참고, 도매창고 실사용 확인) 화면을 사람처럼 열어가며 찾는 마지막 수단을 시도한다. parentName이

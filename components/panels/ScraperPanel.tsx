@@ -3387,6 +3387,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             <tr className="sticky top-0 z-[2] bg-teal-50 border-b border-teal-100">
               <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="이 카테고리를 스크랩할 때 적용할 정렬 순서">정렬</th>
               <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="이 카테고리에서 몇 개/몇 페이지까지만 스크랩할지 상한을 둡니다(비워두면 무제한)">스크랩 상한</th>
+              {/* "전체 가져오기" 그리드와 같은 자리(정렬/스크랩 상한 다음, URL 앞) — URL만 보고는(특히
+                  잘려서 표시되면) 어느 카테고리인지 바로 알기 어렵다는 지적(사용자, 2026-09-25 — "여기에도
+                  카테고리명을 확인해야해"). 이 표는 URL만 손으로 모으는 곳이라 이름을 직접 캡처해두지
+                  않으므로, handleExpandSubcategory와 같은 방식으로 이미 아는 이름(몰구조분석/"전체
+                  가져오기"가 채운 categories, 없으면 "카테고리별 상품 개수 확인"이 남긴 categoryInfo.label)
+                  중에서 찾아 보여준다 — 아직 아무 이름도 모르면(직접 입력한 URL 등) "-"로 표시. */}
+              <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap">카테고리</th>
               <th className="px-3 py-1.5 text-gray-500 font-normal text-left">URL</th>
               {/* "전체 가져오기" 그리드와 같은 자리/모양 — 이 표엔 원래 없어서 "스크랩 미리보기"로 개수를
                   확인해도 볼 방법이 없었다(사용자 지적, 2026-09-05: "왜 개수를 체크하지 못하지?"). */}
@@ -3406,6 +3413,10 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               const live = categoryCountByHref.get(resolvedUrl)
               const count = live ?? (info?.count != null ? { count: info.count, truncated: info.truncated } : undefined)
               const truncatedTitle = '확인 상한에 도달할 때까지도 새 상품이 계속 나와 멈췄습니다 — 실제로는 더 많을 수 있습니다.'
+              // handleExpandSubcategory와 같은 두 단계 조회(3356행 근처 주석 참고) — 몰구조분석/"전체
+              // 가져오기"가 채운 categories를 최우선으로, 없으면 "카테고리별 상품 개수 확인"이 남긴
+              // categoryInfo.label을 보조로 쓴다. 둘 다 없으면(직접 입력한 URL 등) 이름을 모른다는 뜻.
+              const categoryName = categories.find(c => c.href === href)?.text || info?.label || ''
               return (
                 <tr key={href} className="group border-b border-gray-100 last:border-0 hover:bg-gray-50">
                   <td className="px-3 py-1.5">
@@ -3436,6 +3447,12 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                           onChange={e => { activateManualMode(); updateCategorySetting(href, { limitValue: e.target.value ? Number(e.target.value) : undefined }) }} />
                       )}
                     </div>
+                  </td>
+                  <td className="px-3 py-1.5 max-w-[200px] text-gray-700">
+                    <span className={`block truncate ${categoryName ? '' : 'text-gray-400 italic'}`}
+                      title={categoryName || '이 URL의 카테고리명을 아직 모릅니다 — 몰구조분석/"전체 가져오기"로 찾아지거나 "카테고리별 상품 개수 확인"을 돌리면 채워집니다.'}>
+                      {categoryName || '-'}
+                    </span>
                   </td>
                   {/* URL은 길어서 잘리는데, 하필 카테고리를 구분하는 부분(?ctno=001 등)이 **뒤쪽**에 있어
                       앞에서 자르면 모든 행이 똑같아 보인다 — 사용자가 "현재 카테고리를 제대로 못 불러온다"고

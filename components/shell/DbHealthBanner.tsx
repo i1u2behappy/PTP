@@ -4,6 +4,12 @@ import { setSystemOutageActive } from './GlobalErrorNet'
 
 const NORMAL_POLL_MS = 20_000
 const RESTARTING_POLL_MS = 4_000
+// health가 'ok'가 아닌 동안은 더 자주 확인한다 — 원래는 정상 상태든 아니든 항상 20초 주기였는데, 그러면
+// 실제로는 이미 복구된 뒤에도 최대 20초(게다가 탭이 백그라운드라 브라우저가 타이머를 늦추면 그보다 훨씬
+// 더) 동안 낡은 경고가 화면에 그대로 남는다(사용자 실사용 확인, 2026-09-25 — "시스템 상태" 모달은
+// 정상인데 "PTP 서버 응답 없음" 배너가 새 서버가 47분째 멀쩡히 떠 있는데도 안 사라져 있었음). 무언가
+// 잘못됐다고 이미 보여주고 있는 동안은 "언제 풀리는지"가 사용자 경험에 훨씬 중요하므로 빠르게 재확인한다.
+const UNHEALTHY_POLL_MS = 5_000
 const COUNTDOWN_TICK_MS = 1_000
 // 워커 재시작 버튼을 누르면 실제로는 곧바로 안 끝난다 — 열려있던 로그인 세션을 정상 종료하고
 // (closeAllOpenSessionsGracefully) 프로세스를 새로 띄우는 데 보통 10~30초, 세션이 여러 개 열려있으면
@@ -57,13 +63,21 @@ export function DbHealthBanner() {
   // 진짜 Docker/WSL 다운은 다음 주기에도 계속 실패하므로 여전히 잡아내고, 순간적인 경합은 다음 폴링 때
   // 이미 풀려 있어 걸러진다.
   const consecutiveDbDownRef = useRef(0)
+  // server-down(fetch 자체가 던짐)도 db-down과 같은 이유로 debounce한다 — 탭이 백그라운드에서 풀려나는
+  // 순간이나 일시적인 네트워크 끊김 한 번만으로도 fetch가 실패할 수 있는데, 그때마다 곧바로 "서버가
+  // 죽었다"는 배너를 띄우면 실제로 서버는 멀쩡한 오탐이 나온다.
+  const consecutiveServerDownRef = useRef(0)
 
   useEffect(() => {
     let cancelled = false
-    async function check() {
+    /** 이번 확인 결과(effective health)를 반환한다 — 호출부가 이 값으로 다음 폴링 간격을 정한다
+     *  (UNHEALTHY_POLL_MS 주석 참고: 정상이 아닌 동안은 더 자주 재확인해서 빨리 자동으로 사라지게 함). */
+    async function check(): Promise<Health> {
       let next: Health = 'ok'
       try {
         const d = await fetch('/api/health/db').then(r => r.json())
+        // fetch 자체는 성공했다 — 서버는 분명히 응답하고 있으므로 server-down 연속 실패 집계를 리셋한다.
+        consecutiveServerDownRef.current = 0
         if (d.ok) {
           consecutiveDbDownRef.current = 0
           next = 'ok'
@@ -72,7 +86,8 @@ export function DbHealthBanner() {
           next = consecutiveDbDownRef.current >= 2 ? 'db-down' : 'ok'
         }
       } catch {
-        next = 'server-down'
+        consecutiveServerDownRef.current++
+        next = consecutiveServerDownRef.current >= 2 ? 'server-down' : 'ok'
       }
       // PTP 서버 자체가 죽은 경우(server-down)엔 이 요청도 어차피 안 닿으므로 건너뛴다.
       let boot: WorkerBootStatus = { status: 'unknown' }
@@ -85,7 +100,7 @@ export function DbHealthBanner() {
           freshness = await fetch('/api/health/worker-freshness').then(r => r.json())
         } catch { /* 못 읽어도 기존 판단에 영향 없음 — 순수 부가 정보 */ }
       }
-      if (cancelled) return
+      if (cancelled) return next
       // 워커가 DB 재연결을 자동으로 시도 중이면(재부팅 직후 최대 8분) — 사용자가 할 수 있는 일이 없는
       // 상태이므로, "재시작해주세요" 버튼 대신 진행 상황과 대략의 대기시간을 보여주는 쪽이 더 정확하다.
       // worker-stale은 db/server/booting보다 우선순위가 낮다 — 그쪽들이 이미 더 급한 문제를 설명 중이면
@@ -104,10 +119,47 @@ export function DbHealthBanner() {
       // 워커가 실제로 다시 신선해졌으면(재시작 성공) 유예기간 표시도 같이 끝낸다 — 다음에 또 stale이
       // 감지됐을 때 이전 클릭 시각이 남아있어 엉뚱하게 "재시작 중"으로 잠깐 보이는 일이 없게 한다.
       if (effective === 'ok') setWorkerRestartRequestedAt(null)
+      return effective
     }
-    check()
-    const id = setInterval(check, restarting ? RESTARTING_POLL_MS : NORMAL_POLL_MS)
-    return () => { cancelled = true; clearInterval(id) }
+    // setInterval 고정 주기 대신, 매번 확인 결과를 보고 스스로 다음 대기시간을 정하는 방식으로 바꿨다 —
+    // health가 안 좋을 땐 더 자주(UNHEALTHY_POLL_MS), 좋을 땐 느긋하게(NORMAL_POLL_MS) 재확인해야
+    // 실제로 복구된 뒤 화면이 낡은 경고를 계속 붙들고 있는 시간을 줄일 수 있다.
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    // check()가 fetch 여러 번을 순서대로 기다리는 동안(수백ms~수 초) visibilitychange가 겹쳐 들어오면
+    // loop()가 두 번 동시에 진행되고, 그러면 이후 setTimeout 체인이 두 갈래로 갈라져 영원히 두 배로
+    // 폴링하게 된다(lib/onceGlobally.ts가 막는 것과 같은 부류의 "겹쳐 도는 타이머" 사고) — 이미 진행
+    // 중이면 새로 트리거하지 않고 지금 도는 것이 끝나기를 기다린다(끝나자마자 최신 상태로 다시 스스로
+    // 돈다).
+    let inFlight = false
+    async function loop() {
+      if (inFlight) return
+      inFlight = true
+      try {
+        const effective = await check()
+        if (cancelled) return
+        const delay = restarting ? RESTARTING_POLL_MS : effective !== 'ok' ? UNHEALTHY_POLL_MS : NORMAL_POLL_MS
+        timeoutId = setTimeout(loop, delay)
+      } finally {
+        inFlight = false
+      }
+    }
+    // 브라우저는 백그라운드 탭의 타이머를 늦추거나 완전히 멈춘다 — 탭을 며칠 띄워두고 다른 작업을 하다
+    // 돌아오면, 그사이 서버가 잠깐 죽었다 다시 살아난 이력이 있어도 이 배너는 그때 멈춘 상태(예: 낡은
+    // "server-down")를 그대로 붙들고 있을 수 있다(실사용 확인, 2026-09-25 — "시스템 상태"는 정상인데
+    // 배너만 47분째 "PTP 서버 응답 없음"이었음). 탭이 다시 보이는 순간 예정된 타이머를 기다리지 말고
+    // 바로 재확인해, 사용자가 화면을 보는 시점엔 항상 최신 상태가 반영되게 한다.
+    function onVisibilityChange() {
+      if (document.visibilityState !== 'visible') return
+      if (timeoutId) clearTimeout(timeoutId)
+      loop()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    loop()
+    return () => {
+      cancelled = true
+      if (timeoutId) clearTimeout(timeoutId)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
   }, [restarting])
 
   // "다음 시도까지 M초"를 실시간으로 줄어들게 보여주기 위한 1초 틱 — 실제 재시도는 위 폴링과 무관하게

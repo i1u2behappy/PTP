@@ -8247,7 +8247,16 @@ export function flattenVisibleCategoryHierarchy(groups: { group: string; items: 
  *  것과 짝지어 href를 되찾는다 — 화면에 보이는 텍스트라면 DOM에 진짜 앵커가 있다는 뜻이므로, 못 찾으면
  *  좌표 클릭으로 지어내지 않고 그냥 버린다(resolveMissingCategoryCandidates와 같은 원칙 — "확인 못 하면
  *  후보에서 뺀다"). 정확히 안 맞으면 findApproximateMatch로 한 번 더 시도한다(비전 OCR 오독 흡수, 같은
- *  이유는 findApproximateMatch 주석 참고). 같은 href를 두 후보가 나눠 갖지 않도록 소비한 href는 뺀다. */
+ *  이유는 findApproximateMatch 주석 참고).
+ *
+ *  같은 이름이 실제로 화면에 여러 번 나온 만큼만(=pageLinks에 그 이름의 앵커가 실제로 등장한 횟수만큼만)
+ *  중복 배정을 허용한다 — 이름별 href 배열에서 매칭될 때마다 하나씩 소비(shift)해, "화면에 1번만
+ *  나온 이름을 후보 여럿이 나눠 가지려는" 경우(비전이 같은 걸 두 번 다르게 읽은 오탐)는 여전히 막으면서,
+ *  "화면에 실제로 여러 번(다른 대분류 아래에 교차로) 나오는 이름"은 그 등장 횟수만큼 각 후보가 저마다
+ *  자기 href를 받아간다(모자사러 실사용 확인, 2026-09-27 — 메가메뉴에서 "볼캡"이 "캡모자"/"빅사이즈모자"
+ *  등 여러 대분류 아래 교차로 나열되는데, 예전엔 href를 전역으로 한 번 "쓴 것"으로 표시해버려 두 번째부터
+ *  전부 사라졌다. 사용자 지시: "중복돼 있어도 보이는대로 몰 구조를 그대로 가져와 — 중복되더라도 각
+ *  카테고리는 개별로 화면과 같이 노출되게 해"). */
 export function matchVisibleCategoryLinksToHrefs(
   candidates: VisibleCategoryCandidate[],
   pageLinks: { text: string; href: string }[],
@@ -8260,19 +8269,17 @@ export function matchVisibleCategoryLinksToHrefs(
     if (list) list.push(l.href)
     else byName.set(key, [l.href])
   }
-  const usedHrefs = new Set<string>()
   const out: CategoryMenuLink[] = []
   for (const c of candidates) {
     const key = normalizeCategoryName(c.leafText)
     if (!key) continue
-    let href = byName.get(key)?.find(h => !usedHrefs.has(h))
-    if (!href) {
+    let list = byName.get(key)
+    if (!list?.length) {
       const approx = findApproximateMatch(key, byName.keys())
-      if (approx) href = byName.get(approx)?.find(h => !usedHrefs.has(h))
+      list = approx ? byName.get(approx) : undefined
     }
-    if (!href) continue
-    usedHrefs.add(href)
-    out.push({ name: c.name, href })
+    if (!list?.length) continue
+    out.push({ name: c.name, href: list.shift()! })
   }
   return out
 }

@@ -284,13 +284,31 @@ describe('matchVisibleCategoryLinksToHrefs', () => {
     expect(matchVisibleCategoryLinksToHrefs([{ name: '없는메뉴', leafText: '없는메뉴' }], pageLinks)).toEqual([])
   })
 
-  it('같은 href를 두 후보가 나눠 갖지 않는다', () => {
+  it('같은 href를 두 후보가 나눠 갖지 않는다 — 화면(pageLinks)에 실제로 1번만 나온 이름은 후보 여럿이 나눠 갖지 못한다', () => {
     const links = [{ text: '신상품', href: 'https://m.com/a' }]
     const out = matchVisibleCategoryLinksToHrefs(
       [{ name: '신상품', leafText: '신상품' }, { name: '신상품2', leafText: '신상품' }],
       links,
     )
     expect(out).toHaveLength(1)
+  })
+
+  it('같은 이름이 서로 다른 대분류 아래 교차로 여러 번 나오면(메가메뉴), 등장 횟수만큼 각 후보가 개별로 href를 받는다', () => {
+    // 모자사러 실사용 확인(2026-09-27) — "볼캡"이 "캡모자"/"빅사이즈모자" 두 대분류 열에 각각 따로
+    // 나열되는 메가메뉴. 화면(pageLinks)에도 실제로 2번(앵커 2개) 나온다 — 사용자 지시: "중복돼 있어도
+    // 보이는대로 몰 구조를 그대로 가져와 — 중복되더라도 각 카테고리는 개별로 화면과 같이 노출되게 해".
+    const links = [
+      { text: '볼캡', href: 'https://mojasareo.com/product/list.html?cate_no=42' },
+      { text: '볼캡', href: 'https://mojasareo.com/product/list.html?cate_no=42' },
+    ]
+    const out = matchVisibleCategoryLinksToHrefs(
+      [{ name: '캡모자 > 볼캡', leafText: '볼캡' }, { name: '빅사이즈모자 > 볼캡', leafText: '볼캡' }],
+      links,
+    )
+    expect(out).toEqual([
+      { name: '캡모자 > 볼캡', href: 'https://mojasareo.com/product/list.html?cate_no=42' },
+      { name: '빅사이즈모자 > 볼캡', href: 'https://mojasareo.com/product/list.html?cate_no=42' },
+    ])
   })
 
   it('임의 입력에서도 예외를 던지지 않고, 반환된 href는 항상 입력 pageLinks에서 온 것이다', () => {

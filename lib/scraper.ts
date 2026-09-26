@@ -8980,6 +8980,19 @@ async function discoverCategoryLinksInner(opts: ScrapeOptions, signal: AbortSign
 // 돌거나 API 호출을 무한정 쓰지 않게 막는 안전판 — 대>중>소>세보다 훨씬 넉넉한 깊이/전체 개수를 둔다.
 const EXPAND_CHILDREN_MAX_DEPTH = 6
 const EXPAND_CHILDREN_MAX_NODES = 300
+// "몰 카테고리 선택 가져오기(반복)"의 "↳ 가져오기" 버튼은 사용자가 클릭하고 그 자리에서 기다리는
+// 인터랙티브 기능이라, "몰 구조분석"처럼 몇 분씩 걸려도 되는 작업이 아니다. 그런데 실제로는 노드마다
+// AI 후보 스캔이 실패하면 화면 인식(비전)까지 폴백하는데, 이 비전 호출이 Groq/Gemini 무료 한도가
+// 소진된 날엔 결국 로컬 Ollama(90초/회, OLLAMA_VISION_TIMEOUT_MS)까지 떨어지고, 재귀 확장 중 이런
+// 노드를 여러 개 만나면 그 90초가 노드 수만큼 쌓인다 — 실사용 확인(2026-09-27, 모자사러): 워커 RPC를
+// 직접 불러 재현했더니 100초가 넘도록 응답이 안 와, "↳ 가져오기" 버튼이 "가져오는 중"에서 멈춘 채
+// 안 풀리던 증상과 정확히 일치했다. AI/비전 호출 하나하나에 취소 신호를 넣는 건 lib/ai.ts 깊숙한
+// 곳까지 손대야 하는 큰 변경이라, 대신 전체 재귀 확장에 상한 시간을 두고 넘기면 "지금까지 찾은 것
+// 없음"으로 정직하게 끝낸다(0개 반환 → 화면은 이미 "하위 카테고리를 찾지 못했습니다" 배너로 처리함,
+// components/panels/ScraperPanel.tsx의 handleExpandSubcategory 참고). 이미 시작된 AI/비전 호출 자체는
+// 취소되지 않고 백그라운드에서 계속 진행되다 스스로 끝난다 — 그 결과는 버려질 뿐 사용자를 더 기다리게
+// 하지 않는다.
+const EXPAND_CHILDREN_TIMEOUT_MS = 120_000
 
 /** expandCategoryChildren의 한 단계(어떤 카테고리 하나의 직계 자식만) — 재귀 루프가 매 노드마다 이 함수를
  *  부른다. 원래 expandCategoryChildren 본문 그대로이되, 재귀에서도 캐시/브라우저 컨텍스트를 그대로 재사용할
@@ -9137,7 +9150,7 @@ export async function expandCategoryChildren(
       return { platform: 'unknown', links: cached.map(c => ({ href: c.href, text: c.name })), aiUsed: false }
     }
   }
-  return withContext(opts, async (_page, context) => {
+  const expandPromise = withContext(opts, async (_page, context) => {
     const scanPage = await context.newPage()
     try {
       const knownNames = new Set<string>()
@@ -9162,4 +9175,19 @@ export async function expandCategoryChildren(
       await scanPage.close().catch(() => {})
     }
   }, '카테고리 하위구조 확인')
+  // 위 EXPAND_CHILDREN_TIMEOUT_MS 주석 참고 — AI/비전 호출 자체를 취소할 수 없어(취소 신호가 lib/ai.ts까지
+  // 안 이어짐), "이 시간 안에 안 끝나면 포기하고 빈 결과로 답한다"는 타임아웃만 바깥에서 건다. expandPromise
+  // 자체는 취소되지 않고 백그라운드에서 계속 실행되다 스스로 끝난다(그 결과는 버려짐) — withSiteLock이
+  // 그 동안 이 사이트를 계속 붙들고 있어 다른 작업이 잠깐 대기할 순 있지만, 적어도 이 버튼을 누른
+  // 사용자는 무한정 기다리지 않는다.
+  const timedOut = Symbol('expandCategoryChildrenTimedOut')
+  const result = await Promise.race([
+    expandPromise,
+    new Promise<typeof timedOut>(resolve => setTimeout(() => resolve(timedOut), EXPAND_CHILDREN_TIMEOUT_MS)),
+  ])
+  if (result === timedOut) {
+    console.log(`[하위카테고리:진단] "${parentName}" — ${EXPAND_CHILDREN_TIMEOUT_MS / 1000}초 안에 안 끝나 포기(화면 인식 폴백이 느린 것으로 보임) — 빈 결과로 답하고, 이미 시작된 확인은 백그라운드에서 계속 진행됨`)
+    return { platform: 'unknown', links: [], aiUsed: false }
+  }
+  return result
 }

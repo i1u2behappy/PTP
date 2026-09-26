@@ -3350,10 +3350,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       // (사용자 지적, 2026-09-17). 서버(expandCategoryChildren)는 이 이름이 scrape_profile.categoryLinks의
       // "이름 > " 접두사와 정확히 문자열이 같아야만 몰구조분석 캐시를 찾아 쓰므로, categories(몰구조분석/
       // "전체 가져오기"가 채운 상태 — categoryLinks와 1:1로 항상 같은 텍스트)를 최우선으로 쓴다.
-      // categoryInfo.label은 "카테고리별 상품 개수 확인" 때 별도로 저장된 값이라 살짝 다르게 포맷됐거나
-      // (그 기능을 아직 안 돌렸으면 아예 없거나) 오래된 몰구조분석 실행의 라벨일 수 있어, categories에
-      // 없는 href(사용자가 직접 입력한 URL 등)에 대한 보조 수단으로만 쓴다.
-      const label = categories.find(c => c.href === href)?.text || categoryInfo[sortedCategoryUrl(href)]?.label || ''
+      // categoryInfo.label은 "카테고리별 상품 개수 확인"(previewCatalog) 때 별도로 저장된 값이라 살짝
+      // 다르게 포맷됐거나(그 기능을 아직 안 돌렸으면 아예 없거나) 오래된 몰구조분석 실행의 라벨일 수
+      // 있어, categories에 없는 href(사용자가 직접 입력한 URL 등)에 대한 보조 수단으로만 쓴다.
+      // countCategoryProductsOnce(lib/scraper.ts)가 화면에서 카테고리명을 못 읽으면 label을 통째로
+      // categoryUrl(그 URL 자체)로 채워 저장해두는 경우가 있어(2026-09-26 도매창고 실사용 확인 — MD추천
+      // 칸에 이름 대신 URL이 그대로 표시됨), 그 URL-그대로인 값은 "이름을 안다"고 보지 않는다.
+      const knownLabel = categoryInfo[sortedCategoryUrl(href)]?.label
+      const label = categories.find(c => c.href === href)?.text || (knownLabel && knownLabel !== sortedCategoryUrl(href) ? knownLabel : '') || ''
       const res = await fetch('/api/scrape/categories/expand', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ siteId: selectedSite.id, url: href, name: label || undefined }),
@@ -3366,6 +3370,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         d.links!.forEach(l => lines.add(l.href))
         return [...lines].join('\n')
       })
+      // d.links가 들고 온 하위 카테고리 이름(text)을 여기서 버리면, 아래 표의 "카테고리" 칸이 이 새
+      // href들을 categories에서 못 찾아 계속 "-"로만 보인다(사용자 지적, 2026-09-26 — "하위카테고리명도
+      // 넣어지게 해"). "전체 가져오기"/몰구조분석이 채우는 것과 같은 categories 상태에 그대로 합쳐서,
+      // 표의 카테고리명 조회(3419행 근처, categories.find)가 이 하위 카테고리도 그대로 찾게 한다.
+      // 기존 항목이 있으면(같은 href를 몰구조분석이 이미 알고 있었으면) 그 값을 그대로 지키고, 새 href만
+      // 추가한다(dedupeCategoryLinks가 먼저 나온 것을 우선하므로 prev를 앞에 둔다).
+      setCategories(prev => dedupeCategoryLinks([...prev, ...d.links!]))
     } catch {
       alert('하위 카테고리 확인에 실패했습니다.')
     } finally {
@@ -3416,7 +3427,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               // handleExpandSubcategory와 같은 두 단계 조회(3356행 근처 주석 참고) — 몰구조분석/"전체
               // 가져오기"가 채운 categories를 최우선으로, 없으면 "카테고리별 상품 개수 확인"이 남긴
               // categoryInfo.label을 보조로 쓴다. 둘 다 없으면(직접 입력한 URL 등) 이름을 모른다는 뜻.
-              const categoryName = categories.find(c => c.href === href)?.text || info?.label || ''
+              // info.label이 URL 그 자체와 같으면(countCategoryProductsOnce가 화면에서 이름을 못 읽어
+              // categoryUrl로 대신 채운 경우, handleExpandSubcategory의 knownLabel 주석 참고) 이름을
+              // 안다고 보지 않는다 — URL을 "카테고리명"인 척 보여주면 컬럼이 URL 컬럼과 똑같아져 무의미하다.
+              const categoryName = categories.find(c => c.href === href)?.text
+                || (info?.label && info.label !== resolvedUrl ? info.label : '') || ''
               return (
                 <tr key={href} className="group border-b border-gray-100 last:border-0 hover:bg-gray-50">
                   <td className="px-3 py-1.5">
@@ -4719,9 +4734,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
               const resolvedUrl = sortedCategoryUrl(href)
               const live = categoryCountByHref.get(resolvedUrl)
               const info = categoryInfo[resolvedUrl]
+              // live/info의 label이 URL 그 자체와 같으면(countCategoryProductsOnce가 화면에서 카테고리명을
+              // 못 읽어 categoryUrl로 대신 채운 경우 — "몰 카테고리 선택 가져오기" 표의 categoryName 주석
+              // 참고, 2026-09-26 도매창고 실사용 확인) 진짜 이름으로 보지 않는다 — categories(몰구조분석/
+              // "전체 가져오기")가 이미 아는 진짜 이름(categoryTextByHref)이 있는데도 URL이 그걸 가려버렸다.
+              const isRealLabel = (l: string | undefined) => !!l && l !== resolvedUrl && l !== href
               return {
                 url: href,
-                label: live?.label || info?.label || categoryTextByHref.get(href) || href,
+                label: (isRealLabel(live?.label) ? live!.label : undefined)
+                  || (isRealLabel(info?.label) ? info!.label : undefined)
+                  || categoryTextByHref.get(href) || href,
                 count: live?.count ?? null,
                 truncated: live?.truncated ?? false,
                 duplicateCount: exactOverlapByUrl.get(resolvedUrl)?.duplicateCount ?? null,

@@ -1,5 +1,5 @@
 import pool, { decryptSecret } from './db'
-import { runScraping, isAnySiteBusy } from './workerClient'
+import { runScraping, isAnySiteBusy, isAnyMallWorkBusy } from './workerClient'
 import { restartPtpServer, isRestartInFlight } from './systemRestart'
 import { restartWorker, isWorkerRestartInFlight } from './workerRestart'
 import { checkWorkerFreshness } from './workerFreshness'
@@ -49,15 +49,22 @@ async function checkMemoryAndAutoRestart() {
  *  참고) — lib/scraper.ts·lib/ai.ts 등을 고쳐도 사람이 "워커 재시작" 버튼을 누르기 전까지 예전 코드가
  *  계속 돈다. 예전엔 이 감지를 "시스템 상태" 배지로 사람에게 알리기만 하고 실제로 재시작하는 루프가 없어
  *  매번 수동으로 눌러야 했다(사용자 지적, 2026-09-23 — "왜 워커 정상화가 자동으로 안되는거야?"). 위
- *  checkMemoryAndAutoRestart와 똑같은 유휴-확인 패턴을 그대로 재사용한다 — 스크랩 작업 중간에 끼어들어
- *  진행상황을 날리지 않는 게 최우선이라, 코드가 낡았어도 몰 작업이 도는 동안은 기다렸다가 다음 유휴
- *  순간에 재시작한다. 재시작 자체가 새 워커를 최신 코드로 띄우므로, 재시작 뒤엔 stale:false가 되어
- *  당장 또 걸릴 일이 없다(메모리 자동재시작과 같은 자기제한적 구조). */
+ *  checkMemoryAndAutoRestart와 똑같은 유휴-확인 패턴을 재사용하되, isAnySiteBusy가 아니라
+ *  isAnyMallWorkBusy(열려있기만 한 로그인 창은 안 봄)를 쓴다 — 스크랩/몰구조분석 작업 중간에 끼어들어
+ *  진행상황을 날리지 않는 게 최우선인 건 같지만, 로그인 창 하나가 idle 상태로 열려있다는 이유만으로
+ *  코드 최신화를 무기한 미룰 필요는 없다(실사용 확인, 2026-09-26 — 도매창고 로그인 창이 홈페이지에
+ *  idle 상태로 열려있는 동안 isAnySiteBusy()가 계속 true를 반환해, 실제 작업은 전혀 없는데도 "워커
+ *  코드가 낡았다"는 배너만 뜬 채 이 자동 재시작이 몇 시간째 건너뛰어지고 있었다 — 사용자 지적: "실제
+ *  작업이 없는 상태로... 계속 지켜보고 있었다는 거잖아"). 메모리 자동재시작(worker/index.ts의
+ *  checkMemoryAndAutoRestart)은 여전히 isAnySiteBusy를 그대로 쓴다 — 그건 지금 당장 메모리를 비워야
+ *  하는 위급 상황이라, 로그인 창 입력 중에 끼어드는 걸 더 보수적으로 피해야 한다(isAnySiteBusy 주석의
+ *  2026-08-17 로그인 도중 강제 새로고침 사고 참고). 재시작 자체가 새 워커를 최신 코드로 띄우므로,
+ *  재시작 뒤엔 stale:false가 되어 당장 또 걸릴 일이 없다(메모리 자동재시작과 같은 자기제한적 구조). */
 async function checkWorkerFreshnessAndAutoRestart() {
   if (isWorkerRestartInFlight()) return
   const freshness = await checkWorkerFreshness()
   if (!freshness.ok || !freshness.stale) return
-  if (await isAnySiteBusy()) {
+  if (await isAnyMallWorkBusy()) {
     console.log(`[autoRestart] 워커 코드 ${freshness.staleFileCount}개 파일 변경됨(낡음) — 진행 중인 몰 작업이 있어 이번엔 건너뜀`)
     return
   }

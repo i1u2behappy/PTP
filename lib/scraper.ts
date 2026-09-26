@@ -471,6 +471,20 @@ export function isAnySiteBusy(): boolean {
   return siteLockStatus.size > 0 || openSessions.size > 0
 }
 
+/** isAnySiteBusy와 달리 openSessions(열려만 있는 로그인 창)는 안 본다 — withSiteLock으로 실제 잠긴
+ *  스크랩/몰구조분석 작업이 있는지만 확인한다. lib/scheduler.ts의 "워커 코드가 낡았으면 유휴 순간에
+ *  자동 재시작"(checkWorkerFreshnessAndAutoRestart) 전용 — 이 재시작은 메모리 부족처럼 지금 당장
+ *  해결해야 할 위급함이 없어서, isAnySiteBusy처럼 로그인 창 하나 열려있다고 무기한 미룰 필요가 없다.
+ *  실사용 확인(2026-09-26, 도매창고): 로그인 창 하나가 홈페이지에 idle 상태로 열려있는 동안
+ *  isAnySiteBusy()가 계속 true를 반환해, 실제 작업은 아무것도 없는데도 "워커 코드가 낡았다"는 배너만
+ *  뜬 채 자동 재시작이 계속 건너뛰어졌다(사용자 지적: "실제 작업이 없는 상태로... 계속 지켜보고 있었다는
+ *  거잖아"). isAnySiteBusy 자체는 그대로 둔다 — 메모리 자동재시작(worker/index.ts의
+ *  checkMemoryAndAutoRestart, 위 isAnySiteBusy 주석의 2026-08-17 로그인 도중 강제 새로고침 사고)은
+ *  여전히 로그인 창도 "사용 중"으로 보는 보수적인 판단이 맞다. */
+export function isAnyMallWorkBusy(): boolean {
+  return siteLockStatus.size > 0
+}
+
 const previewRuns = globalThis.__previewRuns ?? (globalThis.__previewRuns = new Map<number, PreviewRunState>())
 
 /** previewCatalog 진행률 표시 + 같은 몰에 대한 중복 실행 방지용. 실사용 중 확인된 문제: 미리보기가

@@ -1280,6 +1280,16 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 지금 하위구조를 가져오는 중인 href 하나(동시에 여러 개를 누르면 헷갈리므로 한 번에 하나만 허용).
   const [manualHasSubcategory, setManualHasSubcategory] = useState<Record<string, boolean>>({})
   const [expandingHref, setExpandingHref] = useState<string | null>(null)
+  // "↳ 가져오기" 결과/실패 안내 — 예전엔 alert()로 띄워서 사용자가 직접 "확인"을 눌러야만 다음으로
+  // 넘어갔다(사용자 지적, 2026-09-26 — "확인 처리 전에는 멈추는데, 몇초 후 자동으로 닫히게 해": alert()는
+  // 브라우저 네이티브 블로킹 모달이라 프로그램적으로 자동 닫기가 불가능하다). 화면 안에 표시되는 배너로
+  // 바꾸고 몇 초 뒤 스스로 사라지게 한다.
+  const [expandSubcategoryNotice, setExpandSubcategoryNotice] = useState<string | null>(null)
+  useEffect(() => {
+    if (!expandSubcategoryNotice) return
+    const t = setTimeout(() => setExpandSubcategoryNotice(null), 4_000)
+    return () => clearTimeout(t)
+  }, [expandSubcategoryNotice])
   // "몰 카테고리 선택 가져오기(반복)"로 카테고리를 가져오면 그 즉시 "정렬" 드롭다운이 쓰이도록, 몰
   // 구조분석 없이도 그 카테고리 페이지에서 바로 정렬 옵션을 확인해 둔다(사용자 요청, 2026-08-26 —
   // "카테고리를 가져오기 하면 그 즉시 정렬/스크랩 상한 작업이 가능하도록"). gridSortOptions가
@@ -3428,8 +3438,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         body: JSON.stringify({ siteId: selectedSite.id, url: href, name: label || undefined }),
       })
       const d = await res.json() as { links?: { href: string; text: string }[]; error?: string }
-      if (!res.ok) { alert(`하위 카테고리 확인 실패: ${d.error || res.status}`); return }
-      if (!d.links?.length) { alert('하위 카테고리를 찾지 못했습니다.'); return }
+      if (!res.ok) { setExpandSubcategoryNotice(`하위 카테고리 확인 실패: ${d.error || res.status}`); return }
+      if (!d.links?.length) { setExpandSubcategoryNotice('하위 카테고리를 찾지 못했습니다.'); return }
       setManualCategoryUrlsText(prev => {
         const lines = new Set(prev.split('\n').map(s => s.trim()).filter(Boolean))
         d.links!.forEach(l => lines.add(l.href))
@@ -3443,7 +3453,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
       // 추가한다(dedupeCategoryLinks가 먼저 나온 것을 우선하므로 prev를 앞에 둔다).
       setCategories(prev => dedupeCategoryLinks([...prev, ...d.links!]))
     } catch {
-      alert('하위 카테고리 확인에 실패했습니다.')
+      setExpandSubcategoryNotice('하위 카테고리 확인에 실패했습니다.')
     } finally {
       setExpandingHref(null)
     }
@@ -3454,6 +3464,11 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         💡 카테고리마다 정렬 순서/스크랩 상한을 다르게 설정할 수 있습니다. 대분류 페이지 안에 하위(중분류)
         메뉴가 더 있으면 &quot;하위 카테고리&quot;를 체크하고 &quot;↳ 가져오기&quot;를 눌러 그 하위 목록을 이어서 담을 수 있습니다.
       </p>
+      {expandSubcategoryNotice && (
+        <p className="text-xs text-amber-700 bg-amber-50 border-t border-amber-100 px-3 py-1.5">
+          ⚠ {expandSubcategoryNotice}
+        </p>
+      )}
       {manualCategoryUrls.length === 0 ? (
         <p className="text-xs text-gray-400 px-3 py-3">위 &quot;현재 카테고리 가져오기&quot;로 모으면 여기에 나타납니다.</p>
       ) : (

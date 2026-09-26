@@ -7112,7 +7112,14 @@ async function findRealLastPage(
  *  document.body 전체를 무작정 훑으면 이 카테고리와 무관한 배지 숫자를 잘못 집을 위험이 있다(과거
  *  readListedTotalCount가 실제로 이 문제로 제거됐다 — scrape-preview-catalog-count-and-target-ui.md
  *  버그 1 참고) — 찾은 문장 주변에 이 카테고리 라벨의 마지막 구간(예: "강아지 > 사료"의 "사료")이 같이
- *  나오는지로 한 번 검증해, 무관한 사이트 전체 통계 배지를 걸러낸다. */
+ *  나오는지로 한 번 검증해, 무관한 사이트 전체 통계 배지를 걸러낸다.
+ *
+ *  이 라벨 근접 검증이 못 잡는 경우가 있다(도매창고 실사용 확인, 2026-09-26 — "MD추천" 356개짜리
+ *  카테고리가 27개로 잘못 나옴): 이 몰은 "총 N개의 상품" 문구가 검색필터 패널 안에 있고 카테고리 이름은
+ *  페이지 다른 곳(제목)에만 있어, 문구 30자 근처에 카테고리 라벨이 전혀 안 나온다. 그래서 텍스트
+ *  근접성이 없어도, 그 숫자를 담은 엘리먼트 자신의 id/class가 "이 목록의 총 개수 배지"임을 스스로
+ *  드러내면(`id="goods_list_total"`처럼 total/count와 goods/product/item/list가 같이 들어있음) 그것도
+ *  신뢰할 근거로 인정한다 — 사이트 전체 통계 배지는 보통 이런 식으로 목록 전용 id를 안 쓴다. */
 async function readStatedTotalCount(page: Page, categoryLabel: string): Promise<number | null> {
   const leafLabel = categoryLabel.split(' > ').pop()?.trim()
   if (!leafLabel) return null
@@ -7127,8 +7134,34 @@ async function readStatedTotalCount(page: Page, categoryLabel: string): Promise<
         if (Number.isInteger(n) && n > 0 && n < 1_000_000) return n
       }
     }
+    // 도매창고 실사용 확인(2026-09-26): 같은 페이지에 "total_goodscd"(선택한 상품 코드 담기 개수, 평소
+    // 0)처럼 id/class는 같은 패턴에 걸리지만 이 목록과 무관한 숫자 배지가 먼저 나올 수 있다 — 0은 진짜
+    // 총 개수일 리 없으니(빈 카테고리는 이미 위에서 perPage===0으로 걸러짐) 값 자체가 0보다 큰 첫 후보를
+    // 찾을 때까지 계속 본다(첫 매칭에서 멈추지 않음).
+    for (const el of Array.from(document.querySelectorAll('[id], [class]'))) {
+      const idcls = `${el.id} ${el.className}`
+      if (!/total|count/i.test(idcls) || !/goods|product|item|list/i.test(idcls)) continue
+      const raw = (el.textContent || '').trim()
+      if (!/^[\d,]+$/.test(raw)) continue
+      const n = Number(raw.replace(/,/g, ''))
+      if (Number.isInteger(n) && n > 0 && n < 1_000_000) return n
+    }
     return null
   }, { leafLabel }).catch(() => null)
+}
+
+/** readStatedTotalCount의 재시도판 — 총 개수를 AJAX로 나중에 채우는 몰(도매창고 실사용 확인,
+ *  2026-09-26)은 page.goto 직후엔 아직 "총 0개"처럼 자리표시자만 있어 첫 시도가 null을 반환한다.
+ *  readMaxPageWithRetry(위)와 같은 이유로, 실패했을 때만 숫자가 채워지길 짧게 한 번 더 기다렸다
+ *  재시도한다 — 이미 채워져 있는 대다수 몰은 첫 시도에서 바로 성공해 이 대기를 전혀 안 거친다. */
+async function readStatedTotalCountWithRetry(page: Page, categoryLabel: string): Promise<number | null> {
+  const first = await readStatedTotalCount(page, categoryLabel)
+  if (first !== null) return first
+  await page.waitForFunction(
+    () => /(총|전체)\s*[1-9][\d,]*\s*(개|건)/.test(document.body.innerText),
+    undefined, { timeout: 3_000 },
+  ).catch(() => {})
+  return readStatedTotalCount(page, categoryLabel)
 }
 
 async function countCategoryProductsOnce(
@@ -7157,7 +7190,7 @@ async function countCategoryProductsOnce(
   // 오탐을 걸러내므로, 여기서 "1페이지 개수(perPage)보다 작으면 안 믿는다"는 추가 조건은 걸지 않는다
   // — perPage 자체가 상품 카드 중복 링크 등으로 부풀려진 경우(실사용 확인: 펫투비, 진짜 21개인데
   // perPage가 31~32로 잡힘) 정답인 statedTotal이 오히려 perPage보다 작아 그 조건에 걸려 버려진다.
-  const statedTotal = await readStatedTotalCount(workerPage, label)
+  const statedTotal = await readStatedTotalCountWithRetry(workerPage, label)
   if (statedTotal !== null) {
     console.log(`[previewCatalog] "${label}" 페이지에 적힌 "총 ${statedTotal}개" 문구를 그대로 사용 → count=${statedTotal}`)
     return { url: categoryUrl, label, count: statedTotal }

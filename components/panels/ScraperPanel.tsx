@@ -535,6 +535,22 @@ const MALL_PROFILE_STEP_ORDER = [
   '목록 페이지 확인 중', '카테고리 구조 확인 중', '카테고리 하위구조 확인 중', '정렬 옵션 확인 중',
   '회사정보/이용안내 페이지 확인 중', '샘플 상품', 'AI로 결제/배송/업체정보 분석 중',
 ]
+// 위 MALL_PROFILE_STEP_ORDER와 같은 순서 — 진행 중 화면에 "지금 몇 단계째"뿐 아니라 7단계 전체가
+// 각각 무엇인지도 같이 보여주기 위한 사람이 읽는 설명(사용자 지적, 2026-09-26 — "총 7단계 중 몇단계
+// 표시만 되지 실지 무슨 작업 중인지를 알 수가 없다"). 3번 항목엔 4번(정렬 옵션 확인)을 같이 적어둔다 —
+// 2026-09-26부터 정렬 옵션 확인이 카테고리 하위구조 확인과 병행 처리로 바뀌어(lib/scraper.ts의
+// tryDetectSortDuringExpansion 주석 참고) 대부분 실행에서 4번은 화면에 아예 안 뜨고 3번 안에서 같이
+// 끝난다 — 그 사실을 안내하지 않으면 "정렬 옵션은 언제 확인하나" 오해가 생긴다. 화면 인식이 전부
+// 실패했을 때만 드물게 4번이 별도로 뜬다.
+const MALL_PROFILE_STEP_LABELS = [
+  '목록 페이지 확인',
+  '카테고리 구조 확인',
+  '카테고리 하위구조 확인 (정렬 옵션도 함께 확인)',
+  '정렬 옵션 확인(보조) — 화면 인식이 전부 실패했을 때만 별도로 표시됨',
+  '회사정보/이용안내 페이지 확인',
+  '샘플 상품 확인',
+  'AI 리포트 생성(결제/배송/업체정보 분석)',
+]
 
 /** 몰구조분석 리포트의 "카테고리 구조" 문장은 AI가 간결하게 요약한 텍스트라 정확한 개수를 안 담는다
  *  (Groq 출력 토큰 예산 때문에 항목마다 대표 몇 개만 들고 "등"으로 줄이도록 일부러 지시해둠) — "카테고리
@@ -739,6 +755,23 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
               style={{ width: `${Math.round(((mallProfileStepIndex + 1) / MALL_PROFILE_STEP_ORDER.length) * 100)}%` }}
             />
           </div>
+        )}
+        {/* 진행률 바(위)는 "몇 %인지"는 보여줘도 "그 7단계가 각각 뭘 하는 단계인지"는 안 보여준다 —
+            사용자 지적(2026-09-26): "총 7단계 중 몇단계 표시만 되지 실지 무슨 작업 중인지를 알 수가
+            없다." mallProfileStepIndex가 안 잡힌 동안(락이 막 걸렸거나 단계 전환 사이의 짧은 틈)은
+            아직 어느 단계인지 확정할 수 없으니 목록 자체를 숨긴다. */}
+        {mallProfileStepIndex >= 0 && (
+          <ol className="mb-3 space-y-1">
+            {MALL_PROFILE_STEP_LABELS.map((label, i) => (
+              <li key={label} className={`text-[11px] leading-relaxed flex gap-1.5 ${
+                i < mallProfileStepIndex ? 'text-gray-400'
+                : i === mallProfileStepIndex ? 'text-teal-700 font-semibold' : 'text-gray-300'
+              }`}>
+                <span className="shrink-0">{i < mallProfileStepIndex ? '✓' : i === mallProfileStepIndex ? '▶' : `${i + 1}.`}</span>
+                <span>{label}</span>
+              </li>
+            ))}
+          </ol>
         )}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           {Array.from({ length: 11 }).map((_, i) => (

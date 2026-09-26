@@ -213,14 +213,25 @@ export function GlobalErrorNet() {
       {hiddenCount > 0 && (
         <p className="text-xs text-white bg-gray-700 rounded-full px-3 py-1 self-end shadow">그 외 {hiddenCount}건 더 실패</p>
       )}
-      {shown.map(f => (
-        <div key={f.id} className="bg-rose-600 text-white text-sm rounded-xl shadow-lg px-4 py-3 flex items-start gap-3">
+      {shown.map(f => {
+        // 자동 재시도가 아직 남아있는 동안은 "지금 조치가 필요한 문제"가 아니라 "대부분 저절로 풀리는
+        // 일시적 문제"다(REVEAL_GRACE_MS/scheduleRetry 주석 참고 — dev 핫리로드나 순간적 DB 재연결처럼
+        // 실제로 몇 초 안에 스스로 회복되는 경우가 많다). 그런데도 재시도 중이나 재시도가 끝난 뒤나 똑같이
+        // 새빨간 경고색+"요청 실패"로 보여줘 매번 실제보다 더 큰 사고처럼 보인다는 지적(사용자, 2026-09-26,
+        // "붉은색 배경의 경고색상도 수정하고") — 색과 문구를 상태별로 나눈다: 재시도 중엔 아직 지켜보는
+        // 중이라는 뜻으로 호박색(주의)을, 자동 재시도를 다 썼는데도 안 풀렸을 때만 실제로 사용자 조치가
+        // 필요하다는 뜻으로 빨간색(경고)을 쓴다.
+        const exhausted = f.attempt >= MAX_AUTO_RETRIES
+        return (
+        <div key={f.id} className={`${exhausted ? 'bg-rose-600' : 'bg-amber-500'} text-white text-sm rounded-xl shadow-lg px-4 py-3 flex items-start gap-3`}>
           <div className="flex-1 min-w-0">
-            <p className="font-semibold">⚠ 요청 실패</p>
-            <p className="text-rose-100 text-xs mt-0.5">{f.message}</p>
-            <p className="text-rose-200 text-[11px] mt-0.5 truncate" title={f.url}>{f.url}</p>
-            <p className="text-rose-200 text-[11px] mt-0.5">
-              {f.attempt < MAX_AUTO_RETRIES ? `자동으로 다시 시도 중 (${f.attempt}/${MAX_AUTO_RETRIES})` : '자동 재시도 종료 — 수동으로 다시 시도해주세요'}
+            <p className="font-semibold">{exhausted ? '⚠ 자동 복구 실패' : '⏳ 문제를 자동으로 해결하는 중'}</p>
+            <p className={`${exhausted ? 'text-rose-100' : 'text-amber-100'} text-xs mt-0.5`}>{f.message}</p>
+            <p className={`${exhausted ? 'text-rose-200' : 'text-amber-200'} text-[11px] mt-0.5 truncate`} title={f.url}>{f.url}</p>
+            <p className={`${exhausted ? 'text-rose-200' : 'text-amber-200'} text-[11px] mt-0.5`}>
+              {exhausted
+                ? '자동으로는 복구되지 않았어요 — 아래 "다시 시도"를 눌러주세요'
+                : `대부분 몇 초 안에 저절로 정상화돼요 — 자동으로 다시 확인하는 중 (${f.attempt}/${MAX_AUTO_RETRIES})`}
             </p>
           </div>
           <div className="flex flex-col gap-1 shrink-0">
@@ -242,13 +253,14 @@ export function GlobalErrorNet() {
               }).catch(() => {})
               fetch(...f.retryArgs).catch(() => {})
             }}
-              className="px-2 py-1 bg-white text-rose-600 rounded-full text-xs font-semibold hover:bg-rose-50 transition-colors">
+              className={`px-2 py-1 bg-white rounded-full text-xs font-semibold transition-colors ${exhausted ? 'text-rose-600 hover:bg-rose-50' : 'text-amber-600 hover:bg-amber-50'}`}>
               다시 시도
             </button>
-            <button onClick={() => dismiss(f.id)} className="px-2 py-1 text-rose-200 hover:text-white text-xs transition-colors">닫기</button>
+            <button onClick={() => dismiss(f.id)} className={`px-2 py-1 text-xs transition-colors ${exhausted ? 'text-rose-200 hover:text-white' : 'text-amber-200 hover:text-white'}`}>닫기</button>
           </div>
         </div>
-      ))}
+        )
+      })}
     </div>
   )
 }

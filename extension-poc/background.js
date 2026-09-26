@@ -1793,6 +1793,62 @@ async function runExpandCategories(tab, site) {
     let activeLimit = workerTabIds.length
     await reportProfileProgress(site.id, `카테고리 하위구조 확인 중 (0/${categoryLinks.length})`)
 
+    // 정렬 옵션 확인 병행 처리 — 서버 쪽(lib/scraper.ts의 tryDetectSortDuringExpansion)과 같은 이유·같은
+    // 설계(사용자 지시, 2026-09-27 — "정렬옵션 병행처리는 개발자모드에도 반영해"). 예전엔 이 하위구조
+    // 확인이 전부 끝난 뒤 runDetectSortOptions가 site.categoryLinks를 처음부터 다시 최대 5개까지 순서대로
+    // 열어 화면 인식을 시도했다 — 지금 이 워커가 이미 열어본 상품 있는 카테고리 페이지를 재사용하면 그
+    // 재방문 자체가 없어지고, 여러 워커(EXPAND_TAB_CONCURRENCY)가 병렬로 도는 동안 스크린샷+비전 호출도
+    // 그 안에서 겹쳐 돈다. sortFound 이후로는 더 시도하지 않고, sortFoundCount로 실제 확정된 개수를
+    // runFullMallProfile에 돌려준다(화면에 "정렬 옵션 N개" 표시용). 화면 인식이 다 실패하면(sortFound가
+    // 끝까지 false) runFullMallProfile이 기존 runDetectSortOptions(href/select 구조 스캔 폴백 포함)를
+    // 그대로 안전망으로 돌린다 — 이 함수는 "1차 화면 인식"만 대신하고, 2차 폴백까지 옮기진 않는다(위험
+    // 대비 이득이 작아 최소 변경으로 둠).
+    let sortFound = false
+    let sortFoundCount = 0
+    let sortAttempts = 0
+    async function tryDetectSortDuringExpansion(workerTabId, baseUrl) {
+      if (sortFound || sortAttempts >= MAX_SORT_CATEGORY_ATTEMPTS) return
+      sortAttempts++
+      // runDetectSortOptions의 1차(화면 인식)+1.5차(트리거 클릭)와 완전히 같은 순서 — 두 곳이 갈라지지
+      // 않게 그대로 복제한다(주석 규칙, runDetectSortOptions 정의부 참고).
+      let links = []
+      await evalInTab(workerTabId, OPEN_SORT_DROPDOWN_EXPR).catch(() => false)
+      const screenshotBase64 = await captureScreenshot(workerTabId).catch(() => null)
+      if (screenshotBase64) {
+        const labels = await fetch(`${PTP_ORIGIN}/api/scrape/detect-sort-labels`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mallName: site.name, imageBase64: screenshotBase64, mimeType: 'image/jpeg' }),
+        }).then(r => r.json()).then(d => d.labels || []).catch(() => [])
+        if (labels.length) links = await clickCandidatesAndCollectLinks(workerTabId, baseUrl, labels)
+      }
+      if (!links.length && screenshotBase64) {
+        const trigger = await fetch(`${PTP_ORIGIN}/api/scrape/detect-sort-trigger`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mallName: site.name, imageBase64: screenshotBase64, mimeType: 'image/jpeg' }),
+        }).then(r => r.json()).then(d => d.trigger || { found: false }).catch(() => ({ found: false }))
+        if (trigger.found) {
+          const viewport = await evalInTab(workerTabId, '(() => ({ width: innerWidth, height: innerHeight }))()').catch(() => ({ width: 1280, height: 800 }))
+          const x = viewport.width * (trigger.xPercent / 100)
+          const y = viewport.height * (trigger.yPercent / 100)
+          await evalInTab(workerTabId, `(() => { const el = document.elementFromPoint(${x}, ${y}); if (el) { el.click(); return true } return false })()`).catch(() => false)
+          await new Promise(r => setTimeout(r, 300))
+          const reshotBase64 = await captureScreenshot(workerTabId).catch(() => null)
+          const labels2 = reshotBase64 ? await fetch(`${PTP_ORIGIN}/api/scrape/detect-sort-labels`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mallName: site.name, imageBase64: reshotBase64, mimeType: 'image/jpeg' }),
+          }).then(r => r.json()).then(d => d.labels || []).catch(() => []) : []
+          if (labels2.length) links = await clickCandidatesAndCollectLinks(workerTabId, baseUrl, labels2)
+        }
+      }
+      if (!links.length) return
+      sortFound = true
+      const res = await fetch(`${SITE_API_BASE}/${site.id}/sort-options`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ links, baseUrl, verified: true }),
+      }).then(r => r.json()).catch(() => null)
+      sortFoundCount = res?.count || 0
+    }
+
     /** 카테고리 1건 확인 — 봇 차단 인터스티셜을 만나면 포기 전에 점점 길게 쉬며 재시도한다(IS_BLOCK_PAGE_EXPR
      *  참고). 재시도 후에도 안 풀리면 원래 항목을 미확장인 채로 남기고 blocked:true를 돌려준다 — 호출부가
      *  이걸로 남은 워커들의 동시성을 낮춘다. */
@@ -1820,9 +1876,12 @@ async function runExpandCategories(tab, site) {
         // 쪽과 같은 사고, 진짜양말 실사용 확인 — 2026-09-06). 하위 메뉴가 실제로 있으면 부모(이미 유효한
         // 스크랩 대상)에 얹어 같이 돌려준다(사용자 요청 — "가급적 하위 메뉴 리스트까지 리스트업").
         const hasOwnProducts = probe.links.length > 0
+        // 정렬 옵션 확인 병행 처리용 — 이 카테고리의 실제 도착 URL(리다이렉트로 c.href와 다를 수 있음).
+        const baseUrl = await evalInTab(workerTabId, 'location.href').catch(() => c.href)
         const sub = await evalInTab(workerTabId, buildScanSubmenuExpr(topLevelHrefs)).catch(() => ({ links: [] }))
         if (sub.links.length) {
           const childLinks = sub.links.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
+          if (hasOwnProducts) await tryDetectSortDuringExpansion(workerTabId, baseUrl).catch(() => {})
           return { links: hasOwnProducts ? [c, ...childLinks] : childLinks, blocked: false }
         }
         // 규칙 기반(buildScanSubmenuExpr)은 <ul>/<li> 메뉴 트리만 찾는다 — 펫토리 실사용 확인(2026-09-06):
@@ -1842,10 +1901,14 @@ async function runExpandCategories(tab, site) {
           const realAi = aiLinks.filter(s => !topLevelHrefsCanon.has(canonicalizeHref(s.href)))
           if (realAi.length) {
             const childLinks = realAi.map(s => ({ name: `${c.name} > ${s.name}`, href: s.href }))
+            if (hasOwnProducts) await tryDetectSortDuringExpansion(workerTabId, baseUrl).catch(() => {})
             return { links: hasOwnProducts ? [c, ...childLinks] : childLinks, blocked: false }
           }
         }
-        if (hasOwnProducts) return { links: [c], blocked: false }
+        if (hasOwnProducts) {
+          await tryDetectSortDuringExpansion(workerTabId, baseUrl).catch(() => {})
+          return { links: [c], blocked: false }
+        }
         // 상품도 하위 메뉴도 못 찾은 빈 허브 — lib/scraper.ts의 expandCategoryHubs와 같은 이유(2026-08-30,
         // 소꿉노리 — 공지/문의 게시판 글이 "빈 허브"로 오인돼 카테고리에 계속 남던 사고)로, 이 페이지에
         // 정렬 UI 키워드조차 하나도 안 보이면 상품 목록 페이지가 아닐 가능성이 높다고 보고 통째로 뺀다.
@@ -1899,7 +1962,12 @@ async function runExpandCategories(tab, site) {
     })
     const data = await res.json().catch(() => ({}))
     if (!res.ok) return { ok: false, error: data.error || String(res.status) }
-    return { ok: true, count: deduped.length, blockedCount: blockedCount || undefined }
+    return {
+      ok: true, count: deduped.length, blockedCount: blockedCount || undefined,
+      // runFullMallProfile이 이걸로 별도 runDetectSortOptions 재실행 여부를 정한다(위
+      // tryDetectSortDuringExpansion 주석 참고).
+      sortDetected: sortFound, sortCount: sortFoundCount,
+    }
   } catch (e) {
     return { ok: false, error: e.message }
   } finally {
@@ -1970,7 +2038,12 @@ async function runDetectSortOptions(tab, site) {
     let lastError = null
     for (let i = 0; i < attempts.length; i++) {
       const category = attempts[i]
-      await reportProfileProgress(site.id, `정렬 옵션 감지 중... (${i + 1}/${attempts.length})`)
+      // 문구를 서버 쪽(lib/scraper.ts)의 "정렬 옵션 확인 중..."과 똑같이 맞춘다 — PTP 화면
+      // (components/panels/ScraperPanel.tsx의 MALL_PROFILE_STEP_ORDER)이 이 접두어로 "7단계 중 몇
+      // 번째"를 판정하는데, 여기만 "감지"로 다르게 써서 이 경로(화면 인식이 모두 실패했을 때의 안전망)가
+      // 돌 때는 그 목록이 안 뜨고 있었다(사용자 지시, 2026-09-27 — "7단계 목록 UI는 가능한 범위 내에서
+      // 반영해"). 병행 처리(tryDetectSortDuringExpansion) 도입 이후로는 이 경로 자체가 드물게만 돈다.
+      await reportProfileProgress(site.id, `정렬 옵션 확인 중... (${i + 1}/${attempts.length})`)
       await navigate(tab.id, category.href)
       const baseUrl = await evalInTab(tab.id, 'location.href').catch(() => category.href)
 
@@ -2846,11 +2919,19 @@ async function verifyNextPageDetection(tab, categoryHref) {
  *  셋 다 순서대로 눌러야 해서 번거롭다는 지적으로 하나로 합쳤다(2026-08-22). runProfile은 서버가 알아서
  *  띄우는 별도의 헤드리스 브라우저(개인 크롬 프로필 사본)를 쓰므로 이 탭과 무관해 병렬로 같이 돌리고,
  *  카테고리 하위구조 확인과 정렬 옵션 감지는 둘 다 이 탭의 chrome.debugger를 붙였다 떼야 해서(동시에
- *  붙이면 충돌) 순서대로 실행한다. */
+ *  붙이면 충돌) 순서대로 실행한다.
+ *
+ *  runExpandCategories가 이미 카테고리 하위구조를 확인하는 동안 정렬 옵션도 병행 시도한다
+ *  (tryDetectSortDuringExpansion 참고, 2026-09-27 — 서버 쪽 병행 처리와 동일하게 반영). 그게 성공했으면
+ *  (expandRes.sortDetected) runDetectSortOptions를 또 돌려 같은 카테고리들을 처음부터 다시 여는 중복을
+ *  피하고, 실패했을 때만(화면 인식이 모든 시도 카테고리에서 실패한 드문 경우) 기존 안전망을 그대로
+ *  돌린다 — 이 경우 병행 시도로 이미 확인된 카테고리도 다시 훑게 되지만, 애초에 드문 경로라 감수한다. */
 async function runFullMallProfile(tab, site) {
   const profilePromise = runProfile(site)
   const expandRes = await runExpandCategories(tab, site)
-  const sortRes = await runDetectSortOptions(tab, site)
+  const sortRes = expandRes.ok && expandRes.sortDetected
+    ? { ok: true, count: expandRes.sortCount }
+    : await runDetectSortOptions(tab, site)
   const profileRes = await profilePromise
 
   const failures = []

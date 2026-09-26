@@ -1657,6 +1657,11 @@ export function classifySessionLossSignal(input: {
 const AI_REPORT_PROGRESS_LABEL: Record<AiProviderId, string> = { anthropic: 'Anthropic', gemini: 'Gemini', groq: 'Groq', ollama: '로컬(Ollama)' }
 
 const MALL_PROFILE_SAMPLE_SIZE = 6
+// "정렬 옵션 확인"(sampleMallProfile 내부, expandCategoryHubs 병행 처리 참고)이 상품 있는 카테고리를
+// 몇 개까지 시도해볼지 — 예전 별도 단계 시절과 같은 상한(사용자 지시, 2026-08-23: "실지 상품이 있는
+// 카테고리라면 반드시 정렬이 여기 있을 것", 상품이 있어도 정렬 UI 자체가 없는 카테고리가 있어 하나만
+// 보고 끝내면 안 된다는 근거는 그대로 유효하다).
+const MALL_PROFILE_SORT_CANDIDATE_LIMIT = 5
 // 걸스굽 실사용 확인(2026-09-01) 중 동시성을 1로 낮춘 적이 있었다 — 탭을 2개 이상 동시에 열면(시차를
 // 줘도) 로그인 세션이 끊기는 것처럼 보였기 때문. 하지만 그건 진짜 원인이 아니었다: 그 시점엔
 // loginIfNeeded가 "몰 구조분석" 시작 시점에 홈페이지(로그인폼이 없는 일반 쇼핑몰 홈페이지)에서 호출되고
@@ -2927,6 +2932,56 @@ async function sampleMallProfile(
   // MALL_REPORT_HINT_KEYWORDS 참고 — 카테고리 하위구조 확인 중 결제/배송/정렬 등 관련 키워드가 발견된
   // 페이지 URL. 아래 "AI로 결제/배송/업체정보 분석 중" 단계가 이 URL만 다시 방문해 참고 자료로 쓴다.
   let categoryPageHintHrefs: string[] = []
+
+  // "카테고리별 정렬기준 설정" 기능용 — 정렬 위젯은 보통 홈페이지가 아니라 카테고리 목록 페이지에만
+  // 있어서(등록된 몰 URL이 홈페이지인 경우가 흔함), 방금 찾은 카테고리 중 하나를 실제로 열어봐야 확인할
+  // 수 있다. 몰 전체가 같은 정렬 메커니즘을 쓴다고 가정한다(실사용상 카테고리마다 다른 경우는 못 봤음) —
+  // 대분류 하나만 확인하면 충분. 무거운 작업이라 deep("몰 구조분석")에서만 한다.
+  //
+  // 2026-09-26 이전엔 이 확인이 아래 "카테고리 하위구조 확인"(expandCategoryHubs)이 전부 끝난 뒤 완전히
+  // 별도인 단계로, 상품 있는 카테고리를 처음부터 다시 최대 5개까지 순서대로 열어가며 진행했다 — 그런데
+  // "카테고리 하위구조 확인"이 이미 대분류 각각을 방문해 상품 유무를 확인하는 중이라, 그 방문을 재사용하지
+  // 않고 나중에 또 열어보는 중복이었다. 무엇보다 정렬 인식은 Groq의 비전 모델이 계정에서 사라진 뒤
+  // (2026-09-16, GROQ_VISION_MODEL 주석 참고) 사실상 로컬 CPU 전용 Ollama(qwen2.5vl:7b, 40~90초/회)에만
+  // 의존하는데, 후보 카테고리 5개 × 최대 2회(라벨 인식 실패 시 트리거 인식까지)를 전부 직렬로 돌리면
+  // 실측 613.8초까지 걸렸다(도매창고 실사용, 2026-09-26 — 사용자 지적: "정렬옵션 확인은 qwen2.5가
+  // 해야해? 너무 오래걸리잖아... 카테고리 구조 확인 시에 정렬옵션도 카테고리 내에 같이 나오니, 이를
+  // 같이 분석하는 것으로 할 수는 없어?"). 그래서 별도 단계로 빼는 대신, expandCategoryHubs가 상품 있는
+  // 카테고리를 발견하는 바로 그 시점(이미 그 페이지를 열어본 시점)에 스크린샷+비전 판정을 그 자리에서
+  // 시도하도록 콜백으로 넘긴다 — 페이지 재방문이 없어지는 것은 물론, 비전 추론이 CPU를 붙잡고 있는
+  // 40~90초 동안에도 다른 워커(기본 동시성 4)는 나머지 카테고리 확장을 계속 진행하므로 체감 대기시간이
+  // 줄어든다(실제 추론 시간 자체는 그대로다 — Ollama 호출은 전역 큐(lib/ai.ts의 withOllamaQueue)로 어차피
+  // 한 번에 하나씩만 처리되지만, 그 대기시간이 "정렬만 확인하는 별도 단계"로 새로 쌓이는 대신 "카테고리
+  // 하위구조 확인"이 어차피 쓰던 시간 안에 겹쳐 들어간다).
+  let sortOptions: MallProfileSignals['sortOptions'] = []
+  const sortDetectionCandidates: { link: CategoryMenuLink; baseUrl: string }[] = []
+  let sortDetectionAttempts = 0
+  const prevSortLabels = prevSortOptions.map(o => o.label).filter(Boolean)
+  // 상품이 있어도 정렬 UI 자체가 없는 카테고리가 있다(도매의신 실사용 확인, 2026-09-18 — 표본으로 고른
+  // "베스트상품" 목록엔 정렬 위젯이 아예 없었음) — 그래서 하나 찾아 실패하면 포기하지 않고
+  // MALL_PROFILE_SORT_CANDIDATE_LIMIT개까지 계속 다른 카테고리로 시도한다(사용자 지시, 2026-09-18:
+  // "알아서 찾을 수 있어야 돼"). expandCategoryHubs는 여러 워커가 동시에 카테고리를 확장하므로, 이 함수도
+  // 여러 워커에서 동시에 불릴 수 있다 — 아래 두 줄(길이 확인 → 카운트 증가) 사이엔 await이 없어(동기
+  // 구간) 시도 상한을 넘겨 예약하는 경합이 생기지 않는다.
+  async function tryDetectSortDuringExpansion(workerPage: Page, link: CategoryMenuLink) {
+    if (sortOptions.length || sortDetectionAttempts >= MALL_PROFILE_SORT_CANDIDATE_LIMIT) return
+    sortDetectionAttempts++
+    const baseUrl = workerPage.url()
+    sortDetectionCandidates.push({ link, baseUrl })
+    console.log(`[정렬탐지:진단:${mallName}] "${link.name}"(${baseUrl}) — 하위구조 확인 중 발견, 화면 인식 시도(${sortDetectionAttempts}/${MALL_PROFILE_SORT_CANDIDATE_LIMIT})`)
+    // 화면(스크린샷)을 먼저 본다(사용자 지시, 2026-09-08 — "정렬은 어차피 사람 눈으로 화면에서 확인
+    // 가능하다"). href/select 마크업 형태나 사이트 공통 내비게이션 텍스트와의 우연한 키워드 겹침 같은
+    // 마크업발 오탐/누락(2026-09-08, 소꿉노리 다수)이 이 경로 자체로는 발생하지 않는다. 이 몰에서
+    // 예전에 확인된 라벨이 있으면 참고 예시로 같이 건넨다(사용자 지시, 2026-09-18).
+    const found = await detectSortOptionsByScreenshot(workerPage, baseUrl, mallName, signal, prevSortLabels, visionLog).catch(() => [])
+    console.log(`[정렬탐지:진단:${mallName}] "${link.name}" 화면 인식 결과: ${found.length}개`)
+    // 다른 워커가 그새 먼저 찾았으면(sortOptions.length) 나중에 도착한 결과로 덮어쓰지 않는다.
+    if (found.length && !sortOptions.length) {
+      sortOptions = found
+      console.log(`[정렬탐지:진단:${mallName}] 표본 카테고리 확정(화면 인식, 카테고리 하위구조 확인과 병행): ${baseUrl}`)
+    }
+  }
+
   if (deep && categoryLinks.length) {
     step('카테고리 하위구조 확인 중...')
     // platform이 아직 'unknown'이면(collectProductUrls가 목록 인식에 실패한 경우) 여기서 먼저 확인한다 —
@@ -2935,6 +2990,7 @@ async function sampleMallProfile(
     const expansion = await expandCategoryHubs(
       context, page, categoryLinks, mallName, expandPlatform, new URL(startUrl).origin,
       {}, signal, siteId, aiProviders.includes('ollama'), visionLog,
+      tryDetectSortDuringExpansion,
     )
     categoryLinks = expansion.links
     categoryLinksAiUsed = categoryLinksAiUsed || expansion.aiUsed
@@ -2957,109 +3013,53 @@ async function sampleMallProfile(
   }
   if (signal?.aborted) return null
 
-  // "카테고리별 정렬기준 설정" 기능용 — 정렬 위젯은 보통 홈페이지가 아니라 카테고리 목록 페이지에만
-  // 있어서(등록된 몰 URL이 홈페이지인 경우가 흔함), 방금 찾은 카테고리 중 하나를 실제로 열어봐야 확인할
-  // 수 있다. 몰 전체가 같은 정렬 메커니즘을 쓴다고 가정한다(실사용상 카테고리마다 다른 경우는 못 봤음) —
-  // 대분류 하나만 확인하면 충분. 무거운 작업이라 deep("몰 구조분석")에서만 한다.
-  let sortOptions: MallProfileSignals['sortOptions'] = []
-  if (deep && categoryLinks.length) {
+  // 위 병행 화면 인식이 후보를 전부(MALL_PROFILE_SORT_CANDIDATE_LIMIT개) 시도하고도 하나도 못 찾았을
+  // 때만 마지막 수단으로 DOM 폴백(href/select 키워드 스캔 → 클릭 검증)을 시도한다 — 예전 "2단계"와 같은
+  // 로직이다. 화면 인식이 각 페이지를 지나쳐 다음 카테고리로 넘어갔으므로 여기서 같은 URL을 다시 열어야
+  // 하지만(재방문 비용), 이 경로는 화면 인식이 전부 실패했을 때만 타는 드문 경로라 감수한다.
+  if (deep && !sortOptions.length && sortDetectionCandidates.length) {
+    // 라벨을 예전과 똑같이 유지한다 — components/panels/ScraperPanel.tsx의 MALL_PROFILE_STEP_ORDER가
+    // 이 접두어("정렬 옵션 확인 중")로 "지금 몇 번째 단계인지" 배지를 매칭하는데, 다른 문구를 쓰면 이
+    // 드문 폴백 경로에서만 그 배지가 조용히 안 뜬다(에러는 아니지만 굳이 만들 필요 없는 사소한 회귀).
     step('정렬 옵션 확인 중...')
-    // categoryLinks[0]이 하필 상품 0개인 카테고리(안내/이벤트 허브 등)면 정렬 위젯 자체가 없어 아래
-    // 시도가 전부 헛수고로 끝난다 — 상품이 있는 카테고리를 만날 때까지 앞에서부터 최대 5개만 시도한다
-    // (전체를 다 훑진 않음, 무거운 작업이라 안전하게 상한을 둔다. 사용자 지시, 2026-08-23: "실지 상품이
-    // 있는 카테고리라면 반드시 정렬이 여기 있을 것").
-    // 상품이 있어도 정렬 UI 자체가 없는 카테고리가 있다(도매의신 실사용 확인, 2026-09-18 — 표본으로 고른
-    // "베스트상품" 목록엔 정렬 위젯이 아예 없었음). 예전엔 "상품이 있는 첫 카테고리"만 찾아 그 하나로
-    // 모든 시도(비전→DOM 폴백)를 끝냈는데, 그 하나가 하필 정렬 없는 카테고리면 나머지 4개는 시도조차
-    // 안 됐다 — 사람이 화면을 보다가 안 보이면 다른 카테고리를 눌러보듯, 이 5개 후보 전체를 돌며 정렬을
-    // 찾을 때까지 계속 시도한다(사용자 지시, 2026-09-18: "알아서 찾을 수 있어야 돼").
-    let sortLoginRecoveryAttempted = false
-    const prevSortLabels = prevSortOptions.map(o => o.label).filter(Boolean)
-    // 1단계: 상품 있는 카테고리를 최대 5개까지 훑되, DOM 폴백으로 새지 않고 "화면 인식(비전)"만으로
-    // 전부 먼저 시도한다(사용자 지시, 2026-09-18 — "다른 페이지도 비전으로 봐야지, 왜 폴백으로 가는거야":
-    // 예전엔 카테고리 하나에서 비전이 실패하면 그 자리에서 곧바로 그 카테고리의 DOM 폴백으로 넘어갔는데,
-    // 그 폴백이 오탐(가짜 정렬)을 확정해버리면 진짜 정렬이 있는 다음 카테고리는 비전으로 아예 확인도
-    // 못 해보고 루프가 끝나버렸다 — 도매의신 실사용 확인: 정렬 없는 "베스트상품" 목록에서 DOM 폴백이
-    // 상품 링크를 정렬로 잘못 확정해, 진짜 정렬(cid=632 카테고리의 <select name=sort>)이 있는 다음
-    // 후보는 시도조차 안 됐다). DOM 폴백은 이 5개 전부 "비전으로도" 실패했을 때만 2단계에서 쓴다.
-    const productCategories: { link: CategoryMenuLink; baseUrl: string }[] = []
-    for (const link of categoryLinks.slice(0, 5)) {
+    for (const { link, baseUrl } of sortDetectionCandidates) {
       if (signal?.aborted) break
-      const moved = await page.goto(link.href, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
-      if (!moved) {
-        console.log(`[정렬탐지:진단:${mallName}] 카테고리 페이지 이동 실패(${link.href})`)
-        continue
+      const moved = await page.goto(baseUrl, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
+      if (!moved) continue
+      const sortCandidates = await collectSortCandidates(page)
+      // 후보 텍스트가 정렬스러운 낱말(looksLikeSortLabel)을 포함하는 것만 먼저 골라내고, diffQueryParams
+      // (같은 경로, 쿼리파라미터만 다름)까지 통과하면 그대로 확정한다 — 로컬 Ollama(detectSortOptionsWithAI)
+      // 에게 판별을 맡기던 걸 없앴다(2026-08-23, 사용자 지시로 재검토): collectSortCandidates가 모아오는
+      // 후보엔 카테고리 사이드바 링크 등 정렬과 전혀 무관한 것도 잔뜩 섞여있는데, 로컬 Ollama가 이걸
+      // 정렬로 잘못 골라 저장한 사고가 이미 있었고, 응답이 느리거나(수십~수백 초) 도구 호출 대신
+      // 텍스트로 새는 문제도 같은 세션에서 반복 확인됐다. "정렬스러운 텍스트"(의미)와 "실제로 다른
+      // 목록으로 이어지는 링크"(구조)라는 독립된 증거 두 개가 이미 있으니, 신뢰도 낮은 세 번째 신호(AI)를
+      // 더할 필요가 없다 — 키워드 매칭만 쓰는 클릭 폴백(detectSortOptionsByClicking)이 오히려 더
+      // 안정적이었던 것과 같은 이유. 개발자모드 확장의 별도 정렬감지 경로(app/api/sites/[id]/sort-options,
+      // detectSortOptionsWithAI 계속 사용)는 호출부가 달라 이번엔 손대지 않았다.
+      console.log(`[정렬탐지:진단:${mallName}] "${link.name}" 정적 후보 ${sortCandidates.length}개(${sortCandidates.slice(0, 15).map(c => c.text).join(', ')})`)
+      const queryBased = sortCandidates
+        .filter(c => looksLikeSortLabel(c.text))
+        .map(c => ({ label: c.text, kind: 'query' as const, paramsToAdd: diffQueryParams(baseUrl, c.href) }))
+        .filter((o): o is { label: string; kind: 'query'; paramsToAdd: Record<string, string> } => !!o.paramsToAdd)
+      console.log(`[정렬탐지:진단:${mallName}] "${link.name}" 키워드+쿼리검증 통과 ${queryBased.length}개`)
+      if (queryBased.length) {
+        sortOptions = queryBased
+      } else {
+        // 정적 href/select 기반 감지가 후보를 못 찾았거나, 찾았어도 키워드 필터를 통과한 게 하나도
+        // 없을 때 — 화면 텍스트를 후보로 삼아 실제로 클릭해보고 URL/목록 순서 변화로 직접 검증한다
+        // (detectSortOptionsByClicking 주석 참고 — kind:'query'/kind:'click' 둘 다 여기서 나올 수 있다).
+        sortOptions = await detectSortOptionsByClicking(page, baseUrl).catch(() => [])
+        console.log(`[정렬탐지:진단:${mallName}] "${link.name}" 클릭 폴백 결과 ${sortOptions.length}개`)
       }
-      let collected = await collectProductUrls(page, { maxPages: 1 }).catch(() => null)
-      if (collected?.needsLogin && !sortLoginRecoveryAttempted) {
-        sortLoginRecoveryAttempted = true
-        if (await recoverSessionLogin(page, siteId, mallName, '정렬탐지')) {
-          const movedAgain = await page.goto(link.href, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
-          if (movedAgain) collected = await collectProductUrls(page, { maxPages: 1 }).catch(() => null)
-        }
-      }
-      console.log(`[정렬탐지:진단:${mallName}] ${link.name}(${link.href}) — 상품 URL ${collected?.urls.length ?? 0}개`)
-      if (!collected?.urls.length) continue
-
-      const baseUrl = page.url()
-      productCategories.push({ link, baseUrl })
-      // 화면(스크린샷)을 먼저 본다(사용자 지시, 2026-09-08 — "정렬은 어차피 사람 눈으로 화면에서 확인
-      // 가능하다"). href/select 마크업 형태나 사이트 공통 내비게이션 텍스트와의 우연한 키워드 겹침 같은
-      // 마크업발 오탐/누락(2026-09-08, 소꿉노리 다수)이 이 경로 자체로는 발생하지 않는다. 이 몰에서
-      // 예전에 확인된 라벨이 있으면 참고 예시로 같이 건넨다(사용자 지시, 2026-09-18).
-      sortOptions = await detectSortOptionsByScreenshot(page, baseUrl, mallName, signal, prevSortLabels, visionLog).catch(() => [])
-      console.log(`[정렬탐지:진단:${mallName}] "${link.name}" 화면 인식 결과: ${sortOptions.length}개`)
       if (sortOptions.length) {
-        console.log(`[정렬탐지:진단:${mallName}] 표본 카테고리 확정(화면 인식): ${link.href}`)
+        console.log(`[정렬탐지:진단:${mallName}] 표본 카테고리 확정(DOM 폴백): ${link.href}`)
         break
       }
-      console.log(`[정렬탐지:진단:${mallName}] "${link.name}"에서 화면 인식 실패 — 다음 카테고리도 화면 인식부터 시도`)
-    }
-
-    // 2단계: 후보 전부에서 화면 인식이 실패했을 때만 DOM 폴백(href/select 키워드 스캔 → 클릭 검증)으로
-    // 넘어간다 — 최후 수단은 정말 "화면으로는 도저히 못 찾았을 때"만 쓴다는 원칙 그대로다. 같은 카테고리를
-    // 다시 열어야 해서(1단계는 화면 인식까지만 하고 이동했다) 약간의 재방문 비용이 들지만, 오탐이 진짜
-    // 정렬을 가리는 사고를 막으려면 이 순서가 맞다.
-    if (!sortOptions.length) {
-      for (const { link, baseUrl } of productCategories) {
-        if (signal?.aborted) break
-        const moved = await page.goto(baseUrl, { waitUntil: 'load', timeout: 20_000 }).then(() => true).catch(() => false)
-        if (!moved) continue
-        const sortCandidates = await collectSortCandidates(page)
-        // 후보 텍스트가 정렬스러운 낱말(looksLikeSortLabel)을 포함하는 것만 먼저 골라내고, diffQueryParams
-        // (같은 경로, 쿼리파라미터만 다름)까지 통과하면 그대로 확정한다 — 로컬 Ollama(detectSortOptionsWithAI)
-        // 에게 판별을 맡기던 걸 없앴다(2026-08-23, 사용자 지시로 재검토): collectSortCandidates가 모아오는
-        // 후보엔 카테고리 사이드바 링크 등 정렬과 전혀 무관한 것도 잔뜩 섞여있는데, 로컬 Ollama가 이걸
-        // 정렬로 잘못 골라 저장한 사고가 이미 있었고, 응답이 느리거나(수십~수백 초) 도구 호출 대신
-        // 텍스트로 새는 문제도 같은 세션에서 반복 확인됐다. "정렬스러운 텍스트"(의미)와 "실제로 다른
-        // 목록으로 이어지는 링크"(구조)라는 독립된 증거 두 개가 이미 있으니, 신뢰도 낮은 세 번째 신호(AI)를
-        // 더할 필요가 없다 — 키워드 매칭만 쓰는 클릭 폴백(detectSortOptionsByClicking)이 오히려 더
-        // 안정적이었던 것과 같은 이유. 개발자모드 확장의 별도 정렬감지 경로(app/api/sites/[id]/sort-options,
-        // detectSortOptionsWithAI 계속 사용)는 호출부가 달라 이번엔 손대지 않았다.
-        console.log(`[정렬탐지:진단:${mallName}] "${link.name}" 정적 후보 ${sortCandidates.length}개(${sortCandidates.slice(0, 15).map(c => c.text).join(', ')})`)
-        const queryBased = sortCandidates
-          .filter(c => looksLikeSortLabel(c.text))
-          .map(c => ({ label: c.text, kind: 'query' as const, paramsToAdd: diffQueryParams(baseUrl, c.href) }))
-          .filter((o): o is { label: string; kind: 'query'; paramsToAdd: Record<string, string> } => !!o.paramsToAdd)
-        console.log(`[정렬탐지:진단:${mallName}] "${link.name}" 키워드+쿼리검증 통과 ${queryBased.length}개`)
-        if (queryBased.length) {
-          sortOptions = queryBased
-        } else {
-          // 정적 href/select 기반 감지가 후보를 못 찾았거나, 찾았어도 키워드 필터를 통과한 게 하나도
-          // 없을 때 — 화면 텍스트를 후보로 삼아 실제로 클릭해보고 URL/목록 순서 변화로 직접 검증한다
-          // (detectSortOptionsByClicking 주석 참고 — kind:'query'/kind:'click' 둘 다 여기서 나올 수 있다).
-          sortOptions = await detectSortOptionsByClicking(page, baseUrl).catch(() => [])
-          console.log(`[정렬탐지:진단:${mallName}] "${link.name}" 클릭 폴백 결과 ${sortOptions.length}개`)
-        }
-        if (sortOptions.length) {
-          console.log(`[정렬탐지:진단:${mallName}] 표본 카테고리 확정(DOM 폴백): ${link.href}`)
-          break
-        }
-        console.log(`[정렬탐지:진단:${mallName}] "${link.name}"에서 DOM 폴백도 실패 — 다음 카테고리 시도`)
-      }
+      console.log(`[정렬탐지:진단:${mallName}] "${link.name}"에서 DOM 폴백도 실패 — 다음 카테고리 시도`)
     }
     if (!sortOptions.length) {
-      console.log(`[정렬탐지:진단:${mallName}] 상품 있는 카테고리 ${productCategories.length}개를 화면 인식+DOM 폴백 모두 시도했지만 정렬을 못 찾음`)
+      console.log(`[정렬탐지:진단:${mallName}] 상품 있는 카테고리 ${sortDetectionCandidates.length}개를 화면 인식+DOM 폴백 모두 시도했지만 정렬을 못 찾음`)
     }
   }
 
@@ -8567,6 +8567,13 @@ async function expandCategoryHubs(
    *  2026-09-23). "카테고리 불러오기"(discoverCategoryLinks) 호출부는 이 개념이 없어 안 넘기면 그냥
    *  기록 안 하고 넘어간다(no-op). */
   visionLog?: VisionAttempt[],
+  /** "몰 구조분석"(sampleMallProfile)만 넘긴다 — 카테고리 하나가 상품을 직접 보여주는 것으로 확인된 그
+   *  순간(=이미 이 페이지를 열어본 시점) 호출돼, 정렬 옵션 확인용 스크린샷+비전 판정을 그 자리에서
+   *  시도한다(sampleMallProfile의 tryDetectSortDuringExpansion 주석 참고 — 예전엔 이 확장이 전부 끝난
+   *  뒤 별도 단계로 카테고리를 다시 열어 확인했는데, 실측 613.8초까지 걸려 병행 처리로 바꿨다,
+   *  2026-09-26). "카테고리 불러오기"(discoverCategoryLinks) 호출부는 안 넘기면 그냥 기록 안 하고
+   *  넘어간다(no-op) — 예전과 동일하게 이 경로엔 정렬 확인이 없다. */
+  onProductCategoryPage?: (workerPage: Page, link: CategoryMenuLink) => Promise<void>,
 ): Promise<CategoryExpansionResult> {
   let aiUsed = false
   const profile = PLATFORM_PROFILES[platform]
@@ -8756,6 +8763,15 @@ async function expandCategoryHubs(
       aiMs = Date.now() - aiStart
       if (realChildren.length) aiUsed = true
     }
+    // 정렬 옵션 확인 병행 처리(위 onProductCategoryPage 주석 참고) — 이 워커가 지금 이 페이지를 이미 열어
+    // 상품이 있음을 확인했고, 이 페이지를 읽기만 하는 나머지 작업(하위 메뉴 스캔)도 다 끝난 시점이라
+    // 재방문 없이 바로 스크린샷+비전 판정을 시도할 수 있다 — 위치를 여기로 둔 이유는, 정렬 확인이 화면을
+    // 클릭/스크린샷하며 페이지 상태를 건드릴 수 있는데, 그 앞의 scanCategoryMenuRobust 등은 DOM을 읽기만
+    // 해서 순서가 바뀌어도 지장이 없는 반면 거꾸로(정렬 확인을 먼저) 하면 그 상태 변화가 하위 메뉴 스캔에
+    // 영향을 줄 수 있었기 때문이다. 다른 워커의 진행을 막지 않도록 이 워커 자신만 기다린다
+    // (EXPAND_CONCURRENCY만큼 여러 카테고리가 동시에 처리되므로, 이 대기는 다른 카테고리 처리와 자연히
+    // 겹쳐 돈다).
+    if (hasOwnProducts && onProductCategoryPage) await onProductCategoryPage(workerPage, c).catch(() => {})
     if (realChildren.length) {
       const totalMs = Date.now() - itemStart
       if (totalMs >= 8_000) {

@@ -6140,7 +6140,15 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
       const shapeOf = (u: string) => {
         try {
           const x = new URL(u)
-          return `${x.pathname}|${[...x.searchParams.keys()].sort().join(',')}`
+          // 상품 ID가 쿼리가 아니라 경로 자체에 박혀 있는 몰(예: /goods/4557959)은 상품마다 pathname이
+          // 전부 달라 그대로 비교하면 "반복된 모양"이 하나도 안 잡힌다(2026-09-26 도매창고 실사용
+          // 확인 — 이 때문에 페이지에 우연히 중복으로 실린 무관한 nav 링크(header/모바일 메뉴에 같은
+          // href가 두 번 나온 "/service/video_guide")가 "가장 많이 반복된 모양"으로 잘못 뽑혀, 진짜
+          // 상품 20개가 전부 버려지고 그 nav 링크만 살아남았다가 Set 중복제거로 최종 1개가 됐다 —
+          // "MD추천"(실제 356개)에서 count=1로 나온 원인). 숫자로만 된 경로 조각은 상품 ID로 보고
+          // 자리표시자로 치환해, 서로 다른 상품이라도 같은 "모양"으로 묶이게 한다.
+          const normalizedPath = x.pathname.split('/').map(seg => /^\d+$/.test(seg) ? '#' : seg).join('/')
+          return `${normalizedPath}|${[...x.searchParams.keys()].sort().join(',')}`
         } catch { return u }
       }
       const shapeCounts = new Map<string, number>()
@@ -6267,37 +6275,78 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
       }
       return best
     }
+    // 도매창고처럼 페이지 번호가 <a href>가 아니라 <div data-page="N"> 클릭+AJAX로만 넘어가는 몰을 만나면
+    // (아래에서 clickToPageNumber가 처음 성공하는 순간) true로 바뀐다. 한 번 이 방식으로 넘어가지면 이후
+    // 페이지 이동도 계속 클릭으로만 한다 — URL 이동(withPageParam)이 이 몰에선 안 통한다는 뜻이므로, 계속
+    // 시도해봤자 클릭으로 AJAX 렌더된 상태를 무의미한 URL 이동이 덮어쓰기만 한다(previewCatalog의
+    // countByClickingThroughPages와 같은 이유, 2026-09-26 도매창고 실사용 확인 — "정확한 총 개수 확인"이
+    // 이 몰의 356개 카테고리에서 1개만 반환했다).
+    let clickPaginationMode = false
     for (let p = 0; p < effectiveMaxPages; p++) {
       if (shouldStop()) { collectionStopped = true; break }
-      let matched = p === 0 ? await scanProductsSettled() : await scanForProducts(workerPage)
+      // 클릭 기반 AJAX 페이지네이션으로 확정된 뒤에는 매 페이지 첫 스캔부터 안정화를 기다린다 —
+      // 이런 몰은 클릭 직후 즉시 스캔하면 이전 페이지 내용이 아직 그대로 남아있어(2026-09-26 실사용
+      // 확인) 스캔한 페이지 내용을 신뢰할 수 없다.
+      let matched = (p === 0 || clickPaginationMode) ? await scanProductsSettled() : await scanForProducts(workerPage)
       let hrefsThisPage = new Set(matched.map(m => m.href))
       const isDeadEnd = (hrefs: Set<string>) => hrefs.size === 0 || (prevHrefs !== null && [...hrefs].every(h => prevHrefs!.has(h)))
+      // 빠른 스캔(scanForProducts, 안정화 대기 없음)이 "이전 페이지보다 훨씬 적은 개수"를 주웠다면 —
+      // 실제로 다음 페이지가 짧아서가 아니라, 아직 다 안 그려진 화면을 스냅샷한 노이즈일 가능성이 크다
+      // (도매창고 실사용 확인, 2026-09-26: URL 파라미터 이동이 안 통하는 몰에서 이 빠른 스캔이 아직 안
+      // 그려진 화면에서 우연히 상품 링크 1개만 집어들었는데, 그 1개가 이전 페이지 20개 집합에 없어
+      // "새 상품이다"로 오판 — isDeadEnd가 false를 반환해 아래 클릭 폴백을 건너뛰고, 그 가짜 1개를 결과에
+      // 섞어 넣은 채 다음 페이지로 진행했다. 원래 페이지네이션이 안 통하는 몰이라 계속 같은 1페이지만
+      // 반복해서 봤을 뿐인데, 매번 다른 노이즈 1개씩을 "새 상품"으로 잘못 누적했다). isDeadEnd의 "완전히
+      // 부분집합"이라는 엄격한 조건은 이런 애매한 경우(진짜 새 상품 몇 개 + 노이즈)를 못 잡으므로, 개수
+      // 자체가 확 줄었을 때는 안정화 재확인을 강제한다 — 이미 클릭 기반으로 확정된 뒤(clickPaginationMode)
+      // 에는 정상적으로 페이지가 줄어들 수 있으므로(마지막 페이지) 적용하지 않는다.
+      const looksIncomplete = !clickPaginationMode && p > 0 && prevHrefs !== null && hrefsThisPage.size > 0 && hrefsThisPage.size < prevHrefs.size
 
-      // page 파라미터로 다음 페이지 이동을 시도했는데도 상품 목록이 그대로거나 비었으면(그 파라미터를 안 쓰는
-      // 몰이거나 스킨 구조가 다른 경우), "다음" 버튼 클릭 방식으로 한 번 더 시도해본다.
-      if (isDeadEnd(hrefsThisPage) && p > 0 && nextPageSelector) {
-        const nextBtn = workerPage.locator(nextPageSelector).first()
-        if (await nextBtn.isVisible({ timeout: 2_000 }).catch(() => false)) {
-          await nextBtn.click()
-          await workerPage.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
-          matched = await scanForProducts(workerPage)
-          hrefsThisPage = new Set(matched.map(m => m.href))
+      // "끝"이라고 단정하기 전에 먼저 안정화를 기다린 뒤 재확인한다 — 목록을 JS/AJAX로 늦게 그리는
+      // 몰에서는 방금 연 다음 페이지가 아직 안 그려져 이전 페이지와 같아 보인다(투비즈온 실사용 확인,
+      // 2026-09-13: 그래서 "정확한 총 개수 확인"이 1페이지만 세고 24로 끝났다). 매 페이지마다 기다리면
+      // 대형 카테고리에서 누적 비용이 크므로, dead-end처럼 "보일" 때만 안정화 후 재확인한다.
+      // **클릭 폴백보다 반드시 먼저** 해야 한다 — 도매창고는 상품 목록뿐 아니라 페이지네이션 위젯
+      // 자체도 페이지 이동 직후엔 아직 DOM에 없다가 AJAX로 뒤늦게 채워진다(2026-09-26 실사용 확인:
+      // 안정화 없이 곧바로 clickToPageNumber를 부르면 매번 버튼을 못 찾아 result=false — "정확한 총
+      // 개수 확인"이 같은 페이지(20개)만 반복해서 세며 상한(1000페이지)까지 헛돌았다).
+      if ((isDeadEnd(hrefsThisPage) || looksIncomplete) && p > 0) {
+        const settled = await scanProductsSettled()
+        const settledHrefs = new Set(settled.map(m => m.href))
+        if (!isDeadEnd(settledHrefs)) {
+          matched = settled
+          hrefsThisPage = settledHrefs
+        } else {
+          matched = settled
+          hrefsThisPage = settledHrefs
+          // 안정화된 뒤에도 새 상품이 없다 — 정말 페이지가 안 바뀐 것으로 보고, 사이트별
+          // nextPageSelector가 있으면 그것부터, 그다음 화면의 실제 페이지 번호 버튼(클릭 기반 AJAX
+          // 페이지네이션, data-page 속성 기반, mall-agnostic)을 순서대로 시도한다.
+          if (nextPageSelector) {
+            const nextBtn = workerPage.locator(nextPageSelector).first()
+            if (await nextBtn.isVisible({ timeout: 2_000 }).catch(() => false)) {
+              await nextBtn.click()
+              await workerPage.waitForLoadState('load', { timeout: 15_000 }).catch(() => {})
+              const afterClick = await scanProductsSettled()
+              matched = afterClick
+              hrefsThisPage = new Set(afterClick.map(m => m.href))
+            }
+          }
+          if (isDeadEnd(hrefsThisPage)) {
+            const clicked = await clickToPageNumber(workerPage, p + 1)
+            if (clicked) {
+              clickPaginationMode = true
+              const afterClick = await scanProductsSettled()
+              matched = afterClick
+              hrefsThisPage = new Set(afterClick.map(m => m.href))
+            }
+          }
         }
       }
       // dead-end(페이지네이션 끝) 판정은 이 페이지에서 실제로 찾은 전체 목록(matched/hrefsThisPage)
       // 기준으로 그대로 한다 — 개수 상한 때문에 일부만 담기로 했다고 해서 "새 상품이 없다"로 오판하면
       // 안 된다(아래 담는 부분만 상한을 적용한다).
-      // "끝"이라고 단정하기 전에 한 번 더 확인한다 — 목록을 AJAX로 늦게 그리는 몰에서는 방금 연 다음
-      // 페이지가 아직 안 그려져 이전 페이지와 같아 보인다(투비즈온 실사용 확인, 2026-09-13: 그래서
-      // "정확한 총 개수 확인"이 1페이지만 세고 24로 끝났다). 매 페이지마다 기다리면 대형 카테고리에서
-      // 누적 비용이 크므로, **끝이라고 판단한 순간에만** 안정화 후 재확인한다.
-      if (isDeadEnd(hrefsThisPage)) {
-        const settled = await scanProductsSettled()
-        const settledHrefs = new Set(settled.map(m => m.href))
-        if (isDeadEnd(settledHrefs)) break
-        matched = settled
-        hrefsThisPage = settledHrefs
-      }
+      if (isDeadEnd(hrefsThisPage)) break
       prevHrefs = hrefsThisPage
 
       const itemsToAdd = limit?.mode === 'count'
@@ -6313,6 +6362,14 @@ async function collectProductUrls(page: Page, opts: ScrapeOptions, context?: Bro
       if (limit?.mode === 'count' && listingCount >= limit.value) break
 
       if (p >= effectiveMaxPages - 1) break
+      if (clickPaginationMode) {
+        // URL 이동이 안 통하는 몰로 이미 확정됐으니, 다음 페이지도 같은 방식(클릭)으로 이동만 해두고
+        // 실제 대기/재스캔은 다음 루프 맨 위(그리고 필요하면 위의 dead-end 재확인 단계)에 맡긴다 — 다른
+        // AJAX 몰(투비즈온 정렬 클릭 등)과 같은 패턴으로, 클릭 직후 고정 sleep을 넣기보다 기존
+        // settle-재확인 로직이 타이밍을 흡수하게 한다.
+        await clickToPageNumber(workerPage, p + 2)
+        continue
+      }
       // 스킨마다 다른 "다음" 버튼 클래스에 기대는 대신, page 쿼리파라미터를 다음 번호로 바꿔 직접 이동한다 —
       // cafe24 등 대부분의 몰이 페이지 번호 링크 없이도(숫자가 안 보여도) 이 파라미터로 페이지를 넘겨준다.
       // 이 이동이 타임아웃 등으로 실패하면(예전엔 catch로 조용히 무시) 페이지가 이전 페이지에 그대로
@@ -6958,6 +7015,71 @@ async function probeCategoryPage(
   return { count, isLoginPage, fingerprint, hrefs, currentPage }
 }
 
+/** URL 쿼리파라미터(`?page=N`)로는 페이지가 안 넘어가는 몰을 위한 마지막 수단 — 사람이 화면에서 실제
+ *  페이지네이션 버튼을 찾아 누르듯이, 목표 페이지 번호와 일치하는 클릭 가능한 요소를 찾아 직접 클릭한다.
+ *  도매창고 실사용 확인(2026-09-26): 이 몰의 페이지 번호는 `<a href>`가 아니라 `<div class="num"
+ *  data-page="2">` 형태라 `readMaxPageNumber` 등 기존 위젯 판독(항상 `a[href]`만 봄, 그 위 주석 참고)
+ *  에 전혀 안 걸리고, `withPageParam`으로 URL을 바꿔봐도 실제로는 페이지가 안 넘어간다(AJAX+클릭 전용).
+ *  `data-page` 속성은 이런 JS 기반 페이지네이션에서 흔한 관례라 몰 이름을 안 가리고 범용으로 찾는다 —
+ *  숫자 버튼뿐 아니라 "다음"류 화살표도 보통 같은 속성을 쓴다(도매창고의 `<div class="gt"
+ *  data-page="2">`가 실제 그 예). `data-page` 속성이 없으면 순수 텍스트가 목표 번호와 같은 요소로도
+ *  시도한다. 페이지네이션처럼 보이는 영역(`class`/`id`에 "pag" 포함 — "paging"/"pagination"/"pager"를
+ *  전부 잡는다) 안에서만 찾아, 상품 개수 배지 등 무관한 숫자를 잘못 누르지 않는다. */
+async function clickToPageNumber(page: Page, targetPage: number): Promise<boolean> {
+  return page.evaluate((targetPage) => {
+    const roots = Array.from(document.querySelectorAll('[class*="pag" i], [id*="pag" i]'))
+    for (const root of roots) {
+      const candidates = Array.from(root.querySelectorAll('[data-page], a, button, li, span, div')) as HTMLElement[]
+      for (const el of candidates) {
+        const dataPage = el.getAttribute('data-page')
+        const text = (el.textContent || '').trim()
+        const matches = (dataPage !== null && Number(dataPage) === targetPage)
+          || (!dataPage && /^\d+$/.test(text) && Number(text) === targetPage)
+        if (matches) { el.click(); return true }
+      }
+    }
+    return false
+  }, targetPage).catch(() => false)
+}
+
+/** clickToPageNumber로 넘어간 뒤에도(다른 요소 클릭으로 발생하는 페이지 전환 등) 실제로 새 상품이
+ *  나타났는지는 항상 href 집합으로 다시 확인해야 한다 — 이 몰이 진짜로 1페이지뿐인데 클릭이 아무 데나
+ *  맞아 우연히 "성공"으로 보일 수 있어서다(클릭 좌표 없이 요소를 직접 element.click()하므로 엉뚱한
+ *  곳을 누를 위험 자체는 낮지만, 그래도 결과는 항상 내용으로 재검증한다).
+ *
+ *  URL 기반 탐색(findRealLastPage 등)이 전부 안 통하는 몰의 마지막 수단 — countCategoryProductsOnce의
+ *  "안전한 순차 탐색"(맨 아래 for 루프)과 똑같은 규칙(href 누적 집합, 끝난 것 같으면 한 번 더 재확인,
+ *  AUTO_PAGINATION_CAP까지)을 그대로 따르되, `withPageParam`+`page.goto` 대신 clickToPageNumber로
+ *  페이지를 넘긴다. */
+async function countByClickingThroughPages(
+  workerPage: Page, userSel: string | null, platformSel: string | null, detailPatternSrc: string | undefined,
+  baseUrl: string, page1Hrefs: string[], stop: () => boolean,
+): Promise<{ count: number; truncated: boolean }> {
+  const seenHrefs = new Set<string>(page1Hrefs)
+  let hitCap = true
+  for (let pageNum = 2; pageNum <= AUTO_PAGINATION_CAP; pageNum++) {
+    if (stop()) { hitCap = false; break }
+    const clicked = await clickToPageNumber(workerPage, pageNum)
+    if (!clicked) { hitCap = false; break } // 이 번호로 넘어갈 클릭 대상 자체가 더 없다 — 여기가 끝
+    const first = await countProductsSettled(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+    if (first.isLoginPage) return { count: seenHrefs.size, truncated: false }
+    let { count, hrefs } = first
+    let newCount = hrefs.filter(h => !seenHrefs.has(h)).length
+    if (count === 0 || newCount === 0) {
+      // findRealLastPage의 confirmedEnd와 같은 이유 — "끝난 것 같다"고 처음 판단됐을 때만 한 번 더
+      // 클릭해(같은 번호를 다시) 재확인한다. 렌더링이 느려 아직 안 그려졌을 수 있어서다.
+      await sleep(SETTLE_COUNT_INTERVAL_MS)
+      const retry = await countProductsSettled(workerPage, userSel, platformSel, detailPatternSrc, baseUrl)
+      if (retry.isLoginPage) return { count: seenHrefs.size, truncated: false }
+      count = retry.count; hrefs = retry.hrefs
+      newCount = hrefs.filter(h => !seenHrefs.has(h)).length
+    }
+    if (count === 0 || newCount === 0) { hitCap = false; break }
+    hrefs.forEach(h => seenHrefs.add(h))
+  }
+  return { count: seenHrefs.size, truncated: hitCap }
+}
+
 /** 지수+이분 탐색이나 최후수단 순회를 시작하기 전에, 2페이지가 1페이지와 실제로 다른 상품을 보여주는지
  *  딱 한 번만 가볍게 확인한다 — "페이지 번호를 늘리면 다음 상품이 나온다"는, 이후 모든 탐색이 의존하는
  *  전제 자체를 검증하는 것이다. 위젯이 없는 몰(펫투비 등)은 이 파라미터가 애초에 안 통하는 경우가
@@ -7245,8 +7367,23 @@ async function countCategoryProductsOnce(
   if (maxPage === null && !stop()) {
     const works = await paginationActuallyWorks(workerPage, context, firstPageUrl, useHttp, page1Hrefs, userSel, platformSel, detailPatternSrc, baseUrl, nextPageSelector)
     if (!works) {
-      console.log(`[previewCatalog] "${label}" 2페이지가 1페이지와 다른 상품을 보여주지 않음 → 페이지 번호가 안 통하는 카테고리로 보고 count=${perPage}로 확정`)
-      return { url: categoryUrl, label, count: perPage }
+      // URL 쿼리파라미터로는 안 통했지만, 그렇다고 이 카테고리가 진짜 1페이지짜리라고 단정하면 안 된다 —
+      // 클릭+AJAX 전용 페이지네이션(도매창고 실사용 확인, 2026-09-26 — `<div data-page="2">`, URL은
+      // 절대 안 바뀜)일 수 있다. 사람이 화면에서 실제 버튼을 찾아 누르듯이 한 번 더 확인한다
+      // (countByClickingThroughPages 주석 참고) — 이 함수 자체가 첫 시도(2페이지 클릭)에서 새 상품이
+      // 하나도 없으면 곧바로 멈추고 원래 perPage와 같은 값을 돌려주므로, 별도의 "되나 안 되나" 사전
+      // 확인 없이 곧장 맡겨도 안전하다. paginationActuallyWorks의 probeCategoryPage가 workerPage를 이미
+      // page=2 URL(안 통했으므로 실제로는 그대로인 1페이지)로 옮겨놨을 수 있으니, 클릭 대상을 찾으려면
+      // 먼저 1페이지로 돌아가야 한다.
+      await workerPage.goto(firstPageUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {})
+      await settleAfterNav(workerPage)
+      const { count, truncated } = await countByClickingThroughPages(workerPage, userSel, platformSel, detailPatternSrc, baseUrl, page1Hrefs, stop)
+      if (count <= perPage) {
+        console.log(`[previewCatalog] "${label}" 2페이지가 1페이지와 다른 상품을 보여주지 않음(URL·클릭 모두 확인) → 페이지 번호가 안 통하는 카테고리로 보고 count=${perPage}로 확정`)
+        return { url: categoryUrl, label, count: perPage }
+      }
+      console.log(`[previewCatalog] "${label}" URL 파라미터로는 안 통했지만 화면의 실제 페이지 버튼 클릭으로는 넘어감 → 클릭 기반 순회 count=${count}${truncated ? ` (상한 ${AUTO_PAGINATION_CAP}페이지까지만 확인 — 더 있을 수 있음)` : ''}`)
+      return { url: categoryUrl, label, count, truncated }
     }
   }
 

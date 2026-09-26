@@ -365,6 +365,11 @@ interface MallProfileSignals {
    *  aiAnalysisElapsedSec는 마지막 AI 리포트 단계 하나만 잰 값이라 화면에 그것만 보이면 "몰 구조분석
    *  전체"로 오해하기 쉬워(사용자 지적, 2026-09-09) 같이 보여준다. */
   totalElapsedSec?: number
+  /** lib/scraper.ts의 MallProfileSignals.stepTimings와 같은 모양 — "몰 구조분석"의 각 단계(목록 페이지
+   *  확인/카테고리 구조 확인/카테고리 하위구조 확인/정렬 옵션 확인/회사정보 확인/샘플 상품 확인/AI 분석
+   *  등)가 각각 몇 초 걸렸는지. totalElapsedSec·aiAnalysisElapsedSec 둘만으론 "AI 아닌 나머지가 어디서
+   *  오래 걸렸는지" 알 수 없어(사용자 지적, 2026-09-26) 추가. */
+  stepTimings?: { label: string; elapsedSec: number }[]
   /** 몰 구조분석 도중/직후 로그인 세션이 끊긴 것으로 보이면 true — lib/scraper.ts의
    *  MallProfileSignals.sessionLostDuringAnalysis 주석 참고. */
   sessionLostDuringAnalysis?: boolean
@@ -828,6 +833,33 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
               )
             })()}
           </div>
+          {/* totalElapsedSec·aiAnalysisElapsedSec 둘만으론 "AI 아닌 나머지 단계 중 어디가 오래 걸렸는지"
+              전혀 알 수 없다는 지적(사용자, 2026-09-26 — "실제 몰구조분석 시간이 훨씬 오래 걸렸어. 왜
+              저렇게밖에 안나오지? AI뿐만이 아니라 전체적으로 어떤 내용으로 얼마나 시간이 걸린 건지를
+              파악할 수 있게"). 로딩 중 진행 표시(MALL_PROFILE_STEP_ORDER)와 같은 단계 이름으로, 완료 뒤엔
+              각 단계가 실제로 몇 초/전체의 몇 %였는지 펼쳐볼 수 있게 한다 — 가장 오래 걸린 단계를 굵게
+              표시해 "왜 오래 걸렸는지"에 바로 답한다. */}
+          {result.signals.stepTimings && result.signals.stepTimings.length > 0 && (
+            <details className="mb-3 text-xs bg-gray-50 rounded-lg px-3 py-2">
+              <summary className="cursor-pointer font-semibold text-gray-500">단계별 소요시간 ({result.signals.stepTimings.length}단계)</summary>
+              <ul className="mt-1.5 space-y-0.5">
+                {(() => {
+                  const timings = result.signals.stepTimings!
+                  const total = result.signals.totalElapsedSec ?? timings.reduce((sum, t) => sum + t.elapsedSec, 0)
+                  const maxSec = Math.max(...timings.map(t => t.elapsedSec))
+                  return timings.map((t, i) => {
+                    const pct = total > 0 ? Math.round((t.elapsedSec / total) * 100) : null
+                    const isSlowest = maxSec > 0 && t.elapsedSec === maxSec
+                    return (
+                      <li key={i} className={isSlowest ? 'text-amber-700 font-semibold' : 'text-gray-600'}>
+                        {t.label} · {formatElapsedSeconds(Math.round(t.elapsedSec))}{pct != null ? ` (전체의 ${pct}%)` : ''}
+                      </li>
+                    )
+                  })
+                })()}
+              </ul>
+            </details>
+          )}
           {/* "AI 호출 실패"/"AI 분석 성공(이전 리포트 유지 중)" 배지만 봐서는 어느 공급자가 왜 실패했는지
               (크레딧 부족/레이트리밋/타임아웃 등) 알 수 없다는 지적(사용자 지시, 2026-09-23)으로, 이번
               실행에서 실제로 시도한 공급자별 결과를 펼쳐볼 수 있게 한다 — 시도가 하나도 없으면(aiProviders를

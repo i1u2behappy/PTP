@@ -1576,6 +1576,14 @@ export interface MallProfileSignals {
    *  옵션 확인만 152초, 전체 4.1분 걸렸는데 화면엔 AI 리포트 단계의 7초만 보였다). 개발자모드도 읽을 수
    *  있게 aiAnalysisElapsedSec와 같은 이유로 DB에 남긴다. */
   totalElapsedSec?: number
+  /** sampleMallProfile의 각 단계(목록 페이지 확인/카테고리 구조 확인/카테고리 하위구조 확인/정렬 옵션
+   *  확인/회사정보 확인/샘플 상품 확인/AI 분석 등, step() 호출 순서 그대로)가 각각 몇 초 걸렸는지 —
+   *  totalElapsedSec·aiAnalysisElapsedSec 둘만으로는 "전체 시간 중 AI 아닌 나머지가 어디서 오래
+   *  걸렸는지"를 알 수 없다(사용자 지적, 2026-09-26 — "AI뿐만이 아니라 전체적으로 어떤 내용으로 얼마나
+   *  시간이 걸린 건지를 파악할 수 있게"). 화면 진행 표시(setSiteLockDetail)와 같은 라벨을 그대로 써서
+   *  진행 중 봤던 단계 이름과 완료 후 소요시간 목록의 라벨이 항상 일치한다. totalElapsedSec와 같은
+   *  이유로 DB에도 남긴다. */
+  stepTimings?: { label: string; elapsedSec: number }[]
   /** deep 호출에서 첫 성공 샘플의 원문(product page innerText) — "몰 구조분석" 직후 자동으로
    *  추출규칙(runAutoAnalysis)을 생성할 때만 쓰고 DB에는 저장하지 않는다(applyProfileResult에서 제외).
    *  가벼운 구조변화감지(deep=false)에서는 항상 undefined. */
@@ -2815,15 +2823,29 @@ async function sampleMallProfile(
   const profileStartedAt = Date.now()
   let lastStepAt = profileStartedAt
   let lastStepLabel: string | null = null
+  // .worker.log(console.log)에만 남아 화면에서는 "몰구조분석에 몇 분 걸렸는지"만 보이고 "그중 어느
+  // 단계가 오래 걸렸는지"는 전혀 알 수 없었다(사용자 지적, 2026-09-26 — "AI뿐만이 아니라 전체적으로
+  // 어떤 내용으로 얼마나 시간이 걸린 건지를 파악할 수 있게"). console.log와 정확히 같은 시점·같은 값을
+  // signals.stepTimings에도 남겨, 화면(MallProfileResultDisplay)이 "AI 호출 상세"와 같은 방식으로
+  // 단계별 소요시간을 펼쳐볼 수 있게 한다.
+  const stepTimings: { label: string; elapsedSec: number }[] = []
   const step = (detail: string) => {
     const now = Date.now()
-    if (lastStepLabel) console.log(`[몰구조분석:${mallName}] "${lastStepLabel}" — ${((now - lastStepAt) / 1000).toFixed(1)}초`)
+    if (lastStepLabel) {
+      const elapsedSec = (now - lastStepAt) / 1000
+      console.log(`[몰구조분석:${mallName}] "${lastStepLabel}" — ${elapsedSec.toFixed(1)}초`)
+      stepTimings.push({ label: lastStepLabel, elapsedSec })
+    }
     lastStepLabel = detail
     lastStepAt = now
     if (siteId != null) setSiteLockDetail(siteId, detail)
   }
   const logFinalStep = () => {
-    if (lastStepLabel) console.log(`[몰구조분석:${mallName}] "${lastStepLabel}" — ${((Date.now() - lastStepAt) / 1000).toFixed(1)}초`)
+    if (lastStepLabel) {
+      const elapsedSec = (Date.now() - lastStepAt) / 1000
+      console.log(`[몰구조분석:${mallName}] "${lastStepLabel}" — ${elapsedSec.toFixed(1)}초`)
+      stepTimings.push({ label: lastStepLabel, elapsedSec })
+    }
   }
   // 카테고리/정렬 화면인식이 실제로 어느 공급자(Groq/로컬 Ollama)를 썼는지 화면에 보여주기 위한 기록
   // (사용자 지시, 2026-09-22 — "Groq 토큰 문제가 생기면 로컬로 넘어가는 건데, 어느 걸 쓰고 있는지 화면에
@@ -3277,6 +3299,7 @@ async function sampleMallProfile(
   }
   logFinalStep()
   signals.totalElapsedSec = (Date.now() - profileStartedAt) / 1000
+  signals.stepTimings = stepTimings
   return signals.sampleCount > 0 ? signals : null
 }
 

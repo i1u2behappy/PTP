@@ -222,13 +222,18 @@ export function GlobalErrorNet() {
         // 중이라는 뜻으로 호박색(주의)을, 자동 재시도를 다 썼는데도 안 풀렸을 때만 실제로 사용자 조치가
         // 필요하다는 뜻으로 빨간색(경고)을 쓴다.
         const exhausted = f.attempt >= MAX_AUTO_RETRIES
+        // amber-500 + amber-100/200(옅은 노랑) 조합이 글자를 거의 안 보이게 만든다는 지적(사용자,
+        // 2026-09-26 — "배경색 노랑을 바꿔. 글자가 잘 안보여") — 배경은 DbHealthBanner가 이미 쓰고
+        // 검증된 조합(bg-amber-600 + text-white)을 그대로 따르고, 옅은 보조글자도 같은 amber 색상의
+        // 밝은 tint(대비가 거의 안 남는다) 대신 흰색에 투명도만 낮춰(text-white/80 등) 배경이 무슨
+        // 색이든 항상 충분한 대비가 나오게 한다.
         return (
-        <div key={f.id} className={`${exhausted ? 'bg-rose-600' : 'bg-amber-500'} text-white text-sm rounded-xl shadow-lg px-4 py-3 flex items-start gap-3`}>
+        <div key={f.id} className={`${exhausted ? 'bg-rose-600' : 'bg-amber-600'} text-white text-sm rounded-xl shadow-lg px-4 py-3 flex items-start gap-3`}>
           <div className="flex-1 min-w-0">
             <p className="font-semibold">{exhausted ? '⚠ 자동 복구 실패' : '⏳ 문제를 자동으로 해결하는 중'}</p>
-            <p className={`${exhausted ? 'text-rose-100' : 'text-amber-100'} text-xs mt-0.5`}>{f.message}</p>
-            <p className={`${exhausted ? 'text-rose-200' : 'text-amber-200'} text-[11px] mt-0.5 truncate`} title={f.url}>{f.url}</p>
-            <p className={`${exhausted ? 'text-rose-200' : 'text-amber-200'} text-[11px] mt-0.5`}>
+            <p className="text-white/80 text-xs mt-0.5">{f.message}</p>
+            <p className="text-white/70 text-[11px] mt-0.5 truncate" title={f.url}>{f.url}</p>
+            <p className="text-white/70 text-[11px] mt-0.5">
               {exhausted
                 ? '자동으로는 복구되지 않았어요 — 아래 "다시 시도"를 눌러주세요'
                 : `대부분 몇 초 안에 저절로 정상화돼요 — 자동으로 다시 확인하는 중 (${f.attempt}/${MAX_AUTO_RETRIES})`}
@@ -256,7 +261,7 @@ export function GlobalErrorNet() {
               className={`px-2 py-1 bg-white rounded-full text-xs font-semibold transition-colors ${exhausted ? 'text-rose-600 hover:bg-rose-50' : 'text-amber-600 hover:bg-amber-50'}`}>
               다시 시도
             </button>
-            <button onClick={() => dismiss(f.id)} className={`px-2 py-1 text-xs transition-colors ${exhausted ? 'text-rose-200 hover:text-white' : 'text-amber-200 hover:text-white'}`}>닫기</button>
+            <button onClick={() => dismiss(f.id)} className={`px-2 py-1 text-xs transition-colors ${exhausted ? 'text-rose-200 hover:text-white' : 'text-white/70 hover:text-white'}`}>닫기</button>
           </div>
         </div>
         )

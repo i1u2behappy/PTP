@@ -64,6 +64,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     freshCategoryLinksCount: body.links.length,
     prevAiUsed: !!prevProfile?.categoryLinksAiUsed,
     prevCategoryLinksCount: prevCategoryLinks?.length ?? 0,
+    freshCategoryLinks: body.links,
+    prevCategoryLinks,
   })
   if (keepPrevious) {
     return NextResponse.json({ ok: true, count: prevCategoryLinks?.length ?? 0, kept: true }, { headers: corsHeaders() })

@@ -39,6 +39,26 @@ describe('shouldKeepPreviousCategoryLinks', () => {
     })).toBe(false)
   })
 
+  it('이전이 AI 채택분이고 개수는 안 늘었어도, 이번 규칙 기반 결과가 계층(대분류>중분류)까지 잡았으면 새 결과로 덮어쓴다', () => {
+    // 걸스굽 실사용 확인(2026-09-27) — scanCategoryMenu가 "여성화 > BASIC HEEL LINE > 1 ~ 3cm"까지
+    // 정확히 계층을 잡았는데, 몇 달 전 AI가 한 번 채택된 뒤로 categoryLinksAiUsed=true가 계속 이어받아져
+    // "이번엔 AI를 안 썼다"는 이유만으로 매번 옛 평평한 66개 캐시로 되돌아갔다.
+    const prev = Array.from({ length: 66 }, (_, i) => ({ name: `카테고리${i}` }))
+    const next = [{ name: '여성화 > BASIC HEEL LINE > 1 ~ 3cm' }, { name: '여성화 > FLAT & LOAFER' }]
+    expect(shouldKeepPreviousCategoryLinks({
+      freshAiUsed: false, freshLoginBlockedExpansion: false, freshCategoryLinksCount: next.length,
+      prevAiUsed: true, prevCategoryLinksCount: prev.length,
+      freshCategoryLinks: next, prevCategoryLinks: prev,
+    })).toBe(false)
+  })
+
+  it('계층 정보를 안 넘기는 호출부는 기존과 동일하게(개수/AI 여부만으로) 판단한다', () => {
+    expect(shouldKeepPreviousCategoryLinks({
+      freshAiUsed: false, freshLoginBlockedExpansion: false, freshCategoryLinksCount: 5,
+      prevAiUsed: true, prevCategoryLinksCount: 10,
+    })).toBe(true)
+  })
+
   it('이전이 AI 채택분이라도 이번에 규칙 기반으로 찾은 개수가 이전보다 뚜렷이 많으면 새 결과로 덮어쓴다', () => {
     // 펫토리 실사용 확인(2026-09-06) — 예전 AI 결과는 겨우 3개(로그인 벽에 막혀 우연히 찾은 상품
     // 링크였을 뿐 진짜 카테고리가 아니었음)였는데, 이후 판정 버그를 고쳐 규칙 기반이 실제 대분류 17개를

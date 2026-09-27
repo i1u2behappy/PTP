@@ -23,11 +23,24 @@ export function shouldKeepPreviousCategoryLinks(input: {
   freshCategoryLinksCount: number
   prevAiUsed: boolean
   prevCategoryLinksCount: number
+  /** "AI 채택분 보호"(바로 아래)도 hasMoreCategoryHierarchy 가드(개수 축소 가드)와 같은 사고 클래스다 —
+   *  개수/AI 여부만 보고 이전 결과가 낫다고 단정하면, 예전에 AI가 한 번 채택된 뒤로는(categoryLinksAiUsed가
+   *  계속 이전 값을 이어받아 영원히 true로 남으므로) 이후 규칙 기반이 계층까지 정확히 잡아도(대분류>중분류>
+   *  소분류) 매번 그 옛 결과로 되돌아간다(걸스굽 실사용 확인, 2026-09-27 — scanCategoryMenu가 "여성화 >
+   *  BASIC HEEL LINE > 1 ~ 3cm"까지 정확히 계층을 잡는데도, 몇 달 전 AI가 한 번 채택된 뒤 이 분기가 매번
+   *  그 평평한 캐시로 되돌려 "몰 구조분석을 아무리 다시 돌려도 결과가 그대로"였다 — hasMoreCategoryHierarchy
+   *  가 이미 있었지만 개수 축소 가드에만 연결돼 있었고 이 AI 보호 분기엔 안 걸려 있었다). 선택 인자라 안
+   *  넘기는 호출부는 기존과 동일하게 동작한다(개수/AI 여부만으로 판단). */
+  freshCategoryLinks?: { name: string }[]
+  prevCategoryLinks?: { name: string }[]
 }): boolean {
   if (input.prevCategoryLinksCount <= 0) return false
   if (input.freshLoginBlockedExpansion) return true
   if (input.freshCategoryLinksCount > input.prevCategoryLinksCount) return false
-  if (!input.freshAiUsed && input.prevAiUsed) return true
+  if (!input.freshAiUsed && input.prevAiUsed) {
+    if (hasMoreCategoryHierarchy(input.prevCategoryLinks, input.freshCategoryLinks)) return false
+    return true
+  }
   return false
 }
 

@@ -145,6 +145,8 @@ export async function POST(req: NextRequest) {
       freshCategoryLinksCount: result.links.length,
       prevAiUsed: !!prevProfile?.categoryLinksAiUsed,
       prevCategoryLinksCount: prevCategoryLinks?.length ?? 0,
+      freshCategoryLinks: result.links.map(l => ({ name: l.text })),
+      prevCategoryLinks,
     })
     if (keepPrevious && prevCategoryLinks?.length) {
       responseLinks = prevCategoryLinks.map(c => ({ href: c.href, text: c.name }))

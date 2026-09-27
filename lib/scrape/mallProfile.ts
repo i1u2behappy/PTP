@@ -162,6 +162,8 @@ async function applyProfileResult(siteId: number, next: MallProfileSignals, deep
     freshCategoryLinksCount: next.categoryLinks?.length ?? 0,
     prevAiUsed: !!prev?.categoryLinksAiUsed,
     prevCategoryLinksCount: prev?.categoryLinks?.length ?? 0,
+    freshCategoryLinks: next.categoryLinks,
+    prevCategoryLinks: prev?.categoryLinks,
   }) && prev?.categoryLinks?.length) {
     next.categoryLinks = prev.categoryLinks
     next.categoryMenuNames = prev.categoryMenuNames

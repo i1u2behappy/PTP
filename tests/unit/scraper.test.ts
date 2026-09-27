@@ -404,4 +404,13 @@ describe('isNonCategoryCandidate', () => {
     expect(isNonCategoryCandidate('캡모자 > 커뮤니티', 'https://m.com/board/index.html')).toBe(true)
     expect(isNonCategoryCandidate('캡모자 > 상품 Q&A', 'https://m.com/board/product/list.html?board_no=6')).toBe(true)
   })
+
+  it('쇼핑몰정보 위젯(회사소개/이용약관/개인정보 처리방침/이용안내)도 카테고리가 아니라고 걸러낸다', () => {
+    // 걸스굽 실사용 확인(2026-09-27) — "전체상품보기" 허브를 펼치다가 같은 페이지의 이 위젯 링크가
+    // "전체상품보기 > 쇼핑몰정보 > 회사소개"로 그대로 하위 카테고리에 섞여 들어왔다.
+    expect(isNonCategoryCandidate('전체상품보기 > 쇼핑몰정보 > 회사소개', 'https://m.com/company/intro.html')).toBe(true)
+    expect(isNonCategoryCandidate('전체상품보기 > 쇼핑몰정보 > 이용약관', 'https://m.com/terms.html')).toBe(true)
+    expect(isNonCategoryCandidate('전체상품보기 > 쇼핑몰정보 > 개인정보 처리방침', 'https://m.com/privacy.html')).toBe(true)
+    expect(isNonCategoryCandidate('전체상품보기 > 쇼핑몰정보 > 이용안내', 'https://m.com/guide.html')).toBe(true)
+  })
 })

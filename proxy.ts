@@ -34,6 +34,13 @@ const PUBLIC_API_PREFIXES = [
   // log-diagnostic: 확장이 DB 저장 없이 .dev-server.log에 한 줄만 남기고 싶을 때 쓰는 범용 진단 라우트
   // (2026-09-08, dialogListener의 alert()/confirm() 감지 등) — 위와 같은 이유·같은 실수 클래스.
   '/api/scrape/log-diagnostic',
+  // site-lock-status: 확장의 "몰 구조분석"이 이제 응답 하나를 오래 붙들고 기다리는 대신, 시작만 요청하고
+  // PTP 화면과 같은 방식으로 이 라우트를 짧게 폴링해 완료 여부를 확인한다(2026-09-27 — 크롬 확장의 fetch
+  // 연결이 몇 분씩 유지되지 못해 진행 중이던 분석이 중간에 끊기던 문제의 근본 수정, background.js의
+  // runProfile 참고). 위 profile-progress/preview-progress와 정확히 같은 이유·같은 실수 클래스라 여기
+  // 같이 넣는다 — 빠뜨리면 조용히 401로 실패해(background.js가 .catch(()=>null)로 삼킴) 폴링이 항상
+  // "busy 아님"으로 오판돼 분석이 채 안 끝났는데도 곧바로 완료 처리될 위험이 있다.
+  '/api/scrape/site-lock-status',
 ]
 // 몰 id가 경로 중간에 끼어 있어(/api/sites/{id}/...) 단순 prefix로 못 걸러 정규식으로 따로 둔다 — 개발자모드
 // 크롬 확장이 세션 쿠키 없이 호출하는 엔드포인트들. preview-capture(스크래핑 전 단건 미리보기),

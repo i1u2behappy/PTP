@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { runMallStructureReport, stopProfileAnalysis } from '@/lib/workerClient'
 import { getEnabledAiProviders } from '@/lib/aiProviderConfig'
+import pool from '@/lib/db'
 
 // 개발자모드 확장은 이 라우트를 바디 없이 POST하므로(기존 동작), aiProviders는 항상 optional — 없으면
 // 기본 공급자 목록을 쓴다. 2026-09-02: 단일 "AI 사용" 켬/끔에서 공급자별(Anthropic/Gemini/Groq/Ollama)
@@ -51,6 +52,25 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const parsed = RequestSchema.safeParse(await req.json().catch(() => ({})))
   const saved = await getEnabledAiProviders().catch(() => null)
   const aiProviders = (parsed.success ? parsed.data.aiProviders : undefined) ?? saved ?? FALLBACK_AI_PROVIDERS
+
+  // 개발자모드(manual_login_required) 몰은 이 응답을 오래 붙들고 기다리지 않는다 — 시작만 확인해주고
+  // 곧바로 응답하며, 실제 완료 여부는 확장이 PTP 화면과 같은 방식(site-lock-status 폴링)으로 따로
+  // 확인한다(extension-poc/background.js의 runProfile 참고). 크롬 확장의 fetch 연결이 "몰 구조분석"
+  // 전체(몇 분~몇십 분)만큼 오래 유지되지 못하는 게 실사용으로 확인됐다(모자사러, 2026-09-27 — 매번
+  // "카테고리 구조 확인" 단계가 끝나자마자 조용히 중단됨을 반복 재현). 그 연결이 끊기면 바로 아래
+  // abort 리스너가 "PTP 탭을 닫았다"와 똑같이 취급해, 실제로는 잘 진행 중이던 분석을 중간에 멈춰버렸다
+  // — 이게 그 증상의 근본 원인이었다. 일반모드(PTP 웹탭)는 원래대로 이 응답에서 바로 전체 결과를 받는다
+  // — 이미 그 결과를 그대로 화면에 그리는 코드(handleProfileMall)가 있어 바꾸면 그쪽이 깨진다.
+  const siteRes = await pool.query<{ manual_login_required: boolean | null }>(
+    'SELECT manual_login_required FROM sites WHERE id = $1', [siteId],
+  )
+  if (siteRes.rows[0]?.manual_login_required) {
+    // 여기서는 일부러 req.signal의 abort를 안 듣는다 — 확장 쪽 연결이 끊겨도(원래 문제였던 그 현상)
+    // 분석 자체는 서버에서 끝까지 계속돼야 한다. 실패해도(URL 없음 등) 이 응답은 이미 나간 뒤라 조용히
+    // 삼킨다 — 확장은 어차피 폴링으로 완료를 확인하지 이 fetch의 최종 성공/실패를 안 본다.
+    runMallStructureReport(siteId, [...aiProviders]).catch(() => {})
+    return NextResponse.json({ ok: true, started: true }, { headers: corsHeaders() })
+  }
 
   // 이 요청을 보낸 PTP 탭을 사용자가 닫으면(또는 브라우저/네트워크가 끊기면) req.signal이 abort된다 —
   // "몰 구조분석 중지" 버튼이 호출하는 것과 같은 stopProfileAnalysis를 그대로 재사용해, 탭을 닫는 것도

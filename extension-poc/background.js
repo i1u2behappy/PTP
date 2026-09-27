@@ -2868,17 +2868,41 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   else await runPicker(tab, site)
 })
 
+// runProfile의 폴링 간격/상한 — 5초마다 가벼운 상태 조회 하나(site-lock-status, in-memory 맵 조회라
+// 비용이 거의 없음)만 보낸다. 상한은 넉넉하게 60분: 오늘 실측(Groq/Gemini 무료 한도 소진 + 로컬 Ollama
+// 폴백)으로 "몰 구조분석" 하나가 35분 넘게 걸린 사례가 있었다 — 그보다 짧게 잡으면 진짜 진행 중인
+// 분석을 여기서 또 포기 처리해버릴 위험이 있다.
+const PROFILE_POLL_INTERVAL_MS = 5_000
+const PROFILE_POLL_MAX_MS = 60 * 60 * 1000
+
 /** "몰 구조분석" — 일반모드가 쓰는 서버 쪽 몰 구조분석(lib/scraper.ts의 profileMallStructure, PTP
  *  화면의 "🔍 몰 구조분석"과 완전히 같은 엔드포인트)을 그대로 트리거한다. 그 함수는 withContext로
  *  브라우저 컨텍스트를 얻는데, 직접로그인 필수 몰(개발자모드로 등록된 몰)은 이미 신뢰가 쌓인 사용자의
  *  개인 크롬 프로필 사본을 서버가 스스로 헤드리스로 띄워 처리한다 — 그래서 chrome.debugger나 "지금 이
- *  탭"이 전혀 필요 없고, 그냥 요청만 쏘아두면 된다(결과는 PTP 화면이 폴링해서 보여줌). */
+ *  탭"이 전혀 필요 없고, 그냥 요청만 쏘아두면 된다(결과는 PTP 화면이 폴링해서 보여줌).
+ *
+ *  2026-09-27 수정 — 예전엔 이 POST 응답 하나를 "몰 구조분석" 전체(몇 분~몇십 분)가 끝날 때까지 그대로
+ *  기다렸다. 크롬 확장의 fetch 연결이 그렇게 오래 유지되지 못하는 게 실사용으로 확인됐다(모자사러 —
+ *  "카테고리 구조 확인" 단계가 끝나자마자 매번 조용히 분석이 중단됨을 반복 재현). 그 연결이 끊기면
+ *  서버(app/api/sites/[id]/profile/route.ts)가 "PTP 탭을 닫았다"와 똑같이 취급해 실제로 잘 진행 중이던
+ *  분석을 중간에 멈춰버린 것이 근본 원인이었다. 이제 개발자모드 몰은 서버가 시작 확인만 즉시 돌려주고
+ *  (data.started), 실제 완료 여부는 PTP 화면과 똑같은 방식으로 site-lock-status를 짧게 반복 조회해
+ *  확인한다 — 개별 요청이 전부 짧게 끝나므로 이 문제 자체가 재발할 수 없다. 일반모드 몰은 서버가 여전히
+ *  이 응답 하나에서 바로 전체 결과를 주므로(data.started가 없음) 폴링 없이 그대로 끝난다. */
 async function runProfile(site) {
   try {
     const res = await fetch(`${SITE_API_BASE}/${site.id}/profile`, { method: 'POST' })
     const data = await res.json().catch(() => ({}))
     if (!res.ok) return { ok: false, error: data.error || String(res.status) }
-    return { ok: true }
+    if (!data.started) return { ok: true }
+    const deadline = Date.now() + PROFILE_POLL_MAX_MS
+    while (Date.now() < deadline) {
+      await delay(PROFILE_POLL_INTERVAL_MS)
+      const statusRes = await fetch(`${PTP_ORIGIN}/api/scrape/site-lock-status?siteId=${site.id}`).catch(() => null)
+      const status = statusRes ? await statusRes.json().catch(() => null) : null
+      if (status && status.busy === false) return { ok: true }
+    }
+    return { ok: false, error: `${Math.round(PROFILE_POLL_MAX_MS / 60_000)}분 안에 끝나지 않아 포기했습니다(서버에서는 계속 진행 중일 수 있습니다 — 잠시 후 PTP에서 확인해보세요)` }
   } catch (e) {
     return { ok: false, error: e.message }
   }

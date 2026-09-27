@@ -4111,14 +4111,26 @@ function decodeHttpResponseText(res: APIResponse, body: Buffer): string {
 
 /** scanCategoryMenu의 실사용 진입점 — 브라우저 라이브 DOM 스캔에, 원본 HTML을 추가로 받아 cheerio로도
  *  스캔해 합친 결과를 쓴다(scanCategoryMenuFromHtml 주석 참고 — 캐러셀 JS가 라이브 DOM에서 지운
- *  카테고리를 원본 쪽이 채워준다). 원본 HTML을 못 받아오면(네트워크 오류 등) 라이브 DOM 결과만 쓴다. */
+ *  카테고리를 원본 쪽이 채워준다). 원본 HTML을 못 받아오면(네트워크 오류 등) 라이브 DOM 결과만 쓴다.
+ *
+ *  links는 항상 isNonCategoryCandidate로 정리해서 돌려준다(scanCategoryOverviewPage가 자기 결과를 스스로
+ *  정리해 돌려주는 것과 같은 원칙). 예전엔 이 함수 자신은 원본 그대로 돌려주고, 호출부마다 각자 이
+ *  필터를 따로 걸었는데 — 그중 한 곳(expandCategoryHubs의 허브 하위구조 확장)이 이 필터를 빠뜨린 채
+ *  topLevelHrefSet 제외만 하고 있어서, 수진펫 실사용 확인(2026-09-27) 때 그 페이지에 같이 있던 사이트
+ *  전체 GNB가 "하위 카테고리"로 그대로 섞여 들어갔다 — 도매신(2026-09-17)에 이미 한 번 겪은 것과 같은
+ *  종류의 사고가 반복된 것. 호출부마다 따로 챙기게 하는 대신 이 함수 자신이 항상 정리해서 돌려주면,
+ *  앞으로 이 함수를 쓰는 어떤 새 호출부도 이 필터를 빠뜨릴 수 없다(호출부에 남아있는 같은 필터는
+ *  중복이라도 해될 게 없어 그대로 둔다). */
 async function scanCategoryMenuRobust(page: Page): Promise<CategoryMenuScanResult> {
   const live = await scanCategoryMenu(page)
-  try {
-    const res = await page.context().request.get(page.url(), { timeout: 15_000 })
-    if (res.ok()) return mergeCategoryMenuScans(live, scanCategoryMenuFromHtml(decodeHttpResponseText(res, await res.body()), res.url()))
-  } catch { /* 못 받아오면 라이브 DOM 결과만 쓴다 */ }
-  return live
+  const merged = await (async () => {
+    try {
+      const res = await page.context().request.get(page.url(), { timeout: 15_000 })
+      if (res.ok()) return mergeCategoryMenuScans(live, scanCategoryMenuFromHtml(decodeHttpResponseText(res, await res.body()), res.url()))
+    } catch { /* 못 받아오면 라이브 DOM 결과만 쓴다 */ }
+    return live
+  })()
+  return { ...merged, links: merged.links.filter(l => !isNonCategoryCandidate(l.name, l.href)) }
 }
 
 /** 시작 페이지에 상품 링크가 0개일 때(배너 전용 랜딩 페이지) 따라 들어가볼 카테고리 후보 링크를 모은다.

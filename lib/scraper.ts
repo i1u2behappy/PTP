@@ -1827,6 +1827,19 @@ export async function profileMallStructure(siteId: number, deep = false, aiProvi
 async function profileMallStructureInner(siteId: number, deep: boolean, aiProviders: AiProviderId[]): Promise<MallProfileSignals | null> {
   const site = await siteInfo(siteId)
   if (!site.url) return null
+  // 이미 이 사이트에 대해 "몰 구조분석"(deep)이 진행 중이면 새로 겹쳐 시작하지 않는다 — withSiteLock은
+  // 겹친 두 번째 요청을 그냥 뒤로 줄 세울 뿐인데, profileAbortControllers는 siteId당 슬롯이 하나뿐이라
+  // (바로 아래 주석 참고) 두 번째 요청이 아직 대기 중인 상태에서도 자기 컨트롤러로 먼저 실행 중이던
+  // 요청의 컨트롤러를 덮어써버린다 — 그 뒤 "중지" 신호나 연결 끊김으로 인한 abort가 엉뚱한 쪽(이미 끝난
+  // 요청, 또는 아직 시작도 안 한 대기 중인 요청)에 걸려 두 실행이 서로 뒤엉킨다. 실사용 확인(2026-09-27,
+  // 모자사러 개발자모드) — 크롬 확장 팝업은 포커스를 잃으면 자동으로 닫히는데, "몰 구조분석"이 오래
+  // 걸리는 동안 사용자가 팝업을 다시 열어 모르고 또 눌러서 같은 사이트에 겹친 요청이 들어갔고, 그 결과
+  // "목록 페이지 확인"부터 다시 시작하는 시도가 짧은 시간에 7번 찍히면서도 단 한 번도 끝까지 완료되지
+  // 못했다(둘 다 서로의 abort로 계속 끊김). 겹친 요청은 아예 여기서 조기에 거절하는 게 근본적인 해결이다.
+  if (deep && siteLockStatus.get(siteId)?.label === '몰 구조분석') {
+    console.log(`[몰구조분석:${site.name}] 이미 진행 중인 분석이 있어 이번 요청은 건너뜀(중복 실행 방지)`)
+    return null
+  }
   const { pattern: categoryUrlPattern, manualSamples: knownCategoryExamples, prevSortOptions, prevCategoryLinks } = await getCategoryMemory(siteId)
   const controller = new AbortController()
   profileAbortControllers.set(siteId, controller)

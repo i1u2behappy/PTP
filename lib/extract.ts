@@ -209,9 +209,17 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
 
     // 국내 쇼핑몰은 전자상거래법상 "상품정보제공고시" 표를 의무 게시하므로, 라벨-값 쌍에서 부가 정보를 찾는다.
     // 카페24 등은 <table>(th/td)로, 신우 같은 구형 자체 솔루션은 <dl><dt>/<dd>로 같은 걸 표현하니 둘 다 본다.
+    // 옵션(색상/사이즈 등) 선택 위젯을 <table><tr><th>/<td> 정렬로 배치하는 카페24 구형 테마가 있다
+    // (시즌백 실사용 확인, 2026-09-27 — <select>의 <option> 목록 전체 텍스트("- [필수] 옵션을 선택해
+    // 주세요 --------------------블랙그레이")가 "값"으로, 그 옵션 그룹 내부 이름(하필 상품 자체 스타일
+    // 코드와 같아 "BG-7868" 등)이 "라벨"로 잡혀 custom_fields에 그대로 섞여 들어갔다 — 상품마다 라벨이
+    // 전부 달라, 스크랩 Raw 확인 화면에 상품 수만큼 거의 빈 컬럼이 하나씩 생겨났다). <select>/<input>
+    // 같은 상호작용 위젯이 든 행은 애초에 "상품정보제공고시" 정적 텍스트가 아니므로 통째로 제외한다 —
+    // 이 구조를 쓰는 다른 몰에도 똑같이 적용되는 일반적인 신호다(특정 라벨/코드 패턴 추측이 아님).
+    const looksLikeOptionWidget = (el: Element) => !!el.querySelector('select, input')
     const infoRows: [string, string][] = []
     document.querySelectorAll('table tr').forEach(tr => {
-      if (isIrrelevantRegion(tr)) return
+      if (isIrrelevantRegion(tr) || looksLikeOptionWidget(tr)) return
       const cells = Array.from(tr.querySelectorAll('th,td')).map(cleanText)
       if (cells.length === 2 && cells[0] && cells[1]) infoRows.push([cells[0], cells[1]])
     })
@@ -222,7 +230,7 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
         // 대신 각 dt에서 다음 dt를 만나기 전 첫 dd를 직접 찾는다.
         let sib = dt.nextElementSibling
         while (sib && sib.tagName !== 'DD' && sib.tagName !== 'DT') sib = sib.nextElementSibling
-        if (sib && sib.tagName === 'DD') {
+        if (sib && sib.tagName === 'DD' && !looksLikeOptionWidget(dt) && !looksLikeOptionWidget(sib)) {
           const label = cleanText(dt)
           const value = cleanText(sib)
           if (label && value) infoRows.push([label, value])

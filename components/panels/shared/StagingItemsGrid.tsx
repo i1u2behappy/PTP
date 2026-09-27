@@ -440,6 +440,23 @@ export function StagingItemsGrid({ sessionId }: {
       })
     : filteredItems
 
+  // 스크랩이 진행 중이면 /api/scrape-staging이 created_at DESC(최신이 맨 위)로 새 항목을 계속 위쪽에
+  // 추가한다 — 그리드 기본 높이가 좁아 그 새 항목이 화면 밖에 있으면 사용자가 진행 상황을 보려고 매번
+  // 직접 맨 위로 스크롤해야 했다(사용자 지시, 2026-09-27 — "작업시 포커스도 가도록"). 사용자가 이미 아래로
+  // 스크롤해 다른 항목을 살펴보고 있으면(80px 넘게 내려감) 그 위치를 존중해 방해하지 않는다. 사용자가
+  // 직접 정렬을 걸었으면(sortKeys) "맨 위 = 최신"이 더 이상 아니므로 이 동작 자체를 건너뛴다.
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null)
+  const lastTopIdRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (sortKeys.length) return
+    const topId = visibleItems[0]?.id ?? null
+    if (topId != null && topId !== lastTopIdRef.current) {
+      const el = scrollContainerRef.current
+      if (el && el.scrollTop < 80) el.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+    lastTopIdRef.current = topId
+  }, [visibleItems, sortKeys.length])
+
   function handleSort(key: string, e: { shiftKey: boolean }) {
     setSortKeys(prev => {
       const idx = prev.findIndex(s => s.key === key)
@@ -621,7 +638,7 @@ export function StagingItemsGrid({ sessionId }: {
   }
 
   return (
-    <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-[160px] flex flex-col resize-y">
+    <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden flex-1 min-h-[300px] flex flex-col resize-y">
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 shrink-0 flex-wrap gap-2">
         <div className="flex items-center gap-4 text-xs text-gray-600 flex-wrap">
           {/* 체크박스 두 개를 하나의 <label>에 같이 넣지 않는다 — 라벨 텍스트를 클릭하면 그 라벨 안의
@@ -682,7 +699,7 @@ export function StagingItemsGrid({ sessionId }: {
           <button onClick={() => setNoClientWarning(null)} aria-label="닫기" className="text-amber-400 hover:text-amber-600 shrink-0">✕</button>
         </div>
       )}
-      <div className="overflow-x-auto overflow-y-auto flex-1 min-h-0">
+      <div ref={scrollContainerRef} className="overflow-x-auto overflow-y-auto flex-1 min-h-0">
         <table className="text-sm border-collapse" style={{ tableLayout: 'fixed', width: tableWidth }}>
           <colgroup>
             <col style={{ width: 40 }} />

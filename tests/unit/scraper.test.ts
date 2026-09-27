@@ -394,4 +394,14 @@ describe('isNonCategoryCandidate', () => {
   it('진짜 카테고리는 통과시킨다', () => {
     expect(isNonCategoryCandidate('스니커즈/슬립온', 'https://m.com/product/list.html?cate_no=106')).toBe(false)
   })
+
+  // 모자사러 실사용 확인(2026-09-27) — 트리거를 실제로 클릭해 연 메뉴를 DOM으로 스캔하는 경로
+  // (discoverCategoryMenuByVision의 케이스 b)에 이 필터 자체가 빠져 있어, "캡모자" 하위 카테고리에
+  // 이 10개가 그대로 섞여 들어간 사고를 계기로 낱말을 보강했다.
+  it('마이쇼핑/내게시물/커뮤니티/상품 Q&A도 카테고리가 아니라고 걸러낸다', () => {
+    expect(isNonCategoryCandidate('캡모자 > 마이쇼핑', 'https://m.com/myshop/index.html')).toBe(true)
+    expect(isNonCategoryCandidate('캡모자 > 내게시물', 'https://m.com/myshop/board_list.html')).toBe(true)
+    expect(isNonCategoryCandidate('캡모자 > 커뮤니티', 'https://m.com/board/index.html')).toBe(true)
+    expect(isNonCategoryCandidate('캡모자 > 상품 Q&A', 'https://m.com/board/product/list.html?board_no=6')).toBe(true)
+  })
 })

@@ -3623,7 +3623,12 @@ export interface CategoryMenuLink {
 // 기획전: 카페24가 "goods_exhibit" 외에 "project.html?cate_no=" 같은 다른 경로로도 기획전(프로모션 배너)
 // 페이지를 만든다(도매신 실사용 확인, 2026-09-17 — "샘플 기획전"이 "하위 카테고리 가져오기"에 잘못
 // 딸려옴) — 경로 패턴은 몰마다 달라 못 미더우니, 더 안정적인 라벨 텍스트("기획전")로 막는다.
-const NON_CATEGORY_TEXT_RE = /로그인|회원가입|로그아웃|장바구니|마이페이지|고객센터|검색어?|주문|배송조회|결제|사이트맵|관리자|촬영명령|입고대?기|입고대령|단가\s*(인상|조정)|재진행|색상?\s*(별)?\s*분류|공지사항|공지\b|납품\s*사례|제작\s*문의|도매\s*인증|상품\s*문의|회원\s*정보|정보\s*수정|적립금|관심\s*상품|최근\s*본\s*상품|위시\s*리스트|찜\s*(목록)?|기획전|notice|cart|login|logout|mypage|search|sitemap|wishlist/i
+// 마이쇼핑/내게시물/커뮤니티/상품 Q&A: 위 "마이페이지"/"상품문의"와 같은 성격(계정·게시판 메뉴)인데
+// 이 몰(모자사러)은 정확히 이 낱말을 쓰지 않아 그동안 안 걸러졌다 — 트리거를 실제로 클릭해 연 메뉴를
+// DOM으로 스캔하는 경로(discoverCategoryMenuByVision의 케이스 b)엔 이 필터 자체가 아예 빠져 있었던
+// 것도 같이 발견해 고쳤다(2026-09-27 실사용 확인 — "캡모자" 하위 카테고리에 장바구니/마이쇼핑/주문조회/
+// 적립금/내게시물/커뮤니티/공지사항/상품 Q&A/제작문의/도매인증 10개가 그대로 저장돼 있었음).
+const NON_CATEGORY_TEXT_RE = /로그인|회원가입|로그아웃|장바구니|마이\s*(페이지|쇼핑)|고객센터|검색어?|주문|배송조회|결제|사이트맵|관리자|촬영명령|입고대?기|입고대령|단가\s*(인상|조정)|재진행|색상?\s*(별)?\s*분류|공지사항|공지\b|납품\s*사례|제작\s*문의|도매\s*인증|상품\s*문의|상품\s*Q\s*&\s*A|내\s*게시물|커뮤니티|회원\s*정보|정보\s*수정|적립금|관심\s*상품|최근\s*본\s*상품|위시\s*리스트|찜\s*(목록)?|기획전|notice|cart|login|logout|mypage|search|sitemap|wishlist/i
 
 // 공지/문의/후기 등 게시판 글은 플랫폼 무관하게 URL 경로에 거의 항상 board/bbs 세그먼트를 쓴다(카페24
 // board/view.php, 고도몰 bbs/board.php 등) — deriveCategoryUrlPattern(학습)과 scanByKnownUrlPattern
@@ -5470,6 +5475,22 @@ async function discoverCategoryMenuByVision(
           console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: 클릭 후에도 링크 0개(${url}, 시도 ${attemptNo})`)
           return null
         }
+      }
+      // 케이스 a(화면 클릭 없이 읽기)는 matchVisibleCategoryLinksToHrefs 뒤에 isNonCategoryCandidate
+      // 필터를 거는데, 이 케이스(트리거를 실제로 클릭해 연 메뉴를 DOM으로 스캔)는 그 필터가 빠져 있었다
+      // — scanCategoryMenuRobust가 열린 메뉴의 <li> 트리를 그대로 따라가다 보니, 같은 메뉴 안에 나란히
+      // 있는 장바구니/마이쇼핑/주문조회/공지사항/제작문의/도매인증 같은 계정·게시판 링크까지 하위
+      // 카테고리로 같이 주워왔다(모자사러 실사용 확인, 2026-09-27 — "캡모자" 밑에 이런 10개가 하위
+      // 카테고리로 그대로 저장됨). 게다가 필터가 없어 개수가 부풀려진 이 결과가, 아래에서 케이스 a(제대로
+      // 필터링된 결과)보다 "링크를 더 많이 찾았다"는 이유로 오히려 우선 채택되는 이중 사고였다.
+      const beforeFilterCount = links.length
+      links = links.filter(l => !isNonCategoryCandidate(l.name, l.href))
+      if (links.length !== beforeFilterCount) {
+        console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: 클릭 후 스캔한 ${beforeFilterCount}개 중 카테고리 아닌 것으로 보이는 ${beforeFilterCount - links.length}개 제외 → ${links.length}개(${url}, 시도 ${attemptNo})`)
+      }
+      if (!links.length) {
+        console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: 클릭 후 걸러내고 나니 남은 링크 0개(${url}, 시도 ${attemptNo})`)
+        return null
       }
       if (!await looksLikeRealCategoryBatch(context, links, platform, productLinkSelector)) {
         console.log(`[카테고리탐지:진단:${mallName}] 화면 인식: 클릭 후 ${links.length}개 찾았지만 표본검증 실패(${url}, 시도 ${attemptNo}) — ${links.slice(0, 10).map(l => `${l.name}(${l.href})`).join(', ')}`)

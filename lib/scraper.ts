@@ -5050,6 +5050,15 @@ interface CategoryMenuDiscovery {
 // 믿는다(discoverCategoryMenuByVision의 케이스 a/b, discoverTopLevelCategoryLinks의 비전-vs-전수클릭
 // 경쟁이 공유하는 기준선 — 사용자 지시, 2026-09-12 "다른 방법으로 해").
 const VISION_CONFIDENT_GROUP_COUNT = 3
+// 그룹 수만 보면 "3개짜리 홍보 퀵메뉴(신상품/이벤트/오픈샵직배송류)"도 진짜 카테고리 사이드바(보통
+// 10개 이상)와 똑같이 "확신"으로 오인된다 — 실사용 확인(수진펫, 2026-09-27): "전용/땡처리★할인몰/
+// 오픈샵직배송" 3개 그룹, 그나마도 링크는 2개뿐인데 그룹 수 조건만으로 통과해버려, 실제 사이드바
+// (강아지사료/분유 등 11개 대분류)를 찾을 수 있었던 전수클릭(discoverCategoryMenuByExhaustiveHeaderClick)
+// 시도 자체가 아예 안 됐다. 그 뒤 이 "땡처리★할인몰"의 하위구조를 확장하다, 그 페이지에도 걸려있는
+// 사이트 전체 GNB를 하위 메뉴로 잘못 재검출해(topLevelHrefSet 가드는 "이미 아는 최상위 href"만
+// 걸러내는데, 애초에 진짜 최상위를 못 찾았으니 이 가드도 못 걸렀다) 105개짜리 엉뚱한 "하위 카테고리"가
+// 만들어졌다. 그룹 수와 별개로 실제로 찾은 링크 수도 최소한 이 정도는 돼야 "확신"으로 인정한다.
+const VISION_CONFIDENT_MIN_LINKS = 5
 
 /** 메뉴가 열렸는데도(트리거 클릭 성공) scanCategoryMenuRobust가 링크를 하나도 못 찾는 몰이 있다 — 실사용
  *  확인(2026-09-20, 도매창고): 카테고리 항목이 `<a href>`도 `onclick="location.href=...`도 아니라
@@ -5436,8 +5445,8 @@ async function discoverCategoryMenuByVision(
         console.log(`[카테고리탐지:진단:${mallName}] 화면 인식(클릭 없이): 그룹 ${hierarchy.length}개 읽었지만 DOM에서 href를 못 찾음 — 트리거도 같이 확인(${url}, 시도 ${attemptNo})`)
       } else if (!await looksLikeRealCategoryBatch(context, matched, platform, productLinkSelector)) {
         console.log(`[카테고리탐지:진단:${mallName}] 화면 인식(클릭 없이): ${matched.length}개 찾았지만 표본검증 실패 — 트리거도 같이 확인(${url}, 시도 ${attemptNo})`)
-      } else if (hierarchy.length < VISION_CONFIDENT_GROUP_COUNT) {
-        console.log(`[카테고리탐지:진단:${mallName}] 화면 인식(클릭 없이): 그룹 ${hierarchy.length}개뿐이라 못 미더움 — 트리거도 같이 확인(${url}, 시도 ${attemptNo})`)
+      } else if (hierarchy.length < VISION_CONFIDENT_GROUP_COUNT || matched.length < VISION_CONFIDENT_MIN_LINKS) {
+        console.log(`[카테고리탐지:진단:${mallName}] 화면 인식(클릭 없이): 그룹 ${hierarchy.length}개·링크 ${matched.length}개뿐이라 못 미더움 — 트리거도 같이 확인(${url}, 시도 ${attemptNo})`)
       } else {
         console.log(`[카테고리탐지:진단:${mallName}] 화면 인식(클릭 없이 바로 읽음): "${hierarchy.map(h => h.group).join(', ')}" ${hierarchy.length}개 그룹 → ${matched.length}개 링크(표본검증 통과, 시도 ${attemptNo})`)
         caseAResult = { links: matched, groupCount: hierarchy.length, screenNames: candidates.map(c => c.leafText), screenHierarchy: hierarchy, menuLinks: pageLinks }
@@ -5763,7 +5772,7 @@ async function discoverTopLevelCategoryLinks(
   // 받아들이고, 그렇지 않으면(그룹 1~2개 — 부분 결과일 위험이 큼) 헤더 아이콘을 전부 실제로 클릭해보는
   // 더 느리지만 확실한 방법도 마저 시도해 더 나은 쪽(찾은 개수×그룹 수가 더 큰 쪽)을 채택한다.
   const visionScore = visionResult.links.length * Math.max(1, visionResult.groupCount)
-  if (visionResult.links.length && visionResult.groupCount >= VISION_CONFIDENT_GROUP_COUNT) {
+  if (visionResult.links.length >= VISION_CONFIDENT_MIN_LINKS && visionResult.groupCount >= VISION_CONFIDENT_GROUP_COUNT) {
     return { links: visionResult.links, textlessHrefs: [], aiUsed: false, screenNames: visionResult.screenNames, screenHierarchy: visionResult.screenHierarchy, menuLinks: visionResult.menuLinks }
   }
 

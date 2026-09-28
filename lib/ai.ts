@@ -725,7 +725,7 @@ ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
 
   const groqStartedAt = Date.now()
   let indices = await pickIndicesWithGroq(
-    prompt, 'set_category_link_indices',
+    mallName, '카테고리 후보 선별', prompt, 'set_category_link_indices',
     '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
     signal,
   )
@@ -774,9 +774,15 @@ const LAST_PAGE_TOOL_DESCRIPTION = '마지막 페이지로 이동하는 링크�
  *  조건에 맞는 인덱스만 고르기"라는 같은 패턴이라 이 헬퍼 하나를 공유한다(2026-09-07, 사용자 요청 —
  *  펫토리 카테고리 하위구조 판별에 Qwen을 실제로 붙여보니 품질이 좋아서 "카테고리/정렬 등 다른 판별에도
  *  Qwen을 써서 결과물 품질을 높여달라") — 원래는 detectLastPageLinkWithAI 하나만 이 Groq 경로를 썼는데
- *  (last-page 전용 하드코딩), toolName/toolDescription을 인자로 받도록 일반화했다. */
+ *  (last-page 전용 하드코딩), toolName/toolDescription을 인자로 받도록 일반화했다.
+ *
+ *  mallName/taskLabel(2026-09-28 추가) — 이 함수는 원래 실패하면 조용히 null만 돌려줘서(catch에서 이유를
+ *  버림), "카테고리 후보 선별"이 Groq에서 연달아 0.2~0.3초 만에 실패하는 게 화면에 보여도 429(레이트리밋)
+ *  인지 403(네트워크 차단)인지 알 방법이 없었다(사용자 지적 — "그 원인을 정확히 짚을 수 있어?"). 형제
+ *  화면인식 함수들(detectCategoryHierarchyWithGroqVision 등)은 전부 HTTP status/본문을 [AI:groq]로 남기는데
+ *  이 함수만 예외였다 — 같은 패턴으로 맞춘다. */
 async function pickIndicesWithGroq(
-  prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal,
+  mallName: string, taskLabel: string, prompt: string, toolName: string, toolDescription: string, signal?: AbortSignal,
 ): Promise<number[] | null> {
   if (!isAiProviderEnabled('groq') || !process.env.GROQ_API_KEY) return null
   try {
@@ -803,13 +809,20 @@ async function pickIndicesWithGroq(
         tool_choice: { type: 'function', function: { name: toolName } },
       }),
     })
-    if (!res.ok) return null
+    if (!res.ok) {
+      console.log(`[AI:groq] ${taskLabel} 실패(${mallName}) — HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`)
+      return null
+    }
     const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
     const call = data.choices?.[0]?.message?.tool_calls?.[0]
-    if (!call) return null
+    if (!call) {
+      console.log(`[AI:groq] ${taskLabel} 실패(${mallName}) — 도구 호출 없이 응답함`)
+      return null
+    }
     const args = JSON.parse(call.function.arguments) as { indices?: unknown }
     return Array.isArray(args.indices) ? args.indices.filter((i): i is number => Number.isInteger(i)) : []
-  } catch {
+  } catch (e) {
+    console.log(`[AI:groq] ${taskLabel} 실패(${mallName}) — ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`)
     return null
   }
 }
@@ -837,7 +850,7 @@ export async function detectLastPageLinkWithAI(
   const candidates = linkCandidates.slice(0, OLLAMA_MAX_CANDIDATES)
   const prompt = buildLastPagePrompt(mallName, baseUrl, candidates)
 
-  let indices = await pickIndicesWithGroq(prompt, 'set_last_page_link_index', LAST_PAGE_TOOL_DESCRIPTION, signal)
+  let indices = await pickIndicesWithGroq(mallName, '마지막 페이지 링크 판별', prompt, 'set_last_page_link_index', LAST_PAGE_TOOL_DESCRIPTION, signal)
   if (indices === null) {
     // Groq가 키 없음/한도 초과/오류로 실패했을 때만 로컬 Ollama를 시도한다 — Groq가 "성공적으로 빈 배열"을
     // 반환했을 때(확신 없어 안 고름)는 이미 유효한 답이므로 Ollama로 다시 물어보지 않는다.
@@ -892,7 +905,7 @@ export async function detectSortOptionsWithAI(
 ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
 
   let indices = await pickIndicesWithGroq(
-    prompt, 'set_sort_option_indices',
+    mallName, '정렬 옵션 링크 선택', prompt, 'set_sort_option_indices',
     '정렬 기준 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
     signal,
   )

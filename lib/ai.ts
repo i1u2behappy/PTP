@@ -28,8 +28,17 @@ import { ALL_AI_PROVIDERS, isAiProviderEnabled } from './aiProviderGate'
  *  함수들이 자기 몫을 그 배열에 追加한다 — 반환 타입을 안 바꾸고도(기존 호출부를 안 건드리고도) 부가
  *  정보만 곁다리로 모을 수 있다. 카테고리/정렬처럼 한 번의 몰구조분석 안에서도 항목마다 다른 공급자가
  *  성공할 수 있어(예: 카테고리는 Groq, 정렬은 한도초과로 로컬) 단일 값이 아니라 배열로 둔다. 'gemini'는
- *  2026-09-25 Groq 일일 한도 대응으로 Groq/Ollama 사이에 추가됨(GEMINI_VISION_MODEL 주석 참고).*/
-export interface VisionAttempt { task: string; provider: 'groq' | 'gemini' | 'ollama' }
+ *  2026-09-25 Groq 일일 한도 대응으로 Groq/Ollama 사이에 추가됨(GEMINI_VISION_MODEL 주석 참고).
+ *
+ *  elapsedMs/success는 2026-09-28에 추가됐다(사용자 지적 — "카테고리 구조 확인"/"카테고리 하위구조
+ *  확인"이 전체 시간의 95%를 차지하는데 "AI 호출 상세"엔 마지막 리포트 생성 단계(15초)만 보여 AI가 그
+ *  긴 시간의 원인인지 알 방법이 없었다). 예전엔 **성공한 시도만** 시간 없이 기록했는데, 그러면 "Groq
+ *  실패 → Gemini 실패 → Ollama 성공"에서 앞의 두 실패가 얼마나 걸렸는지(특히 Ollama 타임아웃처럼 그
+ *  자체로 수십~수백 초가 걸리는 실패)가 전부 사라져 정작 시간을 가장 많이 잡아먹은 시도가 안 보였다.
+ *  이제 성공/실패 관계없이 시도마다 기록해 AiReportAttempt와 같은 모양으로 "AI 호출 상세"에 합쳐 보여준다
+ *  (에러 메시지까지는 안 담는다 — 이 함수들은 AiReportAttempt 계열과 달리 실패 사유를 onError로 밖에
+ *  알려주는 구조가 아니라, 그러려면 공급자별 저수준 함수 15개 전부를 고쳐야 해 이번 범위를 벗어난다). */
+export interface VisionAttempt { task: string; provider: 'groq' | 'gemini' | 'ollama'; elapsedMs: number; success: boolean }
 
 /** generateMallProfileReport가 Anthropic→Gemini→Groq→Ollama 순으로 폴백하며 실제로 시도한 각 공급자의
  *  결과 — 최종 화면 배지("AI 호출 실패"/"AI 분석 성공(이전 리포트 유지 중)")만 봐서는 "어느 공급자가 왜
@@ -714,24 +723,25 @@ export async function detectCategoryLinksWithAI(
 [링크 목록 (인덱스. "링크텍스트" → URL)]
 ${candidates.map((c, i) => `${i}. "${c.text}" → ${c.href}`).join('\n')}`
 
+  const groqStartedAt = Date.now()
   let indices = await pickIndicesWithGroq(
     prompt, 'set_category_link_indices',
     '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
     signal,
   )
-  if (indices !== null) {
-    log?.push({ task: '카테고리 후보 선별', provider: 'groq' })
-  } else {
+  log?.push({ task: '카테고리 후보 선별', provider: 'groq', elapsedMs: Date.now() - groqStartedAt, success: indices !== null })
+  if (indices === null) {
     // Groq가 키 없음/한도 초과/오류로 실패했을 때만 로컬 Ollama를 시도한다 — Groq가 "성공적으로 빈
     // 배열"을 반환했을 때(확신 없어 안 고름)는 이미 유효한 답이므로 Ollama로 다시 물어보지 않는다
     // (detectLastPageLinkWithAI와 같은 패턴, 2026-09-07 — 사용자 요청으로 카테고리/정렬 판별에도 Qwen을
     // 우선 시도하도록 확장. Ollama만 쓰던 이전 결정은 "어떤 외부 서비스에도 의존하지 않겠다"는 취지였는데,
     // Groq를 완전히 대체가 아니라 "더 빠르고 품질 좋은 1차 시도"로 앞에 두고 Ollama를 그대로 안전망으로
     // 남겨 그 취지를 지킨다 — 키 없음/한도초과/장애 어떤 이유로든 Groq가 안 되면 자동으로 Ollama로 넘어감).
+    const ollamaStartedAt = Date.now()
     indices = await pickIndicesWithOllama(prompt, 'set_category_link_indices',
       '실제 상품 카테고리 링크라고 확신하는 항목의 인덱스만 반환한다. 확신 없는 항목은 넣지 않는다.',
       signal, timeoutMs)
-    if (indices !== null) log?.push({ task: '카테고리 후보 선별', provider: 'ollama' })
+    log?.push({ task: '카테고리 후보 선별', provider: 'ollama', elapsedMs: Date.now() - ollamaStartedAt, success: indices !== null })
   }
   indices = indices ?? []
   const seen = new Set<number>()
@@ -1128,18 +1138,17 @@ export async function detectSortOptionsFromScreenshot(
    *  프롬프트 자체에도 "안 보여도 참고만" 이라고 명시해뒀다(buildSortLabelScreenshotPrompt 참고). */
   knownExamples?: string[], log?: VisionAttempt[],
 ): Promise<string[] | null> {
+  const groqStartedAt = Date.now()
   const viaGroq = await detectSortLabelsWithGroqVision(mallName, imageBase64, mimeType, signal, knownExamples)
-  if (viaGroq !== null) {
-    log?.push({ task: '정렬 라벨', provider: 'groq' })
-    return viaGroq
-  }
+  log?.push({ task: '정렬 라벨', provider: 'groq', elapsedMs: Date.now() - groqStartedAt, success: viaGroq !== null })
+  if (viaGroq !== null) return viaGroq
+  const geminiStartedAt = Date.now()
   const viaGemini = await detectSortLabelsWithGeminiVision(mallName, imageBase64, mimeType, signal, knownExamples)
-  if (viaGemini !== null) {
-    log?.push({ task: '정렬 라벨', provider: 'gemini' })
-    return viaGemini
-  }
+  log?.push({ task: '정렬 라벨', provider: 'gemini', elapsedMs: Date.now() - geminiStartedAt, success: viaGemini !== null })
+  if (viaGemini !== null) return viaGemini
+  const ollamaStartedAt = Date.now()
   const viaOllama = await detectSortLabelsWithOllamaVision(mallName, imageBase64, signal, knownExamples)
-  if (viaOllama !== null) log?.push({ task: '정렬 라벨', provider: 'ollama' })
+  log?.push({ task: '정렬 라벨', provider: 'ollama', elapsedMs: Date.now() - ollamaStartedAt, success: viaOllama !== null })
   return viaOllama
 }
 
@@ -1405,18 +1414,17 @@ export async function detectCategoryMenuTriggerFromScreenshot(
   const gridded = await overlayGridForVision(imageBase64)
   const gridImage = gridded?.base64 ?? imageBase64
   const gridMimeType = gridded?.mimeType ?? mimeType
+  const groqStartedAt = Date.now()
   const viaGroq = await detectCategoryMenuTriggerWithGroqVision(mallName, gridImage, gridMimeType, signal)
-  if (viaGroq !== null) {
-    log?.push({ task: '카테고리 메뉴 트리거', provider: 'groq' })
-    return sanitizeCategoryMenuTrigger(viaGroq)
-  }
+  log?.push({ task: '카테고리 메뉴 트리거', provider: 'groq', elapsedMs: Date.now() - groqStartedAt, success: viaGroq !== null })
+  if (viaGroq !== null) return sanitizeCategoryMenuTrigger(viaGroq)
+  const geminiStartedAt = Date.now()
   const viaGemini = await detectCategoryMenuTriggerWithGeminiVision(mallName, gridImage, gridMimeType, signal)
-  if (viaGemini !== null) {
-    log?.push({ task: '카테고리 메뉴 트리거', provider: 'gemini' })
-    return sanitizeCategoryMenuTrigger(viaGemini)
-  }
+  log?.push({ task: '카테고리 메뉴 트리거', provider: 'gemini', elapsedMs: Date.now() - geminiStartedAt, success: viaGemini !== null })
+  if (viaGemini !== null) return sanitizeCategoryMenuTrigger(viaGemini)
+  const ollamaStartedAt = Date.now()
   const viaOllama = await detectCategoryMenuTriggerWithOllamaVision(mallName, gridImage, signal)
-  if (viaOllama !== null) log?.push({ task: '카테고리 메뉴 트리거', provider: 'ollama' })
+  log?.push({ task: '카테고리 메뉴 트리거', provider: 'ollama', elapsedMs: Date.now() - ollamaStartedAt, success: viaOllama !== null })
   return sanitizeCategoryMenuTrigger(viaOllama)
 }
 
@@ -1600,18 +1608,17 @@ export async function detectSortTriggerFromScreenshot(
   const gridded = await overlayGridForVision(imageBase64)
   const gridImage = gridded?.base64 ?? imageBase64
   const gridMimeType = gridded?.mimeType ?? mimeType
+  const groqStartedAt = Date.now()
   const viaGroq = await detectSortTriggerWithGroqVision(mallName, gridImage, gridMimeType, signal)
-  if (viaGroq !== null) {
-    log?.push({ task: '정렬 트리거', provider: 'groq' })
-    return sanitizeSortTrigger(viaGroq)
-  }
+  log?.push({ task: '정렬 트리거', provider: 'groq', elapsedMs: Date.now() - groqStartedAt, success: viaGroq !== null })
+  if (viaGroq !== null) return sanitizeSortTrigger(viaGroq)
+  const geminiStartedAt = Date.now()
   const viaGemini = await detectSortTriggerWithGeminiVision(mallName, gridImage, gridMimeType, signal)
-  if (viaGemini !== null) {
-    log?.push({ task: '정렬 트리거', provider: 'gemini' })
-    return sanitizeSortTrigger(viaGemini)
-  }
+  log?.push({ task: '정렬 트리거', provider: 'gemini', elapsedMs: Date.now() - geminiStartedAt, success: viaGemini !== null })
+  if (viaGemini !== null) return sanitizeSortTrigger(viaGemini)
+  const ollamaStartedAt = Date.now()
   const viaOllama = await detectSortTriggerWithOllamaVision(mallName, gridImage, signal)
-  if (viaOllama !== null) log?.push({ task: '정렬 트리거', provider: 'ollama' })
+  log?.push({ task: '정렬 트리거', provider: 'ollama', elapsedMs: Date.now() - ollamaStartedAt, success: viaOllama !== null })
   return sanitizeSortTrigger(viaOllama)
 }
 
@@ -1884,18 +1891,17 @@ function buildVisibleCategoryHierarchyPrompt(mallName: string): string {
 export async function detectVisibleCategoryHierarchy(
   mallName: string, imageBase64: string, mimeType: string, signal?: AbortSignal, log?: VisionAttempt[],
 ): Promise<{ group: string; items: string[] }[] | null> {
+  const groqStartedAt = Date.now()
   const viaGroq = await detectCategoryHierarchyWithGroqVision(mallName, imageBase64, mimeType, signal)
-  if (viaGroq !== null) {
-    log?.push({ task: '카테고리 계층', provider: 'groq' })
-    return viaGroq
-  }
+  log?.push({ task: '카테고리 계층', provider: 'groq', elapsedMs: Date.now() - groqStartedAt, success: viaGroq !== null })
+  if (viaGroq !== null) return viaGroq
+  const geminiStartedAt = Date.now()
   const viaGemini = await detectCategoryHierarchyWithGeminiVision(mallName, imageBase64, mimeType, signal)
-  if (viaGemini !== null) {
-    log?.push({ task: '카테고리 계층', provider: 'gemini' })
-    return viaGemini
-  }
+  log?.push({ task: '카테고리 계층', provider: 'gemini', elapsedMs: Date.now() - geminiStartedAt, success: viaGemini !== null })
+  if (viaGemini !== null) return viaGemini
+  const ollamaStartedAt = Date.now()
   const viaOllama = await detectCategoryHierarchyWithOllamaVision(mallName, imageBase64, signal)
-  if (viaOllama !== null) log?.push({ task: '카테고리 계층', provider: 'ollama' })
+  log?.push({ task: '카테고리 계층', provider: 'ollama', elapsedMs: Date.now() - ollamaStartedAt, success: viaOllama !== null })
   return viaOllama
 }
 

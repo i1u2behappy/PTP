@@ -395,8 +395,10 @@ interface MallProfileSignals {
    *  (사용자 요청, 2026-09-05, lib/scraper.ts의 MallProfileSignals와 같은 모양). */
   newCategoryHrefs?: string[]
   /** lib/scraper.ts의 MallProfileSignals.visionProviderLog와 같은 모양 — 카테고리/정렬 화면인식이 이번
-   *  실행에서 실제로 Groq/Gemini/로컬 Ollama 중 뭘 썼는지(사용자 지시, 2026-09-22). */
-  visionProviderLog?: { task: string; provider: 'groq' | 'gemini' | 'ollama' }[]
+   *  실행에서 실제로 Groq/Gemini/로컬 Ollama 중 뭘 썼는지(사용자 지시, 2026-09-22). elapsedMs/success는
+   *  2026-09-28 추가 — "AI 호출 상세"에 aiReportAttempts와 합쳐서 보여주는 데 쓴다(lib/ai.ts의
+   *  VisionAttempt 주석 참고). */
+  visionProviderLog?: { task: string; provider: 'groq' | 'gemini' | 'ollama'; elapsedMs: number; success: boolean }[]
   /** lib/scraper.ts의 MallProfileSignals.aiReportAttempts와 같은 모양 — "몰 구조분석" AI 리포트가
    *  Anthropic→Gemini→Groq→Ollama 순으로 폴백하며 이번 실행에서 실제로 시도한 각 공급자의 결과
    *  (성공/실패·원인·걸린 시간, 사용자 지시 2026-09-23). */
@@ -896,26 +898,41 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
           {/* "AI 호출 실패"/"AI 분석 성공(이전 리포트 유지 중)" 배지만 봐서는 어느 공급자가 왜 실패했는지
               (크레딧 부족/레이트리밋/타임아웃 등) 알 수 없다는 지적(사용자 지시, 2026-09-23)으로, 이번
               실행에서 실제로 시도한 공급자별 결과를 펼쳐볼 수 있게 한다 — 시도가 하나도 없으면(aiProviders를
-              전부 꺼둔 채 곧장 규칙 기반으로 간 경우) 아무것도 안 보인다. */}
-          {result.signals.aiReportAttempts && result.signals.aiReportAttempts.length > 0 && (
-            <details className="mb-3 text-xs bg-gray-50 rounded-lg px-3 py-2">
-              <summary className="cursor-pointer font-semibold text-gray-500">AI 호출 상세 ({result.signals.aiReportAttempts.length}개 공급자 시도)</summary>
-              <ul className="mt-1.5 space-y-0.5">
-                {result.signals.aiReportAttempts.map((a, i) => {
-                  // 공급자 라벨(AI_PROVIDER_OPTIONS)엔 Ollama처럼 작업에 따라 모델이 갈리는 경우가 있어
-                  // (14b는 후보 선별, 8b는 이 리포트 생성) 라벨의 괄호 설명 대신 이번 시도가 실제로 쓴
-                  // 모델(a.model)을 직접 붙인다 — "Ollama(qwen3:8b)"처럼 어느 모델이 쓰였는지 헷갈리지 않게.
-                  const providerName = AI_PROVIDER_OPTIONS.find(o => o.id === a.provider)?.label.split('(')[0].trim() ?? a.provider
-                  return (
+              전부 꺼둔 채 곧장 규칙 기반으로 간 경우) 아무것도 안 보인다.
+              2026-09-28부터 카테고리/정렬 화면인식(visionProviderLog)도 여기 같이 합쳐서 보여준다 —
+              "카테고리 구조 확인"/"카테고리 하위구조 확인"이 전체 시간의 대부분을 차지하는데, 이 패널이
+              마지막 리포트 생성 단계(aiReportAttempts)만 보여줘서 "그 오래 걸린 단계에 AI가 쓰였는지"를
+              전혀 알 수 없다는 지적(사용자 지적) — 예전엔 성공한 화면인식만 시간 없이 기록해뒀는데, 이제
+              성공/실패 관계없이 시도마다 걸린 시간까지 기록해(lib/ai.ts의 VisionAttempt 주석 참고) 두
+              신호를 시간 순서대로 한 목록에 합친다. */}
+          {(() => {
+            const visionAttempts = (result.signals.visionProviderLog ?? []).map(v => ({
+              label: `[${v.task}] ${VISION_PROVIDER_BADGE[v.provider].label}`,
+              elapsedMs: v.elapsedMs, success: v.success, error: undefined as string | undefined,
+            }))
+            // 공급자 라벨(AI_PROVIDER_OPTIONS)엔 Ollama처럼 작업에 따라 모델이 갈리는 경우가 있어(14b는
+            // 후보 선별, 8b는 이 리포트 생성) 라벨의 괄호 설명 대신 이번 시도가 실제로 쓴 모델(a.model)을
+            // 직접 붙인다 — "Ollama(qwen3:8b)"처럼 어느 모델이 쓰였는지 헷갈리지 않게.
+            const reportAttempts = (result.signals.aiReportAttempts ?? []).map(a => ({
+              label: `[AI 리포트] ${AI_PROVIDER_OPTIONS.find(o => o.id === a.provider)?.label.split('(')[0].trim() ?? a.provider}(${a.model})`,
+              elapsedMs: a.elapsedMs, success: a.success, error: a.error,
+            }))
+            const allAttempts = [...visionAttempts, ...reportAttempts]
+            if (!allAttempts.length) return null
+            return (
+              <details className="mb-3 text-xs bg-gray-50 rounded-lg px-3 py-2">
+                <summary className="cursor-pointer font-semibold text-gray-500">AI 호출 상세 ({allAttempts.length}개 시도)</summary>
+                <ul className="mt-1.5 space-y-0.5">
+                  {allAttempts.map((a, i) => (
                     <li key={i} className={a.success ? 'text-teal-700' : 'text-rose-600'}>
-                      {a.success ? '✓' : '✗'} {providerName}({a.model})
+                      {a.success ? '✓' : '✗'} {a.label}
                       {' · '}{(a.elapsedMs / 1000).toFixed(1)}초{!a.success && a.error ? ` · ${a.error}` : ''}
                     </li>
-                  )
-                })}
-              </ul>
-            </details>
-          )}
+                  ))}
+                </ul>
+              </details>
+            )
+          })()}
           {/* 분석 도중/직후 로그인 세션이 끊긴 것으로 보이는 경우 — lib/scraper.ts의
               MallProfileSignals.sessionLostDuringAnalysis 주석 참고. 원인은 아직 정확히 확정되지 않았고
               (걸스굽 실사용 확인, 2026-09-01) 이 경고 자체가 약한 신호(로그아웃 링크를 못 찾음)라 확정

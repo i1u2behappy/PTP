@@ -368,8 +368,12 @@ interface MallProfileSignals {
   /** lib/scraper.ts의 MallProfileSignals.stepTimings와 같은 모양 — "몰 구조분석"의 각 단계(목록 페이지
    *  확인/카테고리 구조 확인/카테고리 하위구조 확인/정렬 옵션 확인/회사정보 확인/샘플 상품 확인/AI 분석
    *  등)가 각각 몇 초 걸렸는지. totalElapsedSec·aiAnalysisElapsedSec 둘만으론 "AI 아닌 나머지가 어디서
-   *  오래 걸렸는지" 알 수 없어(사용자 지적, 2026-09-26) 추가. */
-  stepTimings?: { label: string; elapsedSec: number }[]
+   *  오래 걸렸는지" 알 수 없어(사용자 지적, 2026-09-26) 추가.
+   *  visionLogEndIndex: lib/scraper.ts의 MallProfileSignals.stepTimings 주석 참고 — 이 단계가 끝난
+   *  시점까지 visionProviderLog에 쌓인 항목 수(누적). 화면이 "이전 경계~이 경계" 구간을 잘라 그 단계
+   *  동안의 AI 시도만 정확히 보여주는 데 쓴다(2026-09-28, "AI호출상세 내용을 단계별 소요시간에 각
+   *  단계별 소요시간 우측에 표시해 줘"). */
+  stepTimings?: { label: string; elapsedSec: number; visionLogEndIndex: number }[]
   /** 몰 구조분석 도중/직후 로그인 세션이 끊긴 것으로 보이면 true — lib/scraper.ts의
    *  MallProfileSignals.sessionLostDuringAnalysis 주석 참고. */
   sessionLostDuringAnalysis?: boolean
@@ -873,62 +877,70 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
               저렇게밖에 안나오지? AI뿐만이 아니라 전체적으로 어떤 내용으로 얼마나 시간이 걸린 건지를
               파악할 수 있게"). 로딩 중 진행 표시(MALL_PROFILE_STEP_ORDER)와 같은 단계 이름으로, 완료 뒤엔
               각 단계가 실제로 몇 초/전체의 몇 %였는지 펼쳐볼 수 있게 한다 — 가장 오래 걸린 단계를 굵게
-              표시해 "왜 오래 걸렸는지"에 바로 답한다. */}
-          {result.signals.stepTimings && result.signals.stepTimings.length > 0 && (
-            <details className="mb-3 text-xs bg-gray-50 rounded-lg px-3 py-2">
-              <summary className="cursor-pointer font-semibold text-gray-500">단계별 소요시간 ({result.signals.stepTimings.length}단계)</summary>
-              <ul className="mt-1.5 space-y-0.5">
-                {(() => {
-                  const timings = result.signals.stepTimings!
-                  const total = result.signals.totalElapsedSec ?? timings.reduce((sum, t) => sum + t.elapsedSec, 0)
-                  const maxSec = Math.max(...timings.map(t => t.elapsedSec))
-                  return timings.map((t, i) => {
-                    const pct = total > 0 ? Math.round((t.elapsedSec / total) * 100) : null
-                    const isSlowest = maxSec > 0 && t.elapsedSec === maxSec
-                    return (
-                      <li key={i} className={isSlowest ? 'text-amber-700 font-semibold' : 'text-gray-600'}>
-                        {t.label} · {formatElapsedSeconds(Math.round(t.elapsedSec))}{pct != null ? ` (전체의 ${pct}%)` : ''}
-                      </li>
-                    )
-                  })
-                })()}
-              </ul>
-            </details>
-          )}
-          {/* "AI 호출 실패"/"AI 분석 성공(이전 리포트 유지 중)" 배지만 봐서는 어느 공급자가 왜 실패했는지
-              (크레딧 부족/레이트리밋/타임아웃 등) 알 수 없다는 지적(사용자 지시, 2026-09-23)으로, 이번
-              실행에서 실제로 시도한 공급자별 결과를 펼쳐볼 수 있게 한다 — 시도가 하나도 없으면(aiProviders를
-              전부 꺼둔 채 곧장 규칙 기반으로 간 경우) 아무것도 안 보인다.
-              2026-09-28부터 카테고리/정렬 화면인식(visionProviderLog)도 여기 같이 합쳐서 보여준다 —
-              "카테고리 구조 확인"/"카테고리 하위구조 확인"이 전체 시간의 대부분을 차지하는데, 이 패널이
-              마지막 리포트 생성 단계(aiReportAttempts)만 보여줘서 "그 오래 걸린 단계에 AI가 쓰였는지"를
-              전혀 알 수 없다는 지적(사용자 지적) — 예전엔 성공한 화면인식만 시간 없이 기록해뒀는데, 이제
-              성공/실패 관계없이 시도마다 걸린 시간까지 기록해(lib/ai.ts의 VisionAttempt 주석 참고) 두
-              신호를 시간 순서대로 한 목록에 합친다. */}
-          {(() => {
-            const visionAttempts = (result.signals.visionProviderLog ?? []).map(v => ({
-              label: `[${v.task}] ${VISION_PROVIDER_BADGE[v.provider].label}`,
-              elapsedMs: v.elapsedMs, success: v.success, error: undefined as string | undefined,
-            }))
-            // 공급자 라벨(AI_PROVIDER_OPTIONS)엔 Ollama처럼 작업에 따라 모델이 갈리는 경우가 있어(14b는
-            // 후보 선별, 8b는 이 리포트 생성) 라벨의 괄호 설명 대신 이번 시도가 실제로 쓴 모델(a.model)을
-            // 직접 붙인다 — "Ollama(qwen3:8b)"처럼 어느 모델이 쓰였는지 헷갈리지 않게.
-            const reportAttempts = (result.signals.aiReportAttempts ?? []).map(a => ({
-              label: `[AI 리포트] ${AI_PROVIDER_OPTIONS.find(o => o.id === a.provider)?.label.split('(')[0].trim() ?? a.provider}(${a.model})`,
-              elapsedMs: a.elapsedMs, success: a.success, error: a.error,
-            }))
-            const allAttempts = [...visionAttempts, ...reportAttempts]
-            if (!allAttempts.length) return null
+              표시해 "왜 오래 걸렸는지"에 바로 답한다.
+              원래는 이 목록과 별개로 "AI 호출 상세" 패널을 하단에 따로 뒀는데, "카테고리 구조 확인"/
+              "카테고리 하위구조 확인" 단계가 전체 시간을 대부분 차지하는데도 그 단계 줄만 봐선 AI가
+              쓰였는지 전혀 알 수 없어 패널을 따로 펼쳐 대조해야 했다(사용자 지적, 2026-09-28 —
+              "AI호출상세 내용을 단계별 소요시간에 각 단계별 소요시간 우측에 표시해 줘"). 이제 각 단계
+              경계에서 스냅샷한 visionLogEndIndex(lib/scraper.ts의 MallProfileSignals.stepTimings 주석
+              참고)로 visionProviderLog를 "그 단계 동안 쌓인 구간"만 잘라 해당 줄 우측/아래에 바로 붙인다
+              — task 이름만으론 카테고리 관련 화면인식 함수가 최초 발견과 하위구조 확장 양쪽에서 공유돼
+              어느 단계 소속인지 알 수 없었는데, 이 방식은 실행 순서 그대로라 정확하다. aiReportAttempts는
+              항상 마지막 단계("AI로 결제/배송/업체정보 분석 중...") 안에서만 일어나므로(그 뒤로는 추가
+              step() 호출이 없다, lib/scraper.ts 확인) 마지막 줄에만 붙인다.
+              elapsedMs가 없는 항목(시간 미기록)이 "NaN초"로 보였던 문제(사용자 지적, 2026-09-28 스크린샷)
+              — VisionAttempt에 elapsedMs/success를 기록하기 시작한 커밋(2026-09-28) 이전부터 떠 있던
+              워커 프로세스가 그 실행 내내 옛 코드(성공 시에만, 시간 없이 기록)로 돈 흔적이라 이후
+              재시작되면 재발하지 않지만, 데이터 결손이 다시 생겨도 깨진 표시가 안 뜨게 아래서 방어한다. */}
+          {result.signals.stepTimings && result.signals.stepTimings.length > 0 && (() => {
+            const timings = result.signals.stepTimings!
+            const total = result.signals.totalElapsedSec ?? timings.reduce((sum, t) => sum + t.elapsedSec, 0)
+            const maxSec = Math.max(...timings.map(t => t.elapsedSec))
+            const visionLog = result.signals.visionProviderLog ?? []
+            const reportLog = result.signals.aiReportAttempts ?? []
+            type StepAttempt = { label: string; elapsedMs: number; success: boolean; error?: string }
+            const fmtAttemptElapsed = (ms: number) => Number.isFinite(ms) ? `${(ms / 1000).toFixed(1)}초` : '시간 미기록'
             return (
               <details className="mb-3 text-xs bg-gray-50 rounded-lg px-3 py-2">
-                <summary className="cursor-pointer font-semibold text-gray-500">AI 호출 상세 ({allAttempts.length}개 시도)</summary>
-                <ul className="mt-1.5 space-y-0.5">
-                  {allAttempts.map((a, i) => (
-                    <li key={i} className={a.success ? 'text-teal-700' : 'text-rose-600'}>
-                      {a.success ? '✓' : '✗'} {a.label}
-                      {' · '}{(a.elapsedMs / 1000).toFixed(1)}초{!a.success && a.error ? ` · ${a.error}` : ''}
-                    </li>
-                  ))}
+                <summary className="cursor-pointer font-semibold text-gray-500">단계별 소요시간 ({timings.length}단계)</summary>
+                <ul className="mt-1.5 space-y-1">
+                  {timings.map((t, i) => {
+                    const pct = total > 0 ? Math.round((t.elapsedSec / total) * 100) : null
+                    const isSlowest = maxSec > 0 && t.elapsedSec === maxSec
+                    const prevEndIndex = i > 0 ? timings[i - 1].visionLogEndIndex : 0
+                    const stepVisionAttempts: StepAttempt[] = visionLog.slice(prevEndIndex, t.visionLogEndIndex).map(v => ({
+                      label: `[${v.task}] ${VISION_PROVIDER_BADGE[v.provider].label}`, elapsedMs: v.elapsedMs, success: v.success,
+                    }))
+                    // 공급자 라벨(AI_PROVIDER_OPTIONS)엔 Ollama처럼 작업에 따라 모델이 갈리는 경우가 있어
+                    // 라벨의 괄호 설명 대신 이번 시도가 실제로 쓴 모델(a.model)을 직접 붙인다.
+                    const stepReportAttempts: StepAttempt[] = i === timings.length - 1 ? reportLog.map(a => ({
+                      label: `[AI 리포트] ${AI_PROVIDER_OPTIONS.find(o => o.id === a.provider)?.label.split('(')[0].trim() ?? a.provider}(${a.model})`,
+                      elapsedMs: a.elapsedMs, success: a.success, error: a.error,
+                    })) : []
+                    const attempts = [...stepVisionAttempts, ...stepReportAttempts]
+                    return (
+                      <li key={i}>
+                        <div className={`flex items-baseline justify-between gap-2 ${isSlowest ? 'text-amber-700 font-semibold' : 'text-gray-600'}`}>
+                          <span>{t.label} · {formatElapsedSeconds(Math.round(t.elapsedSec))}{pct != null ? ` (전체의 ${pct}%)` : ''}</span>
+                          {attempts.length > 0 && (
+                            <span className="shrink-0 font-normal text-gray-400">
+                              AI {attempts.length}회 · {attempts.filter(a => a.success).length}성공
+                            </span>
+                          )}
+                        </div>
+                        {attempts.length > 0 && (
+                          <ul className="mt-0.5 ml-3 space-y-0.5">
+                            {attempts.map((a, j) => (
+                              <li key={j} className={a.success ? 'text-teal-700' : 'text-rose-600'}>
+                                {a.success ? '✓' : '✗'} {a.label} · {fmtAttemptElapsed(a.elapsedMs)}
+                                {!a.success && a.error ? ` · ${a.error}` : ''}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </li>
+                    )
+                  })}
                 </ul>
               </details>
             )

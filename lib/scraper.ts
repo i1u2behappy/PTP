@@ -1596,8 +1596,15 @@ export interface MallProfileSignals {
    *  걸렸는지"를 알 수 없다(사용자 지적, 2026-09-26 — "AI뿐만이 아니라 전체적으로 어떤 내용으로 얼마나
    *  시간이 걸린 건지를 파악할 수 있게"). 화면 진행 표시(setSiteLockDetail)와 같은 라벨을 그대로 써서
    *  진행 중 봤던 단계 이름과 완료 후 소요시간 목록의 라벨이 항상 일치한다. totalElapsedSec와 같은
-   *  이유로 DB에도 남긴다. */
-  stepTimings?: { label: string; elapsedSec: number }[]
+   *  이유로 DB에도 남긴다.
+   *  visionLogEndIndex: 이 단계가 끝난 시점까지 visionProviderLog에 쌓인 항목 수(누적) — 2026-09-28
+   *  추가. "그 오래 걸린 단계에 AI가 쓰였는지"를 보려면 "AI 호출 상세"를 따로 펼쳐 대조해야 했는데
+   *  (사용자 지적 — "AI호출상세 내용을 단계별 소요시간에 각 단계별 소요시간 우측에 표시해 줘"), task
+   *  이름만으로는 카테고리 관련 화면인식 함수들(카테고리 계층/메뉴 트리거 등)이 최초 발견과 하위구조
+   *  확장 양쪽에서 공유돼 어느 단계 소속인지 확정할 수 없다. 대신 매 단계 경계(step() 호출) 시점의
+   *  visionProviderLog.length를 그대로 스냅샷으로 남겨, 화면이 "이전 경계~이 경계" 구간을 그대로 잘라
+   *  그 단계 동안 실제로 쌓인 시도만 정확히 보여줄 수 있게 한다(호출 순서=실행 순서이므로 정확하다). */
+  stepTimings?: { label: string; elapsedSec: number; visionLogEndIndex: number }[]
   /** deep 호출에서 첫 성공 샘플의 원문(product page innerText) — "몰 구조분석" 직후 자동으로
    *  추출규칙(runAutoAnalysis)을 생성할 때만 쓰고 DB에는 저장하지 않는다(applyProfileResult에서 제외).
    *  가벼운 구조변화감지(deep=false)에서는 항상 undefined. */
@@ -2860,13 +2867,20 @@ async function sampleMallProfile(
   // 어떤 내용으로 얼마나 시간이 걸린 건지를 파악할 수 있게"). console.log와 정확히 같은 시점·같은 값을
   // signals.stepTimings에도 남겨, 화면(MallProfileResultDisplay)이 "AI 호출 상세"와 같은 방식으로
   // 단계별 소요시간을 펼쳐볼 수 있게 한다.
-  const stepTimings: { label: string; elapsedSec: number }[] = []
+  const stepTimings: { label: string; elapsedSec: number; visionLogEndIndex: number }[] = []
+  // 카테고리/정렬 화면인식이 실제로 어느 공급자(Groq/로컬 Ollama)를 썼는지 화면에 보여주기 위한 기록
+  // (사용자 지시, 2026-09-22 — "Groq 토큰 문제가 생기면 로컬로 넘어가는 건데, 어느 걸 쓰고 있는지 화면에
+  // 표시해줄 수 있어?"). 아래 호출들에 그대로 넘기면 실제로 성공한 함수가 자기 몫을 여기 추가한다.
+  // step()/logFinalStep()이 각 단계 경계에서 이 배열의 길이를 스냅샷으로 남기므로(stepTimings.visionLogEndIndex
+  // 주석 참고), step() 정의보다 먼저 선언해야 한다 — 클로저는 호출 시점에 값을 읽으므로 실행 순서만
+  // 맞으면 되지만, 선언 순서를 눈으로 봤을 때도 헷갈리지 않게 여기 둔다.
+  const visionLog: VisionAttempt[] = []
   const step = (detail: string) => {
     const now = Date.now()
     if (lastStepLabel) {
       const elapsedSec = (now - lastStepAt) / 1000
       console.log(`[몰구조분석:${mallName}] "${lastStepLabel}" — ${elapsedSec.toFixed(1)}초`)
-      stepTimings.push({ label: lastStepLabel, elapsedSec })
+      stepTimings.push({ label: lastStepLabel, elapsedSec, visionLogEndIndex: visionLog.length })
     }
     lastStepLabel = detail
     lastStepAt = now
@@ -2876,13 +2890,9 @@ async function sampleMallProfile(
     if (lastStepLabel) {
       const elapsedSec = (Date.now() - lastStepAt) / 1000
       console.log(`[몰구조분석:${mallName}] "${lastStepLabel}" — ${elapsedSec.toFixed(1)}초`)
-      stepTimings.push({ label: lastStepLabel, elapsedSec })
+      stepTimings.push({ label: lastStepLabel, elapsedSec, visionLogEndIndex: visionLog.length })
     }
   }
-  // 카테고리/정렬 화면인식이 실제로 어느 공급자(Groq/로컬 Ollama)를 썼는지 화면에 보여주기 위한 기록
-  // (사용자 지시, 2026-09-22 — "Groq 토큰 문제가 생기면 로컬로 넘어가는 건데, 어느 걸 쓰고 있는지 화면에
-  // 표시해줄 수 있어?"). 아래 호출들에 그대로 넘기면 실제로 성공한 함수가 자기 몫을 여기 추가한다.
-  const visionLog: VisionAttempt[] = []
   // "몰 구조분석 중지" 버튼이 눌리면(2026-08-22) 주요 단계 경계마다 여기서 확인해 더 진행하지 않고
   // 즉시 빠진다 — 이미 모은 신호는 버린다(중간 상태를 scrape_profile에 저장하면 다음 조회 때 "이번에
   // 정말 확인된 값"과 구분이 안 된다). AbortSignal 자체는 이 함수가 부르는 Ollama 호출(가장 CPU를 많이

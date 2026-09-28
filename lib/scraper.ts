@@ -8603,11 +8603,19 @@ interface CategoryExpansionResult {
  *  다른 신호다. 실사용 확인(2026-08-29, 펫토리): 카페24가 "잠시 접속이 제한되었습니다" 같은 안내
  *  페이지로 대신 응답하는데, count===0으로만 판정하면 진짜 하위 카테고리가 없는 대분류로 오판한다.
  *  extension-poc/background.js에도 같은 정규식으로 IS_BLOCK_PAGE_EXPR을 뒀다(런타임이 달라 코드는
- *  공유 못 함 — 문구 바뀌면 두 곳 다 같이 고친다). */
-async function isBotBlockPage(page: Page): Promise<boolean> {
+ *  공유 못 함 — 문구 바뀌면 두 곳 다 같이 고친다).
+ *
+ *  2026-09-27 모자사러 실사용 확인: 카페24의 또 다른 봇 차단 형태 — 원래 도메인이 아니라
+ *  `veritas-hub.cafe24.com/challenge?...`로 통째로 리다이렉트되는 별도 챌린지 페이지("안전한 이용을
+ *  위해" / "간단한 확인이 필요해요" / "아래 확인을 마치면 원래 페이지로 돌아가요")였다 — 위 문구
+ *  패턴엔 하나도 안 걸려, "카테고리 하위구조 확인"/"몰 구조분석"이 이 페이지를 실제 카테고리 메뉴로
+ *  착각해(AI 비전이 이 문구를 "그룹 3개"로 읽음) 몇십 분을 허비하고도 결국 하위 카테고리 0개로
+ *  결론짓는 원인이 됐다. 도메인 자체가 원래 몰과 다르다는 게 문구보다 훨씬 확실한 신호라 먼저 본다. */
+export async function isBotBlockPage(page: Page): Promise<boolean> {
   return page.evaluate(() => {
+    if (/(^|\.)veritas-hub\.cafe24\.com$/i.test(location.hostname)) return true
     const text = document.title + ' ' + (document.body?.innerText || '').slice(0, 800)
-    return /접속\s*(이|을)?\s*제한|일시적으로\s*(접속|이용)|비정상적인\s*(접근|접속)|잠시\s*접속|과도한\s*요청|too many requests|access denied/i.test(text)
+    return /접속\s*(이|을)?\s*제한|일시적으로\s*(접속|이용)|비정상적인\s*(접근|접속)|잠시\s*접속|과도한\s*요청|간단한\s*확인이?\s*필요|안전한\s*이용을\s*위해|too many requests|access denied/i.test(text)
   }).catch(() => false)
 }
 
@@ -9067,7 +9075,7 @@ const EXPAND_CHILDREN_TIMEOUT_MS = 120_000
 async function expandOneLevel(
   context: BrowserContext, scanPage: Page, opts: ScrapeOptions, parentUrl: string, parentName: string,
   knownNames: Set<string> = new Set(), ancestorUrls: (string | null)[] = [],
-): Promise<{ platform: MallPlatform; links: CategoryLink[]; aiUsed: boolean }> {
+): Promise<{ platform: MallPlatform; links: CategoryLink[]; aiUsed: boolean; blocked: boolean }> {
   // 몰구조분석이 이미 이 대분류의 하위 구조를 화면 인식(비전)으로 확인해 "대분류 > 소분류" 형태로
   // scrape_profile.categoryLinks에 캐시해뒀으면 그걸 그대로 쓴다 — 이미 검증된 값이라 아래 AI 재추측보다
   // 훨씬 믿을 만하고, 페이지를 새로 열 필요도 없어 빠르다. 캐시에 이 대분류의 하위가 하나도 없으면
@@ -9096,7 +9104,7 @@ async function expandOneLevel(
     const cached = prevCategoryLinks.filter(c => c.name.startsWith(prefix))
     if (cached.length) {
       console.log(`[하위카테고리:진단] "${parentName}" — 몰구조분석 캐시에서 ${cached.length}개 그대로 사용(AI 재추측 건너뜀)`)
-      return { platform: 'unknown', links: cached.map(c => ({ href: c.href, text: c.name })), aiUsed: false }
+      return { platform: 'unknown', links: cached.map(c => ({ href: c.href, text: c.name })), aiUsed: false, blocked: false }
     }
   }
   const topLevelHrefSet = new Set(
@@ -9110,6 +9118,22 @@ async function expandOneLevel(
   const platform = await detectMallPlatform(scanPage)
   const site = opts.siteId ? await siteInfo(opts.siteId) : null
   const mallName = site?.name ?? new URL(parentUrl).hostname
+  // 봇 차단 인터스티셜(veritas-hub.cafe24.com 챌린지 등, isBotBlockPage 주석 참고)에 걸리면 이 페이지엔
+  // 실제 하위 메뉴가 하나도 없어 AI/DOM/화면인식이 전부 "정말로 하위가 없다"는 것처럼 0개를 반환한다 —
+  // expandCategoryHubs의 expandOne과 같은 재시도(점점 길게 쉬며)를 여기도 둔다(모자사러 실사용 확인,
+  // 2026-09-27 — "몰 카테고리 선택 가져오기"의 하위 카테고리 확인이 매번 0개를 반환했는데, 실제로는
+  // 이 페이지 자체가 봇 차단으로 리다이렉트돼 있었다). 재시도해도 안 풀리면 links:[]와 함께 blocked:true를
+  // 돌려줘, 호출부가 "하위 카테고리 없음"이 아니라 "차단으로 확인 못 함"이라고 정확히 알릴 수 있게 한다.
+  let botBlocked = await isBotBlockPage(scanPage)
+  for (let attempt = 0; botBlocked && attempt < 2; attempt++) {
+    await sleep(5_000 * (attempt + 1))
+    await scanPage.goto(parentUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {})
+    botBlocked = await isBotBlockPage(scanPage)
+  }
+  if (botBlocked) {
+    console.log(`[하위카테고리:진단:${mallName}] ${parentUrl} — 봇 차단 인터스티셜에 막혀 하위 확인 불가`)
+    return { platform, links: [], aiUsed: false, blocked: true }
+  }
   const aiCandidates = await collectAllPageLinks(scanPage, new URL(parentUrl).origin)
   // 위 discoverTopLevelCategoryLinks/expandCategoryHubs의 AI 폴백과 같은 이유(2026-08-30 소꿉노리) —
   // AI 결과에 공지/문의 게시판 링크가 섞여 나와도 걸러낼 필터가 없었다.
@@ -9159,7 +9183,7 @@ async function expandOneLevel(
     }
   }
   console.log(`[하위카테고리:진단:${mallName}] 최종 ${links.length}개 반환 (aiUsed=${aiUsed}): ${links.slice(0, 5).map(l => l.text).join(', ')}${links.length > 5 ? ' 등' : ''}`)
-  return { platform, links, aiUsed }
+  return { platform, links, aiUsed, blocked: false }
 }
 
 /** expandOneLevel이 찾은 직계 자식 각각을, 더 이상 하위가 없을 때까지(=expandOneLevel이 빈 배열을 돌려줄
@@ -9169,10 +9193,14 @@ async function expandOneLevel(
 async function expandDescendants(
   context: BrowserContext, scanPage: Page, opts: ScrapeOptions, url: string, name: string, depth: number,
   visited: Set<string>, budget: { remaining: number }, knownNames: Set<string>, ancestorUrls: (string | null)[],
+  /** 재귀 중 어느 한 단계라도 봇 차단에 막혔는지 — expandCategoryChildren이 최종 응답에 "차단으로 일부
+   *  확인 못 했을 수 있음"을 담을 수 있도록 재귀 전체에서 하나로 누적한다(budget과 같은 방식). */
+  blockedRef: { hit: boolean },
 ): Promise<CategoryLink[]> {
   if (depth >= EXPAND_CHILDREN_MAX_DEPTH || budget.remaining <= 0) return []
   budget.remaining--
   const result = await expandOneLevel(context, scanPage, opts, url, name, knownNames, ancestorUrls).catch(() => null)
+  if (result?.blocked) blockedRef.hit = true
   if (!result?.links.length) return []
   // 지금 막 찾은 형제들을 공용 목록에 더해둔다 — 더 깊이 들어가 화면을 다시 찍을 때, 옆에 남아있는 이
   // 형제들(예: DVD 하위를 보는 화면에 생활/건강의 다른 중분류들이 같이 찍혀도) 하위로 오인하지 않게 한다.
@@ -9186,7 +9214,7 @@ async function expandDescendants(
     if (visited.has(child.href) || budget.remaining <= 0) continue
     visited.add(child.href)
     out.push(child)
-    out.push(...await expandDescendants(context, scanPage, opts, child.href, child.text, depth + 1, visited, budget, knownNames, childAncestorUrls))
+    out.push(...await expandDescendants(context, scanPage, opts, child.href, child.text, depth + 1, visited, budget, knownNames, childAncestorUrls, blockedRef))
   }
   return out
 }
@@ -9204,7 +9232,7 @@ async function expandDescendants(
  */
 export async function expandCategoryChildren(
   opts: ScrapeOptions, parentUrl: string, parentName: string,
-): Promise<{ platform: MallPlatform; links: CategoryLink[]; aiUsed: boolean }> {
+): Promise<{ platform: MallPlatform; links: CategoryLink[]; aiUsed: boolean; blocked: boolean }> {
   // 최상위 자체가 이미 캐시로 다 있으면(예: 이 서브트리를 예전에 한 번 다 펼쳐 저장해둔 경우) 브라우저를
   // 아예 열 필요도 없다 — expandOneLevel 안에도 같은 체크가 있지만(재귀 중 더 깊은 노드용), 최상위는 여기서
   // 먼저 확인해야 이 빠른 경로(페이지 안 열고 즉시 반환)를 살릴 수 있다.
@@ -9214,7 +9242,7 @@ export async function expandCategoryChildren(
     const cached = prevCategoryLinks.filter(c => c.name.startsWith(prefix))
     if (cached.length) {
       console.log(`[하위카테고리:진단] "${parentName}" — 몰구조분석 캐시에서 ${cached.length}개 그대로 사용(AI 재추측 건너뜀)`)
-      return { platform: 'unknown', links: cached.map(c => ({ href: c.href, text: c.name })), aiUsed: false }
+      return { platform: 'unknown', links: cached.map(c => ({ href: c.href, text: c.name })), aiUsed: false, blocked: false }
     }
   }
   const expandPromise = withContext(opts, async (_page, context) => {
@@ -9222,6 +9250,7 @@ export async function expandCategoryChildren(
     try {
       const knownNames = new Set<string>()
       const first = await expandOneLevel(context, scanPage, opts, parentUrl, parentName, knownNames)
+      const blockedRef = { hit: first.blocked }
       for (const child of first.links) knownNames.add(child.text)
       const visited = new Set<string>([parentUrl, ...first.links.map(l => l.href)])
       const budget = { remaining: EXPAND_CHILDREN_MAX_NODES }
@@ -9232,12 +9261,15 @@ export async function expandCategoryChildren(
       const allLinks = [...first.links]
       for (const child of first.links) {
         if (budget.remaining <= 0) break
-        allLinks.push(...await expandDescendants(context, scanPage, opts, child.href, child.text, 1, visited, budget, knownNames, topAncestorUrls))
+        allLinks.push(...await expandDescendants(context, scanPage, opts, child.href, child.text, 1, visited, budget, knownNames, topAncestorUrls, blockedRef))
       }
       if (allLinks.length !== first.links.length) {
         console.log(`[하위카테고리:진단] "${parentName}" — 재귀 확장으로 ${first.links.length}개 → 총 ${allLinks.length}개(더 깊은 단계 포함)`)
       }
-      return { platform: first.platform, links: allLinks, aiUsed: first.aiUsed }
+      if (blockedRef.hit) {
+        console.log(`[하위카테고리:진단] "${parentName}" — 재귀 확장 중 봇 차단을 만난 적 있음(결과가 실제보다 적을 수 있음)`)
+      }
+      return { platform: first.platform, links: allLinks, aiUsed: first.aiUsed, blocked: blockedRef.hit }
     } finally {
       await scanPage.close().catch(() => {})
     }
@@ -9254,7 +9286,7 @@ export async function expandCategoryChildren(
   ])
   if (result === timedOut) {
     console.log(`[하위카테고리:진단] "${parentName}" — ${EXPAND_CHILDREN_TIMEOUT_MS / 1000}초 안에 안 끝나 포기(화면 인식 폴백이 느린 것으로 보임) — 빈 결과로 답하고, 이미 시작된 확인은 백그라운드에서 계속 진행됨`)
-    return { platform: 'unknown', links: [], aiUsed: false }
+    return { platform: 'unknown', links: [], aiUsed: false, blocked: false }
   }
   return result
 }

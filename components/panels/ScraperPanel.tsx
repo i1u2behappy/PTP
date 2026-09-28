@@ -3437,8 +3437,13 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ siteId: selectedSite.id, url: href, name: label || undefined }),
       })
-      const d = await res.json() as { links?: { href: string; text: string }[]; error?: string }
+      const d = await res.json() as { links?: { href: string; text: string }[]; error?: string; blocked?: boolean }
       if (!res.ok) { setExpandSubcategoryNotice(`하위 카테고리 확인 실패: ${d.error || res.status}`); return }
+      // blocked: 봇 차단 인터스티셜(veritas-hub.cafe24.com 챌린지 등, lib/scraper.ts의 isBotBlockPage
+      // 참고)에 막혀 이 페이지 자체를 못 읽은 것 — "하위 카테고리가 없다"는 확정된 답과는 완전히 다른
+      // 상황이라 구분해서 보여준다(모자사러 실사용 확인, 2026-09-27 — 이 구분이 없어 봇 차단을 "하위
+      // 카테고리 없음"으로 오인하게 만들었다).
+      if (d.blocked) { setExpandSubcategoryNotice('몰이 봇 차단 화면으로 응답해 하위 카테고리를 확인하지 못했습니다 — 잠시 후 다시 시도해 주세요.'); return }
       if (!d.links?.length) { setExpandSubcategoryNotice('하위 카테고리를 찾지 못했습니다.'); return }
       setManualCategoryUrlsText(prev => {
         const lines = new Set(prev.split('\n').map(s => s.trim()).filter(Boolean))

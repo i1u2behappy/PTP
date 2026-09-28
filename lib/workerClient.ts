@@ -104,7 +104,7 @@ export const runMallProfileCheckForScrape = (opts: ScrapeOptions) => callWorker<
 export const discoverCategoryLinks = (opts: ScrapeOptions) => callWorker<CategoryDiscoveryResult>('discoverCategoryLinks', [opts])
 export const stopCategoryDiscovery = (siteId: number) => callWorker<boolean>('stopCategoryDiscovery', [siteId])
 export const expandCategoryChildren = (opts: ScrapeOptions, parentUrl: string, parentName: string) =>
-  callWorker<{ platform: MallPlatform; links: CategoryLink[]; aiUsed: boolean }>('expandCategoryChildren', [opts, parentUrl, parentName])
+  callWorker<{ platform: MallPlatform; links: CategoryLink[]; aiUsed: boolean; blocked: boolean }>('expandCategoryChildren', [opts, parentUrl, parentName])
 export const detectSortOptionsForCategory = (opts: ScrapeOptions, categoryUrl: string) =>
   callWorker<MallSortOption[]>('detectSortOptionsForCategory', [opts, categoryUrl])
 export const recheckMallProducts = (opts: ScrapeOptions, targets: RecheckTarget[]) => callWorker<RecheckResult[]>('recheckMallProducts', [opts, targets])

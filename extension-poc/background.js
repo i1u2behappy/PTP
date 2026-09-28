@@ -295,9 +295,13 @@ async function applySortByClicking(tabId, text) {
 // 페이지로 대신 응답하는데, 이걸 감지 못 하면 진짜 하위 카테고리가 없는 대분류로 오판해버린다.
 // lib/scraper.ts에도 같은 정규식으로 isBotBlockPage를 뒀다(런타임이 달라 코드는 공유 못 함 — 문구
 // 바뀌면 두 곳 다 같이 고친다).
+// 2026-09-27 모자사러 실사용 확인: 카페24의 또 다른 봇 차단 형태 — 원래 도메인이 아니라
+// veritas-hub.cafe24.com/challenge?...로 통째로 리다이렉트되는 별도 챌린지 페이지("안전한 이용을 위해"/
+// "간단한 확인이 필요해요")였다 — lib/scraper.ts의 isBotBlockPage와 같은 이유로 같이 고친다.
 const IS_BLOCK_PAGE_EXPR = `(() => {
+  if (/(^|\\.)veritas-hub\\.cafe24\\.com$/i.test(location.hostname)) return true
   const text = document.title + ' ' + (document.body ? document.body.innerText.slice(0, 800) : '')
-  return /접속\\s*(이|을)?\\s*제한|일시적으로\\s*(접속|이용)|비정상적인\\s*(접근|접속)|잠시\\s*접속|과도한\\s*요청|too many requests|access denied/i.test(text)
+  return /접속\\s*(이|을)?\\s*제한|일시적으로\\s*(접속|이용)|비정상적인\\s*(접근|접속)|잠시\\s*접속|과도한\\s*요청|간단한\\s*확인이?\\s*필요|안전한\\s*이용을\\s*위해|too many requests|access denied/i.test(text)
 })()`
 
 // 상품 링크/다음페이지 링크 수집 — 페이지 이동 없이 현재 문서만 읽는다. 몰마다 플랫폼이 달라(카페24

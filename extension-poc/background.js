@@ -76,6 +76,9 @@ async function resolveSite(hostname) {
     categoryLinks: safeCategoryLinks,
     categorySettings: data.categorySettings || {}, sortOptions: data.sortOptions || [],
     masterLabels: data.masterLabels || {}, masterOrder: data.masterOrder || [], previewProduct: data.previewProduct || null,
+    // runPicker가 "지금 이 탭이 previewProduct와 같은 상품인지" 대조하는 기준(2026-10-01, 일반모드
+    // lib/scraper.ts의 startElementPicker와 같은 이유 — resolve/route.ts 주석 참고).
+    previewProductUrl: data.previewProductUrl || null,
     excludeUrls: data.excludeUrls || [],
   }
 }
@@ -2838,7 +2841,17 @@ async function runPicker(tab, site) {
     await withTimeout(chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.addBinding', { name: 'ptpDeleteField' }), 10_000, 'Runtime.addBinding(ptpDeleteField)')
     await withTimeout(chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.addBinding', { name: 'ptpPickerClose' }), 10_000, 'Runtime.addBinding(ptpPickerClose)')
     pickerSessions.set(tab.id, { siteId: site.id, pendingSaves: [] })
-    const seed = { previewProduct: site.previewProduct, extractionRules: site.extractionRules, masterLabels: site.masterLabels, masterOrder: site.masterOrder, siteId: site.id }
+    // previewProduct는 "지금 이 탭에 보이는 상품"이라고 믿고 자동값 힌트로 보여주는 값이라, 실제로는
+    // 지금 탭이 그 상품이 아닐 수 있다(사용자가 미리보기 그리드에서 다른 상품을 열어본 뒤 이 버튼을
+    // 누르는 등) — 서버(previewProductUrl)를 알 때만 지금 탭 URL과 대조해, 다르면 엉뚱한 자동값을
+    // 보여주는 대신 비워서 "미지정"으로 정직하게 보여준다(일반모드 lib/scraper.ts의 startElementPicker와
+    // 같은 이유, 2026-10-01 실사용 확인 — "화면에 나온 상품이 왜 다른거야"). previewProductUrl 자체가
+    // 없으면(예전 버전 서버 등) 대조할 기준이 없으니 기존대로 보여준다.
+    const previewMatchesTab = !site.previewProductUrl || site.previewProductUrl === tab.url
+    const seed = {
+      previewProduct: previewMatchesTab ? site.previewProduct : null,
+      extractionRules: site.extractionRules, masterLabels: site.masterLabels, masterOrder: site.masterOrder, siteId: site.id,
+    }
     await evalInTab(tab.id, buildPickerScript(seed))
     return { ok: true }
   } catch (e) {

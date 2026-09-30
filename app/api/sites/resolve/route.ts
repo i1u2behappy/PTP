@@ -40,7 +40,7 @@ export async function GET(req: NextRequest) {
     id: number; name: string | null; url: string; extraction_rules: unknown; devmode_ai_preview: boolean
     devmode_category_urls: string[] | null
     devmode_category_settings: Record<string, { sortLabel?: string; limitMode?: 'count' | 'pages'; limitValue?: number }> | null
-    last_adjustment_preview: { preview?: { product: Record<string, unknown> } | null } | null
+    last_adjustment_preview: { preview?: { sourceUrl: string; product: Record<string, unknown> } | null } | null
     scrape_profile: { categoryLinks?: { name: string; href: string }[]; sortOptions?: { label: string; paramsToAdd: Record<string, string> }[] } | null
     manual_login_required: boolean
   }>(
@@ -93,6 +93,11 @@ export async function GET(req: NextRequest) {
     categorySettings: match.devmode_category_settings || {},
     sortOptions: match.scrape_profile?.sortOptions || [],
     masterLabels, masterOrder, previewProduct: match.last_adjustment_preview?.preview?.product || null,
+    // "스크랩 대상 직접지정"이 지금 보고 있는 탭과 이 previewProduct가 실제로 같은 상품인지 대조하는 데
+    // 쓴다(background.js의 runPicker 참고) — 대조할 기준 URL이 없으면 캐시된 값을 무조건 맞다고 믿고
+    // 보여줄 수밖에 없어, 사용자가 다른 상품을 열어본 뒤 지정해도 엉뚱한 자동값이 그대로 나온다(일반모드
+    // lib/scraper.ts의 startElementPicker 수정과 같은 이유, 2026-10-01).
+    previewProductUrl: match.last_adjustment_preview?.preview?.sourceUrl || null,
     excludeUrls: excludeRes.rows.map(r => r.url),
   }, { headers: corsHeaders() })
 }

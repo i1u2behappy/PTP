@@ -2080,8 +2080,15 @@ export async function startElementPicker(
       if (other === page) continue
       await other.evaluate(() => (window as unknown as { __ptpPickerTeardown?: () => void }).__ptpPickerTeardown?.()).catch(() => {})
     }
+    // previewProduct(아래 injectElementPicker에 넘겨 "자동값" 힌트로 보여줌)는 targetUrl의 상품 기준으로
+    // 뽑힌 값이다 — 이 goto가 실패하면(타임아웃/네트워크 오류 등) 화면엔 엉뚱한 상품이 열린 채로 그
+    // 엉뚱한 상품의 필드에 다른 상품의 "자동값"이 붙어버린다(사용자 실사용 확인, 2026-10-01 — "미리보기
+    // 첫번째 상품 연 후 직접지정을 했는데 화면에 나온 상품이 왜 다른거야", 예전엔 실패를 조용히 삼키고도
+    // previewProduct를 그대로 주입해 이 불일치를 화면이 구분할 방법이 없었다). 이동이 실패하면
+    // previewProduct를 비워 "미지정"으로 정직하게 보여준다 — 틀린 자동값보다 없는 게 낫다.
     if (targetUrl && page.url() !== targetUrl) {
-      await page.goto(targetUrl, { waitUntil: 'load', timeout: 30_000 }).catch(() => {})
+      const moved = await page.goto(targetUrl, { waitUntil: 'load', timeout: 30_000 }).then(() => true).catch(() => false)
+      if (!moved) previewProduct = null
     }
     await page.bringToFront().catch(() => {})
 

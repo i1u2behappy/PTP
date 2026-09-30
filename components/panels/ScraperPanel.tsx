@@ -3069,6 +3069,19 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
     myLockClickAtRef.current = Date.now()
     const effectiveIncludeAlreadyScraped = overrideIncludeAlreadyScraped ?? includeAlreadyScraped
     const { categoryUrls, categoryLimits, categorySortClicks } = buildCategoryUrlsAndLimits()
+    // "이어서 하기"/"처음부터 다시 하기"(overrideIncludeAlreadyScraped가 명시적으로 주어지는 두 버튼 전용)는
+    // 카테고리 여러 개로 돌던 세션을 이어받는 버튼인데, activeCategoryUrlsText(화면 상태)가 어떤 이유로든
+    // (코드 변경에 따른 Fast Refresh 강제 새로고침, "선택 가져오기" 탭이 비어있는 채로 전환 등) 빈 문자열이
+    // 되면 여기서 조용히 "카테고리 없음"으로 판단해 몰 대문(targetUrl) 딱 1페이지만 훑고 그걸 상품 1건으로
+    // 잘못 저장한 채 "완료"로 끝나버린다 — 사용자가 눈치채기 전엔 카테고리 수백 개를 통째로 건너뛴 것처럼
+    // 보인다(2026-10-01 실사용 확인: 정글북 — DB scope_params.categoryUrls가 실제로 빈 배열로 찍혀 있었다,
+    // 직전 세션엔 93개가 정상이었음). 이 몰에 카테고리 목록 자체가 없는 경우(categories.length===0, 단일
+    // URL 스크랩이 원래 의도인 몰)는 막을 이유가 없으므로, "카테고리가 있는 몰인데 지금 선택이 비었다"는
+    // 조합일 때만 막는다.
+    if (overrideIncludeAlreadyScraped !== undefined && categoryUrls.length === 0 && categories.length > 0) {
+      alert('카테고리 선택이 비어 있습니다 — 화면이 새로고침되며 선택이 초기화된 것으로 보입니다. 카테고리를 다시 선택한 뒤 다시 시도해주세요.')
+      return
+    }
     setStatus('running')
     setProgress({ saved: 0, total: 0, successCount: 0, failedCount: 0 }); setConcurrencyLog([]); setCollectProgress(null)
     setSessionCreatedAt(null)

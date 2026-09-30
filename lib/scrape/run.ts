@@ -15,9 +15,9 @@ export interface RunScrapingOpts {
   categoryLimits?: Record<string, { mode: 'count' | 'pages'; value: number }>
   /** AJAX(클릭) 방식 정렬용 — lib/scraper.ts의 ScrapeOptions.categorySortClicks와 동일한 모양. */
   categorySortClicks?: Record<string, string>
-  /** true(기본)면 mall_products에 이미 있는 상품도 다시 스크랩 대상에 포함한다 — 위에서 선택한 카테고리
-   *  전체를 대상으로 "다시 받는" 것이 기본 기대이기 때문(사용자 지시, 2026-08-23). false면 예전 동작대로
-   *  이미 있는 상품(source_url 기준)은 건너뛴다. */
+  /** true(기본)면 이미 성공적으로 스크랩한 상품도 다시 스크랩 대상에 포함한다 — 위에서 선택한 카테고리
+   *  전체를 대상으로 "다시 받는" 것이 기본 기대이기 때문(사용자 지시, 2026-08-23). false면 이미 성공한
+   *  상품(scrape_item_log 기준, 아래 skipAlreadyScraped 주석 참고)은 건너뛴다. */
   includeAlreadyScraped?: boolean
   delayMs?: number
   loginId?: string
@@ -51,13 +51,25 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
   // 위에서 선택한 카테고리 전체를 그대로 다시 대상으로 삼는다(사용자 지시, 2026-08-23 — "전체 카테고리
   // 기준이건 일부 선택한 카테고리 기준이건... 이미 스크랩한 상품 포함 옵션을 디폴트로"). 포함하는
   // 경우엔 이 목록 자체가 필요 없으니 쿼리도 건너뛴다.
+  //
+  // 기준은 mall_products가 아니라 scrape_item_log의 성공 기록이다(2026-10-01 변경, 사용자 지적) —
+  // mall_products는 "스크랩 검토" 화면에서 사용자가 직접 병합해야만 채워지는데, "이어서 하기"는 검토를
+  // 거치기 전인 작업 도중(진행 상황 카드가 아직 떠 있는 상태)에 누르는 버튼이다. mall_products 기준이면
+  // "1233개 수집 완료"가 아직 병합 전이라 하나도 제외되지 않아 처음부터 다 다시 도는 게 실제 버그였다
+  // (다음 단계로 넘어가 병합하고 이 화면으로 돌아와야만 제외되는 건 "이어서 하기"의 기대와 다르다는
+  // 지적). 개발자모드(app/api/sites/resolve/route.ts)는 애초부터 같은 이유로 scrape_item_log를 써왔으므로
+  // (2026-08-22) 그 기준을 일반모드에도 그대로 맞춘다 — 병합 여부와 무관하게 "성공적으로 수집된 URL"만
+  // 빠지고, 실패한 건 여기 안 걸려(status != 'success') 자연히 "나머지"에 포함돼 다시 시도된다. 실패한
+  // 것만 콕 집어 재시도하고 싶으면 별도의 "실패 N개 재시도"(app/api/scrape/failed-urls)를 쓴다.
   const skipAlreadyScraped = scrapeMode !== 'incremental' && opts.includeAlreadyScraped === false
   const excluded = skipAlreadyScraped
-    ? await pool.query<{ source_url: string }>(
-        `SELECT DISTINCT source_url FROM mall_products WHERE site_id=$1 AND source_url IS NOT NULL`,
+    ? await pool.query<{ url: string }>(
+        `SELECT DISTINCT l.url FROM scrape_item_log l
+         JOIN scrape_sessions s ON s.id = l.session_id
+         WHERE s.site_id=$1 AND l.status='success'`,
         [siteId],
       )
-    : { rows: [] as { source_url: string }[] }
+    : { rows: [] as { url: string }[] }
 
   const siteRes = await pool.query<{
     custom_name_selector: string | null; custom_price_selector: string | null; custom_thumbnail_selector: string | null
@@ -74,7 +86,7 @@ export async function runScraping(sessionId: number, opts: RunScrapingOpts) {
     categorySortClicks: opts.categorySortClicks, delayMs: opts.delayMs,
     loginId: opts.loginId, loginPw: opts.loginPw, productLinkSelector: opts.productLinkSelector, siteId,
     concurrencyMode: opts.concurrencyMode, concurrency: opts.concurrency,
-    excludeUrls: excluded.rows.map(r => r.source_url), sessionId,
+    excludeUrls: excluded.rows.map(r => r.url), sessionId,
     nameSelector: site?.custom_name_selector || undefined,
     priceSelector: site?.custom_price_selector || undefined,
     thumbnailSelector: site?.custom_thumbnail_selector || undefined,

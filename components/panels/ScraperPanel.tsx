@@ -5038,7 +5038,7 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
             // 하기 기능도"). 각 버튼이 includeAlreadyScraped를 명시적으로 override해서 보낸다.
             <div className="flex gap-2">
               <button onClick={() => handleStart(false)} disabled={!canStart}
-                title={!canStart && needsLogin ? '로그인 확인이 필요합니다' : '이미 상품마스터에 있는 상품(source_url 기준)은 건너뛰고, 남은 것만 이어서 받습니다.'}
+                title={!canStart && needsLogin ? '로그인 확인이 필요합니다' : '이미 성공적으로 수집한 상품(검토/병합 여부와 무관)은 건너뛰고, 실패했거나 아직 안 받은 나머지만 이어서 받습니다.'}
                 className="flex-1 py-3 rounded-2xl font-semibold text-sm bg-teal-500 text-white hover:bg-teal-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
                 ▶ 이어서 하기 (기존 상품 제외)
               </button>

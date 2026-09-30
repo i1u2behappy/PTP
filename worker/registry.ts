@@ -34,6 +34,7 @@ export function registerAll() {
   reg('getCollectProgress', scraper.getCollectProgress)
   reg('setCollectProgress', scraper.setCollectProgress)
   reg('getSiteLockStatus', scraper.getSiteLockStatus)
+  reg('getAllSiteLockStatuses', scraper.getAllSiteLockStatuses)
   reg('setSiteLockDetail', scraper.setSiteLockDetail)
   reg('getSiteLastRunSignals', scraper.getSiteLastRunSignals)
   reg('isAnySiteBusy', scraper.isAnySiteBusy)

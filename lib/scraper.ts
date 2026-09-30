@@ -439,6 +439,18 @@ export function getSiteLockStatus(siteId: number): { label: string; sinceMs: num
   return { label: entry.label, sinceMs: Date.now() - entry.since, ...(detail ? { detail } : {}) }
 }
 
+/** getSiteLockStatus(siteId 하나)와 달리 지금 이 프로세스에 걸려있는 락 전체를 훑는다 — "워커 재시작"
+ *  (수동 버튼 app/api/system/restart-worker/route.ts 포함)이 진행 중인 몰 작업을 흔적도 없이 끊어버리는
+ *  사고를 진단할 방법이 없었다(2026-10-01 실사용 확인 — 정글북 "이어서 하기" 세션이 status='running'에서
+ *  갑자기 멈췄는데, 브라우저 닫힘 에러도 uncaughtException 로그도 전혀 안 남아 원인을 확정 못 함. 자동
+ *  재시작 두 경로(checkMemoryAndAutoRestart/checkWorkerFreshnessAndAutoRestart)는 isAnyMallWorkBusy로
+ *  먼저 확인하고 건너뛰지만, 수동 "워커 재시작" 버튼은 그 확인이 아예 없어 스크랩 도중에 눌리면 조용히
+ *  프로세스를 통째로 죽인다 — lib/workerRestart.ts가 죽이기 직전에 이 목록을 로그로 남겨, 다음에 같은
+ *  증상이 나오면 "그 시점에 이 몰 작업이 실행 중이었다"를 바로 확인할 수 있게 한다). */
+export function getAllSiteLockStatuses(): { key: string; label: string; sinceMs: number }[] {
+  return [...siteLockStatus.entries()].map(([key, entry]) => ({ key: String(key), label: entry.label, sinceMs: Date.now() - entry.since }))
+}
+
 /** "몰 구조분석"이 방금 만든 이번 실행 전용 신호(aiReportAttempts/visionProviderLog, MallProfileSignals
  *  주석 참고 — 일부러 DB엔 저장 안 함)를 개발자모드 화면에서도 볼 수 있게 하는 짧은 캐시. 개발자모드는
  *  확장(extension-poc/background.js의 runProfile)이 /api/sites/[id]/profile을 직접 POST해서 그 HTTP

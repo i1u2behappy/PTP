@@ -4,6 +4,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { orphanedChromeCleanupScript, closeAllOpenSessionsGracefully } from './scraper'
+import { getAllSiteLockStatuses } from './workerClient'
 import { recordRestart, type RestartTrigger } from './restartHistory'
 
 const execFileAsync = promisify(execFile)
@@ -44,6 +45,19 @@ export function isWorkerRestartInFlight(): boolean {
 export async function restartWorker(trigger: RestartTrigger = 'manual'): Promise<void> {
   if (isWorkerRestartInFlight()) throw new Error('이미 재시작이 진행 중입니다')
   fs.writeFileSync(LOCK_PATH, String(Date.now()))
+  // "워커 재시작" 버튼(trigger='manual')은 자동재시작 두 경로(checkMemoryAndAutoRestart/
+  // checkWorkerFreshnessAndAutoRestart)와 달리 isAnyMallWorkBusy 확인이 없어, 스크랩/몰구조분석이 진행
+  // 중이어도 그대로 워커 프로세스를 강제종료한다 — 그 작업은 정상 종료 경로(성공/에러 기록)를 못 타고
+  // DB엔 아무 흔적도 안 남는다(2026-10-01 실사용 확인 — 정글북 "이어서 하기" 세션이 이유 없이 죽은 채
+  // 발견됨, 원인을 이 로그가 없어 90% 정황증거로만 추정해야 했다). 이 시점에 실제로 진행 중이던 작업이
+  // 있었는지를 남겨, 다음에 같은 증상이 나오면 바로 확인할 수 있게 한다(getAllSiteLockStatuses가 비어
+  // 있으면 이 재시작은 무관하다는 뜻이고, 실시간 재시작은 이 로그가 안 남을 수 있다는 점도 감안한다 —
+  // RPC 호출 자체가 실패하면 조용히 넘어간다).
+  await getAllSiteLockStatuses().then(locks => {
+    if (locks.length === 0) return
+    console.log(`[workerRestart] ⚠ 진행 중인 몰 작업이 있는 상태로 워커를 강제종료합니다(trigger=${trigger}): ${
+      locks.map(l => `${l.key}(${l.label}, ${Math.round(l.sinceMs / 1000)}초째)`).join(', ')}`)
+  }).catch(() => {})
   // 아래 스크립트의 Stop-Process -Force(강제종료) 전에 열린 로그인 창들을 정상 종료해 쿠키를 디스크에
   // 반영해둔다 — 안 그러면 재시작마다(특히 메모리 임계치로 자동 재시작될 때마다) 로그인 세션을 잃는다
   // (closeAllOpenSessionsGracefully 주석 참고, 2026-08-31 실사용 확인). 최대 몇 초짜리 안전장치라

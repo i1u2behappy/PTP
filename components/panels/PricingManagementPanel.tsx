@@ -46,6 +46,12 @@ export function PricingManagementPanel({ params }: { params?: Record<string, unk
   const [search, setSearch] = useState('')
   const [editing, setEditing] = useState<{ id: number; key: NumberKey | 'target_margin_rate' } | null>(null)
   const [editValue, setEditValue] = useState('')
+  // "✨ AI 목표마진율 추천" — target_margin_rate는 몰 소스가 없는 순수 정책값이라 다른 가격 필드와 달리
+  // 사람이 이미 입력해둔 값을 예시로 학습해 추천한다(lib/ai.ts의 suggestMarginRates 참고). 제안만 받고
+  // 사람이 "적용"을 눌러야 저장 — 다른 AI 버튼들과 같은 원칙.
+  const [suggesting, setSuggesting] = useState(false)
+  const [marginSuggestions, setMarginSuggestions] = useState<Map<number, number>>(new Map())
+  const [applyingMargin, setApplyingMargin] = useState<number | null>(null)
 
   const load = useCallback(() => {
     if (scope.sessionId === '') { setRows([]); return }
@@ -54,6 +60,42 @@ export function PricingManagementPanel({ params }: { params?: Record<string, unk
 
   /* eslint-disable-next-line react-hooks/set-state-in-effect */
   useEffect(() => { load() }, [load])
+  // 세션을 바꾸면 이전 세션의 제안이 그대로 남아 엉뚱한 상품에 적용되는 사고를 막기 위해 비운다.
+  /* eslint-disable-next-line react-hooks/set-state-in-effect */
+  useEffect(() => { setMarginSuggestions(new Map()) }, [scope.sessionId])
+
+  async function runMarginSuggest() {
+    if (scope.sessionId === '') return
+    setSuggesting(true)
+    try {
+      const res = await fetch('/api/master/pricing/suggest-margin', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: scope.sessionId }),
+      })
+      const data = await res.json().catch(() => null) as { id: number; marginRate: number }[] | null
+      if (!Array.isArray(data)) { alert('마진율 추천을 받아오지 못했습니다'); return }
+      if (data.length === 0) { alert('추천할 만한 상품이 없습니다(참고할 기존 설정값이 2개 미만이거나, 비어있는 상품이 없습니다)'); return }
+      setMarginSuggestions(new Map(data.map(s => [s.id, s.marginRate])))
+    } finally {
+      setSuggesting(false)
+    }
+  }
+
+  async function applyMarginSuggestion(id: number) {
+    const marginRate = marginSuggestions.get(id)
+    if (marginRate == null) return
+    setApplyingMargin(id)
+    try {
+      await fetch(`/api/master/${id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_margin_rate: marginRate / 100 }),
+      })
+      setMarginSuggestions(prev => { const n = new Map(prev); n.delete(id); return n })
+      load()
+    } finally {
+      setApplyingMargin(null)
+    }
+  }
 
   function startEdit(id: number, key: NumberKey | 'target_margin_rate', current: number | null) {
     setEditing({ id, key })
@@ -77,6 +119,20 @@ export function PricingManagementPanel({ params }: { params?: Record<string, unk
     const value = k === 'target_margin_rate' ? row.target_margin_rate : row[k]
     const isEditing = editing?.id === row.id && editing.key === k
     const display = value == null ? null : k === 'target_margin_rate' ? `${Math.round(value * 100)}%` : `₩${value.toLocaleString()}`
+    const suggestion = k === 'target_margin_rate' && value == null ? marginSuggestions.get(row.id) : undefined
+    if (!isEditing && suggestion != null) {
+      return (
+        <td className="px-3 py-2 text-xs">
+          <span className="inline-flex items-center gap-1.5 bg-violet-50 text-violet-700 rounded-full pl-2 pr-1 py-0.5">
+            제안 {suggestion}%
+            <button onClick={() => applyMarginSuggestion(row.id)} disabled={applyingMargin === row.id}
+              className="px-1.5 py-0.5 rounded-full bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 text-[10px] font-semibold">
+              {applyingMargin === row.id ? '...' : '적용'}
+            </button>
+          </span>
+        </td>
+      )
+    }
     return (
       <td className="px-3 py-2 cursor-pointer text-xs" onClick={() => !isEditing && startEdit(row.id, k, value)}>
         {isEditing ? (
@@ -99,9 +155,14 @@ export function PricingManagementPanel({ params }: { params?: Record<string, unk
 
       {scope.sessionId === '' ? null : (
         <>
-          <div className="mb-4 shrink-0">
+          <div className="mb-4 shrink-0 flex items-center gap-3">
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="상품명 검색..."
               className="w-full max-w-sm border border-gray-300 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+            <button onClick={runMarginSuggest} disabled={suggesting || rows.length === 0}
+              title="이미 설정해둔 목표 마진율을 예시로 학습해, 비어있는 상품에 추천값을 제안합니다. 제안만 받을 뿐 DB는 바로 안 바뀝니다."
+              className="shrink-0 px-4 py-1.5 rounded-full text-sm font-semibold bg-violet-50 text-violet-600 hover:bg-violet-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+              {suggesting ? '분석 중...' : '✨ AI 목표마진율 추천'}
+            </button>
           </div>
 
           {rows.length === 0 ? (

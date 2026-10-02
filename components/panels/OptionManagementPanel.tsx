@@ -22,6 +22,7 @@ export function OptionManagementPanel({ params }: { params?: Record<string, unkn
   const [search, setSearch] = useState('')
   const [drafts, setDrafts] = useState<Record<number, string>>({})
   const [saving, setSaving] = useState<Set<number>>(new Set())
+  const [cleaning, setCleaning] = useState<Set<number>>(new Set())
 
   const load = useCallback(() => {
     if (scope.sessionId === '') { setRows([]); return }
@@ -42,6 +43,20 @@ export function OptionManagementPanel({ params }: { params?: Record<string, unkn
       await fetch(`/api/master/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ options }) })
     } finally {
       setSaving(s => { const n = new Set(s); n.delete(id); return n })
+    }
+  }
+
+  async function cleanup(id: number) {
+    setCleaning(s => new Set(s).add(id))
+    try {
+      const res = await fetch(`/api/master/${id}/ai-options`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rawText: drafts[id] || '' }),
+      })
+      const groups = await res.json().catch(() => []) as { name: string; values: string[] }[]
+      if (Array.isArray(groups) && groups.length) setDrafts(v => ({ ...v, [id]: optionsToText(groups) }))
+    } finally {
+      setCleaning(s => { const n = new Set(s); n.delete(id); return n })
     }
   }
 
@@ -75,10 +90,16 @@ export function OptionManagementPanel({ params }: { params?: Record<string, unkn
                 <div key={row.id} className="bg-white rounded-2xl border border-gray-200 p-4">
                   <div className="flex items-start justify-between gap-3 mb-2">
                     <p className="text-sm font-semibold text-gray-700 truncate">{row.name_final || row.name_ai || row.name_original}</p>
-                    <button onClick={() => save(row.id)} disabled={saving.has(row.id)}
-                      className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors shrink-0">
-                      {saving.has(row.id) ? '저장 중...' : '저장'}
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button onClick={() => cleanup(row.id)} disabled={cleaning.has(row.id)}
+                        className="px-3 py-1.5 bg-violet-500 hover:bg-violet-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+                        {cleaning.has(row.id) ? '정리 중...' : '✨ AI 정리'}
+                      </button>
+                      <button onClick={() => save(row.id)} disabled={saving.has(row.id)}
+                        className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50 transition-colors">
+                        {saving.has(row.id) ? '저장 중...' : '저장'}
+                      </button>
+                    </div>
                   </div>
                   <textarea value={drafts[row.id] ?? ''} onChange={e => setDrafts(v => ({ ...v, [row.id]: e.target.value }))}
                     placeholder="예) 색상: 빨강, 파랑, 검정&#10;사이즈: S, M, L" rows={3}

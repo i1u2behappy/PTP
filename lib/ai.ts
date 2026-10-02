@@ -963,6 +963,815 @@ export async function classifyMasterCategory(
   return null
 }
 
+/** 브랜드·제조사·원산지처럼 몰마다 표기가 제각각인 필드(예: "LG전자"/"(주)엘지전자"/"엘지전자")를 사람이
+ *  하나하나 찾아 통일하지 않아도 되게, 같은 실제 대상을 가리키는 값들을 그룹으로 묶어 대표값을 제안한다
+ *  (2026-10-03, PTP 마이그레이션 로드맵 §04 "나머지 수동 메뉴에 AI 자동채우기 버튼을 추가한다"). 카테고리
+ *  분류(classifyMasterCategory)와 달리 "기존 기준값에 맞추기"가 아니라 "현재 목록 안에서 서로 같은 걸
+ *  찾기"라 값 하나씩이 아니라 전체 목록을 한 번에 넣는다 — 분할해서 넣으면 서로 다른 배치에 떨어진
+ *  변형끼리는 아예 비교가 안 돼 묶을 기회를 놓친다. */
+export interface ValueMergeGroup { canonical: string; variants: string[] }
+
+/** 값이 너무 많으면(수백 개 이상) 토큰 낭비이자 Groq ITPM 한도 초과 위험이라 이 개수까지만 비교 대상으로
+ *  삼는다 — MASTER_CATEGORY_EXISTING_LIMIT과 같은 이유. */
+const VALUE_MERGE_LIMIT = 300
+
+function buildValueMergePrompt(fieldLabel: string, values: string[]): string {
+  const list = values.slice(0, VALUE_MERGE_LIMIT)
+  return `다음은 한 쇼핑몰에서 스크랩된 "${fieldLabel}" 값 목록이다(건수 많은 순, 이미 중복은 제거됨).
+
+${list.map(v => `- ${v}`).join('\n')}
+
+이 중 같은 실제 대상을 표기만 다르게 쓴 것들이 있으면(예: 띄어쓰기 차이, "(주)"/"주식회사" 접두어 유무,
+한글/영문 표기 차이, 오탈자) 그룹으로 묶어라. 각 그룹마다 대표로 쓸 값(canonical — 이미 목록에 있는 값 중
+가장 널리 쓰이는 표준적인 표기를 그대로 골라라, 새로 지어내지 마라)과 그 그룹에 속하는 원문 값 전체
+(variants, canonical 자신도 포함)를 반환해라. 서로 다른 실제 대상이면 절대 묶지 마라 — 확신이 없으면
+묶지 말고 빼라. 묶을 게 전혀 없으면 빈 배열을 반환해라.`
+}
+
+async function suggestValueMergesAnthropic(
+  fieldLabel: string, values: string[], signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<ValueMergeGroup[] | null> {
+  if (!isAiProviderEnabled('anthropic')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.ANTHROPIC_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const response = await getClient().messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      tools: [{
+        name: 'set_merge_groups',
+        description: '중복/표기변형 그룹 목록을 반환한다.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            groups: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  canonical: { type: 'string', description: '대표값' },
+                  variants: { type: 'array', items: { type: 'string' }, description: '이 그룹에 속하는 원문 값 전체' },
+                },
+                required: ['canonical', 'variants'],
+              },
+            },
+          },
+          required: ['groups'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'set_merge_groups' },
+      messages: [{ role: 'user', content: buildValueMergePrompt(fieldLabel, values) }],
+    }, { signal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal) })
+    const toolUse = response.content.find(b => b.type === 'tool_use')
+    if (!toolUse || toolUse.type !== 'tool_use') { onError?.('도구 호출 없이 응답함'); return null }
+    return (toolUse.input as { groups: ValueMergeGroup[] }).groups
+  } catch (e) {
+    const rawMessage = e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function suggestValueMergesGemini(
+  fieldLabel: string, values: string[], signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<ValueMergeGroup[] | null> {
+  if (!isAiProviderEnabled('gemini')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GEMINI_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_MODEL,
+      contents: buildValueMergePrompt(fieldLabel, values),
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_merge_groups',
+          description: '중복/표기변형 그룹 목록을 반환한다.',
+          parameters: {
+            type: Type.OBJECT,
+            required: ['groups'],
+            properties: {
+              groups: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  required: ['canonical', 'variants'],
+                  properties: {
+                    canonical: { type: Type.STRING },
+                    variants: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  },
+                },
+              },
+            },
+          },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_merge_groups'] } },
+        abortSignal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal),
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) { onError?.('functionCall 없이 응답함'); return null }
+    return (call.args as unknown as { groups: ValueMergeGroup[] }).groups
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function suggestValueMergesGroq(
+  fieldLabel: string, values: string[], signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<ValueMergeGroup[] | null> {
+  if (!isAiProviderEnabled('groq')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GROQ_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: reportAiSignal(MALL_REPORT_GROQ_TIMEOUT_MS, signal),
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        max_tokens: 1200,
+        messages: [{ role: 'user', content: buildValueMergePrompt(fieldLabel, values.slice(0, 120)) }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_merge_groups',
+            description: '중복/표기변형 그룹 목록을 반환한다.',
+            parameters: {
+              type: 'object',
+              required: ['groups'],
+              properties: {
+                groups: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    required: ['canonical', 'variants'],
+                    properties: {
+                      canonical: { type: 'string' },
+                      variants: { type: 'array', items: { type: 'string' } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_merge_groups' } },
+      }),
+    })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail).slice(0, 150)}` : ''}`)
+      return null
+    }
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) { onError?.('도구 호출 없이 응답함'); return null }
+    return (JSON.parse(call.function.arguments) as { groups: ValueMergeGroup[] }).groups
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function suggestValueMergesOllama(
+  fieldLabel: string, values: string[], signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<ValueMergeGroup[] | null> {
+  if (!isAiProviderEnabled('ollama')) { onError?.('공급자가 꺼져있음'); return null }
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          stream: false,
+          think: false,
+          options: OLLAMA_CHAT_OPTIONS,
+          keep_alive: '30m',
+          messages: [{ role: 'user', content: buildValueMergePrompt(fieldLabel, values) }],
+          tools: [{
+            type: 'function',
+            function: {
+              name: 'set_merge_groups',
+              description: '중복/표기변형 그룹 목록을 반환한다.',
+              parameters: {
+                type: 'object',
+                required: ['groups'],
+                properties: {
+                  groups: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      required: ['canonical', 'variants'],
+                      properties: {
+                        canonical: { type: 'string' },
+                        variants: { type: 'array', items: { type: 'string' } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }],
+        }),
+      } as RequestInit)
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 200)
+        onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail)}` : ''}`)
+        return null
+      }
+      const data = await res.json() as { message?: { tool_calls?: { function: { arguments: unknown } }[] } }
+      const call = data.message?.tool_calls?.[0]
+      if (!call) { onError?.('도구 호출 없이 응답함'); return null }
+      const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments
+      return (args as { groups: ValueMergeGroup[] }).groups
+    } catch (e) {
+      onError?.(e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+      return null
+    }
+  })
+}
+
+/**
+ * 브랜드/제조사/원산지 등 한 필드의 distinct 값 목록 안에서, 같은 실제 대상을 표기만 다르게 쓴 값들을
+ * 그룹으로 제안한다. 호출부(화면)가 "제안만 받고 사람이 확정"하는 흐름으로 쓰도록 설계돼 있다 — 여기서
+ * 바로 DB를 바꾸지 않는다.
+ *
+ * 모델이 목록에 없는 값을 canonical로 지어냈거나 variants에 없는 값을 섞었으면 그 그룹은 버린다(값이
+ * valueSet에 실제로 있는지로 재확인) — classifyMasterCategory의 "모델 자기신고보다 실제 일치 확인이 더
+ * 믿을만하다" 원칙과 같다. variants가 (중복 제거 후) 2개 미만이면 묶을 짝이 없다는 뜻이라 버린다.
+ */
+export async function suggestValueMerges(
+  fieldLabel: string,
+  values: string[],
+  signal?: AbortSignal,
+): Promise<ValueMergeGroup[]> {
+  if (values.length < 2) return []
+  const providers: { id: AiProviderId; fn: (onError: (reason: string) => void) => Promise<ValueMergeGroup[] | null> }[] = [
+    { id: 'anthropic', fn: onError => suggestValueMergesAnthropic(fieldLabel, values, signal, onError) },
+    { id: 'gemini', fn: onError => suggestValueMergesGemini(fieldLabel, values, signal, onError) },
+    { id: 'groq', fn: onError => suggestValueMergesGroq(fieldLabel, values, signal, onError) },
+    { id: 'ollama', fn: onError => suggestValueMergesOllama(fieldLabel, values, signal, onError) },
+  ]
+  for (const p of providers) {
+    if (signal?.aborted) return []
+    let errorMsg: string | undefined
+    const result = await p.fn(reason => { errorMsg = reason }).catch((e: unknown) => {
+      errorMsg = errorMsg ?? (e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+      return null
+    })
+    if (result) {
+      const valueSet = new Set(values.map(v => v.trim()))
+      return result
+        .map(g => ({
+          canonical: g.canonical?.trim() ?? '',
+          variants: [...new Set((g.variants ?? []).map(v => v.trim()).filter(v => valueSet.has(v)))],
+        }))
+        .filter(g => g.canonical && g.variants.includes(g.canonical) && g.variants.length >= 2)
+    }
+    console.log(`[AI:${p.id}] 값 중복 정리 제안 실패(${translateAiErrorReason(errorMsg ?? '원인 미상')}) — 다음 공급자로 넘어감`)
+  }
+  return []
+}
+
+/** 옵션 관리 화면의 "AI 정리" — 몰에서 스크랩된 옵션 원문이 구분자가 뒤섞여 있거나(예: "색상:빨강/파랑;검정
+ *  사이즈 S,M,L") 같은 옵션명이 중복으로 나뉘어 있을 때, 사람이 일일이 다시 타이핑하지 않고 AI가 정리본을
+ *  제안하게 한다(2026-10-03, PTP 마이그레이션 로드맵 §04). 결과는 그 자리에서 저장하지 않고 화면 초안만
+ *  바꾼다 — 사람이 "저장"을 눌러야 실제로 반영된다(다른 AI 버튼들과 동일한 "조용한 오매핑 방지" 원칙). */
+export interface OptionCleanupGroup { name: string; values: string[] }
+
+function buildOptionCleanupPrompt(productName: string, rawText: string): string {
+  return `다음은 상품 "${productName}"의 옵션 구성 원문이다. 구분자가 뒤섞여 있거나 같은 옵션명이 중복돼
+있을 수 있다.
+
+${rawText || '(원문 없음)'}
+
+이걸 옵션명과 그 옵션의 선택값 목록으로 깔끔하게 정리해라. 같은 옵션명이 여러 번 나오면 하나로 합치고,
+값 안의 불필요한 공백이나 괄호 설명은 정리하되 실제 값 자체는 바꾸지 마라. 원문에 없는 옵션이나 값을
+새로 지어내지 마라. 원문이 비어있거나 옵션 정보가 전혀 없으면 빈 배열을 반환해라.`
+}
+
+async function cleanupProductOptionsAnthropic(
+  productName: string, rawText: string, signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<OptionCleanupGroup[] | null> {
+  if (!isAiProviderEnabled('anthropic')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.ANTHROPIC_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const response = await getClient().messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      tools: [{
+        name: 'set_option_groups',
+        description: '정리된 옵션 그룹 목록을 반환한다.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            groups: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string', description: '옵션명' },
+                  values: { type: 'array', items: { type: 'string' }, description: '선택값 목록' },
+                },
+                required: ['name', 'values'],
+              },
+            },
+          },
+          required: ['groups'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'set_option_groups' },
+      messages: [{ role: 'user', content: buildOptionCleanupPrompt(productName, rawText) }],
+    }, { signal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal) })
+    const toolUse = response.content.find(b => b.type === 'tool_use')
+    if (!toolUse || toolUse.type !== 'tool_use') { onError?.('도구 호출 없이 응답함'); return null }
+    return (toolUse.input as { groups: OptionCleanupGroup[] }).groups
+  } catch (e) {
+    const rawMessage = e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function cleanupProductOptionsGemini(
+  productName: string, rawText: string, signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<OptionCleanupGroup[] | null> {
+  if (!isAiProviderEnabled('gemini')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GEMINI_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_MODEL,
+      contents: buildOptionCleanupPrompt(productName, rawText),
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_option_groups',
+          description: '정리된 옵션 그룹 목록을 반환한다.',
+          parameters: {
+            type: Type.OBJECT,
+            required: ['groups'],
+            properties: {
+              groups: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  required: ['name', 'values'],
+                  properties: {
+                    name: { type: Type.STRING },
+                    values: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  },
+                },
+              },
+            },
+          },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_option_groups'] } },
+        abortSignal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal),
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) { onError?.('functionCall 없이 응답함'); return null }
+    return (call.args as unknown as { groups: OptionCleanupGroup[] }).groups
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function cleanupProductOptionsGroq(
+  productName: string, rawText: string, signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<OptionCleanupGroup[] | null> {
+  if (!isAiProviderEnabled('groq')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GROQ_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: reportAiSignal(MALL_REPORT_GROQ_TIMEOUT_MS, signal),
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        max_tokens: 900,
+        messages: [{ role: 'user', content: buildOptionCleanupPrompt(productName, rawText) }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_option_groups',
+            description: '정리된 옵션 그룹 목록을 반환한다.',
+            parameters: {
+              type: 'object',
+              required: ['groups'],
+              properties: {
+                groups: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    required: ['name', 'values'],
+                    properties: {
+                      name: { type: 'string' },
+                      values: { type: 'array', items: { type: 'string' } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_option_groups' } },
+      }),
+    })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail).slice(0, 150)}` : ''}`)
+      return null
+    }
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) { onError?.('도구 호출 없이 응답함'); return null }
+    return (JSON.parse(call.function.arguments) as { groups: OptionCleanupGroup[] }).groups
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function cleanupProductOptionsOllama(
+  productName: string, rawText: string, signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<OptionCleanupGroup[] | null> {
+  if (!isAiProviderEnabled('ollama')) { onError?.('공급자가 꺼져있음'); return null }
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          stream: false,
+          think: false,
+          options: OLLAMA_CHAT_OPTIONS,
+          keep_alive: '30m',
+          messages: [{ role: 'user', content: buildOptionCleanupPrompt(productName, rawText) }],
+          tools: [{
+            type: 'function',
+            function: {
+              name: 'set_option_groups',
+              description: '정리된 옵션 그룹 목록을 반환한다.',
+              parameters: {
+                type: 'object',
+                required: ['groups'],
+                properties: {
+                  groups: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      required: ['name', 'values'],
+                      properties: {
+                        name: { type: 'string' },
+                        values: { type: 'array', items: { type: 'string' } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }],
+        }),
+      } as RequestInit)
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 200)
+        onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail)}` : ''}`)
+        return null
+      }
+      const data = await res.json() as { message?: { tool_calls?: { function: { arguments: unknown } }[] } }
+      const call = data.message?.tool_calls?.[0]
+      if (!call) { onError?.('도구 호출 없이 응답함'); return null }
+      const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments
+      return (args as { groups: OptionCleanupGroup[] }).groups
+    } catch (e) {
+      onError?.(e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+      return null
+    }
+  })
+}
+
+/** 상품 옵션 원문 텍스트를 정리된 옵션 그룹으로 제안한다 — rawText가 비어있으면 호출할 거리가 없으니
+ *  바로 빈 배열을 반환한다. */
+export async function cleanupProductOptions(
+  productName: string,
+  rawText: string,
+  signal?: AbortSignal,
+): Promise<OptionCleanupGroup[]> {
+  if (!rawText.trim()) return []
+  const providers: { id: AiProviderId; fn: (onError: (reason: string) => void) => Promise<OptionCleanupGroup[] | null> }[] = [
+    { id: 'anthropic', fn: onError => cleanupProductOptionsAnthropic(productName, rawText, signal, onError) },
+    { id: 'gemini', fn: onError => cleanupProductOptionsGemini(productName, rawText, signal, onError) },
+    { id: 'groq', fn: onError => cleanupProductOptionsGroq(productName, rawText, signal, onError) },
+    { id: 'ollama', fn: onError => cleanupProductOptionsOllama(productName, rawText, signal, onError) },
+  ]
+  for (const p of providers) {
+    if (signal?.aborted) return []
+    let errorMsg: string | undefined
+    const result = await p.fn(reason => { errorMsg = reason }).catch((e: unknown) => {
+      errorMsg = errorMsg ?? (e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+      return null
+    })
+    if (result) {
+      return result
+        .map(g => ({ name: (g.name ?? '').trim(), values: (g.values ?? []).map(v => v.trim()).filter(Boolean) }))
+        .filter(g => g.name && g.values.length > 0)
+    }
+    console.log(`[AI:${p.id}] 옵션 정리 실패(${translateAiErrorReason(errorMsg ?? '원인 미상')}) — 다음 공급자로 넘어감`)
+  }
+  return []
+}
+
+/** 가격 및 이익 관리 화면의 "✨ AI 목표마진율 추천" — target_margin_rate는 몰 어디에도 소스가 없는 순수
+ *  정책값이라(스크랩으로 못 채움, Transform의 ai 규칙 컬럼 대상에도 없음) 유일하게 자동채우기 공백으로
+ *  남아있던 가격 필드다(2026-10-03, PTP 마이그레이션 로드맵 §04). 이미 사람이 설정해둔 값(카테고리·
+ *  가격대별로 보통 몇 %를 쓰는지)을 few-shot 예시로 주고, 비어있는 상품에 추천값을 제안한다 — Transform의
+ *  "AS-IS/TO-BE 쌍에서 패턴을 학습" 원리를 그대로 재사용, 새 개념을 만들지 않는다. 예시가 없으면(아직
+ *  아무도 마진율을 입력한 적 없는 세션) 참고할 패턴 자체가 없으니 호출하지 않는다. */
+export interface MarginRateExample { name: string; category: string; costPrice: number | null; salePrice: number | null; marginRate: number }
+export interface MarginRateTarget { id: number; name: string; category: string; costPrice: number | null; salePrice: number | null }
+export interface MarginRateSuggestion { id: number; marginRate: number }
+
+const MARGIN_EXAMPLE_LIMIT = 50
+const MARGIN_TARGET_LIMIT = 150
+
+function fmtMarginPrice(n: number | null): string {
+  return n == null ? '?' : `₩${n.toLocaleString()}`
+}
+
+function buildMarginRatePrompt(examples: MarginRateExample[], targets: MarginRateTarget[]): string {
+  return `다음은 이 거래처가 이미 직접 설정해둔 "목표 마진율" 예시다(상품명/카테고리/원가/판매가/실제 설정한
+마진율%). 이 패턴(어떤 카테고리·가격대에 보통 몇 %를 쓰는지)을 참고해, 아직 목표 마진율이 비어있는 아래
+상품들에 적절한 마진율(%)을 추천해라.
+
+[기존 설정 예시]
+${examples.map(e => `- ${e.name} | ${e.category || '(카테고리 없음)'} | 원가 ${fmtMarginPrice(e.costPrice)} | 판매가 ${fmtMarginPrice(e.salePrice)} | 마진율 ${e.marginRate}%`).join('\n')}
+
+[마진율이 필요한 상품]
+${targets.map(t => `- id=${t.id} | ${t.name} | ${t.category || '(카테고리 없음)'} | 원가 ${fmtMarginPrice(t.costPrice)} | 판매가 ${fmtMarginPrice(t.salePrice)}`).join('\n')}
+
+비슷한 카테고리·가격대 예시가 전혀 없어 추측에 가까워지는 상품은 추천하지 말고 결과에서 빼라. 마진율은
+0보다 크고 100 이하인 숫자로만 답해라.`
+}
+
+async function suggestMarginRatesAnthropic(
+  examples: MarginRateExample[], targets: MarginRateTarget[], signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<MarginRateSuggestion[] | null> {
+  if (!isAiProviderEnabled('anthropic')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.ANTHROPIC_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const response = await getClient().messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      tools: [{
+        name: 'set_margin_suggestions',
+        description: '목표 마진율 추천 목록을 반환한다.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            suggestions: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'number', description: '대상 상품 id' },
+                  marginRate: { type: 'number', description: '추천 마진율(%), 0 초과 100 이하' },
+                },
+                required: ['id', 'marginRate'],
+              },
+            },
+          },
+          required: ['suggestions'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'set_margin_suggestions' },
+      messages: [{ role: 'user', content: buildMarginRatePrompt(examples, targets) }],
+    }, { signal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal) })
+    const toolUse = response.content.find(b => b.type === 'tool_use')
+    if (!toolUse || toolUse.type !== 'tool_use') { onError?.('도구 호출 없이 응답함'); return null }
+    return (toolUse.input as { suggestions: MarginRateSuggestion[] }).suggestions
+  } catch (e) {
+    const rawMessage = e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function suggestMarginRatesGemini(
+  examples: MarginRateExample[], targets: MarginRateTarget[], signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<MarginRateSuggestion[] | null> {
+  if (!isAiProviderEnabled('gemini')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GEMINI_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_MODEL,
+      contents: buildMarginRatePrompt(examples, targets),
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_margin_suggestions',
+          description: '목표 마진율 추천 목록을 반환한다.',
+          parameters: {
+            type: Type.OBJECT,
+            required: ['suggestions'],
+            properties: {
+              suggestions: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  required: ['id', 'marginRate'],
+                  properties: {
+                    id: { type: Type.NUMBER },
+                    marginRate: { type: Type.NUMBER },
+                  },
+                },
+              },
+            },
+          },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_margin_suggestions'] } },
+        abortSignal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal),
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) { onError?.('functionCall 없이 응답함'); return null }
+    return (call.args as unknown as { suggestions: MarginRateSuggestion[] }).suggestions
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function suggestMarginRatesGroq(
+  examples: MarginRateExample[], targets: MarginRateTarget[], signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<MarginRateSuggestion[] | null> {
+  if (!isAiProviderEnabled('groq')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GROQ_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: reportAiSignal(MALL_REPORT_GROQ_TIMEOUT_MS, signal),
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        max_tokens: 1200,
+        messages: [{ role: 'user', content: buildMarginRatePrompt(examples.slice(0, 20), targets.slice(0, 40)) }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_margin_suggestions',
+            description: '목표 마진율 추천 목록을 반환한다.',
+            parameters: {
+              type: 'object',
+              required: ['suggestions'],
+              properties: {
+                suggestions: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    required: ['id', 'marginRate'],
+                    properties: {
+                      id: { type: 'number' },
+                      marginRate: { type: 'number' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_margin_suggestions' } },
+      }),
+    })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail).slice(0, 150)}` : ''}`)
+      return null
+    }
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) { onError?.('도구 호출 없이 응답함'); return null }
+    return (JSON.parse(call.function.arguments) as { suggestions: MarginRateSuggestion[] }).suggestions
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function suggestMarginRatesOllama(
+  examples: MarginRateExample[], targets: MarginRateTarget[], signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<MarginRateSuggestion[] | null> {
+  if (!isAiProviderEnabled('ollama')) { onError?.('공급자가 꺼져있음'); return null }
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          stream: false,
+          think: false,
+          options: OLLAMA_CHAT_OPTIONS,
+          keep_alive: '30m',
+          messages: [{ role: 'user', content: buildMarginRatePrompt(examples, targets) }],
+          tools: [{
+            type: 'function',
+            function: {
+              name: 'set_margin_suggestions',
+              description: '목표 마진율 추천 목록을 반환한다.',
+              parameters: {
+                type: 'object',
+                required: ['suggestions'],
+                properties: {
+                  suggestions: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      required: ['id', 'marginRate'],
+                      properties: {
+                        id: { type: 'number' },
+                        marginRate: { type: 'number' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          }],
+        }),
+      } as RequestInit)
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 200)
+        onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail)}` : ''}`)
+        return null
+      }
+      const data = await res.json() as { message?: { tool_calls?: { function: { arguments: unknown } }[] } }
+      const call = data.message?.tool_calls?.[0]
+      if (!call) { onError?.('도구 호출 없이 응답함'); return null }
+      const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments
+      return (args as { suggestions: MarginRateSuggestion[] }).suggestions
+    } catch (e) {
+      onError?.(e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+      return null
+    }
+  })
+}
+
+/**
+ * 목표 마진율이 비어있는 상품들에 추천값을 제안한다 — examples(이미 사람이 설정한 값)가 2개 미만이면
+ * 참고할 패턴 자체가 없으므로 호출하지 않고 빈 배열을 반환한다. 응답의 id가 실제 targets에 있는지,
+ * marginRate가 0~100 범위인지 재확인한 뒤(classifyMasterCategory와 같은 "모델 자기신고보다 실제 검증"
+ * 원칙) 걸러서 반환한다 — 터무니없는 마진율이 조용히 적용되는 사고를 막는다.
+ */
+export async function suggestMarginRates(
+  examples: MarginRateExample[],
+  targets: MarginRateTarget[],
+  signal?: AbortSignal,
+): Promise<MarginRateSuggestion[]> {
+  if (examples.length < 2 || targets.length === 0) return []
+  const ex = examples.slice(0, MARGIN_EXAMPLE_LIMIT)
+  const tg = targets.slice(0, MARGIN_TARGET_LIMIT)
+  const providers: { id: AiProviderId; fn: (onError: (reason: string) => void) => Promise<MarginRateSuggestion[] | null> }[] = [
+    { id: 'anthropic', fn: onError => suggestMarginRatesAnthropic(ex, tg, signal, onError) },
+    { id: 'gemini', fn: onError => suggestMarginRatesGemini(ex, tg, signal, onError) },
+    { id: 'groq', fn: onError => suggestMarginRatesGroq(ex, tg, signal, onError) },
+    { id: 'ollama', fn: onError => suggestMarginRatesOllama(ex, tg, signal, onError) },
+  ]
+  const targetIds = new Set(tg.map(t => t.id))
+  for (const p of providers) {
+    if (signal?.aborted) return []
+    let errorMsg: string | undefined
+    const result = await p.fn(reason => { errorMsg = reason }).catch((e: unknown) => {
+      errorMsg = errorMsg ?? (e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+      return null
+    })
+    if (result) {
+      return result
+        .filter(s => targetIds.has(s.id) && typeof s.marginRate === 'number' && s.marginRate > 0 && s.marginRate <= 100)
+        .map(s => ({ id: s.id, marginRate: Math.round(s.marginRate * 100) / 100 }))
+    }
+    console.log(`[AI:${p.id}] 목표 마진율 추천 실패(${translateAiErrorReason(errorMsg ?? '원인 미상')}) — 다음 공급자로 넘어감`)
+  }
+  return []
+}
+
 export interface ExtractionRule {
   /** 'fixed'는 페이지에서 읽지 않고 value를 모든 상품에 그대로 채운다 — 택배사처럼 페이지에 아예 안
    *  나오지만 이 몰은 항상 같은 값인 필드용(스크랩 대상 직접지정에서 "화면에 없는 값" 입력으로 생성).

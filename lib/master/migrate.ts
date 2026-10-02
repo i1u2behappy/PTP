@@ -131,6 +131,45 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
   return { migrated: masterIds.length, masterIds }
 }
 
+/**
+ * product_master가 "확정"(status='ready')되는 순간, 그 값을 reference_products에 저장해둔다 — 이후 같은
+ * 몰의 같은 mall_product_code 상품이 재마이그레이션(재스크랩 뒤 다시 확정 등)될 때 findReferenceFallback이
+ * "사람이 실제로 확인한 값"으로 빈 칸을 채울 수 있게 한다(2026-10-03, PTP 마이그레이션 로드맵 §04 —
+ * 테이블/조회 로직은 처음부터 있었는데 채우는 쪽이 없어 영원히 안 쓰이던 죽은 코드였다). 확정 때마다
+ * 매번 불러도 안전하도록 UNIQUE(site_id, mall_product_code) 위에서 upsert한다 — 사람이 "확정"을 취소하고
+ * 값을 고쳐 다시 확정해도 최신값으로 갱신될 뿐 중복 행이 쌓이지 않는다.
+ *
+ * brand/manufacturer/origin/description 넷만 저장한다 — findReferenceFallback이 실제로 읽는 컬럼과
+ * 정확히 같다(category는 master_category가 아니라 mall_category 기준으로 맞춘다: migrateToMaster가
+ * reference의 category를 mall_category 자리에 폴백으로 쓰고 있어, 분류된 master_category를 여기 저장하면
+ * 다음 몰 구조가 바뀐 재스크랩 때 엉뚱한 "표준분류"가 mall_category 칸에 들어가 버린다). 값이 전부
+ * 비어있으면(아직 아무것도 채워지지 않은 draft를 실수로 확정한 경우 등) 저장할 게 없으니 건너뛴다.
+ */
+export async function saveAsReferenceProduct(masterId: number): Promise<void> {
+  const res = await pool.query<{
+    site_id: number | null; mall_product_code: string | null; name_original: string | null
+    brand: string | null; manufacturer: string | null; origin: string | null; mall_category: string | null; description: string | null
+  }>(
+    `SELECT mp.site_id, mp.mall_product_code, pm.name_original, pm.brand, pm.manufacturer, pm.origin, pm.mall_category, pm.description
+     FROM product_master pm JOIN mall_products mp ON mp.id = pm.mall_product_id
+     WHERE pm.id=$1`,
+    [masterId],
+  )
+  const row = res.rows[0]
+  if (!row || row.site_id == null || !row.mall_product_code) return
+  if (!row.brand && !row.manufacturer && !row.origin && !row.description) return
+
+  await pool.query(
+    `INSERT INTO reference_products (site_id, mall_product_code, match_key, brand, manufacturer, origin, category, description, source, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'confirmed_master',NOW())
+     ON CONFLICT (site_id, mall_product_code) WHERE mall_product_code IS NOT NULL DO UPDATE SET
+       match_key = $3, brand = $4, manufacturer = $5, origin = $6, category = $7, description = $8,
+       source = 'confirmed_master', updated_at = NOW()`,
+    [row.site_id, row.mall_product_code, normalizeName(row.name_original || ''),
+      row.brand || '', row.manufacturer || '', row.origin || '', row.mall_category || '', row.description || ''],
+  )
+}
+
 /** siteId에 아직 거래처가 없을 때 "확정"(mergeStagingItems)이 상품마스터 반영을 건너뛴 mall_products —
  *  master_product_id가 비어있는 것으로 판별한다(사용자 요청, 2026-08-27: "거래처가 나중에 지정되면
  *  소급 반영"). Mall 상세관리(SiteDetailPanel)가 거래처 옆에 이 개수를 보여주는 데 쓴다. */

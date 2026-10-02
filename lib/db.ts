@@ -476,6 +476,14 @@ async function runMigrations() {
       source             TEXT,
       updated_at         TIMESTAMPTZ DEFAULT NOW()
     );
+    -- "확정"(product_master.status='ready') 시점에 saveAsReferenceProduct가 UPSERT하는 키 —
+    -- 이 테이블이 생긴 이래 읽기만 하고 아무도 INSERT를 안 해 영원히 안 채워지던 죽은 코드였다
+    -- (2026-10-03, PTP 마이그레이션 로드맵 §04 "reference_products 죽은 코드를 정리한다" — 채울 계획을
+    -- 세우는 쪽으로 완성: 이미 사람이 확정한 값을 이후 같은 상품(같은 몰의 같은 mall_product_code)이
+    -- 재스크랩/재마이그레이션될 때 빈 칸 채우기용으로 재사용한다). site_id가 없는 전역 참조 행은 이
+    -- 자동 저장 경로로는 안 생기므로(항상 실제 몰의 상품에서 옴) 부분 유니크 인덱스로 충분하다.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_reference_products_site_code
+      ON reference_products(site_id, mall_product_code) WHERE mall_product_code IS NOT NULL;
 
     -- 실제 영속 '상품마스터' (3단계 자동 마이그레이션의 목표 테이블)
     CREATE TABLE IF NOT EXISTS product_master (

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import pool from '@/lib/db'
+import { saveAsReferenceProduct } from '@/lib/master/migrate'
 
 const ALLOWED = [
   'name_final', 'master_category', 'brand', 'manufacturer', 'origin', 'description', 'options', 'sales_code',
@@ -53,6 +54,9 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     }
     throw e
   }
+  // 이 "확정"(status='ready')이 reference_products를 채우는 유일한 통로다(saveAsReferenceProduct 주석
+  // 참고) — 실패해도 이미 끝난 확정 자체를 무르면 안 되므로 응답과 분리해 조용히 삼킨다.
+  if (body.status === 'ready') await saveAsReferenceProduct(Number(id)).catch(() => {})
   return NextResponse.json({ ok: true })
 }
 

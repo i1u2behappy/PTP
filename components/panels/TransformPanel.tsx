@@ -324,8 +324,21 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
     })
   }
 
+  // ContinuousMigrationPanel의 같은 이름 상수와 같은 이유(Groq 무료 등급 분당 한도 ITPM 7,000/OTPM
+  // 1,000) — generateForProducts를 부르는 진입점이 이 화면과 연속관리 재마이그레이션 둘이라, 한쪽만
+  // 경고를 달면 다른 쪽에서 그대로 재발한다(PTP 마이그레이션 로드맵 §04).
+  const BATCH_WARN_THRESHOLD = 100
+
   async function handleGenerate() {
     if (!selectedSite || selectedProductIds.size === 0) return
+    if (selectedProductIds.size > BATCH_WARN_THRESHOLD) {
+      const proceed = confirm(
+        `${selectedProductIds.size}개를 한 번에 생성합니다. ai 규칙이 있는 컬럼은 상품마다 AI를 호출하는데, ` +
+        `한꺼번에 몰리면 공급자(특히 Groq 무료 등급)의 분당 한도에 걸려 평소보다 오래 걸리거나 일부가 다음 ` +
+        `공급자로 넘어갈 수 있습니다. 계속할까요?\n\n(나눠서 진행하려면 취소 후 일부만 선택해 주세요)`,
+      )
+      if (!proceed) return
+    }
     setGenerating(true)
     try {
       const res = await fetch('/api/transform/generate', {

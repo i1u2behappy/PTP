@@ -156,8 +156,25 @@ export function ContinuousMigrationPanel() {
     setSelected(s => s.size === changes.length ? new Set() : new Set(changes.map(c => c.mallProductId)))
   }
 
+  // 이 숫자 이상을 한 번에 재마이그레이션하면 Transform의 ai 규칙 컬럼이 상품마다 AI를 한 번씩 호출한다
+  // (generateForProducts) — Groq 무료 등급의 분당 토큰 한도(ITPM 7,000/OTPM 1,000, 이 프로젝트가 이미
+  // 몇 차례 실제로 걸려본 한도)에 몰릴 수 있어 중간에 조용히 폴백/지연되며 오래 걸릴 수 있다(사용자가
+  // 그걸 모른 채 기다리게 하지 않는다, PTP 마이그레이션 로드맵 §04 "대량 재적용 전에 배치 한도 경고를
+  // 띄운다" — 키픽AI가 "네이버 API 한도라 1,000개/일 권장"이라고 먼저 알려주는 것과 같은 취지). 정확한
+  // "안전한 숫자"가 있는 건 아니라서, AI 규칙이 있는 몰에서만 보수적으로 100개를 기준으로 삼는다 —
+  // 그 아래는 안내 없이 바로 진행해도 실사용상 문제된 적이 없다.
+  const BATCH_WARN_THRESHOLD = 100
+
   async function migrateSelected() {
     if (!selected.size || siteId === '') return
+    if (selected.size > BATCH_WARN_THRESHOLD) {
+      const proceed = confirm(
+        `${selected.size}개를 한 번에 재마이그레이션합니다. Transform에 AI 컬럼 규칙이 있다면 상품마다 AI를 ` +
+        `호출하는데, 한꺼번에 몰리면 공급자(특히 Groq 무료 등급)의 분당 한도에 걸려 평소보다 오래 걸리거나 ` +
+        `일부가 다음 공급자로 넘어갈 수 있습니다. 계속할까요?\n\n(나눠서 진행하려면 취소 후 일부만 선택해 주세요)`,
+      )
+      if (!proceed) return
+    }
     setMigrating(true)
     try {
       const rows = changes.filter(c => selected.has(c.mallProductId))

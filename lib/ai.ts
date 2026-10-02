@@ -721,6 +721,248 @@ export async function generateTransformColumns(
   return {}
 }
 
+/** 몰마다 제각각인 원문 카테고리("여성신발>운동화", "우먼스 스니커즈" 등)가 master_category에 그대로
+ *  복사만 되고 분류되지 않던 문제(2026-10-03, PTP 마이그레이션 로드맵 §04 "카테고리 자동분류 AI를
+ *  추가한다")에 대응한다. action은 "참고용 힌트"일 뿐 신뢰하지 않는다 — 호출부(classifyMasterCategory)가
+ *  category 값이 existingCategories와 글자 그대로 일치하는지로 재확인(reuse)하므로, 모델이 분류는
+ *  재사용으로 의도했지만 표기를 살짝 다르게 썼다면(공백/띄어쓰기 차이 등) 자동으로 "new"로 떨어진다 —
+ *  모델의 자기 신고보다 실제 문자열 일치가 더 믿을 만하다. */
+export interface MasterCategorySuggestion { action: 'reuse' | 'new'; category: string }
+
+/** 프롬프트가 너무 길어지면(카테고리가 매우 많은 시스템) 토큰 낭비이자 Groq ITPM 한도(8,000) 초과
+ *  위험이라, 기존 카테고리 목록을 이 개수까지만 보여준다 — Transform의 few-shot 개수 제한(8개)과 같은
+ *  이유, 이 값은 "같은 분류 작업 안에서 비교 대상 수"라 더 넉넉히 둔다. */
+const MASTER_CATEGORY_EXISTING_LIMIT = 300
+
+function buildMasterCategoryPrompt(mallCategory: string, existingCategories: string[]): string {
+  const list = existingCategories.slice(0, MASTER_CATEGORY_EXISTING_LIMIT)
+  return `쇼핑몰 원문 카테고리를 내부 표준 카테고리로 분류해라. 몰마다 같은 상품군을 다르게 표현하는데
+(예: "여성신발>운동화"와 "우먼스 스니커즈"는 같은 카테고리), 이미 쓰고 있는 이름이 있으면 새로 짓지 말고
+그 이름을 글자 그대로 재사용해야 한다.
+
+[이미 존재하는 내부 카테고리 목록]
+${list.length ? list.map(c => `- ${c}`).join('\n') : '(아직 없음 — 이번이 사실상 첫 분류)'}
+
+[분류할 원문]
+"${mallCategory}"
+
+위 목록에 같은 뜻의 카테고리가 있으면 그 글자 그대로를 category로 답하고 action은 "reuse"로 한다. 없으면
+목록에 있는 것들과 같은 수준(너무 세분화하지도, 너무 뭉뚱그리지도 않게)으로 간결한 새 이름을 만들고
+action은 "new"로 한다.`
+}
+
+async function classifyMasterCategoryAnthropic(
+  mallCategory: string, existingCategories: string[], signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<MasterCategorySuggestion | null> {
+  if (!isAiProviderEnabled('anthropic')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.ANTHROPIC_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const response = await getClient().messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 256,
+      tools: [{
+        name: 'set_master_category',
+        description: '분류 결과를 반환한다.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['reuse', 'new'], description: '기존 목록에서 재사용하면 reuse, 새로 지었으면 new' },
+            category: { type: 'string', description: '최종 카테고리 이름' },
+          },
+          required: ['action', 'category'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'set_master_category' },
+      messages: [{ role: 'user', content: buildMasterCategoryPrompt(mallCategory, existingCategories) }],
+    }, { signal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal) })
+    const toolUse = response.content.find(b => b.type === 'tool_use')
+    if (!toolUse || toolUse.type !== 'tool_use') { onError?.('도구 호출 없이 응답함'); return null }
+    return toolUse.input as MasterCategorySuggestion
+  } catch (e) {
+    const rawMessage = e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function classifyMasterCategoryGemini(
+  mallCategory: string, existingCategories: string[], signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<MasterCategorySuggestion | null> {
+  if (!isAiProviderEnabled('gemini')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GEMINI_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_MODEL,
+      contents: buildMasterCategoryPrompt(mallCategory, existingCategories),
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_master_category',
+          description: '분류 결과를 반환한다.',
+          parameters: {
+            type: Type.OBJECT,
+            required: ['action', 'category'],
+            properties: {
+              action: { type: Type.STRING, enum: ['reuse', 'new'], description: '기존 목록에서 재사용하면 reuse, 새로 지었으면 new' },
+              category: { type: Type.STRING, description: '최종 카테고리 이름' },
+            },
+          },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_master_category'] } },
+        abortSignal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal),
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) { onError?.('functionCall 없이 응답함'); return null }
+    return call.args as unknown as MasterCategorySuggestion
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function classifyMasterCategoryGroq(
+  mallCategory: string, existingCategories: string[], signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<MasterCategorySuggestion | null> {
+  if (!isAiProviderEnabled('groq')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GROQ_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: reportAiSignal(MALL_REPORT_GROQ_TIMEOUT_MS, signal),
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        max_tokens: 300,
+        messages: [{ role: 'user', content: buildMasterCategoryPrompt(mallCategory, existingCategories.slice(0, 120)) }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_master_category',
+            description: '분류 결과를 반환한다.',
+            parameters: {
+              type: 'object',
+              required: ['action', 'category'],
+              properties: {
+                action: { type: 'string', enum: ['reuse', 'new'] },
+                category: { type: 'string', description: '최종 카테고리 이름' },
+              },
+            },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_master_category' } },
+      }),
+    })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail).slice(0, 150)}` : ''}`)
+      return null
+    }
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) { onError?.('도구 호출 없이 응답함'); return null }
+    return JSON.parse(call.function.arguments) as MasterCategorySuggestion
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function classifyMasterCategoryOllama(
+  mallCategory: string, existingCategories: string[], signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<MasterCategorySuggestion | null> {
+  if (!isAiProviderEnabled('ollama')) { onError?.('공급자가 꺼져있음'); return null }
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          stream: false,
+          think: false,
+          options: OLLAMA_CHAT_OPTIONS,
+          keep_alive: '30m',
+          messages: [{ role: 'user', content: buildMasterCategoryPrompt(mallCategory, existingCategories) }],
+          tools: [{
+            type: 'function',
+            function: {
+              name: 'set_master_category',
+              description: '분류 결과를 반환한다.',
+              parameters: {
+                type: 'object',
+                required: ['action', 'category'],
+                properties: {
+                  action: { type: 'string', enum: ['reuse', 'new'] },
+                  category: { type: 'string', description: '최종 카테고리 이름' },
+                },
+              },
+            },
+          }],
+        }),
+      } as RequestInit)
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 200)
+        onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail)}` : ''}`)
+        return null
+      }
+      const data = await res.json() as { message?: { tool_calls?: { function: { arguments: unknown } }[] } }
+      const call = data.message?.tool_calls?.[0]
+      if (!call) { onError?.('도구 호출 없이 응답함'); return null }
+      const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments
+      return args as MasterCategorySuggestion
+    } catch (e) {
+      onError?.(e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+      return null
+    }
+  })
+}
+
+/**
+ * 몰 원문 카테고리 하나를 내부 표준 카테고리로 분류 제안한다 — "기존에 이미 쓰고 있는 이름 중 같은 뜻이
+ * 있으면 재사용, 없으면 새 이름" 둘 중 하나를 고른다(사방넷 AI 카테고리 추천 등 참고, PTP 마이그레이션
+ * 로드맵 §03/§04). 호출부(카테고리 매핑 화면)가 "제안만 받고 사람이 확정"하는 흐름으로 쓰도록 설계돼
+ * 있다 — 여기서 바로 DB를 바꾸지 않는다.
+ *
+ * action은 모델의 자기 신고일 뿐이라 안 믿는다 — category가 existingCategories와 정확히(trim 후) 일치하면
+ * 호출부 판단과 무관하게 무조건 reuse로 교정한다. 모델이 "reuse"라면서 기존 이름을 살짝 다르게 썼다면
+ * (예: 공백 차이) 그건 사실상 새 이름을 만든 것과 같으므로 new로 본다 — 어설픈 재사용보다 사람이 한 번 더
+ * 확인하는 new 쪽이 "조용한 오매핑"을 피하는 데 더 안전하다(PTP 마이그레이션 로드맵의 반복되는 원칙).
+ */
+export async function classifyMasterCategory(
+  mallCategory: string,
+  existingCategories: string[],
+  signal?: AbortSignal,
+): Promise<MasterCategorySuggestion | null> {
+  if (!mallCategory.trim()) return null
+  const providers: { id: AiProviderId; fn: (onError: (reason: string) => void) => Promise<MasterCategorySuggestion | null> }[] = [
+    { id: 'anthropic', fn: onError => classifyMasterCategoryAnthropic(mallCategory, existingCategories, signal, onError) },
+    { id: 'gemini', fn: onError => classifyMasterCategoryGemini(mallCategory, existingCategories, signal, onError) },
+    { id: 'groq', fn: onError => classifyMasterCategoryGroq(mallCategory, existingCategories, signal, onError) },
+    { id: 'ollama', fn: onError => classifyMasterCategoryOllama(mallCategory, existingCategories, signal, onError) },
+  ]
+  for (const p of providers) {
+    if (signal?.aborted) return null
+    let errorMsg: string | undefined
+    const result = await p.fn(reason => { errorMsg = reason }).catch((e: unknown) => {
+      errorMsg = errorMsg ?? (e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+      return null
+    })
+    if (result?.category?.trim()) {
+      const category = result.category.trim()
+      const matched = existingCategories.find(c => c.trim() === category)
+      return { action: matched ? 'reuse' : 'new', category: matched ?? category }
+    }
+    console.log(`[AI:${p.id}] 카테고리 분류 실패(${translateAiErrorReason(errorMsg ?? '원인 미상')}) — 다음 공급자로 넘어감`)
+  }
+  return null
+}
+
 export interface ExtractionRule {
   /** 'fixed'는 페이지에서 읽지 않고 value를 모든 상품에 그대로 채운다 — 택배사처럼 페이지에 아예 안
    *  나오지만 이 몰은 항상 같은 값인 필드용(스크랩 대상 직접지정에서 "화면에 없는 값" 입력으로 생성).

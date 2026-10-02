@@ -293,50 +293,181 @@ const DEFAULT_PROMPT_TEMPLATE = `원본 상품명: {{name}}
 - 핵심 키워드 포함 (소재, 용도, 특징)
 - 상품명만 출력, 설명 없이`
 
-/** 대표이미지 URL → AI 상품명 생성. promptTemplate에 {{name}}이 원본상품명으로 치환된다. */
-export async function generateProductName(
-  imageUrl: string,
-  originalName: string,
-  promptTemplate?: string,
-  maxLength = 20,
-): Promise<string> {
+async function generateProductNameAnthropic(
+  imageBase64: string, mimeType: string, prompt: string, signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<string | null> {
+  if (!isAiProviderEnabled('anthropic')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.ANTHROPIC_API_KEY) { onError?.('API 키 없음'); return null }
   try {
-    // 이미지를 base64로 다운로드
-    const { default: axios } = await import('axios')
-    const imgRes = await axios.get<ArrayBuffer>(imageUrl, {
-      responseType: 'arraybuffer',
-      timeout: 10_000,
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-    })
-    const base64 = Buffer.from(imgRes.data).toString('base64')
-    const mimeType = (imgRes.headers['content-type'] as string) || 'image/jpeg'
-
     const response = await getClient().messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 128,
       messages: [{
         role: 'user',
         content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp', data: base64 },
-          },
-          {
-            type: 'text',
-            text: (promptTemplate || DEFAULT_PROMPT_TEMPLATE).replace('{{name}}', originalName),
-          },
+          { type: 'image', source: { type: 'base64', media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp', data: imageBase64 } },
+          { type: 'text', text: prompt },
         ],
       }],
       // generateAutoExtractionRules(lib/ai.ts)와 같은 이유로 추가(2026-09-02) — Anthropic은 지금까지
       // 대부분 크레딧 부족으로 즉시 실패했지만, 응답이 느려지는 다른 장애 모드에서도 이 호출 하나 때문에
       // 상품명 생성(대량 반복 호출 가능)이 무한정 멈추지 않게 방어적으로 맞춘다.
-    }, { signal: AbortSignal.timeout(MALL_REPORT_TIMEOUT_MS) })
+    }, { signal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal) })
+    const text = (response.content[0] as { type: string; text?: string }).text
+    if (!text) { onError?.('빈 응답'); return null }
+    return text.trim()
+  } catch (e) {
+    const rawMessage = e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
 
-    return (response.content[0] as { type: string; text: string }).text.trim().slice(0, maxLength)
+async function generateProductNameGemini(
+  imageBase64: string, mimeType: string, prompt: string, signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<string | null> {
+  if (!isAiProviderEnabled('gemini')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GEMINI_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_VISION_MODEL,
+      contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { data: imageBase64, mimeType } }] }],
+      config: { abortSignal: reportAiSignal(GEMINI_VISION_TIMEOUT_MS, signal) },
+    })
+    const text = response.text
+    if (!text) { onError?.('빈 응답'); return null }
+    return text.trim()
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function generateProductNameGroq(
+  imageBase64: string, mimeType: string, prompt: string, signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<string | null> {
+  if (!isAiProviderEnabled('groq')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GROQ_API_KEY) { onError?.('API 키 없음'); return null }
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: reportAiSignal(OLLAMA_TIMEOUT_MS, signal),
+      body: JSON.stringify({
+        model: GROQ_VISION_MODEL,
+        max_tokens: 128,
+        temperature: 0,
+        reasoning_effort: 'none',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        }],
+      }),
+    })
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => '')).slice(0, 200)
+      onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail)}` : ''}`)
+      return null
+    }
+    const data = await res.json() as { choices?: { message?: { content?: string } }[] }
+    const text = data.choices?.[0]?.message?.content
+    if (!text) { onError?.('빈 응답'); return null }
+    return text.trim()
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    onError?.(rawMessage)
+    return null
+  }
+}
+
+async function generateProductNameOllama(
+  imageBase64: string, prompt: string, signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<string | null> {
+  if (!isAiProviderEnabled('ollama')) { onError?.('공급자가 꺼져있음'); return null }
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_VISION_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
+        body: JSON.stringify({
+          model: OLLAMA_VISION_MODEL,
+          stream: false,
+          options: OLLAMA_CHAT_OPTIONS,
+          keep_alive: '30m',
+          messages: [{ role: 'user', content: prompt, images: [imageBase64] }],
+        }),
+      } as RequestInit)
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 200)
+        onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail)}` : ''}`)
+        return null
+      }
+      const data = await res.json() as { message?: { content?: string } }
+      const text = data.message?.content
+      if (!text) { onError?.('빈 응답'); return null }
+      return text.trim()
+    } catch (e) {
+      onError?.(e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+      return null
+    }
+  })
+}
+
+/**
+ * 대표이미지 URL → AI 상품명 생성. promptTemplate에 {{name}}이 원본상품명으로 치환된다.
+ * Anthropic→Gemini→Groq→Ollama 순으로 폴백한다(2026-10-03, PTP 마이그레이션 로드맵 §04 — 예전엔 Anthropic
+ * 하나뿐이라 크레딧 소진 같은 장애가 나면 원본명 축약으로만 계속 떨어졌다). 이미지 다운로드 자체가
+ * 실패하면(공급자와 무관한 문제라) 바로 원본명 축약으로 돌아간다 — 공급자를 바꿔 봐도 못 받은 이미지는
+ * 똑같이 못 받는다.
+ */
+export async function generateProductName(
+  imageUrl: string,
+  originalName: string,
+  promptTemplate?: string,
+  maxLength = 20,
+  signal?: AbortSignal,
+): Promise<string> {
+  let imageBase64: string, mimeType: string
+  try {
+    const { default: axios } = await import('axios')
+    const imgRes = await axios.get<ArrayBuffer>(imageUrl, {
+      responseType: 'arraybuffer',
+      timeout: 10_000,
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+    })
+    imageBase64 = Buffer.from(imgRes.data).toString('base64')
+    mimeType = (imgRes.headers['content-type'] as string) || 'image/jpeg'
   } catch {
-    // 이미지 분석 실패 시 원본명 기반으로 축약
     return originalName.slice(0, maxLength)
   }
+
+  const prompt = (promptTemplate || DEFAULT_PROMPT_TEMPLATE).replace('{{name}}', originalName)
+  const providers: { id: AiProviderId; fn: (onError: (reason: string) => void) => Promise<string | null> }[] = [
+    { id: 'anthropic', fn: onError => generateProductNameAnthropic(imageBase64, mimeType, prompt, signal, onError) },
+    { id: 'gemini', fn: onError => generateProductNameGemini(imageBase64, mimeType, prompt, signal, onError) },
+    { id: 'groq', fn: onError => generateProductNameGroq(imageBase64, mimeType, prompt, signal, onError) },
+    { id: 'ollama', fn: onError => generateProductNameOllama(imageBase64, prompt, signal, onError) },
+  ]
+  for (const p of providers) {
+    if (signal?.aborted) break
+    let errorMsg: string | undefined
+    const result = await p.fn(reason => { errorMsg = reason }).catch((e: unknown) => {
+      errorMsg = errorMsg ?? (e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+      return null
+    })
+    if (result) return result.slice(0, maxLength)
+    console.log(`[AI:${p.id}] 상품명 생성 실패(${translateAiErrorReason(errorMsg ?? '원인 미상')}) — 다음 공급자로 넘어감`)
+  }
+  // 전부 실패 — 이미지 분석 없이 원본명 기반으로 축약(기존 동작 유지).
+  return originalName.slice(0, maxLength)
 }
 
 export interface TransformFewShotExample {
@@ -346,27 +477,18 @@ export interface TransformFewShotExample {
   targetValues: Record<string, string>
 }
 
-/**
- * 몰의 "기존 작업내역 완성본" few-shot 예시를 보고, 같은 패턴으로 신규 상품의 AI 대상 컬럼 값을 생성한다.
- * 정규식 파싱 대신 tool-call로 스키마를 강제해 컬럼 여러 개를 한 번에 안전하게 받는다.
- * ANTHROPIC_API_KEY가 없으면 조용히 빈 객체를 반환한다(호출부에서 전체 배치를 막지 않도록).
- */
-export async function generateTransformColumns(
+/** 4개 공급자 함수가 공유하는 프롬프트 — generateMallProfileReport 계열과 같은 이유로 한 곳에 모은다. */
+function buildTransformColumnsPrompt(
   siteName: string,
   columns: { name: string; instruction: string }[],
   examples: TransformFewShotExample[],
   sourceFields: Record<string, unknown>,
-): Promise<Record<string, string>> {
-  if (!process.env.ANTHROPIC_API_KEY || !columns.length) return {}
-
-  const properties: Record<string, { type: string; description: string }> = {}
-  columns.forEach(c => { properties[c.name] = { type: 'string', description: c.instruction || c.name } })
-
+): string {
   const exampleText = examples.map((ex, i) =>
     `[예시 ${i + 1}]\n원본 데이터: ${JSON.stringify(ex.sourceFields)}\n완성값: ${JSON.stringify(ex.targetValues)}`,
   ).join('\n\n')
 
-  const prompt = `몰 '${siteName}'의 기존 작업 완성 예시들이다 (원본 스크래핑 데이터 → 완성값). 같은 패턴으로 아래 신규 상품의 값을 만들어라.
+  return `몰 '${siteName}'의 기존 작업 완성 예시들이다 (원본 스크래핑 데이터 → 완성값). 같은 패턴으로 아래 신규 상품의 값을 만들어라.
 
 ${exampleText || '(참고할 예시 없음 — 컬럼 지시문만 보고 판단할 것)'}
 
@@ -375,6 +497,22 @@ ${JSON.stringify(sourceFields)}
 
 각 컬럼의 지시문:
 ${columns.map(c => `- ${c.name}: ${c.instruction || '(지시문 없음, 예시 패턴을 참고해 합리적으로 생성)'}`).join('\n')}`
+}
+
+/** Anthropic 전용(기존 유일한 경로)이었다 — 2026-10-03, 사용자 지시로 다른 AI 호출들과 같은
+ *  Anthropic→Gemini→Groq→Ollama 폴백 체인에 연결한다(PTP 마이그레이션 로드맵 §04 "마이그레이션 AI 2곳을
+ *  멀티공급자 폴백에 연결한다" 항목). isAiProviderEnabled 가드도 이번에 처음 추가 — 예전엔 화면에서
+ *  "Anthropic" 체크를 꺼도 이 호출만은 그대로 Anthropic을 불렀다. */
+async function generateTransformColumnsAnthropic(
+  siteName: string, columns: { name: string; instruction: string }[], examples: TransformFewShotExample[],
+  sourceFields: Record<string, unknown>, signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<Record<string, string> | null> {
+  if (!isAiProviderEnabled('anthropic')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.ANTHROPIC_API_KEY) { onError?.('API 키 없음'); return null }
+
+  const properties: Record<string, { type: string; description: string }> = {}
+  columns.forEach(c => { properties[c.name] = { type: 'string', description: c.instruction || c.name } })
+  const prompt = buildTransformColumnsPrompt(siteName, columns, examples, sourceFields)
 
   try {
     const response = await getClient().messages.create({
@@ -383,23 +521,204 @@ ${columns.map(c => `- ${c.name}: ${c.instruction || '(지시문 없음, 예시 �
       tools: [{
         name: 'set_columns',
         description: '각 컬럼명을 key로, 생성한 값을 value(문자열)로 채워 반환한다.',
-        input_schema: {
-          type: 'object',
-          properties,
-          required: columns.map(c => c.name),
-        },
+        input_schema: { type: 'object', properties, required: columns.map(c => c.name) },
       }],
       tool_choice: { type: 'tool', name: 'set_columns' },
       messages: [{ role: 'user', content: prompt }],
       // generateAutoExtractionRules와 같은 이유로 추가(2026-09-02) — 이 함수는 이름 그대로 대량 배치
       // 처리(신규 상품마다 반복 호출)라 타임아웃 없이 걸리면 그 배치 전체가 멈춘다.
-    }, { signal: AbortSignal.timeout(MALL_REPORT_TIMEOUT_MS) })
+    }, { signal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal) })
     const toolUse = response.content.find(b => b.type === 'tool_use')
-    if (!toolUse || toolUse.type !== 'tool_use') return {}
+    if (!toolUse || toolUse.type !== 'tool_use') { onError?.('도구 호출 없이 응답함'); return null }
     return toolUse.input as Record<string, string>
-  } catch {
-    return {}
+  } catch (e) {
+    const rawMessage = e instanceof Anthropic.APIError ? e.message : e instanceof Error ? e.message : String(e)
+    console.error('[generateTransformColumnsAnthropic] API call failed:', rawMessage)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
   }
+}
+
+async function generateTransformColumnsGemini(
+  siteName: string, columns: { name: string; instruction: string }[], examples: TransformFewShotExample[],
+  sourceFields: Record<string, unknown>, signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<Record<string, string> | null> {
+  if (!isAiProviderEnabled('gemini')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GEMINI_API_KEY) { onError?.('API 키 없음'); return null }
+
+  const properties: Record<string, Schema> = {}
+  columns.forEach(c => { properties[c.name] = { type: Type.STRING, description: c.instruction || c.name } })
+  const prompt = buildTransformColumnsPrompt(siteName, columns, examples, sourceFields)
+
+  try {
+    const response = await getGeminiClient().models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        tools: [{ functionDeclarations: [{
+          name: 'set_columns',
+          description: '각 컬럼명을 key로, 생성한 값을 value(문자열)로 채워 반환한다.',
+          parameters: { type: Type.OBJECT, properties, required: columns.map(c => c.name) },
+        }] }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY, allowedFunctionNames: ['set_columns'] } },
+        abortSignal: reportAiSignal(MALL_REPORT_TIMEOUT_MS, signal),
+      },
+    })
+    const call = response.functionCalls?.[0]
+    if (!call) { onError?.('functionCall 없이 응답함'); return null }
+    return call.args as Record<string, string>
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    console.error('[generateTransformColumnsGemini] API call failed:', rawMessage)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function generateTransformColumnsGroq(
+  siteName: string, columns: { name: string; instruction: string }[], examples: TransformFewShotExample[],
+  sourceFields: Record<string, unknown>, signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<Record<string, string> | null> {
+  if (!isAiProviderEnabled('groq')) { onError?.('공급자가 꺼져있음'); return null }
+  if (!process.env.GROQ_API_KEY) { onError?.('API 키 없음'); return null }
+
+  const properties: Record<string, { type: string; description: string }> = {}
+  columns.forEach(c => { properties[c.name] = { type: 'string', description: c.instruction || c.name } })
+  const prompt = buildTransformColumnsPrompt(siteName, columns, examples, sourceFields)
+
+  try {
+    const res = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      signal: reportAiSignal(MALL_REPORT_GROQ_TIMEOUT_MS, signal),
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        // 컬럼 수가 들쭉날쭉해(1~수십 개) GROQ_MAX_OUTPUT_TOKENS(리포트 12필드 전용 값)를 그대로 쓰면
+        // 컬럼이 많은 몰에서 똑같이 OTPM 한도를 넘길 수 있다 — 컬럼당 120토큰 예산으로 계산하되 이 계정
+        // 무료 등급 OTPM 한도(1,000, GROQ_MAX_OUTPUT_TOKENS 주석 참고) 아래로 상한을 둔다.
+        max_tokens: Math.min(900, Math.max(200, columns.length * 120)),
+        messages: [{ role: 'user', content: prompt }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'set_columns',
+            description: '각 컬럼명을 key로, 생성한 값을 value(문자열)로 채워 반환한다.',
+            parameters: { type: 'object', properties, required: columns.map(c => c.name) },
+          },
+        }],
+        tool_choice: { type: 'function', function: { name: 'set_columns' } },
+      }),
+    })
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      console.error(`[generateTransformColumnsGroq] API call failed: ${res.status} ${detail}`)
+      onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail).slice(0, 150)}` : ''}`)
+      return null
+    }
+    const data = await res.json() as { choices?: { message?: { tool_calls?: { function: { arguments: string } }[] } }[] }
+    const call = data.choices?.[0]?.message?.tool_calls?.[0]
+    if (!call) { onError?.('도구 호출 없이 응답함'); return null }
+    return JSON.parse(call.function.arguments) as Record<string, string>
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e)
+    console.error('[generateTransformColumnsGroq] API call failed:', rawMessage)
+    onError?.(extractReadableApiError(rawMessage))
+    return null
+  }
+}
+
+async function generateTransformColumnsOllama(
+  siteName: string, columns: { name: string; instruction: string }[], examples: TransformFewShotExample[],
+  sourceFields: Record<string, unknown>, signal?: AbortSignal, onError?: (reason: string) => void,
+): Promise<Record<string, string> | null> {
+  if (!isAiProviderEnabled('ollama')) { onError?.('공급자가 꺼져있음'); return null }
+  const properties: Record<string, { type: string; description: string }> = {}
+  columns.forEach(c => { properties[c.name] = { type: 'string', description: c.instruction || c.name } })
+  const prompt = buildTransformColumnsPrompt(siteName, columns, examples, sourceFields)
+
+  // generateForProducts가 상품 여러 개를 동시에(GENERATE_CONCURRENCY=6) 처리하는데, 로컬 Ollama는 요청을
+  // 병렬로 받으면 전부 느려지거나 메모리를 다퉈 실패한다 — pickIndicesWithOllama와 같은 이유로 전역
+  // 큐(withOllamaQueue)를 거쳐 한 번에 하나씩만 실제로 호출한다.
+  return withOllamaQueue(async () => {
+    const timeoutSignal = AbortSignal.timeout(OLLAMA_TIMEOUT_MS)
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+    try {
+      const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: combinedSignal,
+        dispatcher: ollamaDispatcher,
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          stream: false,
+          think: false,
+          options: OLLAMA_CHAT_OPTIONS,
+          keep_alive: '30m',
+          messages: [{ role: 'user', content: prompt }],
+          tools: [{
+            type: 'function',
+            function: {
+              name: 'set_columns',
+              description: '각 컬럼명을 key로, 생성한 값을 value(문자열)로 채워 반환한다.',
+              parameters: { type: 'object', properties, required: columns.map(c => c.name) },
+            },
+          }],
+        }),
+      } as RequestInit)
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 200)
+        onError?.(`HTTP ${res.status}${detail ? `: ${extractReadableApiError(detail)}` : ''}`)
+        return null
+      }
+      const data = await res.json() as { message?: { tool_calls?: { function: { arguments: unknown } }[] } }
+      const call = data.message?.tool_calls?.[0]
+      if (!call) { onError?.('도구 호출 없이 응답함'); return null }
+      const args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments
+      return args as Record<string, string>
+    } catch (e) {
+      const message = e instanceof Error ? `${e.name}: ${e.message}` : String(e)
+      onError?.(message)
+      return null
+    }
+  })
+}
+
+/**
+ * 몰의 "기존 작업내역 완성본" few-shot 예시를 보고, 같은 패턴으로 신규 상품의 AI 대상 컬럼 값을 생성한다.
+ * 정규식 파싱 대신 tool-call로 스키마를 강제해 컬럼 여러 개를 한 번에 안전하게 받는다.
+ *
+ * Anthropic→Gemini→Groq→Ollama 순으로 폴백한다(2026-10-03, PTP 마이그레이션 로드맵 §04 — 예전엔 Anthropic
+ * 하나만 있어 크레딧 소진 같은 장애가 나면 이 컬럼들이 전부 빈 값으로 저장됐다). generateForProducts가
+ * 상품마다 반복 호출하는 함수라 공급자별 시도 로그는 안 쌓는다(한 번의 "실행"이 아니라 상품 수만큼 호출돼,
+ * generateMallProfileReport의 log 배열 방식을 그대로 쓰면 로그가 상품 수 × 4까지 불어난다) — 실패 사유는
+ * console.log로만 남긴다. 전부 실패하거나(또는 컬럼이 없으면) 조용히 빈 객체를 반환해 호출부가 전체 배치를
+ * 막지 않게 한다(기존 동작 유지).
+ */
+export async function generateTransformColumns(
+  siteName: string,
+  columns: { name: string; instruction: string }[],
+  examples: TransformFewShotExample[],
+  sourceFields: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, string>> {
+  if (!columns.length) return {}
+  const providers: { id: AiProviderId; fn: (onError: (reason: string) => void) => Promise<Record<string, string> | null> }[] = [
+    { id: 'anthropic', fn: onError => generateTransformColumnsAnthropic(siteName, columns, examples, sourceFields, signal, onError) },
+    { id: 'gemini', fn: onError => generateTransformColumnsGemini(siteName, columns, examples, sourceFields, signal, onError) },
+    { id: 'groq', fn: onError => generateTransformColumnsGroq(siteName, columns, examples, sourceFields, signal, onError) },
+    { id: 'ollama', fn: onError => generateTransformColumnsOllama(siteName, columns, examples, sourceFields, signal, onError) },
+  ]
+  for (const p of providers) {
+    if (signal?.aborted) return {}
+    let errorMsg: string | undefined
+    const result = await p.fn(reason => { errorMsg = reason }).catch((e: unknown) => {
+      errorMsg = errorMsg ?? (e instanceof Error ? `${e.name}: ${e.message}` : String(e))
+      return null
+    })
+    if (result) return result
+    console.log(`[AI:${p.id}] Transform 컬럼 생성 실패(${translateAiErrorReason(errorMsg ?? '원인 미상')}) — 다음 공급자로 넘어감`)
+  }
+  return {}
 }
 
 export interface ExtractionRule {

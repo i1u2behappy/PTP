@@ -60,6 +60,8 @@ Ctrl(⌘)+클릭하면 바로 이동하고, 그 문서를 열어두면 오른쪽
 - [[coupang-category-profile-mapping]] — 쿠팡 카테고리별 옵션·고시정보 슬롯 매핑
 - [[marketplace-formats/coupang]] — 쿠팡(Wing) 대량등록 엑셀 양식 분석
 - [[marketplace-formats/reference-domesin-productdb]] — 참고 아키텍처: 도매의신 "상품DB다운" 페이지
+- [[ptp-migration-roadmap]] — 2·3·4단계 전체 로드맵 설계 검토안(AI 자동채우기, 오픈마켓 연동 등)
+- [[marketplace-api-integration]] — 오픈마켓 API 연동(상품 등록/수정/삭제) 직접구현 설계 — 사방넷·샵링커 분석 기반
 
 ## 로그인 · Mall 관리
 

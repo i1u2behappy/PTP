@@ -80,6 +80,10 @@ export interface RawMasterRow {
   origin: string
   description: string
   options: { name: string; values: string[] }[]
+  /** 옵션1↔옵션2 실제 조합(예: [["빨강","100"],["파랑","100"]]) — 캐스케이드 없는 몰은 결과적으로
+   *  options의 전체 카티전 곱과 같아진다. 비어있으면(과거 마이그레이션 데이터 등) 호출부가 options로
+   *  직접 카티전 곱을 만들어 쓰되, 그게 근사치일 뿐이라는 걸 알아야 한다. */
+  option_combinations: string[][]
   cost_price: number | null
   list_price: number | null
   sale_price: number | null
@@ -95,6 +99,7 @@ export async function getProductMasterRows(ids: number[]): Promise<RawMasterRow[
   const res = await pool.query(
     `SELECT pm.id, pm.name_original, pm.name_ai, pm.name_final,
             pm.master_category, pm.mall_category, pm.brand, pm.manufacturer, pm.origin, pm.description, pm.options,
+            pm.option_combinations,
             pm.cost_price, pm.list_price, pm.sale_price, pm.shipping_fee, pm.other_cost, pm.target_margin_rate,
             pm.stock_status, pm.stock_qty,
             COALESCE(
@@ -110,6 +115,7 @@ export async function getProductMasterRows(ids: number[]): Promise<RawMasterRow[
   return res.rows.map(r => ({
     ...r,
     options: typeof r.options === 'string' ? JSON.parse(r.options) : (r.options || []),
+    option_combinations: typeof r.option_combinations === 'string' ? JSON.parse(r.option_combinations) : (r.option_combinations || []),
     images:  typeof r.images  === 'string' ? JSON.parse(r.images)  : (r.images  || []),
   }))
 }
@@ -520,6 +526,13 @@ async function runMigrations() {
     CREATE UNIQUE INDEX IF NOT EXISTS product_master_sales_code_idx ON product_master(sales_code) WHERE sales_code IS NOT NULL;
     -- 거래처별 커스텀 필드(기준 Master DB에서 정의) 값 저장 — { field_key: value }
     ALTER TABLE product_master ADD COLUMN IF NOT EXISTS custom_fields JSONB DEFAULT '{}';
+    -- 옵션1↔옵션2 실제 조합([["빨강","100"],["빨강","105"],["파랑","100"]] 형태, !specifications/
+    -- cascading-option-combinations.md) — 스크랩 단계(mall_products.raw_data)까지는 이미 잡히는데
+    -- product_master로 오면서 끊겨, 색상별로 실제 있는 사이즈가 뭔지 여기서는 알 길이 없었다
+    -- (2026-10-03, 쿠팡 등록 items[] 설계 중 발견 — 평평한 옵션만으로 카티전 곱을 만들면 실제로 없는
+    -- 조합(예: 빨강-105가 없는데)을 판매 가능한 것처럼 등록하게 된다). options와 마찬가지로 매 마이그
+    -- 레이션마다 스크랩 원본으로 갱신되는 파생 데이터라 사람이 직접 편집하는 필드가 아니다.
+    ALTER TABLE product_master ADD COLUMN IF NOT EXISTS option_combinations JSONB DEFAULT '[]';
 
     -- "기준 Master DB" 타깃 필드 목록 — 거래처 구분 없이 시스템 전체가 공유하는 단일 기준 테이블 정의.
     -- 예전엔 client_id로 거래처별로 나눠 가졌으나(client_master_schema_fields), 기준 테이블은 하나만
@@ -631,6 +644,25 @@ async function runMigrations() {
       updated_at          TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE (product_master_id, marketplace_code)
     );
+    -- API 등록(register()) 결과 추적 — channel_name/channel_url(엑셀 수기기록 시절부터 있던 컬럼)과
+    -- 별개로, 실제 API 호출 결과만 담는다(!specifications/marketplace-api-integration.md).
+    ALTER TABLE product_channel_listings ADD COLUMN IF NOT EXISTS external_product_id TEXT;
+    ALTER TABLE product_channel_listings ADD COLUMN IF NOT EXISTS sync_status TEXT DEFAULT 'none';
+    ALTER TABLE product_channel_listings ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ;
+    ALTER TABLE product_channel_listings ADD COLUMN IF NOT EXISTS error_message TEXT;
+
+    -- 오픈마켓 API 호출 이력 — "지금 상태"만 남는 product_channel_listings와 달리 시간순 전체 로그.
+    -- 실패 원인 추적(운영 중 "왜 실패했는지" 재구성)에 필요, 쌓이는 로그라 상품/마켓 삭제와 무관하게
+    -- 독립적으로 남긴다(ON DELETE SET NULL — 상품이 지워져도 "한때 이런 시도가 있었다"는 기록은 보존).
+    CREATE TABLE IF NOT EXISTS marketplace_sync_log (
+      id                  SERIAL PRIMARY KEY,
+      product_master_id   INT REFERENCES product_master(id) ON DELETE SET NULL,
+      marketplace_code    TEXT REFERENCES marketplace_configs(code),
+      action              TEXT NOT NULL,
+      success             BOOLEAN NOT NULL,
+      error_message       TEXT,
+      created_at          TIMESTAMPTZ DEFAULT NOW()
+    );
 
     CREATE TABLE IF NOT EXISTS exports (
       id            SERIAL PRIMARY KEY,
@@ -641,7 +673,10 @@ async function runMigrations() {
       created_at    TIMESTAMPTZ DEFAULT NOW()
     );
 
-    -- 5단계(오픈마켓 API 연동) — 이번 라운드는 설계만, 소비하는 코드 없음
+    -- 4단계(오픈마켓 API 연동) 1단계: 거래처별 오픈마켓 접속정보 저장(!specifications/
+    -- marketplace-api-integration.md). credential_data_encrypted에는 마켓마다 다른 키 꾸러미를
+    -- JSON으로 통째로(예: 쿠팡={"vendorId":...,"accessKey":...,"secretKey":...}) 암호화해 담는다 —
+    -- 마켓마다 ID/PW·API Key 조합이 다르다는 걸 실제 경쟁사(샵링커) 사례로 확인했다(2026-10-03).
     CREATE TABLE IF NOT EXISTS marketplace_credentials (
       id                         SERIAL PRIMARY KEY,
       client_id                  INT REFERENCES supply_clients(id) ON DELETE CASCADE,
@@ -652,6 +687,17 @@ async function runMigrations() {
       created_at                 TIMESTAMPTZ DEFAULT NOW(),
       updated_at                 TIMESTAMPTZ DEFAULT NOW()
     );
+    -- 마켓별 어댑터(2단계 이후)가 생기면 저장 직후 1회 검증(ping)한 결과를 기록한다 — 어댑터가 아직
+    -- 없는 지금은 항상 NULL(검증 보류), 화면은 이를 "아직 검증 안 됨"으로 표시한다.
+    ALTER TABLE marketplace_credentials ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMPTZ;
+    ALTER TABLE marketplace_credentials ADD COLUMN IF NOT EXISTS verify_error TEXT;
+    -- 거래처 단위 배송/반품 정책(쿠팡 deliveryMethod/returnCenterCode 등) — 비밀값이 아니라 평문
+    -- JSONB로 저장한다(credential_data_encrypted와 다름). !specifications/marketplace-api-integration.md 참고.
+    ALTER TABLE marketplace_credentials ADD COLUMN IF NOT EXISTS settings JSONB DEFAULT '{}';
+    -- 같은 거래처가 같은 마켓 접속정보를 다시 저장하면 새 행이 아니라 덮어써야 한다(업로드 폼 재저장 시
+    -- 중복 행이 쌓이는 사고 방지).
+    CREATE UNIQUE INDEX IF NOT EXISTS marketplace_credentials_client_market_idx
+      ON marketplace_credentials(client_id, marketplace_code);
 
     CREATE TABLE IF NOT EXISTS registration_jobs (
       id                  SERIAL PRIMARY KEY,

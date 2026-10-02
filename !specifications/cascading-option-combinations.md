@@ -38,8 +38,15 @@
 ## 하지 않는 것 (알려진 한계)
 
 - 옵션1→옵션2 1단계 캐스케이드만 지원(기존 제약과 동일) — 3단계 이상 중첩 옵션은 다루지 않는다.
-- `product_master`/마이그레이션/Excel 내보내기는 아직 `option_combinations`를 소비하지 않는다 —
-  현재는 Raw 데이터·검수 그리드에서 정확히 스크랩됐는지 확인하는 단계까지만.
+- ~~`product_master`/마이그레이션/Excel 내보내기는 아직 `option_combinations`를 소비하지 않는다~~ →
+  **2026-10-03 해소**: `migrateToMaster`가 `mall_products.raw_data.option_combinations`를
+  `product_master.option_combinations`로 옮긴다(쿠팡 등록 `items[]` 설계 중, 평평한 옵션만으로
+  카티전 곱을 만들면 실제로 없는 조합을 판매 가능한 것처럼 등록하게 되는 문제를 발견해 선행 작업으로
+  처리 — [[marketplace-api-integration]] 참고). `getProductMasterRows`/엑셀 내보내기용
+  `ProductMasterRow`에도 필드가 흐른다. 단, **엑셀 생성 로직(`lib/excel/coupang.ts` 등) 자체는 아직
+  이 필드를 안 쓴다** — 지금 쓰는 곳은 `lib/marketplace/optionCombinations.ts`
+  (`resolveOptionCombinations`, 실제 조합 우선 사용·없으면 카티전 곱 근사+경고 플래그)뿐이고, 이건
+  쿠팡 API 어댑터가 `register()`를 구현할 때 소비할 예정이다(아직 `register()` 자체는 미구현).
 
 ## 관련 파일
 

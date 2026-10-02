@@ -9,6 +9,9 @@ export interface ProductMasterRow {
   origin: string
   description: string
   options: { name: string; values: string[] }[]
+  /** 옵션1↔옵션2 실제 조합 — 비어있으면(과거 데이터 등) options의 카티전 곱으로 근사해야 한다는 뜻이다.
+   *  !specifications/cascading-option-combinations.md 참고. */
+  option_combinations: string[][]
   cost_price: number | null
   list_price: number | null
   sale_price: number | null

@@ -125,6 +125,7 @@ export function Sidebar() {
           <NavLeaf tab={{ id: 'transform', type: 'transform', title: '마이그레이션2_Transform', icon: '🧬', closable: true }} icon={ReviewIcon} />
           <NavLeaf tab={{ id: 'continuous-migration', type: 'continuous-migration', title: '마이그레이션3_연속관리', icon: '🔁', closable: true }} icon={RefreshIcon} />
           <NavLeaf tab={{ id: 'export', type: 'export', title: '엑셀 내보내기', icon: '📊', closable: true }} icon={ExportIcon} />
+          <NavLeaf tab={{ id: 'marketplace-register', type: 'marketplace-register', title: '오픈마켓 등록', icon: '🛒', closable: true }} icon={StoreIcon} />
           <NavLeaf tab={{ id: 'settings', type: 'settings', title: '시스템관리', icon: '⚙️', closable: true }} icon={SettingsIcon} />
         </nav>
 

@@ -25,6 +25,7 @@ export async function POST(req: NextRequest) {
     category: r.master_category || r.mall_category || '',
     brand: r.brand, manufacturer: r.manufacturer, origin: r.origin, description: r.description,
     options: r.options,
+    option_combinations: r.option_combinations,
     cost_price: r.cost_price, list_price: r.list_price, sale_price: r.sale_price,
     shipping_fee: r.shipping_fee, other_cost: r.other_cost, target_margin_rate: r.target_margin_rate,
     stock_status: r.stock_status, stock_qty: r.stock_qty,

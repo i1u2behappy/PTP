@@ -7,7 +7,7 @@ export type TabType =
   | 'products-list' | 'internal-codes' | 'category-mapping' | 'sales-code' | 'name-management'
   | 'option-management' | 'brand-origin-management' | 'pricing-management' | 'image-host'
   | 'master-list' | 'image-edit'
-  | 'export' | 'settings' | 'transform' | 'continuous-migration'
+  | 'export' | 'settings' | 'transform' | 'continuous-migration' | 'marketplace-register'
 
 /** 상품/상품마스터 "상세"는 탭이 아니라 팝업으로 띄운다 — 예전엔 탭(activeTabId 재사용)으로 열어서,
  *  방금까지 "스크랩 Raw 확인" 등 메뉴 이름이던 탭이 갑자기 상품명으로 바뀌어 보여 혼란스럽다는 지적이

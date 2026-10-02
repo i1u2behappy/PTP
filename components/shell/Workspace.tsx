@@ -21,6 +21,7 @@ import { ImageHostPanel } from '../panels/ImageHostPanel'
 import { MasterListPanel } from '../panels/MasterListPanel'
 import { ImageEditPanel } from '../panels/ImageEditPanel'
 import { ExportPanel } from '../panels/ExportPanel'
+import { MarketplaceRegisterPanel } from '../panels/MarketplaceRegisterPanel'
 import { SettingsPanel } from '../panels/SettingsPanel'
 import { TransformPanel } from '../panels/TransformPanel'
 import { ContinuousMigrationPanel } from '../panels/ContinuousMigrationPanel'
@@ -71,6 +72,7 @@ export function Workspace() {
           case 'master-list':    return <MasterListPanel key={tab.id} />
           case 'image-edit':     return <ImageEditPanel key={tab.id} params={tab.params} />
           case 'export':         return <ExportPanel key={tab.id} />
+          case 'marketplace-register': return <MarketplaceRegisterPanel key={tab.id} />
           case 'settings':       return <SettingsPanel key={tab.id} />
           case 'transform':      return <TransformPanel key={tab.id} params={tab.params} />
           case 'continuous-migration': return <ContinuousMigrationPanel key={tab.id} />

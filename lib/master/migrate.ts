@@ -70,7 +70,7 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
     const category = mp.mall_category || ref?.category || ''
     // cost_price(공급가)/shipping_fee/detail_text는 mall_products에 전용 컬럼이 없어, 스크랩 당시 전체를
     // 담아둔 raw_data에서 꺼낸다(lib/scrape/incremental.ts의 upsertMallProduct가 저장해둔 것).
-    const rawData = (mp.raw_data || {}) as { cost_price?: number | null; shipping_fee?: number | string | null; detail_text?: string; custom_fields?: Record<string, string> }
+    const rawData = (mp.raw_data || {}) as { cost_price?: number | null; shipping_fee?: number | string | null; detail_text?: string; custom_fields?: Record<string, string>; option_combinations?: string[][] }
     // mp.description은 og:description/meta description까지 폴백한 SEO 문구라(lib/extract.ts) "상세설명"
     // 라벨과 안 맞을 수 있다는 지적으로, 실제 상세페이지 본문(detail_text)을 우선 쓰도록 바꿨다(2026-08).
     // detail_text가 비어있는 몰(설명이 이미지로만 된 경우 등)은 예전처럼 SEO 문구로 폴백한다.
@@ -88,13 +88,17 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
       : rawData.shipping_fee ?? null
     // "스크랩 조정"으로 새로 추가된 컬럼들 — Transform 등이 이미 써둔 custom_fields를 덮어쓰지 않도록 병합한다.
     const scrapedCustomFields = rawData.custom_fields || {}
+    // options와 같은 파생 데이터라 같은 방식(COALESCE 보호 없이 매번 원본으로 갱신)으로 다룬다 — 과거
+    // 스크랩분(이 필드가 생기기 전)은 빈 배열일 수 있다, 소비하는 쪽(쿠팡 등록 등)이 options의 카티전
+    // 곱으로 근사해야 한다는 뜻임을 알아야 한다(RawMasterRow 주석 참고).
+    const optionCombinations = rawData.option_combinations || []
 
     const upsert = await pool.query<{ id: number }>(
       `INSERT INTO product_master
         (mall_product_id, client_id, name_original, mall_category, master_category,
-         brand, manufacturer, origin, description, options,
+         brand, manufacturer, origin, description, options, option_combinations,
          sale_price, list_price, cost_price, shipping_fee, stock_status, stock_qty, custom_fields, status)
-       VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'draft')
+       VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'draft')
        ON CONFLICT (mall_product_id, client_id) DO UPDATE SET
          name_original = $3,
          mall_category = $4,
@@ -103,17 +107,19 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
          origin        = COALESCE(NULLIF(product_master.origin, ''), $7),
          description   = COALESCE(NULLIF(product_master.description, ''), $8),
          options       = $9,
-         sale_price    = COALESCE(product_master.sale_price, $10),
-         list_price    = COALESCE(product_master.list_price, $11),
-         cost_price    = COALESCE(product_master.cost_price, $12),
-         shipping_fee  = COALESCE(product_master.shipping_fee, $13),
-         stock_status  = $14,
-         stock_qty     = $15,
-         custom_fields = COALESCE(product_master.custom_fields, '{}'::jsonb) || $16::jsonb,
+         option_combinations = $10,
+         sale_price    = COALESCE(product_master.sale_price, $11),
+         list_price    = COALESCE(product_master.list_price, $12),
+         cost_price    = COALESCE(product_master.cost_price, $13),
+         shipping_fee  = COALESCE(product_master.shipping_fee, $14),
+         stock_status  = $15,
+         stock_qty     = $16,
+         custom_fields = COALESCE(product_master.custom_fields, '{}'::jsonb) || $17::jsonb,
          updated_at    = NOW()
        RETURNING id`,
       [mallProductId, clientId, mp.name_original, category, brand, manufacturer, origin, description,
-        JSON.stringify(mp.options || []), salePrice, listPrice, costPrice, shippingFee, mp.stock_status, mp.stock_qty,
+        JSON.stringify(mp.options || []), JSON.stringify(optionCombinations),
+        salePrice, listPrice, costPrice, shippingFee, mp.stock_status, mp.stock_qty,
         JSON.stringify(scrapedCustomFields)],
     )
     const masterId = upsert.rows[0].id

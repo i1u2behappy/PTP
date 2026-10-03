@@ -1903,7 +1903,10 @@ async function runExpandCategories(tab, site) {
           const all = await evalInTab(workerTabId, COLLECT_ALL_LINKS_EXPR).catch(() => ({ links: [] }))
           const aiLinks = await fetch(`${PTP_ORIGIN}/api/scrape/detect-sub-categories`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mallName: site.name, parentCategoryName: c.name, candidates: all.links }),
+            // parentHref(baseUrl) — 서버가 isHubExpansionNoiseHref로 "같은 카테고리의 정렬/탭 변형"과
+            // "상품 상세 링크"를 걸러내는 데 쓴다(2026-10-03, 리얼백 — 이 필터가 없어 개발자모드가 일반
+            // 모드보다 더 취약했다. app/api/scrape/detect-sub-categories/route.ts 주석 참고).
+            body: JSON.stringify({ mallName: site.name, parentCategoryName: c.name, parentHref: baseUrl, candidates: all.links }),
           }).then(r => r.json()).then(d => d.links || []).catch(() => [])
           const realAi = aiLinks.filter(s => !topLevelHrefsCanon.has(canonicalizeHref(s.href)))
           if (realAi.length) {

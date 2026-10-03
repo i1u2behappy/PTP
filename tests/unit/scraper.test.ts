@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import fc from 'fast-check'
-import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern, scanCategoryMenuFromHtml, deriveDetailUrlPattern, LOGOUT_URL_RE, ACCOUNT_UNSAFE_URL_RE, classifySessionLossSignal, isBrokenPlaceholderCategoryName, isNonCategoryCandidate } from '../../lib/scraper'
+import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern, scanCategoryMenuFromHtml, deriveDetailUrlPattern, LOGOUT_URL_RE, ACCOUNT_UNSAFE_URL_RE, classifySessionLossSignal, isBrokenPlaceholderCategoryName, isNonCategoryCandidate, isHubExpansionNoiseHref } from '../../lib/scraper'
 
 // diffQueryParams는 "카테고리별 정렬기준 설정" 기능의 핵심 — 정렬 후보 링크가 baseUrl과 같은 경로에서
 // 쿼리파라미터만 다른지 확인해, 다른 카테고리/상품 상세로 튀는 링크를 걸러낸다.
@@ -412,5 +412,52 @@ describe('isNonCategoryCandidate', () => {
     expect(isNonCategoryCandidate('전체상품보기 > 쇼핑몰정보 > 이용약관', 'https://m.com/terms.html')).toBe(true)
     expect(isNonCategoryCandidate('전체상품보기 > 쇼핑몰정보 > 개인정보 처리방침', 'https://m.com/privacy.html')).toBe(true)
     expect(isNonCategoryCandidate('전체상품보기 > 쇼핑몰정보 > 이용안내', 'https://m.com/guide.html')).toBe(true)
+  })
+})
+
+// 실제 재발 사고(리얼백realbag.kr, 2026-10-03) — 하위 메뉴가 없는 리프 카테고리(OTHERS/SALE BAG/WOMAN 등,
+// cate_no는 다르지만 실제로는 상품을 직접 보여주는 카테고리)를 펼칠 때, isNonCategoryCandidate를 통과한
+// AI 결과가 그 페이지 자체의 "신상품" 탭 상품 링크와 "등록 제품 : N개" 탭의 정렬 옵션 링크를 하위
+// 카테고리로 잘못 반환해, 카테고리 총 개수가 552개까지 부풀고 정작 진짜 하위 메뉴가 있는 백팩/크로스백
+// 등은 거의 못 찾았다. detectCategoryLinksWithAI의 프롬프트가 이미 이런 링크를 빼라고 지시하지만 AI가
+// 지키지 못한 사례라, 결과를 코드로 한 번 더 거르는 안전망이 필요하다.
+describe('isHubExpansionNoiseHref', () => {
+  it('상품 상세 링크(카페24 product/detail.html)는 하위 카테고리가 아니다', () => {
+    expect(isHubExpansionNoiseHref(
+      'https://realbag.kr/product/list.html?cate_no=45',
+      'https://realbag.kr/product/detail.html?product_no=955&cate_no=45&display_group=3',
+    )).toBe(true)
+  })
+
+  it('같은 카테고리의 정렬 옵션 링크(cate_no 동일, sort_method만 다름)는 하위 카테고리가 아니다', () => {
+    expect(isHubExpansionNoiseHref(
+      'https://realbag.kr/product/list.html?cate_no=45',
+      'https://realbag.kr/product/list.html?cate_no=45&sort_method=3#Product_ListMenu',
+    )).toBe(true)
+  })
+
+  it('홈페이지 자체는 어느 카테고리의 하위도 아니다', () => {
+    expect(isHubExpansionNoiseHref('https://realbag.kr/product/list.html?cate_no=43', 'https://realbag.kr/')).toBe(true)
+  })
+
+  it('cate_no가 실제로 다른 진짜 하위 카테고리는 통과시킨다', () => {
+    expect(isHubExpansionNoiseHref(
+      'https://realbag.kr/product/list.html?cate_no=4',
+      'https://realbag.kr/product/list.html?cate_no=50',
+    )).toBe(false)
+  })
+
+  it('플랫폼을 몰라도(detailPatternSrc 생략) GENERIC_DETAIL_URL_HINT_RE로 다른 플랫폼의 상품상세도 걸러낸다', () => {
+    expect(isHubExpansionNoiseHref(
+      'https://mall.com/goods_list.php?category=031001',
+      'https://mall.com/goods_view.php?goodsno=123',
+    )).toBe(true)
+  })
+
+  it('pathname이 다른 진짜 하위 카테고리(다른 경로 체계)는 통과시킨다', () => {
+    expect(isHubExpansionNoiseHref(
+      'https://mall.com/category/4/',
+      'https://mall.com/category/4/sub/9/',
+    )).toBe(false)
   })
 })

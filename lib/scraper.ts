@@ -5895,8 +5895,12 @@ async function discoverTopLevelCategoryLinks(
     // 공지 위젯(href가 board/list.php)을 카테고리로 잘못 골라, 그 뒤 expandCategoryHubs가 그 "카테고리"를
     // 펼치며 진짜 상품 카테고리들까지 전부 "NOTICE > ..." 접두어로 오염시켰다. AI 결과에도 규칙 기반과
     // 같은 필터를 반드시 거치게 한다.
+    // isHubExpansionNoiseHref의 상품 상세 URL 체크만 재사용한다(parentHref 없이 호출 — 여기는 "허브 하나의
+    // 하위"가 아니라 몰 전체 최상위 탐지라 비교할 부모 카테고리 자체가 없다. 그래도 최상위 "카테고리"가
+    // 상품 상세페이지일 수는 없으니 이 체크만은 그대로 유효하다. PLATFORM_PROFILES[platform] 참고).
+    const topLevelDetailPatternSrc = PLATFORM_PROFILES[platform].detailUrlPattern?.source
     const aiLinks = (await detectCategoryLinksWithAI(mallName, aiCandidates, undefined, signal, knownCategoryExamples, undefined, visionLog).catch(() => []))
-      .filter(l => !isNonCategoryCandidate(l.name, l.href))
+      .filter(l => !isNonCategoryCandidate(l.name, l.href) && !(topLevelDetailPatternSrc && new RegExp(topLevelDetailPatternSrc).test(l.href)))
     console.log(`[카테고리탐지:진단:${mallName}] AI 결과 ${aiLinks.length}개`)
     if (aiLinks.length && await looksLikeRealCategoryBatch(context, aiLinks, platform, productLinkSelector)) {
       return { links: aiLinks, textlessHrefs, aiUsed: true }
@@ -6151,6 +6155,45 @@ export function diffQueryParams(baseUrl: string, variantUrl: string): Record<str
     return Object.keys(diff).length ? diff : null
   } catch {
     return null
+  }
+}
+
+// isHubExpansionNoiseHref 전용 — PLATFORM_PROFILES 각 플랫폼의 detailUrlPattern을 한데 묶은 범용
+// 상품상세 URL 신호. 플랫폼을 특정할 수 없는 호출부(app/api/scrape/detect-sub-categories/route.ts —
+// 개발자모드 확장은 서버가 이 몰의 platform을 따로 안 넘긴다)에서 "적어도 이미 알려진 플랫폼들의 상품
+// 상세 URL 모양"만이라도 걸러내는 안전망으로 쓴다. 몰마다 새로 추측하는 게 아니라 이미 PLATFORM_PROFILES에
+// 등록된, 검증된 패턴을 그대로 재사용하는 것뿐이라 "몰 UI를 하드코딩으로 짐작"하는 것과는 다르다.
+export const GENERIC_DETAIL_URL_HINT_RE = /\/product\/detail\.html|\/product\/.+\/\d+\/category\/\d+\/display\/\d+|shopdetail\.html\?branduid=|goods_view\.php\?goodsno=|\/goods\/view\?no=\d+|p=view\.html.*iid=/i
+
+/** detectCategoryLinksWithAI의 "하위 카테고리 펼치기" 모드(expandOne/expandOneLevel, 그리고 개발자모드
+ *  확장이 쓰는 app/api/scrape/detect-sub-categories)가 "진짜 하위 카테고리"로 착각하기 쉬운 두 경우를
+ *  코드로 한 번 더 거른다 — 프롬프트가 이미 "상품 상세 링크/사이트 운영용 링크는 빼라"고 지시하지만, AI가
+ *  그 지시를 못 지킨 사례가 실제로 있었다(리얼백 실사용 확인, 2026-10-03 — 실제 하위 메뉴가 없는 리프
+ *  카테고리(OTHERS/SALE BAG/WOMAN 등, cate_no만 다르고 실제로는 상품을 직접 보여주는 카테고리)를 펼칠 때,
+ *  그 카테고리 페이지 자체의 "신상품" 탭 상품들을 하위 카테고리로, "등록 제품 : N개" 탭의 정렬 옵션(낮은
+ *  가격순 등)을 또 다른 하위 카테고리로 반환해 "카테고리 구조" 결과가 총 552개까지 부풀었다 — 정작 진짜
+ *  하위 메뉴가 있는 대분류(백팩 등)의 하위는 거의 못 찾았는데도). (1) candidateHref가 GENERIC_DETAIL_URL_HINT_RE나
+ *  이 몰 플랫폼의 상품 상세 URL 패턴(detailPatternSrc)에 맞으면 하위 카테고리가 아니라 상품 자체다.
+ *  (2) candidateHref가 홈페이지 자체면 어느 카테고리의 하위도 아니다. (3) parentHref와 origin+pathname이
+ *  같고 카테고리ID 파라미터(CATEGORY_ID_QUERY_KEYS)값까지 같으면 — 같은 카테고리의 정렬/탭 변형일 뿐
+ *  실제로 다른 카테고리가 아니다(diffQueryParams와 반대 용도 — 그쪽은 "정렬 옵션으로 인정할 차이"를
+ *  찾고, 이쪽은 "같은 카테고리라 하위가 아님"을 판정한다). */
+export function isHubExpansionNoiseHref(parentHref: string, candidateHref: string, detailPatternSrc?: string | null): boolean {
+  if (GENERIC_DETAIL_URL_HINT_RE.test(candidateHref)) return true
+  if (detailPatternSrc && new RegExp(detailPatternSrc).test(candidateHref)) return true
+  try {
+    const candidate = new URL(candidateHref)
+    if (candidate.pathname === '/') return true
+    const parent = new URL(parentHref)
+    if (parent.origin !== candidate.origin || parent.pathname !== candidate.pathname) return false
+    for (const key of CATEGORY_ID_QUERY_KEYS) {
+      const pv = parent.searchParams.get(key)
+      const cv = candidate.searchParams.get(key)
+      if (pv !== null && cv !== null && pv !== cv) return false
+    }
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -8877,7 +8920,8 @@ async function expandCategoryHubs(
       // 카테고리"로 잘못 채택하는 사고가 여기서도 그대로 났다.
       const aiStart = Date.now()
       realChildren = (await detectCategoryLinksWithAI(mallName, aiSubCandidates, c.name, signal, undefined, HUB_EXPANSION_AI_TIMEOUT_MS, visionLog).catch(() => []))
-        .filter(s => !topLevelHrefSet.has(canonicalizeHref(s.href)) && !isNonCategoryCandidate(s.name, s.href))
+        .filter(s => !topLevelHrefSet.has(canonicalizeHref(s.href)) && !isNonCategoryCandidate(s.name, s.href)
+          && !isHubExpansionNoiseHref(c.href, s.href, detailPatternSrc))
       aiMs = Date.now() - aiStart
       if (realChildren.length) aiUsed = true
     }
@@ -9165,9 +9209,12 @@ async function expandOneLevel(
   }
   const aiCandidates = await collectAllPageLinks(scanPage, new URL(parentUrl).origin)
   // 위 discoverTopLevelCategoryLinks/expandCategoryHubs의 AI 폴백과 같은 이유(2026-08-30 소꿉노리) —
-  // AI 결과에 공지/문의 게시판 링크가 섞여 나와도 걸러낼 필터가 없었다.
+  // AI 결과에 공지/문의 게시판 링크가 섞여 나와도 걸러낼 필터가 없었다. isHubExpansionNoiseHref(2026-10-03
+  // 리얼백) — expandOne(expandCategoryHubs)과 같은 이유로, 이 경로(사용자가 직접 카테고리 하나를 골라
+  // "↳ 가져오기"로 펼치는 것)도 AI가 하위 메뉴 대신 그 페이지 자체의 상품/정렬 옵션을 잘못 반환할 수 있다.
+  const detailPatternSrc = PLATFORM_PROFILES[platform].detailUrlPattern?.source
   let children = (await detectCategoryLinksWithAI(mallName, aiCandidates, parentName || '지금 보고 있는 카테고리').catch(() => []))
-    .filter(c => !isNonCategoryCandidate(c.name, c.href))
+    .filter(c => !isNonCategoryCandidate(c.name, c.href) && !isHubExpansionNoiseHref(parentUrl, c.href, detailPatternSrc))
   let aiUsed = children.length > 0
   // 실사용 중 "하위 메뉴가 없는 카테고리를 체크했더니 무관한 대분류가 잔뜩 딸려왔다"는 문제가 있었는데
   // (오토카필, 2026-08-27), 이 함수 자체엔 진단 로그가 전혀 없어 서버 로그만으로 원인(정말 하위

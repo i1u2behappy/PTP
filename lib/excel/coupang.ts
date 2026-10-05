@@ -41,7 +41,7 @@ export function buildCoupangSheet(wb: ExcelJS.Workbook, products: ProductMasterR
       p.stock_qty ?? '',
       pricing.salePrice || '',
       p.description || '',
-      '',
+      p.search_tags || '',
     ])
   }
 

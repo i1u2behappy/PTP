@@ -3,7 +3,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { useTabs } from '../shell/TabsContext'
 
 interface ClientOption { id: number; name: string }
-interface MasterRow { id: number; name_original: string; name_ai: string | null; name_final: string | null; sale_price: number | null; status: string }
+interface CredentialOption { marketplaceCode: string; accountLabel: string }
+interface MasterRow { id: number; name_original: string; name_ai: string | null; name_final: string | null; sale_price: number | null; status: string; master_category_id: number | null }
+interface NoticeTemplateEntry { fieldKey: string; fieldLabel: string | null; defaultValue: string | null; sourceProductField: string | null }
 interface MarketOption { code: string; name: string }
 interface CategoryAttribute { name: string; required: boolean }
 interface CategoryNoticeItem { categoryName: string; name: string; required: boolean }
@@ -25,6 +27,8 @@ export function MarketplaceRegisterPanel() {
   const [clientId, setClientId] = useState<number | ''>('')
   const [markets, setMarkets] = useState<MarketOption[]>([])
   const [marketCode, setMarketCode] = useState('')
+  const [credentialOptions, setCredentialOptions] = useState<CredentialOption[]>([])
+  const [accountLabel, setAccountLabel] = useState('default')
   const [rows, setRows] = useState<MasterRow[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [categoryCode, setCategoryCode] = useState('')
@@ -32,6 +36,8 @@ export function MarketplaceRegisterPanel() {
   const [loadingMeta, setLoadingMeta] = useState(false)
   const [metaError, setMetaError] = useState('')
   const [noticeContents, setNoticeContents] = useState<Record<string, string>>({})
+  const [noticeTemplates, setNoticeTemplates] = useState<NoticeTemplateEntry[]>([])
+  const [savingTemplateField, setSavingTemplateField] = useState<string | null>(null)
   const [registering, setRegistering] = useState(false)
   const [result, setResult] = useState<RegisterResult | null>(null)
 
@@ -51,7 +57,25 @@ export function MarketplaceRegisterPanel() {
   /* eslint-disable-next-line react-hooks/set-state-in-effect */
   useEffect(() => { setSelected(new Set()); setResult(null); setMeta(null); setMetaError('') }, [clientId, marketCode])
 
+  // 거래처가 이 마켓에 판매계정을 여러 개 등록해뒀는지 확인한다(2026-10-05 다중계정 지원) — 1개뿐이면
+  // 선택란 자체를 안 보여주고 'default'로 고정한다(마켓 계정이 1개뿐인 절대다수 거래처는 화면이 그대로).
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 거래처 선택 해제 시 이전 거래처의 계정 목록이 안 섞이게 즉시 비운다
+    if (clientId === '') { setCredentialOptions([]); return }
+    fetch(`/api/marketplace/credentials?clientId=${clientId}`).then(r => r.json())
+      .then((d: { marketplaceCode: string; accountLabel: string }[]) => setCredentialOptions(Array.isArray(d) ? d.map(c => ({ marketplaceCode: c.marketplaceCode, accountLabel: c.accountLabel })) : []))
+      .catch(() => {})
+  }, [clientId])
+  const accountsForMarket = credentialOptions.filter(c => c.marketplaceCode === marketCode).map(c => c.accountLabel)
+  /* eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
+  useEffect(() => { setAccountLabel(accountsForMarket[0] || 'default') }, [marketCode, credentialOptions])
+
   const readyRows = rows.filter(r => r.status === 'ready')
+  // 선택한 상품들이 전부 같은 내부 카테고리일 때만 고시 템플릿 기본값을 적용한다 — 서로 다른 카테고리가
+  // 섞여 있으면(이 화면 자체가 "한 카테고리만 묶어 등록" 전제라 드물지만) 어느 카테고리 기준인지 애매해져
+  // 조용히 틀린 기본값을 보여주느니 아예 안 보여주는 쪽을 택한다.
+  const selectedCategoryIds = new Set([...selected].map(id => readyRows.find(r => r.id === id)?.master_category_id).filter((v): v is number => v != null))
+  const selectedMasterCategoryId = selectedCategoryIds.size === 1 ? [...selectedCategoryIds][0] : null
 
   function toggleSelect(id: number) {
     setSelected(s => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n })
@@ -64,13 +88,45 @@ export function MarketplaceRegisterPanel() {
     if (!marketCode || !categoryCode.trim() || clientId === '') return
     setLoadingMeta(true); setMetaError(''); setMeta(null)
     try {
-      const res = await fetch(`/api/marketplace/${marketCode}/category-meta?clientId=${clientId}&categoryCode=${encodeURIComponent(categoryCode.trim())}`)
+      const res = await fetch(`/api/marketplace/${marketCode}/category-meta?clientId=${clientId}&categoryCode=${encodeURIComponent(categoryCode.trim())}&accountLabel=${encodeURIComponent(accountLabel)}`)
       const data = await res.json().catch(() => null)
       if (!res.ok) { setMetaError(data?.error || `조회 실패 (${res.status})`); return }
       setMeta(data as CategoryMeta)
-      setNoticeContents({})
+      // 선택한 상품들이 전부 같은 내부 카테고리면, 이전에 이 마켓×카테고리에서 저장해둔 고시 기본값으로
+      // 미리 채운다(!specifications/product-master-architecture-redesign.md §3) — 상품마다 다시 타이핑하는
+      // 수고를 줄여준다. 저장해둔 적 없으면 그냥 빈 칸(지금과 동일).
+      if (selectedMasterCategoryId != null) {
+        const templates = await fetch(`/api/notice-templates?marketplaceCode=${marketCode}&masterCategoryId=${selectedMasterCategoryId}`)
+          .then(r => r.json()).catch(() => [])
+        const templateList = Array.isArray(templates) ? templates as NoticeTemplateEntry[] : []
+        setNoticeTemplates(templateList)
+        setNoticeContents(Object.fromEntries(templateList.filter(t => t.defaultValue).map(t => [t.fieldKey, t.defaultValue!])))
+      } else {
+        setNoticeTemplates([])
+        setNoticeContents({})
+      }
     } finally {
       setLoadingMeta(false)
+    }
+  }
+
+  async function saveNoticeAsDefault(fieldKey: string) {
+    if (selectedMasterCategoryId == null || !marketCode) return
+    const value = noticeContents[fieldKey]
+    if (!value?.trim()) return
+    setSavingTemplateField(fieldKey)
+    try {
+      await fetch('/api/notice-templates', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ marketplaceCode: marketCode, masterCategoryId: selectedMasterCategoryId, fieldKey, defaultValue: value.trim() }),
+      })
+      setNoticeTemplates(prev => {
+        const next = prev.filter(t => t.fieldKey !== fieldKey)
+        next.push({ fieldKey, fieldLabel: null, defaultValue: value.trim(), sourceProductField: null })
+        return next
+      })
+    } finally {
+      setSavingTemplateField(null)
     }
   }
 
@@ -80,7 +136,7 @@ export function MarketplaceRegisterPanel() {
     try {
       const res = await fetch(`/api/marketplace/${marketCode}/register`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId, categoryCode: categoryCode.trim(), noticeContents, productMasterIds: [...selected] }),
+        body: JSON.stringify({ clientId, categoryCode: categoryCode.trim(), noticeContents, productMasterIds: [...selected], accountLabel }),
       })
       const data = await res.json().catch(() => null)
       if (!res.ok) { alert(`등록 요청 실패: ${data?.error || res.status}`); return }
@@ -120,6 +176,12 @@ export function MarketplaceRegisterPanel() {
           <option value="">마켓 선택</option>
           {markets.map(m => <option key={m.code} value={m.code}>{m.name}</option>)}
         </select>
+        {accountsForMarket.length > 1 && (
+          <select value={accountLabel} onChange={e => setAccountLabel(e.target.value)}
+            className="border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400">
+            {accountsForMarket.map(label => <option key={label} value={label}>{label} 계정</option>)}
+          </select>
+        )}
         <input value={categoryCode} onChange={e => setCategoryCode(e.target.value)} placeholder="카테고리 코드 (예: 78877)"
           className="border border-gray-300 rounded-xl px-3 py-2 text-sm w-52 focus:outline-none focus:ring-2 focus:ring-teal-400" />
         <button onClick={fetchCategoryMeta} disabled={loadingMeta || !marketCode || !categoryCode.trim() || clientId === ''}
@@ -140,14 +202,31 @@ export function MarketplaceRegisterPanel() {
           </p>
           {requiredNotices.length > 0 ? (
             <div className="space-y-2">
-              <p className="text-xs font-semibold text-gray-600">필수 상품정보제공고시 — 실제 내용을 입력하세요(선택한 상품 전체에 같은 내용이 적용됩니다)</p>
-              {requiredNotices.map(n => (
-                <label key={n.name} className="block">
-                  <span className="block text-xs text-gray-500 mb-1">{n.categoryName} · {n.name}</span>
-                  <input value={noticeContents[n.name] || ''} onChange={e => setNoticeContents(v => ({ ...v, [n.name]: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
-                </label>
-              ))}
+              <p className="text-xs font-semibold text-gray-600">
+                필수 상품정보제공고시 — 실제 내용을 입력하세요(선택한 상품 전체에 같은 내용이 적용됩니다)
+                {selectedMasterCategoryId == null && <span className="font-normal text-gray-400"> · 선택한 상품들의 카테고리가 서로 달라 저장된 기본값을 못 불러왔습니다</span>}
+              </p>
+              {requiredNotices.map(n => {
+                const hasTemplate = noticeTemplates.some(t => t.fieldKey === n.name && t.defaultValue)
+                return (
+                  <label key={n.name} className="block">
+                    <span className="block text-xs text-gray-500 mb-1">
+                      {n.categoryName} · {n.name}
+                      {hasTemplate && <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-sky-50 text-sky-600">저장된 기본값</span>}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <input value={noticeContents[n.name] || ''} onChange={e => setNoticeContents(v => ({ ...v, [n.name]: e.target.value }))}
+                        className="flex-1 border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+                      {selectedMasterCategoryId != null && (
+                        <button onClick={() => saveNoticeAsDefault(n.name)} disabled={savingTemplateField === n.name || !noticeContents[n.name]?.trim()}
+                          className="shrink-0 px-3 py-2 rounded-xl text-xs font-semibold bg-gray-100 hover:bg-gray-200 text-gray-600 disabled:opacity-50">
+                          기본값으로 저장
+                        </button>
+                      )}
+                    </div>
+                  </label>
+                )
+              })}
             </div>
           ) : (
             <p className="text-xs text-gray-400">이 카테고리는 필수 고시정보가 없습니다.</p>

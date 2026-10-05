@@ -10,6 +10,7 @@ const BASE_PRODUCT: ProductMasterRow = {
   cost_price: 1000, list_price: 2000, sale_price: 1500, shipping_fee: 3000, other_cost: null,
   target_margin_rate: null, stock_status: 'in_stock', stock_qty: 10,
   thumbnail_url: 'https://example.com/a.jpg', detail_image_urls: [],
+  search_tags: '',
 }
 
 describe('coupangAdapter.validate', () => {

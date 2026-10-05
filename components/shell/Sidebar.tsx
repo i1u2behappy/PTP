@@ -107,6 +107,7 @@ export function Sidebar() {
             tab={{ id: 'migration-dashboard', type: 'migration-dashboard', title: '데이터 마이그 목록', icon: '📊', closable: true }}>
             <NavLeaf tab={{ id: 'sales-code', type: 'sales-code', title: '판매관리코드 관리', icon: '💳', closable: true }} icon={TagIcon} nested />
             <NavLeaf tab={{ id: 'category-mapping', type: 'category-mapping', title: '카테고리 매핑', icon: '🗺️', closable: true }} icon={MapIcon} nested />
+            <NavLeaf tab={{ id: 'category-tree', type: 'category-tree', title: '카테고리 트리 관리', icon: '🌳', closable: true }} icon={ArchiveIcon} nested />
             <NavLeaf tab={{ id: 'internal-codes', type: 'internal-codes', title: '관리코드 생성', icon: '🏷️', closable: true }} icon={TagIcon} nested />
             <NavLeaf tab={{ id: 'name-management', type: 'name-management', title: '상품명 관리', icon: '✏️', closable: true }} icon={ListIcon} nested />
             <NavLeaf tab={{ id: 'option-management', type: 'option-management', title: '옵션 관리', icon: '🎛️', closable: true }} icon={SettingsIcon} nested />

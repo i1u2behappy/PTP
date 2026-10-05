@@ -29,7 +29,7 @@ export function buildElevenSheet(
       pricing.salePrice || '',
       pricing.salePrice || '',
       p.stock_qty ?? 0,
-      '',
+      p.category || '',  // 카테고리코드 — "카테고리 매핑" 화면에서 이 마켓에 지정해둔 값(없으면 내부 라벨 폴백)
       p.brand || '',
       p.manufacturer || '',
       p.origin || '국내산',

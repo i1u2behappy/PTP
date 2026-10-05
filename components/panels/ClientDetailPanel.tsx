@@ -47,7 +47,7 @@ interface MarketplaceOption { code: string; name: string }
 interface AdapterField { key: string; label: string; secret?: boolean; options?: string[] }
 interface AdapterFields { credentialFields: AdapterField[]; settingsFields: AdapterField[] }
 interface MarketplaceCredential {
-  id: number; marketplaceCode: string; marketplaceName: string; fieldKeys: string[]
+  id: number; marketplaceCode: string; marketplaceName: string; accountLabel: string; fieldKeys: string[]
   isActive: boolean; lastVerifiedAt: string | null; verifyError: string | null
   settings: Record<string, string>
 }
@@ -90,6 +90,9 @@ export function ClientDetailPanel({ params }: Props) {
   const [credentials, setCredentials] = useState<MarketplaceCredential[]>([])
   const [addingMarket, setAddingMarket] = useState(false)
   const [newMarketCode, setNewMarketCode] = useState('')
+  // 거래처가 한 마켓에 판매계정을 여러 개 쓰는 경우를 위한 구분 라벨(2026-10-05 확인 — 샵링커/플레이오토도
+  // 지원하는 패턴). 계정이 1개뿐이면 'default' 그대로 두면 되고, 같은 마켓을 또 연동할 때만 바꿔주면 된다.
+  const [newAccountLabel, setNewAccountLabel] = useState('default')
   const [newFields, setNewFields] = useState<{ key: string; value: string }[]>([{ key: '', value: '' }])
   const [adapterFields, setAdapterFields] = useState<AdapterFields | null>(null)
   const [fixedCredValues, setFixedCredValues] = useState<Record<string, string>>({})
@@ -147,12 +150,12 @@ export function ClientDetailPanel({ params }: Props) {
     try {
       const res = await fetch('/api/marketplace/credentials', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clientId, marketplaceCode: newMarketCode, fields, ...(settings ? { settings } : {}) }),
+        body: JSON.stringify({ clientId, marketplaceCode: newMarketCode, accountLabel: newAccountLabel.trim() || 'default', fields, ...(settings ? { settings } : {}) }),
       })
       if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`저장 실패: ${e.error || res.status}`); return }
       const saved = await res.json().catch(() => null) as { verified: { ok: boolean; error?: string } | null } | null
       if (saved?.verified && !saved.verified.ok) alert(`저장은 됐지만 접속정보 검증에 실패했습니다: ${saved.verified.error}`)
-      setAddingMarket(false); setNewMarketCode(''); setNewFields([{ key: '', value: '' }])
+      setAddingMarket(false); setNewMarketCode(''); setNewAccountLabel('default'); setNewFields([{ key: '', value: '' }])
       loadCredentials()
     } finally {
       setSavingCredential(false)
@@ -396,6 +399,12 @@ export function ClientDetailPanel({ params }: Props) {
               {marketplaceOptions.map(m => <option key={m.code} value={m.code}>{m.name}</option>)}
             </select>
 
+            <label className="block">
+              <span className="block text-xs text-gray-500 mb-1">계정 구분(선택) — 이 마켓에 판매계정이 2개 이상이면 구분할 이름을 붙이세요. 1개뿐이면 그냥 두세요.</span>
+              <input value={newAccountLabel} onChange={e => setNewAccountLabel(e.target.value)} placeholder="default"
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-400" />
+            </label>
+
             {(adapterFields?.credentialFields.length ?? 0) > 0 ? (
               <div className="space-y-2">
                 <p className="text-xs text-gray-400">접속정보</p>
@@ -470,6 +479,9 @@ export function ClientDetailPanel({ params }: Props) {
               <div key={c.id} className="flex items-center justify-between bg-gray-50 border border-gray-200 rounded-xl px-3 py-2.5">
                 <div>
                   <span className="text-sm text-gray-700 font-medium">{c.marketplaceName}</span>
+                  {c.accountLabel !== 'default' && (
+                    <span className="ml-2 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-sky-50 text-sky-600">{c.accountLabel}</span>
+                  )}
                   <span className="block text-xs text-gray-400">
                     설정된 필드: {c.fieldKeys.join(', ') || '없음'}
                     {' · '}

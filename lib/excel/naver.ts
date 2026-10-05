@@ -23,7 +23,7 @@ export function buildNaverSheet(wb: ExcelJS.Workbook, products: ProductMasterRow
       p.name_final || p.name_ai || p.name_original || '',
       pricing.salePrice || '',
       p.stock_qty ?? 0,
-      '',            // 카테고리ID (직접 입력 필요)
+      p.category || '',  // 카테고리ID — "카테고리 매핑" 화면에서 이 마켓에 지정해둔 값(없으면 내부 라벨 폴백)
       p.brand || '',
       p.manufacturer || '',
       p.origin || '국내산',
@@ -36,7 +36,7 @@ export function buildNaverSheet(wb: ExcelJS.Workbook, products: ProductMasterRow
       p.options?.map(o => o.name).join(';') || '',
       p.options?.map(o => o.values.join(':')).join(';') || '',
       p.description || '',
-      '',
+      p.search_tags || '',
     ])
   }
 

@@ -346,6 +346,7 @@ export const TAB_ICONS: Record<string, IconComponent> = {
   'master-schema': ArchiveIcon,
   'sales-code': TagIcon,
   'category-mapping': MapIcon,
+  'category-tree': ArchiveIcon,
   'internal-codes': TagIcon,
   'name-management': ListIcon,
   'option-management': SettingsIcon,

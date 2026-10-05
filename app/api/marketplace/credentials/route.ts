@@ -15,6 +15,10 @@ const SaveSchema = z.object({
   fields: z.record(z.string(), z.string()).refine(f => Object.keys(f).length > 0, { message: 'fields required' }),
   // 거래처 단위 배송/반품 정책 등 — 비밀값이 아니라 평문 저장(settingsFields()가 없는 마켓은 생략 가능).
   settings: z.record(z.string(), z.string()).optional(),
+  // 거래처가 한 마켓에 판매계정을 여러 개 쓰는 경우 구분용(2026-10-05 확인). 계정 추가/선택 UI가 아직
+  // 없어 기본값 'default'만 실사용되지만, 다중계정 스키마(lib/db.ts의 marketplace_credentials
+  // account_label)와 맞추기 위해 받아둔다.
+  accountLabel: z.string().min(1).default('default'),
 })
 
 export async function GET(req: NextRequest) {
@@ -22,18 +26,18 @@ export async function GET(req: NextRequest) {
   if (!clientId) return NextResponse.json({ error: 'clientId required' }, { status: 400 })
 
   const res = await pool.query<{
-    id: number; marketplace_code: string; marketplace_name: string
+    id: number; marketplace_code: string; marketplace_name: string; account_label: string
     credential_data_encrypted: string | null; credential_iv: string | null
     is_active: boolean; last_verified_at: string | null; verify_error: string | null
     settings: Record<string, string> | null
   }>(
-    `SELECT mc.id, mc.marketplace_code, cfg.name AS marketplace_name,
+    `SELECT mc.id, mc.marketplace_code, cfg.name AS marketplace_name, mc.account_label,
             mc.credential_data_encrypted, mc.credential_iv,
             mc.is_active, mc.last_verified_at, mc.verify_error, mc.settings
      FROM marketplace_credentials mc
      JOIN marketplace_configs cfg ON cfg.code = mc.marketplace_code
      WHERE mc.client_id = $1
-     ORDER BY cfg.name`,
+     ORDER BY cfg.name, mc.account_label`,
     [clientId],
   )
 
@@ -46,7 +50,7 @@ export async function GET(req: NextRequest) {
       if (decrypted) fieldKeys = Object.keys(JSON.parse(decrypted) as Record<string, string>)
     } catch { /* 복호화 실패는 화면에서 "설정된 필드 없음"으로만 보이면 충분 */ }
     return {
-      id: r.id, marketplaceCode: r.marketplace_code, marketplaceName: r.marketplace_name,
+      id: r.id, marketplaceCode: r.marketplace_code, marketplaceName: r.marketplace_name, accountLabel: r.account_label,
       fieldKeys, isActive: r.is_active, lastVerifiedAt: r.last_verified_at, verifyError: r.verify_error,
       settings: r.settings || {},
     }
@@ -59,16 +63,16 @@ export async function POST(req: NextRequest) {
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error.issues[0]?.message || 'invalid request' }, { status: 400 })
   }
-  const { clientId, marketplaceCode, fields, settings } = parsed.data
+  const { clientId, marketplaceCode, fields, settings, accountLabel } = parsed.data
 
   const { encrypted, iv } = encryptSecret(JSON.stringify(fields))
   await pool.query(
-    `INSERT INTO marketplace_credentials (client_id, marketplace_code, credential_data_encrypted, credential_iv, settings, is_active)
-     VALUES ($1, $2, $3, $4, $5, true)
-     ON CONFLICT (client_id, marketplace_code) DO UPDATE SET
-       credential_data_encrypted = $3, credential_iv = $4, settings = $5, is_active = true,
+    `INSERT INTO marketplace_credentials (client_id, marketplace_code, account_label, credential_data_encrypted, credential_iv, settings, is_active)
+     VALUES ($1, $2, $3, $4, $5, $6, true)
+     ON CONFLICT (client_id, marketplace_code, account_label) DO UPDATE SET
+       credential_data_encrypted = $4, credential_iv = $5, settings = $6, is_active = true,
        last_verified_at = NULL, verify_error = NULL, updated_at = NOW()`,
-    [clientId, marketplaceCode, encrypted, iv, JSON.stringify(settings || {})],
+    [clientId, marketplaceCode, accountLabel, encrypted, iv, JSON.stringify(settings || {})],
   )
 
   // 어댑터가 있는 마켓(지금은 쿠팡만)은 저장 직후 1회 ping으로 검증한다 — 없는 마켓은 그대로 미검증
@@ -78,9 +82,9 @@ export async function POST(req: NextRequest) {
   if (adapter) {
     verified = await adapter.verifyCredentials(fields).catch((e: unknown) => ({ ok: false, error: e instanceof Error ? e.message : String(e) }))
     await pool.query(
-      `UPDATE marketplace_credentials SET last_verified_at = $3, verify_error = $4
-       WHERE client_id = $1 AND marketplace_code = $2`,
-      [clientId, marketplaceCode, verified.ok ? new Date() : null, verified.ok ? null : (verified.error || '알 수 없는 오류')],
+      `UPDATE marketplace_credentials SET last_verified_at = $4, verify_error = $5
+       WHERE client_id = $1 AND marketplace_code = $2 AND account_label = $3`,
+      [clientId, marketplaceCode, accountLabel, verified.ok ? new Date() : null, verified.ok ? null : (verified.error || '알 수 없는 오류')],
     )
   }
   return NextResponse.json({ ok: true, verified })

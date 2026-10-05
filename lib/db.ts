@@ -74,7 +74,9 @@ export interface RawMasterRow {
   name_ai: string | null
   name_final: string | null
   master_category: string | null
+  master_category_id: number | null
   mall_category: string | null
+  search_tags: string | null
   brand: string
   manufacturer: string
   origin: string
@@ -98,7 +100,8 @@ export interface RawMasterRow {
 export async function getProductMasterRows(ids: number[]): Promise<RawMasterRow[]> {
   const res = await pool.query(
     `SELECT pm.id, pm.name_original, pm.name_ai, pm.name_final,
-            pm.master_category, pm.mall_category, pm.brand, pm.manufacturer, pm.origin, pm.description, pm.options,
+            pm.master_category, pm.master_category_id, pm.mall_category, pm.search_tags,
+            pm.brand, pm.manufacturer, pm.origin, pm.description, pm.options,
             pm.option_combinations,
             pm.cost_price, pm.list_price, pm.sale_price, pm.shipping_fee, pm.other_cost, pm.target_margin_rate,
             pm.stock_status, pm.stock_qty,
@@ -491,6 +494,26 @@ async function runMigrations() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_reference_products_site_code
       ON reference_products(site_id, mall_product_code) WHERE mall_product_code IS NOT NULL;
 
+    -- 내부 카테고리 계층 트리 — product_master.master_category(평문 텍스트)를 대체하기 위한 구조.
+    -- 샵링커/사방넷/플레이오토 전부 대/중/소 등 계층형 카테고리였는데 PTP만 평문 문자열 하나였던 걸
+    -- 바로잡는다(!specifications/product-master-architecture-redesign.md §2.1). 기존 master_category
+    -- TEXT 컬럼은 과도기 동안 유지하고, 이 트리는 전부 parent_id=NULL인 "루트 노드"로 먼저 채운 뒤
+    -- (아래 백필), 실제 계층화(루트 노드를 상/하위로 재배치하는 것)는 별도의 "카테고리 트리 관리"
+    -- 화면에서 사람이 점진적으로 정리한다 — 이 마이그레이션 자체는 데이터 무손실 백필만 한다.
+    CREATE TABLE IF NOT EXISTS master_categories (
+      id          SERIAL PRIMARY KEY,
+      parent_id   INT REFERENCES master_categories(id) ON DELETE CASCADE,
+      name        TEXT NOT NULL,
+      depth       INT NOT NULL DEFAULT 0,
+      sort_order  INT DEFAULT 0,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+    -- 부분 유니크 인덱스 2개로 "루트 레벨에서 이름 중복 금지"와 "같은 부모 아래 이름 중복 금지"를
+    -- 분리한다 — 일반 UNIQUE(parent_id, name)는 parent_id가 NULL인 행끼리는 서로 다른 값으로 취급돼
+    -- (Postgres NULL 비교 규칙) 루트 레벨 중복을 못 막는다.
+    CREATE UNIQUE INDEX IF NOT EXISTS master_categories_root_name_idx ON master_categories(name) WHERE parent_id IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS master_categories_child_name_idx ON master_categories(parent_id, name) WHERE parent_id IS NOT NULL;
+
     -- 실제 영속 '상품마스터' (3단계 자동 마이그레이션의 목표 테이블)
     CREATE TABLE IF NOT EXISTS product_master (
       id                  SERIAL PRIMARY KEY,
@@ -533,6 +556,11 @@ async function runMigrations() {
     -- 조합(예: 빨강-105가 없는데)을 판매 가능한 것처럼 등록하게 된다). options와 마찬가지로 매 마이그
     -- 레이션마다 스크랩 원본으로 갱신되는 파생 데이터라 사람이 직접 편집하는 필드가 아니다.
     ALTER TABLE product_master ADD COLUMN IF NOT EXISTS option_combinations JSONB DEFAULT '[]';
+    -- 계층형 카테고리 FK(위 master_categories) — master_category(TEXT)는 과도기 동안 그대로 두고 병행한다.
+    ALTER TABLE product_master ADD COLUMN IF NOT EXISTS master_category_id INT REFERENCES master_categories(id);
+    -- 검색어(태그) — 상품마스터 컬럼 관리 설계(!specifications/product-master-column-management.md §3.3)에서
+    -- 확정된 공백. 쉼표 구분 문자열, 마켓별로 다른 값이 필요하면 product_channel_listings.search_tags_override로 덮어쓴다.
+    ALTER TABLE product_master ADD COLUMN IF NOT EXISTS search_tags TEXT;
 
     -- "기준 Master DB" 타깃 필드 목록 — 거래처 구분 없이 시스템 전체가 공유하는 단일 기준 테이블 정의.
     -- 예전엔 client_id로 거래처별로 나눠 가졌으나(client_master_schema_fields), 기준 테이블은 하나만
@@ -633,6 +661,46 @@ async function runMigrations() {
       updated_at               TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE (master_category, marketplace_code)
     );
+    ALTER TABLE category_channel_mappings ADD COLUMN IF NOT EXISTS master_category_id INT REFERENCES master_categories(id);
+
+    -- master_categories 백필 — product_master/category_channel_mappings에 남아있는 기존 평문
+    -- master_category 값마다 "루트 노드"를 하나씩 만들고 새 FK 컬럼을 채운다. 매 서버 기동마다 돌지만
+    -- ON CONFLICT DO NOTHING + "... IS NULL" 가드 덕에 이미 처리된 값은 그냥 건너뛰어 사실상 무료다 —
+    -- 그래서 재마이그레이션으로 새 평문 카테고리가 생겨도 다음 재기동 때 자동으로 따라잡는다.
+    INSERT INTO master_categories (name, depth)
+    SELECT DISTINCT t.name, 0 FROM (
+      SELECT master_category AS name FROM product_master WHERE master_category IS NOT NULL AND master_category <> ''
+      UNION
+      SELECT master_category AS name FROM category_channel_mappings WHERE master_category IS NOT NULL AND master_category <> ''
+    ) t
+    ON CONFLICT (name) WHERE parent_id IS NULL DO NOTHING;
+
+    UPDATE product_master pm SET master_category_id = mc.id
+    FROM master_categories mc
+    WHERE mc.name = pm.master_category AND mc.parent_id IS NULL
+      AND pm.master_category_id IS NULL AND pm.master_category IS NOT NULL AND pm.master_category <> '';
+
+    UPDATE category_channel_mappings ccm SET master_category_id = mc.id
+    FROM master_categories mc
+    WHERE mc.name = ccm.master_category AND mc.parent_id IS NULL AND ccm.master_category_id IS NULL;
+
+    -- 고시정보(상품정보제공고시) 카테고리×마켓 기본값 템플릿 — 쿠팡 전용으로 흩어져 있던 라이브조회(카테고리
+    -- 메타 API)/슬롯매핑(categoryProfiles)을 하나로 통합한 범마켓 구조
+    -- (!specifications/product-master-architecture-redesign.md §3). "이 카테고리에 뭘 표시해야 하는가"는
+    -- 법률/마켓 룰이라 계정이 아니라 마켓+카테고리 단위다. 상품별 예외(식품 소비기한 등 드문 케이스)는
+    -- 여기가 아니라 product_channel_listings.notice_field_overrides에 담는다.
+    CREATE TABLE IF NOT EXISTS notice_templates (
+      id                    SERIAL PRIMARY KEY,
+      marketplace_code      TEXT NOT NULL REFERENCES marketplace_configs(code),
+      master_category_id    INT NOT NULL REFERENCES master_categories(id),
+      field_key             TEXT NOT NULL,
+      field_label           TEXT,
+      default_value         TEXT,
+      source_product_field  TEXT,
+      sort_order            INT DEFAULT 0,
+      updated_at            TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (marketplace_code, master_category_id, field_key)
+    );
 
     -- 채널(마켓)별 등록용 상품명/URL — 엑셀 생성 시점에만 임시로 만들어지던 것을 미리보기/수정 가능하게 저장
     CREATE TABLE IF NOT EXISTS product_channel_listings (
@@ -650,6 +718,13 @@ async function runMigrations() {
     ALTER TABLE product_channel_listings ADD COLUMN IF NOT EXISTS sync_status TEXT DEFAULT 'none';
     ALTER TABLE product_channel_listings ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ;
     ALTER TABLE product_channel_listings ADD COLUMN IF NOT EXISTS error_message TEXT;
+    -- 채널(마켓 계정)별 오버라이드 — 상품마스터 공통값을 이 상품×이 마켓 계정에서만 다르게 낼 때 채운다.
+    -- 비어있으면(NULL) 상품마스터 공통값으로 폴백 — 신규 테이블을 안 만들고 기존 "채널별 실제값" 테이블을
+    -- 확장한 이유는 !specifications/product-master-architecture-redesign.md §4 참고.
+    -- (marketplace_credential_id 컬럼은 marketplace_credentials 테이블 정의 뒤에서 추가한다 — FK 대상 테이블이 먼저 있어야 함)
+    ALTER TABLE product_channel_listings ADD COLUMN IF NOT EXISTS search_tags_override TEXT;
+    ALTER TABLE product_channel_listings ADD COLUMN IF NOT EXISTS price_override JSONB;
+    ALTER TABLE product_channel_listings ADD COLUMN IF NOT EXISTS notice_field_overrides JSONB DEFAULT '{}';
 
     -- 오픈마켓 API 호출 이력 — "지금 상태"만 남는 product_channel_listings와 달리 시간순 전체 로그.
     -- 실패 원인 추적(운영 중 "왜 실패했는지" 재구성)에 필요, 쌓이는 로그라 상품/마켓 삭제와 무관하게
@@ -694,10 +769,22 @@ async function runMigrations() {
     -- 거래처 단위 배송/반품 정책(쿠팡 deliveryMethod/returnCenterCode 등) — 비밀값이 아니라 평문
     -- JSONB로 저장한다(credential_data_encrypted와 다름). !specifications/marketplace-api-integration.md 참고.
     ALTER TABLE marketplace_credentials ADD COLUMN IF NOT EXISTS settings JSONB DEFAULT '{}';
+    -- 거래처가 한 마켓에 판매계정을 여러 개 쓰는 경우를 지원한다(2026-10-05 사용자 확인 — 샵링커/
+    -- 플레이오토도 지원하는 패턴, !specifications/product-master-architecture-redesign.md §2.2).
+    -- 기존 행은 전부 DEFAULT 'default'로 채워져 지금까지의 "거래처당 마켓당 1개" 동작이 그대로 유지된다
+    -- (계정이 1개뿐인 한 account_label은 아무 의미 없이 'default' 하나로 고정돼 있을 뿐).
+    ALTER TABLE marketplace_credentials ADD COLUMN IF NOT EXISTS account_label TEXT NOT NULL DEFAULT 'default';
     -- 같은 거래처가 같은 마켓 접속정보를 다시 저장하면 새 행이 아니라 덮어써야 한다(업로드 폼 재저장 시
-    -- 중복 행이 쌓이는 사고 방지).
-    CREATE UNIQUE INDEX IF NOT EXISTS marketplace_credentials_client_market_idx
-      ON marketplace_credentials(client_id, marketplace_code);
+    -- 중복 행이 쌓이는 사고 방지) — 단, 이제 "같은 거래처+마켓"이라도 account_label이 다르면 별개 행이다.
+    DROP INDEX IF EXISTS marketplace_credentials_client_market_idx;
+    CREATE UNIQUE INDEX IF NOT EXISTS marketplace_credentials_client_market_account_idx
+      ON marketplace_credentials(client_id, marketplace_code, account_label);
+
+    -- product_channel_listings.marketplace_credential_id — 어느 마켓 계정 전용 값인지 구분하는 FK.
+    -- marketplace_credentials 정의 뒤에 둬야 하는 이유는 위 FK 대상이 이제야 존재하기 때문. 지금은 NULL
+    -- 허용(계정이 1개뿐인 대다수 거래처는 채울 필요 없음) — UNIQUE 제약은 계정 선택 UI가 생긴 뒤에 바꾼다
+    -- (지금 바꾸면 register 라우트의 기존 ON CONFLICT(product_master_id, marketplace_code)가 깨진다).
+    ALTER TABLE product_channel_listings ADD COLUMN IF NOT EXISTS marketplace_credential_id INT REFERENCES marketplace_credentials(id);
 
     CREATE TABLE IF NOT EXISTS registration_jobs (
       id                  SERIAL PRIMARY KEY,

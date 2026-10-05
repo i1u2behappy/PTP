@@ -22,6 +22,9 @@ export interface ProductMasterRow {
   stock_qty: number | null
   thumbnail_url: string
   detail_image_urls: string[]
+  /** 검색어(태그), 쉼표 구분 — 마켓별 override가 있으면 export route에서 이미 반영된 값(product_master
+   *  공통값 또는 그 마켓 전용값)이 여기 들어있다. !specifications/product-master-architecture-redesign.md §4 */
+  search_tags: string
 }
 
 export interface MarketplaceConfig {

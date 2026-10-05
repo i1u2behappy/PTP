@@ -10,12 +10,13 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ code
   const { code } = await params
   const clientId = req.nextUrl.searchParams.get('clientId')
   const categoryCode = req.nextUrl.searchParams.get('categoryCode')
+  const accountLabel = req.nextUrl.searchParams.get('accountLabel') || undefined
   if (!clientId || !categoryCode) return NextResponse.json({ error: 'clientId/categoryCode required' }, { status: 400 })
 
   const adapter = getProductAdapter(code)
   if (!adapter) return NextResponse.json({ error: `${code}는 아직 API 등록을 지원하지 않습니다` }, { status: 400 })
 
-  const cred = await loadClientCredentials(Number(clientId), code)
+  const cred = await loadClientCredentials(Number(clientId), code, accountLabel)
   if (!cred) return NextResponse.json({ error: '이 거래처에 저장된 접속정보가 없습니다 — 거래처 상세에서 먼저 연동하세요' }, { status: 400 })
 
   try {

@@ -1,4 +1,5 @@
 import pool from '../db'
+import { getOrCreateCategoryId } from './categories'
 
 export interface MigrateResult {
   migrated: number
@@ -92,13 +93,17 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
     // 스크랩분(이 필드가 생기기 전)은 빈 배열일 수 있다, 소비하는 쪽(쿠팡 등록 등)이 options의 카티전
     // 곱으로 근사해야 한다는 뜻임을 알아야 한다(RawMasterRow 주석 참고).
     const optionCombinations = rawData.option_combinations || []
+    // master_category_id는 평문 master_category와 함께 "최초 1회만 세팅, 이후 보존"된다 — 계층형 FK로
+    // 전환 중인 과도기 컬럼(!specifications/product-master-architecture-redesign.md §2.1)이라 평문 컬럼과
+    // 정확히 같은 보존 규칙을 따라야 "AI로 분류 정리"로 사람이 바로잡은 분류가 재마이그레이션에 안 덮인다.
+    const categoryId = await getOrCreateCategoryId(null, category)
 
     const upsert = await pool.query<{ id: number }>(
       `INSERT INTO product_master
-        (mall_product_id, client_id, name_original, mall_category, master_category,
+        (mall_product_id, client_id, name_original, mall_category, master_category, master_category_id,
          brand, manufacturer, origin, description, options, option_combinations,
          sale_price, list_price, cost_price, shipping_fee, stock_status, stock_qty, custom_fields, status)
-       VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'draft')
+       VALUES ($1,$2,$3,$4,$4,$18,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'draft')
        ON CONFLICT (mall_product_id, client_id) DO UPDATE SET
          name_original = $3,
          mall_category = $4,
@@ -120,7 +125,7 @@ export async function migrateToMaster(mallProductIds: number[], clientId: number
       [mallProductId, clientId, mp.name_original, category, brand, manufacturer, origin, description,
         JSON.stringify(mp.options || []), JSON.stringify(optionCombinations),
         salePrice, listPrice, costPrice, shippingFee, mp.stock_status, mp.stock_qty,
-        JSON.stringify(scrapedCustomFields)],
+        JSON.stringify(scrapedCustomFields), categoryId],
     )
     const masterId = upsert.rows[0].id
     masterIds.push(masterId)

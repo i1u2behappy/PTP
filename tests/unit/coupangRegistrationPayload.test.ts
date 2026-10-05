@@ -10,6 +10,7 @@ const PRODUCT: ProductMasterRow = {
   cost_price: 1000, list_price: 20000, sale_price: 15000, shipping_fee: 3000, other_cost: null,
   target_margin_rate: null, stock_status: 'in_stock', stock_qty: 7,
   thumbnail_url: 'https://example.com/thumb.jpg', detail_image_urls: ['https://example.com/d1.jpg'],
+  search_tags: '',
 }
 
 const EMPTY_META: CategoryMeta = { attributes: [], notices: [] }

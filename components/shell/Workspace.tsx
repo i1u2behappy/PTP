@@ -12,6 +12,7 @@ import { MasterSchemaPanel } from '../panels/MasterSchemaPanel'
 import { ProductsListPanel } from '../panels/ProductsListPanel'
 import { InternalCodePanel } from '../panels/InternalCodePanel'
 import { CategoryMappingPanel } from '../panels/CategoryMappingPanel'
+import { CategoryTreePanel } from '../panels/CategoryTreePanel'
 import { SalesCodePanel } from '../panels/SalesCodePanel'
 import { ProductNamePanel } from '../panels/ProductNamePanel'
 import { OptionManagementPanel } from '../panels/OptionManagementPanel'
@@ -62,6 +63,7 @@ export function Workspace() {
           case 'master-schema':  return <MasterSchemaPanel key={tab.id} />
           case 'internal-codes': return <InternalCodePanel key={tab.id} params={tab.params} />
           case 'category-mapping': return <CategoryMappingPanel key={tab.id} params={tab.params} />
+        case 'category-tree':    return <CategoryTreePanel key={tab.id} />
           case 'sales-code':      return <SalesCodePanel key={tab.id} params={tab.params} />
           case 'name-management': return <ProductNamePanel key={tab.id} params={tab.params} />
           case 'option-management': return <OptionManagementPanel key={tab.id} params={tab.params} />

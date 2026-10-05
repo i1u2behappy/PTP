@@ -10,7 +10,7 @@ export async function GET(req: NextRequest) {
   const res = sessionId
     ? await pool.query(
         `SELECT DISTINCT pm.id, pm.mall_product_id, pm.name_original, pm.name_ai, pm.name_final,
-                pm.mall_category, pm.master_category, pm.brand, pm.manufacturer, pm.origin, pm.description,
+                pm.mall_category, pm.master_category, pm.master_category_id, pm.brand, pm.manufacturer, pm.origin, pm.description,
                 pm.options, pm.cost_price, pm.list_price, pm.sale_price, pm.shipping_fee, pm.other_cost,
                 pm.target_margin_rate, pm.stock_status, pm.stock_qty, pm.status, pm.updated_at,
                 pm.internal_code, pm.sales_code, mp.mall_product_code,
@@ -24,7 +24,7 @@ export async function GET(req: NextRequest) {
       )
     : await pool.query(
         `SELECT pm.id, pm.mall_product_id, pm.name_original, pm.name_ai, pm.name_final,
-                pm.mall_category, pm.master_category, pm.brand, pm.manufacturer, pm.origin, pm.description,
+                pm.mall_category, pm.master_category, pm.master_category_id, pm.brand, pm.manufacturer, pm.origin, pm.description,
                 pm.options, pm.cost_price, pm.list_price, pm.sale_price, pm.shipping_fee, pm.other_cost,
                 pm.target_margin_rate, pm.stock_status, pm.stock_qty, pm.status, pm.updated_at,
                 pm.internal_code, pm.sales_code, mp.mall_product_code,

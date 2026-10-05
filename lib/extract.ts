@@ -112,9 +112,23 @@ async function scrapePageData(page: Page): Promise<RawPageData> {
         )]
         if (godoGalleryImgs.length) mainImages = godoGalleryImgs
         else {
-          // 갤러리가 없으면 큰 대표이미지 하나(#bigimage 신우, #objImg/.img_big 고도몰)만이라도 쓴다.
-          const bigImg = document.querySelector<HTMLImageElement>('#bigimage, #objImg, .img_big img')
-          if (bigImg?.src) mainImages = [bigImg.src]
+          // 카페24 기본 스킨: 대표이미지는 .keyImg img, 추가이미지는 .xans-product-addimage(기본
+          // display:none이지만 실제로 추가이미지가 등록된 상품은 내용이 채워진 채 숨겨져 있을 뿐이라
+          // 유효하다) 안의 img다. 이 셀렉터가 없으면 바로 아래(121행) "본문 전체에서 /product/ 경로가
+          // 든 <img>를 추측"하는 범용 폴백까지 떨어지는데, 상세페이지에 같이 실리는 "최근 본 상품"/추천
+          // 위젯의 다른 상품 썸네일도 같은 /product/ 경로를 쓰므로 그것까지 대표이미지로 잘못 주워온다
+          // (실사용 확인, 2026-10-04 — 리얼백 product_no=551: 대표이미지가 실제론 1장인데 관련 위젯의
+          // 다른 상품 썸네일/배너 아이콘까지 섞여 5장으로 잡힘).
+          const cafe24Imgs = [...new Set([
+            ...Array.from(document.querySelectorAll<HTMLImageElement>('.keyImg img')).map(img => img.src),
+            ...Array.from(document.querySelectorAll<HTMLImageElement>('.xans-product-addimage img')).map(img => img.src),
+          ].filter(Boolean))]
+          if (cafe24Imgs.length) mainImages = cafe24Imgs
+          else {
+            // 갤러리가 없으면 큰 대표이미지 하나(#bigimage 신우, #objImg/.img_big 고도몰)만이라도 쓴다.
+            const bigImg = document.querySelector<HTMLImageElement>('#bigimage, #objImg, .img_big img')
+            if (bigImg?.src) mainImages = [bigImg.src]
+          }
         }
       }
     }

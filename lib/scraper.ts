@@ -6178,12 +6178,24 @@ export const GENERIC_DETAIL_URL_HINT_RE = /\/product\/detail\.html|\/product\/.+
  *  같고 카테고리ID 파라미터(CATEGORY_ID_QUERY_KEYS)값까지 같으면 — 같은 카테고리의 정렬/탭 변형일 뿐
  *  실제로 다른 카테고리가 아니다(diffQueryParams와 반대 용도 — 그쪽은 "정렬 옵션으로 인정할 차이"를
  *  찾고, 이쪽은 "같은 카테고리라 하위가 아님"을 판정한다). */
+/** isHubExpansionNoiseHref의 (1)(2) 체크만 떼어낸 것 — 비교할 "부모 카테고리"가 없는 맥락(아래
+ *  isRecoveryNoiseHref — 되살리기 후보는 특정 부모 하나에 매인 게 아니라 "직전 결과 전체에서 떨어져
+ *  나온 것"이라 자연스러운 단일 부모가 없다)에서도 "이건 애초에 카테고리가 아니다"를 판정할 수 있게
+ *  분리한다. */
+export function isObviouslyNotACategoryHref(href: string, detailPatternSrc?: string | null): boolean {
+  if (GENERIC_DETAIL_URL_HINT_RE.test(href)) return true
+  if (detailPatternSrc && new RegExp(detailPatternSrc).test(href)) return true
+  try {
+    return new URL(href).pathname === '/'
+  } catch {
+    return false
+  }
+}
+
 export function isHubExpansionNoiseHref(parentHref: string, candidateHref: string, detailPatternSrc?: string | null): boolean {
-  if (GENERIC_DETAIL_URL_HINT_RE.test(candidateHref)) return true
-  if (detailPatternSrc && new RegExp(detailPatternSrc).test(candidateHref)) return true
+  if (isObviouslyNotACategoryHref(candidateHref, detailPatternSrc)) return true
   try {
     const candidate = new URL(candidateHref)
-    if (candidate.pathname === '/') return true
     const parent = new URL(parentHref)
     if (parent.origin !== candidate.origin || parent.pathname !== candidate.pathname) return false
     for (const key of CATEGORY_ID_QUERY_KEYS) {
@@ -6195,6 +6207,23 @@ export function isHubExpansionNoiseHref(parentHref: string, candidateHref: strin
   } catch {
     return false
   }
+}
+
+/** screenCheckAndRecover의 "직전 결과 대비 누락" 되살리기 전용 — isHubExpansionNoiseHref와 같은 문제를
+ *  겪는다(2026-10-04 리얼백 재발 확인, 2차): expandOne 쪽 구멍을 막고 나니, 이번엔 DB에 남아있던 예전
+ *  오염된 categoryLinks(상품 상세/정렬옵션 포함)가 "직전엔 있었는데 이번엔 안 나옴"으로 분류돼
+ *  recoverMissingCategories가 그 href를 다시 열어보고 "상품이 있다"(상품 상세페이지는 당연히 자기 자신을
+ *  보여주고, 홈페이지는 "신상품" 위젯 때문에 상품이 보임)는 이유만으로 그대로 되살려버렸다 — 그 결과를
+ *  결정하는 "상품이 있는지" 확인은 "이게 새 카테고리인지 이미 찾은 카테고리의 변형일 뿐인지"를 구분하는
+ *  것과는 다른 질문이라(사용자 지적) 되살리기 전에 한 번 더 걸러야 한다. knownHrefs(이번에 이미 제대로
+ *  찾은 카테고리들)의 어느 href와도 "같은 카테고리의 정렬/탭 변형"이면(isHubExpansionNoiseHref 참고)
+ *  되살리지 않는다. */
+export function isRecoveryNoiseHref(candidateHref: string, knownHrefs: Iterable<string>, detailPatternSrc?: string | null): boolean {
+  if (isObviouslyNotACategoryHref(candidateHref, detailPatternSrc)) return true
+  for (const known of knownHrefs) {
+    if (isHubExpansionNoiseHref(known, candidateHref, detailPatternSrc)) return true
+  }
+  return false
 }
 
 /** 목록 페이지(들)을 순회하며 제품 URL 후보를 모은다. 실제 상품 추출은 하지 않는다(테스트/실행 공용 로직).
@@ -8574,9 +8603,15 @@ async function screenCheckAndRecover(
   // 깨진 배너 placeholder(BROKEN_TEMPLATE_TOKEN_RE 주석 참고)는 이번 실행이 정확히 걸러낸 것일 뿐, 이걸
   // "직전엔 있었는데 이번엔 없어졌다"로 보고 되살리려 하면 href가 우연히 진짜 상품 페이지를 가리켜
   // 표본검증을 통과해버려 깨진 이름 그대로 영원히 되살아난다 — 애초에 재검증 대상에 넣지 않는다.
+  const detailPatternSrc = PLATFORM_PROFILES[platform].detailUrlPattern?.source
   const droppedFromPrevious = (previousLinks ?? [])
     .filter(p => !currentHrefs.has(canonicalizeHref(p.href)))
     .filter(p => !isBrokenPlaceholderCategoryName(p.name))
+    // isRecoveryNoiseHref(2026-10-04 리얼백 재발 확인, 2차) — DB에 남아있던 예전 오염 항목(상품 상세/
+    // 정렬옵션)이 "직전엔 있었는데 이번엔 안 나옴"으로 여기 섞여 들어와, 바로 아래 되살리기가 "다시
+    // 열어보니 상품 있음"만으로 그대로 되살려버렸다. 이번에 이미 제대로 찾은 카테고리(links)와 대조해
+    // 같은 카테고리의 정렬/탭 변형이거나 상품 상세/홈페이지 자체면 애초에 재검증 대상에서 뺀다.
+    .filter(p => !isRecoveryNoiseHref(p.href, currentHrefs, detailPatternSrc))
   if (droppedFromPrevious.length) {
     console.log(`[이전결과대조:${mallName}] 직전에 있던 카테고리 ${droppedFromPrevious.length}개가 이번 결과엔 없음 — 재검증 대상에 포함: ${droppedFromPrevious.slice(0, 10).map(p => p.name).join(', ')}`)
   }
@@ -8592,7 +8627,8 @@ async function screenCheckAndRecover(
   if ((!first.missing.length && !droppedFromPrevious.length) || signal?.aborted) return { links, screenCheck: first }
 
   const candidates = [
-    ...resolveMissingCategoryCandidates(first.missing, exclusions, menuLinks),
+    ...resolveMissingCategoryCandidates(first.missing, exclusions, menuLinks)
+      .filter(c => !isRecoveryNoiseHref(c.href, currentHrefs, detailPatternSrc)),
     ...droppedFromPrevious.map(p => ({ name: p.name, href: p.href, reason: '직전 실행엔 있었는데 이번엔 안 나옴' })),
   ].filter((c, i, arr) => arr.findIndex(x => canonicalizeHref(x.href) === canonicalizeHref(c.href)) === i)
   if (!candidates.length) {
@@ -8899,7 +8935,13 @@ async function expandCategoryHubs(
     let realChildren: CategoryMenuLink[]
     const subStart = Date.now()
     const sub = await scanCategoryMenuRobust(workerPage)
-    realChildren = sub.links.filter(s => !topLevelHrefSet.has(canonicalizeHref(s.href)))
+    // isHubExpansionNoiseHref(2026-10-04 리얼백 재발 확인) — 이 페이지 자체의 정렬 툴바("등록 제품 : N개"
+    // 제목 + low price/high price/.../사용후기 링크들)가 <li> 중첩 구조라 scanCategoryMenuRobust의 일반
+    // 메뉴트리 스캔에 그대로 걸려, AI 폴백(아래)까지 가지도 않고 "진짜 하위 메뉴"로 채택됐었다 — AI
+    // 폴백에만 이 필터를 걸어뒀던 게 빠뜨린 지점이었다. 규칙 기반 스캔 결과에도 똑같이 적용한다.
+    realChildren = sub.links
+      .filter(s => !topLevelHrefSet.has(canonicalizeHref(s.href)))
+      .filter(s => !isHubExpansionNoiseHref(c.href, s.href, detailPatternSrc))
     // scanCategoryMenuRobust는 <li> 중첩 트리 기반이라, 이 허브 페이지 자체가 "제목+목록 반복" 구조인
     // 카테고리 전체보기형 페이지면(discoverTopLevelCategoryLinks가 최상위 탐지에 쓰는
     // scanCategoryOverviewPage와 같은 패턴) 아무것도 못 찾는다 — 정글북(id=30) 실사용 확인, 2026-09-15:
@@ -8907,7 +8949,9 @@ async function expandCategoryHubs(
     // 통째로 제외됐다. 최상위 탐지와 같은 폴백을 여기서도 시도한다.
     if (!realChildren.length) {
       const overview = await scanCategoryOverviewPage(workerPage)
-      realChildren = overview.filter(s => !topLevelHrefSet.has(canonicalizeHref(s.href)))
+      realChildren = overview
+        .filter(s => !topLevelHrefSet.has(canonicalizeHref(s.href)))
+        .filter(s => !isHubExpansionNoiseHref(c.href, s.href, detailPatternSrc))
     }
     const subMs = Date.now() - subStart
     let aiMs = 0
@@ -9223,7 +9267,10 @@ async function expandOneLevel(
   console.log(`[하위카테고리:진단:${mallName}] ${parentUrl} — AI 후보 ${aiCandidates.length}개, AI 결과 ${children.length}개`)
   if (!children.length) {
     const sub = await scanCategoryMenuRobust(scanPage)
-    children = sub.links
+    // isHubExpansionNoiseHref(2026-10-04 리얼백 재발 확인) — expandOne(expandCategoryHubs)의 같은 규칙
+    // 기반 폴백에서 이미 겪은 것과 같은 구멍(정렬 툴바가 <li> 메뉴트리로 오인됨)이 이 경로에도 그대로
+    // 있었다 — AI 결과에만 필터를 걸고 이 규칙 기반 폴백 결과엔 전혀 안 걸려 있었다.
+    children = sub.links.filter(c => !isNonCategoryCandidate(c.name, c.href) && !isHubExpansionNoiseHref(parentUrl, c.href, detailPatternSrc))
     console.log(`[하위카테고리:진단:${mallName}] AI 실패 → 규칙 기반 메뉴 스캔 결과 ${children.length}개(대분류 메뉴 전체를 다시 찾았을 수 있음 — 진짜 하위 메뉴가 아닐 위험)`)
   }
   // scanCategoryMenuRobust가 대분류 메뉴(GNB)를 다시 찾아버리면 방문한 그 페이지 자신으로 되돌아오는

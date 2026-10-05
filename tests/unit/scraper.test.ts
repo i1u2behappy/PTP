@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import fc from 'fast-check'
-import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern, scanCategoryMenuFromHtml, deriveDetailUrlPattern, LOGOUT_URL_RE, ACCOUNT_UNSAFE_URL_RE, classifySessionLossSignal, isBrokenPlaceholderCategoryName, isNonCategoryCandidate, isHubExpansionNoiseHref } from '../../lib/scraper'
+import { diffQueryParams, looksLikeSortLabel, resetToFirstPage, deriveCategoryUrlPattern, scanCategoryMenuFromHtml, deriveDetailUrlPattern, LOGOUT_URL_RE, ACCOUNT_UNSAFE_URL_RE, classifySessionLossSignal, isBrokenPlaceholderCategoryName, isNonCategoryCandidate, isHubExpansionNoiseHref, isRecoveryNoiseHref } from '../../lib/scraper'
 
 // diffQueryParams는 "카테고리별 정렬기준 설정" 기능의 핵심 — 정렬 후보 링크가 baseUrl과 같은 경로에서
 // 쿼리파라미터만 다른지 확인해, 다른 카테고리/상품 상세로 튀는 링크를 걸러낸다.
@@ -458,6 +458,41 @@ describe('isHubExpansionNoiseHref', () => {
     expect(isHubExpansionNoiseHref(
       'https://mall.com/category/4/',
       'https://mall.com/category/4/sub/9/',
+    )).toBe(false)
+  })
+})
+
+// 실제 재발 사고(리얼백, 2026-10-04, 2차) — isHubExpansionNoiseHref로 expandOne의 구멍을 막고 나니,
+// screenCheckAndRecover의 "직전 결과 대비 누락 재검증"이 DB에 남아있던 예전 오염된 categoryLinks(상품
+// 상세/정렬옵션 포함)를 "직전엔 있었는데 이번엔 안 나옴"으로 분류해 다시 열어보고 "상품이 있다"(상품
+// 상세페이지는 당연히 자기 자신을 보여주고, 홈페이지는 "신상품" 위젯 때문에 상품이 보임)는 이유만으로
+// 그대로 되살려버렸다. isRecoveryNoiseHref는 되살리기 전에 "이미 찾은 카테고리(knownHrefs)의 정렬/탭
+// 변형이거나 상품 상세/홈페이지 자체인지"를 먼저 걸러 이 재발을 막는다.
+describe('isRecoveryNoiseHref', () => {
+  const knownHrefs = [
+    'https://realbag.kr/product/list.html?cate_no=48',
+    'https://realbag.kr/product/list.html?cate_no=43',
+  ]
+
+  it('이미 찾은 카테고리의 정렬 옵션 변형은 되살리지 않는다', () => {
+    expect(isRecoveryNoiseHref(
+      'https://realbag.kr/product/list.html?cate_no=48&sort_method=3#Product_ListMenu', knownHrefs,
+    )).toBe(true)
+  })
+
+  it('상품 상세 링크는 knownHrefs와 무관하게 되살리지 않는다', () => {
+    expect(isRecoveryNoiseHref(
+      'https://realbag.kr/product/detail.html?product_no=986&cate_no=43&display_group=3', knownHrefs,
+    )).toBe(true)
+  })
+
+  it('홈페이지 자체는 knownHrefs와 무관하게 되살리지 않는다', () => {
+    expect(isRecoveryNoiseHref('https://realbag.kr/', knownHrefs)).toBe(true)
+  })
+
+  it('knownHrefs 중 어느 것과도 같은 카테고리가 아닌 진짜 누락 카테고리는 되살린다', () => {
+    expect(isRecoveryNoiseHref(
+      'https://realbag.kr/product/list.html?cate_no=4', knownHrefs,
     )).toBe(false)
   })
 })

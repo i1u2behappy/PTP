@@ -67,13 +67,11 @@ function LockedNotice({ text }: { text: string }) {
 }
 
 /** AS-IS/TO-BE 업로드 카드 — 둘의 UI가 완전히 동일해 kind만 다르게 재사용한다. */
-function UploadCard({ label, upload, file, onFileChange, uploading, onUpload, pending, codeColumn, onCodeColumnChange, onConfirm }: {
+function UploadCard({ label, upload, uploading, onUpload, pending, codeColumn, onCodeColumnChange, onConfirm }: {
   label: string
   upload: UploadSummary | null
-  file: File | null
-  onFileChange: (f: File | null) => void
   uploading: boolean
-  onUpload: () => void
+  onUpload: (file: File) => void
   pending: { headers: string[] } | null
   codeColumn: string
   onCodeColumnChange: (v: string) => void
@@ -105,12 +103,18 @@ function UploadCard({ label, upload, file, onFileChange, uploading, onUpload, pe
         </div>
       ) : (
         <div className="flex items-center gap-2">
-          <input type="file" accept=".xlsx,.xls" onChange={e => onFileChange(e.target.files?.[0] || null)}
-            className="text-xs text-gray-600 file:mr-2 file:px-2 file:py-1 file:rounded-full file:border-0 file:bg-teal-50 file:text-teal-600 file:text-xs file:font-semibold hover:file:bg-teal-100" />
-          <button onClick={onUpload} disabled={!file || uploading}
-            className="px-3 py-1.5 bg-teal-500 hover:bg-teal-600 text-white text-xs font-semibold rounded-full disabled:opacity-50">
-            {uploading ? '업로드 중...' : (upload ? '다시 업로드' : '업로드')}
-          </button>
+          {/* 파일을 고르는 즉시 업로드한다 — 예전엔 "파일 선택" 뒤에 "업로드" 버튼을 따로 눌러야 했는데
+              (사용자 지적, 2026-10-05: "파일선택과 업로드를 한 버튼으로 해도 되지 않아?"), 이 업로드는
+              그 자리에서 바로 커밋되는 게 아니라 헤더만 읽어 "코드컬럼 선택" 대기 상태로 넘어갈 뿐이라
+              — 잘못 고른 파일이어도 위 "다시 업로드"(이 input을 다시 눌러 새 파일을 고르는 것)로 바로
+              바로잡을 수 있어 확인 버튼을 한 번 더 둘 필요가 약하다. */}
+          {/* .xls(예전 바이너리 형식)는 accept에서 뺐다 — exceljs가 zip 기반 .xlsx만 읽을 수 있어
+              .xls를 골라도 항상 "Can't find end of central directory" 파싱 실패로 끝난다(실사용 확인,
+              2026-10-05 — "업로드 실패: 500"만 뜨고 이유를 알 수 없었음). */}
+          <input type="file" accept=".xlsx" disabled={uploading}
+            onChange={e => { const f = e.target.files?.[0]; if (f) onUpload(f) }}
+            className="text-xs text-gray-600 file:mr-2 file:px-2 file:py-1 file:rounded-full file:border-0 file:bg-teal-50 file:text-teal-600 file:text-xs file:font-semibold hover:file:bg-teal-100 disabled:opacity-50" />
+          {uploading && <span className="text-xs text-gray-400">업로드 중...</span>}
         </div>
       )}
     </div>
@@ -141,11 +145,17 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
   const [asIsUpload, setAsIsUpload] = useState<UploadSummary | null>(null)
   const [toBeUpload, setToBeUpload] = useState<UploadSummary | null>(null)
   const [guidePairs, setGuidePairs] = useState<GuidePair[]>([])
-  const [asIsFile, setAsIsFile] = useState<File | null>(null)
-  const [toBeFile, setToBeFile] = useState<File | null>(null)
-  const [uploadingKind, setUploadingKind] = useState<UploadKind | null>(null)
-  const [pendingUpload, setPendingUpload] = useState<{ id: number; kind: UploadKind; headers: string[]; guessedCodeColumn: string | null } | null>(null)
-  const [codeColumn, setCodeColumn] = useState('')
+  // AS-IS/TO-BE 업로드 진행상태(uploading)·업로드 직후 "코드컬럼 선택" 대기 상태(pending)·그 선택값
+  // (codeColumn)을 kind 하나로 공유하는 변수로 두면, 한쪽을 업로드하는 동안 다른 쪽을 클릭하는 순간
+  // handleUpload(그 다른 kind)가 이 공유 변수들을 그대로 덮어써 먼저 클릭한 쪽의 화면이 업로드 전 상태로
+  // "원복"돼 보인다(사용자 지적, 2026-10-04 — 둘을 동시에 못 올리고 하나가 되돌아감). kind별로 완전히
+  // 분리해 둘이 동시에 진행돼도 서로 안 건드리게 한다.
+  const [uploadingAsIs, setUploadingAsIs] = useState(false)
+  const [uploadingToBe, setUploadingToBe] = useState(false)
+  const [pendingAsIsUpload, setPendingAsIsUpload] = useState<{ id: number; headers: string[]; guessedCodeColumn: string | null } | null>(null)
+  const [pendingToBeUpload, setPendingToBeUpload] = useState<{ id: number; headers: string[]; guessedCodeColumn: string | null } | null>(null)
+  const [asIsCodeColumn, setAsIsCodeColumn] = useState('')
+  const [toBeCodeColumn, setToBeCodeColumn] = useState('')
 
   const [rules, setRules] = useState<ColumnRule[]>([])
   const [customFields, setCustomFields] = useState<{ field_key: string; field_label: string }[]>([])
@@ -193,7 +203,8 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
 
   function selectSite(site: Site, sessionId: number | '') {
     setSelectedSite(site)
-    setPendingUpload(null)
+    setPendingAsIsUpload(null)
+    setPendingToBeUpload(null)
     setSelectedProductIds(new Set())
     loadGuide(site.id)
     loadRules(site.id)
@@ -245,10 +256,12 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
     setSearched(true)
   }
 
-  async function handleUpload(kind: UploadKind) {
-    const file = kind === 'as_is' ? asIsFile : toBeFile
-    if (!selectedSite || !file) return
-    setUploadingKind(kind)
+  async function handleUpload(kind: UploadKind, file: File) {
+    if (!selectedSite) return
+    const setUploading = kind === 'as_is' ? setUploadingAsIs : setUploadingToBe
+    const setPending = kind === 'as_is' ? setPendingAsIsUpload : setPendingToBeUpload
+    const setCodeColumn = kind === 'as_is' ? setAsIsCodeColumn : setToBeCodeColumn
+    setUploading(true)
     try {
       const fd = new FormData()
       fd.append('file', file)
@@ -257,29 +270,29 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
       const res = await fetch('/api/transform/uploads', { method: 'POST', body: fd })
       if (!res.ok) { const e = await res.json().catch(() => ({})); alert(`업로드 실패: ${e.error || res.status}`); return }
       const d = await res.json() as { id: number; headers: string[]; guessedCodeColumn: string | null; orphanedRules?: string[] }
-      setPendingUpload({ id: d.id, kind, headers: d.headers, guessedCodeColumn: d.guessedCodeColumn })
+      setPending({ id: d.id, headers: d.headers, guessedCodeColumn: d.guessedCodeColumn })
       setCodeColumn(d.guessedCodeColumn || d.headers[0] || '')
-      if (kind === 'as_is') setAsIsFile(null); else setToBeFile(null)
       if (d.orphanedRules?.length) {
         alert(`⚠ 새 TO-BE 헤더에 없는 기존 매핑 규칙이 ${d.orphanedRules.length}개 있습니다: ${d.orphanedRules.join(', ')}\n컬럼별 생성 규칙에서 다시 확인해주세요.`)
       }
     } finally {
-      setUploadingKind(null)
+      setUploading(false)
     }
   }
 
-  async function confirmCodeColumn() {
+  async function confirmCodeColumn(kind: UploadKind) {
+    const pendingUpload = kind === 'as_is' ? pendingAsIsUpload : pendingToBeUpload
+    const codeColumn = kind === 'as_is' ? asIsCodeColumn : toBeCodeColumn
     if (!selectedSite || !pendingUpload || !codeColumn) return
     const res = await fetch(`/api/transform/uploads/${pendingUpload.id}`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ codeColumn }),
     })
     const stats = await res.json() as { total: number; matched: number }
-    const kindLabel = pendingUpload.kind === 'as_is' ? 'AS-IS' : 'TO-BE'
-    const wasToBe = pendingUpload.kind === 'to_be'
+    const kindLabel = kind === 'as_is' ? 'AS-IS' : 'TO-BE'
     alert(`${kindLabel} 매칭 완료: 총 ${stats.total}행 중 ${stats.matched}개가 현재 mall_products와 일치`)
-    setPendingUpload(null)
+    if (kind === 'as_is') setPendingAsIsUpload(null); else setPendingToBeUpload(null)
     loadGuide(selectedSite.id)
-    if (wasToBe) loadRules(selectedSite.id)
+    if (kind === 'to_be') loadRules(selectedSite.id)
   }
 
   async function saveRule(rule: ColumnRule) {
@@ -484,6 +497,7 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
 
       {/* 2. AS-IS / TO-BE 샘플 가이드 — 몰 단위 등록·관리 기능이라 1번(세션 선택)과 무관하게 바로 작업할 수 있다 */}
       <StepHeader n={2} title="AS-IS / TO-BE 샘플 가이드" done={!!toBeUpload} />
+      <p className="text-xs text-gray-400 mb-3">엑셀 .xlsx 파일로 업로드해주세요(예전 .xls 형식은 지원하지 않습니다).</p>
       {!selectedSite ? (
         <div className="bg-white rounded-2xl border border-gray-200 p-6 mb-8">
           <div className="text-xs font-semibold text-gray-500 mb-3">관리할 몰을 선택하세요 (1번의 세션 선택과 별개로, 가이드만 먼저 등록·관리할 수 있습니다)</div>
@@ -496,14 +510,14 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
       ) : (
         <>
           <div className="grid grid-cols-2 gap-4 mb-4">
-            <UploadCard label="AS-IS (기존/원본) 엑셀" upload={asIsUpload} file={asIsFile} onFileChange={setAsIsFile}
-              uploading={uploadingKind === 'as_is'} onUpload={() => handleUpload('as_is')}
-              pending={pendingUpload?.kind === 'as_is' ? pendingUpload : null}
-              codeColumn={codeColumn} onCodeColumnChange={setCodeColumn} onConfirm={confirmCodeColumn} />
-            <UploadCard label="TO-BE (완성본) 엑셀" upload={toBeUpload} file={toBeFile} onFileChange={setToBeFile}
-              uploading={uploadingKind === 'to_be'} onUpload={() => handleUpload('to_be')}
-              pending={pendingUpload?.kind === 'to_be' ? pendingUpload : null}
-              codeColumn={codeColumn} onCodeColumnChange={setCodeColumn} onConfirm={confirmCodeColumn} />
+            <UploadCard label="AS-IS (스크래핑본) 엑셀" upload={asIsUpload}
+              uploading={uploadingAsIs} onUpload={file => handleUpload('as_is', file)}
+              pending={pendingAsIsUpload}
+              codeColumn={asIsCodeColumn} onCodeColumnChange={setAsIsCodeColumn} onConfirm={() => confirmCodeColumn('as_is')} />
+            <UploadCard label="TO-BE (상품마스터본) 엑셀" upload={toBeUpload}
+              uploading={uploadingToBe} onUpload={file => handleUpload('to_be', file)}
+              pending={pendingToBeUpload}
+              codeColumn={toBeCodeColumn} onCodeColumnChange={setToBeCodeColumn} onConfirm={() => confirmCodeColumn('to_be')} />
           </div>
 
           {guidePairs.length > 0 && (
@@ -557,7 +571,7 @@ export function TransformPanel({ params }: { params?: Record<string, unknown> })
                 <table className="w-full text-xs border-collapse">
                   <thead>
                     <tr className="text-left text-gray-500 border-b border-gray-200">
-                      <th className="px-2 py-2 sticky left-0 z-10 bg-white">완성본 컬럼</th>
+                      <th className="px-2 py-2 sticky left-0 z-10 bg-white">TO-BE(완성본)</th>
                       <th className="px-2 py-2">상품마스터 대상 필드</th>
                       <th className="px-2 py-2">생성 방식</th>
                       <th className="px-2 py-2">설정</th>

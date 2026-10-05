@@ -1,5 +1,5 @@
 'use client'
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 
 interface SessionLike {
   id: number
@@ -69,6 +69,13 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
   const [colOrder, setColOrder] = useState<string[]>([])
   const [dragKey, setDragKey] = useState<string | null>(null)
+  // 행 전체를 클릭해도 선택되지만(onSelect), 그것만으로는 "이 중 어느 게 다음 단계로 넘어갈 대상인지"가
+  // 흐린 배경색 하나로만 표시돼 눈에 잘 안 띈다는 지적(사용자, 2026-10-04 — "다음 단계를 진행할 것을
+  // 선택하는 기능을 그리드에 넣어줘"). 라디오 버튼을 맨 앞 컬럼으로 추가해 단일 선택임을 명확히 보여준다 —
+  // 체크박스(onToggleCheck, "선택 병합"류 다중 선택)와는 별개로 모든 호출부에 항상 켠다(모든 호출부가
+  // selectedId/onSelect를 필수로 주는 단일 선택 화면이기 때문). useId로 라디오 name을 만들어, 이 그리드가
+  // 한 화면에 여러 번 쓰여도(현재는 없지만) 서로 다른 그룹으로 묶이지 않게 한다.
+  const radioName = useId()
 
   const columns = useMemo<ColumnDef<T>[]>(() => {
     const cols: ColumnDef<T>[] = [
@@ -195,7 +202,9 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
 
   if (sessions.length === 0) return <p className="px-4 py-3 text-xs text-gray-400">검색 결과가 없습니다.</p>
 
-  const tableWidth = (onToggleCheck ? 40 : 0) + orderedColumns.reduce((sum, col) => sum + (colWidths[col.key] ?? widthFor(col.key)), 0) + (onDelete ? 80 : 0)
+  // 첫 번째 데이터 컬럼의 sticky 왼쪽 오프셋 — 라디오(항상 40px) + 체크박스(있으면 40px)만큼 밀려난다.
+  const firstColStickyClass = onToggleCheck ? 'left-20' : 'left-10'
+  const tableWidth = 40 + (onToggleCheck ? 40 : 0) + orderedColumns.reduce((sum, col) => sum + (colWidths[col.key] ?? widthFor(col.key)), 0) + (onDelete ? 80 : 0)
 
   return (
     <div>
@@ -216,14 +225,16 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
       <div className={`${maxHeightClassName} overflow-auto`}>
         <table className="text-xs border-collapse" style={{ tableLayout: 'fixed', width: tableWidth }}>
           <colgroup>
+            <col style={{ width: 40 }} />
             {onToggleCheck && <col style={{ width: 40 }} />}
             {orderedColumns.map(col => <col key={col.key} style={{ width: colWidths[col.key] ?? widthFor(col.key) }} />)}
             {onDelete && <col style={{ width: 80 }} />}
           </colgroup>
           <thead className="sticky top-0 z-10 bg-gray-50">
             <tr className="border-b border-gray-200 text-gray-500 font-semibold">
+              <th className="px-4 py-2 text-left sticky left-0 z-20 bg-gray-50" title="다음 단계로 진행할 세션을 고릅니다">선택</th>
               {onToggleCheck && (
-                <th className="px-4 py-2 text-left sticky left-0 z-20 bg-gray-50">
+                <th className="px-4 py-2 text-left sticky left-10 z-20 bg-gray-50">
                   <input type="checkbox" checked={checkableVisible.length > 0 && checkableVisible.every(s => checkedIds?.has(s.id))} onChange={handleSelectAll} />
                 </th>
               )}
@@ -236,7 +247,7 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
                     onDragOver={e => e.preventDefault()}
                     onDrop={() => handleColDrop(col.key)}
                     onDragEnd={() => setDragKey(null)}
-                    className={`relative px-4 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${dragKey === col.key ? 'opacity-40' : ''} ${colIdx === 0 ? `sticky z-20 bg-gray-50 ${onToggleCheck ? 'left-10' : 'left-0'}` : ''}`}
+                    className={`relative px-4 py-2 text-left cursor-pointer select-none hover:bg-gray-100 overflow-hidden whitespace-nowrap ${dragKey === col.key ? 'opacity-40' : ''} ${colIdx === 0 ? `sticky z-20 bg-gray-50 ${firstColStickyClass}` : ''}`}
                     onClick={e => handleSort(col.key, e)} title="드래그: 컬럼 순서 이동 · 클릭: 정렬 · Shift+클릭: 복합 정렬 추가">
                     <span className={active ? 'text-gray-800' : ''}>{col.label}</span>
                     {active && <span className="ml-1 text-teal-500">{sortKeys[idx].dir === 'asc' ? '▲' : '▼'}{sortKeys.length > 1 ? idx + 1 : ''}</span>}
@@ -249,9 +260,10 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
             </tr>
             {showFilters && (
               <tr className="border-b border-gray-200 bg-white">
-                {onToggleCheck && <th className="px-4 py-1.5 sticky left-0 z-20 bg-white"></th>}
+                <th className="px-4 py-1.5 sticky left-0 z-20 bg-white"></th>
+                {onToggleCheck && <th className="px-4 py-1.5 sticky left-10 z-20 bg-white"></th>}
                 {orderedColumns.map((col, colIdx) => (
-                  <th key={col.key} className={`px-2 py-1.5 font-normal ${colIdx === 0 ? `sticky z-20 bg-white ${onToggleCheck ? 'left-10' : 'left-0'}` : ''}`}>
+                  <th key={col.key} className={`px-2 py-1.5 font-normal ${colIdx === 0 ? `sticky z-20 bg-white ${firstColStickyClass}` : ''}`}>
                     <input value={filters[col.key] || ''} onChange={e => setFilters(f => ({ ...f, [col.key]: e.target.value }))}
                       placeholder="필터..." onClick={e => e.stopPropagation()}
                       className="w-full border border-gray-200 rounded px-1.5 py-1 text-xs font-normal focus:outline-none focus:ring-1 focus:ring-teal-300" />
@@ -263,15 +275,18 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
           </thead>
           <tbody>
             {visibleSessions.length === 0 ? (
-              <tr><td colSpan={orderedColumns.length + (onToggleCheck ? 1 : 0) + (onDelete ? 1 : 0)} className="px-4 py-3 text-xs text-gray-400 text-center">필터에 맞는 세션이 없습니다.</td></tr>
+              <tr><td colSpan={orderedColumns.length + 1 + (onToggleCheck ? 1 : 0) + (onDelete ? 1 : 0)} className="px-4 py-3 text-xs text-gray-400 text-center">필터에 맞는 세션이 없습니다.</td></tr>
             ) : visibleSessions.map(s => {
               const rowStickyBg = s.id === selectedId ? 'bg-teal-50' : 'bg-white group-hover:bg-gray-50'
               return (
               <tr key={s.id} onClick={() => onSelect(s.id)}
                 className={`group border-b border-gray-100 last:border-0 cursor-pointer transition-colors ${
                   s.id === selectedId ? 'bg-teal-50' : 'hover:bg-gray-50'}`}>
+                <td className={`px-4 py-2 sticky left-0 z-10 ${rowStickyBg}`} onClick={e => e.stopPropagation()}>
+                  <input type="radio" name={radioName} checked={s.id === selectedId} onChange={() => onSelect(s.id)} />
+                </td>
                 {onToggleCheck && (
-                  <td className={`px-4 py-2 sticky left-0 z-10 ${rowStickyBg}`} onClick={e => e.stopPropagation()}>
+                  <td className={`px-4 py-2 sticky left-10 z-10 ${rowStickyBg}`} onClick={e => e.stopPropagation()}>
                     <input type="checkbox" checked={checkedIds?.has(s.id) ?? false} onChange={() => onToggleCheck(s.id)}
                       disabled={!(isRowCheckable?.(s) ?? true)}
                       title={isRowCheckable?.(s) === false ? '확정되지 않은 세션이라 선택할 수 없습니다' : undefined}
@@ -279,7 +294,7 @@ export function ScrapeSessionGrid<T extends SessionLike>({ sessions, selectedId,
                   </td>
                 )}
                 {orderedColumns.map((col, colIdx) => (
-                  <td key={col.key} className={`px-4 py-2 truncate ${col.className ?? ''} ${colIdx === 0 ? `sticky z-10 ${rowStickyBg} ${onToggleCheck ? 'left-10' : 'left-0'}` : ''}`} title={col.key === 'url' ? s.url : undefined}>
+                  <td key={col.key} className={`px-4 py-2 truncate ${col.className ?? ''} ${colIdx === 0 ? `sticky z-10 ${rowStickyBg} ${firstColStickyClass}` : ''}`} title={col.key === 'url' ? s.url : undefined}>
                     {col.render(s)}
                   </td>
                 ))}

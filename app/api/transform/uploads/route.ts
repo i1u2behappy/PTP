@@ -31,7 +31,17 @@ export async function POST(req: NextRequest) {
   if (!VALID_KINDS.has(kind as UploadKind)) return NextResponse.json({ error: 'kind must be as_is or to_be' }, { status: 400 })
 
   const buffer = Buffer.from(await file.arrayBuffer())
-  const { headers, rows } = await parseReferenceWorkbook(buffer)
+  // exceljs는 최신 .xlsx(zip 기반)만 읽는다 — 예전 바이너리 .xls나 손상된 파일을 올리면 "Can't find end
+  // of central directory" 같은 jszip 내부 에러를 그대로 던지는데, 이걸 안 잡으면 라우트가 빈 응답으로
+  // 500만 내려줘 화면엔 "업로드 실패: 500"만 보이고 왜 실패했는지 전혀 알 수 없다(사용자 지적, 2026-10-05
+  // — "업로드 실패는 뭐야?"). 원인을 구분할 방법이 없으니(exceljs가 에러 종류를 코드로 안 줌) 파싱
+  // 실패는 전부 "포맷이 안 맞다"는 같은 이유로 보고 안내한다.
+  let headers: string[], rows: Record<string, string>[]
+  try {
+    ({ headers, rows } = await parseReferenceWorkbook(buffer))
+  } catch {
+    return NextResponse.json({ error: '엑셀 파일을 읽을 수 없습니다 — 예전 .xls 형식이거나 손상된 파일일 수 있습니다. 엑셀에서 "다른 이름으로 저장 → Excel 통합 문서(.xlsx)"로 저장한 뒤 다시 올려주세요.' }, { status: 400 })
+  }
   if (!headers.length) return NextResponse.json({ error: '엑셀 헤더를 읽지 못했습니다.' }, { status: 400 })
 
   const uploadRes = await pool.query<{ id: number }>(

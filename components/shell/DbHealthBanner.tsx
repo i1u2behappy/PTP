@@ -20,8 +20,16 @@ const COUNTDOWN_TICK_MS = 1_000
 // 동안은 결과가 뭐든(성공/아직 반영 전) "재시작 진행 중" 문구를 유지해 이 혼란을 없앤다 — 확정적인
 // 에러 응답(스케줄러 등록 실패 등)이 오면 이 유예기간 중이라도 즉시 진짜 에러를 보여준다.
 const WORKER_RESTART_GRACE_MS = 90_000
+// /api/health/db 자체는 ok를 돌려주는데(서버는 분명히 살아있음) 그 왕복시간이 비정상적으로 긴 경우 —
+// 실사용 확인(2026-10-04, 리얼백 몰구조분석 직후 로그인 화면): DB/워커 둘 다 정상인데도 /login 같은
+// 페이지는 물론 정적 파일(/logo.jpg)까지 간헐적으로 6~7초씩 걸렸다. 기존 db-down/server-down은 둘 다
+// "응답이 아예 실패"하는 경우만 잡아서, 이렇게 "응답은 오지만 느린" 상황은 이 배너가 전혀 감지 못 해
+// 사용자가 재시작 버튼조차 볼 수 없었다(2026-09-07 DB 커넥션 풀 소진 사고처럼, dev 서버 경합류 문제가
+// 또 재발해도 매번 이 화면의 "조용한 사각지대"에 걸림). HEALTH_CHECK_TIMEOUT_MS(app/api/health/db/
+// route.ts)의 3초보다 확실히 느릴 때만 "느림"으로 본다 — 그 경로 자체의 DB 타임아웃과 혼동되지 않게.
+const SLOW_RESPONSE_THRESHOLD_MS = 3_000
 
-type Health = 'ok' | 'db-down' | 'server-down' | 'worker-booting' | 'worker-stale'
+type Health = 'ok' | 'db-down' | 'server-down' | 'worker-booting' | 'worker-stale' | 'server-slow'
 
 type WorkerBootStatus =
   | { status: 'unknown' | 'ready' | 'failed' }
@@ -67,6 +75,9 @@ export function DbHealthBanner() {
   // 순간이나 일시적인 네트워크 끊김 한 번만으로도 fetch가 실패할 수 있는데, 그때마다 곧바로 "서버가
   // 죽었다"는 배너를 띄우면 실제로 서버는 멀쩡한 오탐이 나온다.
   const consecutiveServerDownRef = useRef(0)
+  // server-slow도 같은 이유로 debounce한다 — 가끔 한 번 느린 것만으로 배너를 띄우면 일시적인 네트워크
+  // 지연까지 "서버 재시작"으로 오인시킬 수 있다.
+  const consecutiveSlowRef = useRef(0)
 
   useEffect(() => {
     let cancelled = false
@@ -74,19 +85,29 @@ export function DbHealthBanner() {
      *  (UNHEALTHY_POLL_MS 주석 참고: 정상이 아닌 동안은 더 자주 재확인해서 빨리 자동으로 사라지게 함). */
     async function check(): Promise<Health> {
       let next: Health = 'ok'
+      const checkStartedAt = performance.now()
       try {
         const d = await fetch('/api/health/db').then(r => r.json())
+        const elapsedMs = performance.now() - checkStartedAt
         // fetch 자체는 성공했다 — 서버는 분명히 응답하고 있으므로 server-down 연속 실패 집계를 리셋한다.
         consecutiveServerDownRef.current = 0
         if (d.ok) {
           consecutiveDbDownRef.current = 0
-          next = 'ok'
+          if (elapsedMs >= SLOW_RESPONSE_THRESHOLD_MS) {
+            consecutiveSlowRef.current++
+            next = consecutiveSlowRef.current >= 2 ? 'server-slow' : 'ok'
+          } else {
+            consecutiveSlowRef.current = 0
+            next = 'ok'
+          }
         } else {
           consecutiveDbDownRef.current++
+          consecutiveSlowRef.current = 0
           next = consecutiveDbDownRef.current >= 2 ? 'db-down' : 'ok'
         }
       } catch {
         consecutiveServerDownRef.current++
+        consecutiveSlowRef.current = 0
         next = consecutiveServerDownRef.current >= 2 ? 'server-down' : 'ok'
       }
       // PTP 서버 자체가 죽은 경우(server-down)엔 이 요청도 어차피 안 닿으므로 건너뛴다.
@@ -272,6 +293,15 @@ export function DbHealthBanner() {
             title="WSL2를 재시작해 Docker 백엔드를 다시 띄웁니다 — 보통 몇 초 안에, 길면 최대 60초까지 걸릴 수 있습니다. 끝나면 이 배너는 자동으로 사라집니다."
             className="px-3 py-1 bg-white text-rose-600 rounded-full text-xs font-semibold hover:bg-rose-50 disabled:opacity-60 transition-colors">
             {restarting ? 'WSL 재시작 중... (보통 수 초, 길면 최대 60초 — 끝나면 자동으로 사라집니다)' : '🐳 Docker/WSL 재시작'}
+          </button>
+        </>
+      ) : health === 'server-slow' ? (
+        <>
+          <span>⚠ PTP 서버 응답이 비정상적으로 느립니다 — DB/워커는 정상이지만 요청마다 몇 초씩 걸리고 있습니다.</span>
+          {restartError && <span className="text-rose-200">({restartError})</span>}
+          <button onClick={() => handleRestart('/api/system/restart-server')} disabled={restarting}
+            className="px-3 py-1 bg-white text-rose-600 rounded-full text-xs font-semibold hover:bg-rose-50 disabled:opacity-60 transition-colors">
+            {restarting ? '재시작 중... (10~20초 소요)' : '🔄 PTP 서버 재시작'}
           </button>
         </>
       ) : (

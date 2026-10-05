@@ -2,6 +2,25 @@ import type { NextConfig } from 'next'
 
 const nextConfig: NextConfig = {
   serverExternalPackages: ['playwright', 'pg', 'sharp', 'exceljs'],
+  // Next.js 기본 dev 인디케이터("Compiling..." 등) 위치는 bottom-left인데, 이 앱은 메뉴바(Sidebar.tsx)의
+  // "로그아웃"/"시스템 상태" 버튼이 바로 그 자리에 있어 가려진다(사용자 지적, 2026-10-04). 다른 fixed
+  // 오버레이들(GlobalErrorNet의 에러 토스트는 bottom-right, DbHealthBanner는 상단 전체폭, ScraperPanel의
+  // 토스트는 bottom-center)과 안 겹치는 유일한 자리가 top-right라 그쪽으로 옮긴다.
+  devIndicators: {
+    position: 'top-right',
+  },
+  // Next.js 16부터 proxy.ts(이 앱도 씀 — 인증 체크)가 요청 본문을 메모리에 버퍼링해 proxy/라우트 핸들러
+  // 양쪽에서 다시 읽을 수 있게 하는데, 기본 상한이 10MB다(proxyClientMaxBodySize 문서 참고). 이 상한을
+  // 넘으면 에러를 던지는 게 아니라 **본문을 조용히 10MB에서 잘라버린다** — 그 잘린 JSON을 라우트
+  // 핸들러가 req.json()으로 파싱하면 문법 오류로 500이 난다. "스크랩 Raw 확인"의 엑셀 다운로드
+  // (POST /api/scrape-staging/export, 사용자 지적 2026-10-04)가 정확히 이렇게 실패했다 — 세션 하나에
+  // 8,000여개 항목(raw_data만 약 23MB)을 그대로 요청 본문에 실어 보내 기본 10MB를 가볍게 넘었다.
+  // 이 설정은 전역이라(특정 라우트 하나만 고치는 게 아니다) 비슷하게 대량 데이터를 본문에 싣는 다른
+  // export/저장 라우트에도 똑같이 적용된다 — 이 앱은 로컬 단일 사용자 도구라 메모리 상한을 넉넉히
+  // 잡아도 위험이 적다고 보고 100MB로 올린다.
+  experimental: {
+    proxyClientMaxBodySize: '100mb',
+  },
   images: {
     remotePatterns: [{ protocol: 'https', hostname: '**' }, { protocol: 'http', hostname: '**' }],
   },

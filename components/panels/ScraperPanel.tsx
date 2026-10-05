@@ -1079,6 +1079,16 @@ function MallProfileResultDisplay({ error, result, loading, detail, elapsedSec, 
   )
 }
 
+// "전체 가져오기" 카테고리 그리드의 리사이즈 가능한 컬럼들 — 체크박스/제외 액션 칸은 아이콘 크기 고정이라
+// 뺐다. 순서는 실제 <th>/<td> 렌더 순서와 같아야 한다(사용자 요청으로 URL이 카테고리 앞으로 옮겨짐,
+// 2026-10-04).
+type CategoryGridColumn = 'sort' | 'limit' | 'url' | 'name' | 'count' | 'checkedAt' | 'lastScraped' | 'client'
+const DEFAULT_CATEGORY_GRID_WIDTHS: Record<CategoryGridColumn, number> = {
+  sort: 70, limit: 120, url: 260, name: 200, count: 80, checkedAt: 90, lastScraped: 90, client: 90,
+}
+const CATEGORY_GRID_WIDTHS_KEY = 'ptp:categoryGridColWidths'
+const MIN_CATEGORY_GRID_COLUMN_WIDTH = 40
+
 export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   const { openTab, bumpRefresh, setGuidance, refreshSignals } = useTabs()
   const { labels: registryLabels } = useRegisteredFieldKeys()
@@ -1360,6 +1370,59 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
   // 고른 정렬 라벨/상한을 담는다. categoryUrlsText(선택 상태)와 같은 이유로 서버에 영구 저장하지 않고
   // 세션(sessionStorage) 로컬 상태로만 둔다 — 매번 다시 고르는 게 맞는 값이라 DB 스키마 없이 간단하게.
   const [categorySettings, setCategorySettings] = useState<Record<string, { sortLabel?: string; limitMode?: 'count' | 'pages'; limitValue?: number }>>({})
+  // "전체 가져오기" 카테고리 그리드의 컬럼 너비(사용자 요청, 2026-10-04 — "컬럼의 너비를 한번 조절하면
+  // 그 사이즈로 로그아웃 후 다시 열더라도 그 사이즈로 가오게 해"). sidebarCollapsed(TabsContext.tsx)와
+  // 같은 이유로 localStorage에 둔다 — 로그아웃은 세션 쿠키만 지울 뿐 localStorage는 그대로 남으므로
+  // 별도 계정별 서버 저장 없이도 "로그아웃 후에도 유지"를 만족한다.
+  const [categoryGridWidths, setCategoryGridWidths] = useState<Record<CategoryGridColumn, number>>(DEFAULT_CATEGORY_GRID_WIDTHS)
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(CATEGORY_GRID_WIDTHS_KEY)
+      const parsed = saved ? JSON.parse(saved) : null
+      /* eslint-disable-next-line react-hooks/set-state-in-effect */
+      if (parsed && typeof parsed === 'object') setCategoryGridWidths(prev => ({ ...prev, ...parsed }))
+    } catch { /* 저장된 값이 깨져있어도 기본값으로 계속 진행 */ }
+  }, [])
+  // 드래그 중인 컬럼 — mousemove/mouseup은 리액트 이벤트가 아니라 window 전역 리스너로 받아야 드래그가
+  // 셀 경계를 벗어나도 안 끊긴다(흔한 컬럼 리사이즈 구현 패턴).
+  const columnResizeRef = useRef<{ col: CategoryGridColumn; startX: number; startWidth: number } | null>(null)
+  function startColumnResize(col: CategoryGridColumn, e: React.MouseEvent) {
+    e.preventDefault()
+    columnResizeRef.current = { col, startX: e.clientX, startWidth: categoryGridWidths[col] }
+    const onMove = (ev: MouseEvent) => {
+      const r = columnResizeRef.current
+      if (!r) return
+      const next = Math.max(MIN_CATEGORY_GRID_COLUMN_WIDTH, r.startWidth + (ev.clientX - r.startX))
+      setCategoryGridWidths(prev => ({ ...prev, [r.col]: next }))
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      columnResizeRef.current = null
+      // 드래그가 끝난 시점의 최신 값으로 한 번만 저장한다(매 mousemove마다 쓰면 낭비) — 상태를 바꾸지
+      // 않고 읽기만 하려고 updater 함수 형태로 호출한다(prev를 그대로 반환).
+      setCategoryGridWidths(prev => {
+        try { localStorage.setItem(CATEGORY_GRID_WIDTHS_KEY, JSON.stringify(prev)) } catch { /* 저장 실패해도 화면 동작엔 지장 없음 */ }
+        return prev
+      })
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+  /** "전체 가져오기" 그리드의 <th> 하나를 리사이즈 핸들과 함께 그린다 — JSX 컴포넌트 태그(<ResizableTh/>)가
+   *  아니라 일반 함수로 둔다. 컴포넌트 함수 안에서 매 렌더마다 새로 정의되는 컴포넌트를 태그로 쓰면 리액트가
+   *  매번 다른 타입으로 보고 그 서브트리를 통째로 마운트 해제/재마운트한다 — 이 함수는 엘리먼트를 돌려줄
+   *  뿐 태그로 쓰이지 않으므로 그 문제가 없다(.map 콜백과 같은 성격). */
+  function resizableCategoryTh(col: CategoryGridColumn, label: string, opts?: { title?: string; align?: 'right' }) {
+    return (
+      <th key={col} style={{ width: categoryGridWidths[col] }} title={opts?.title}
+        className={`relative px-3 py-1.5 text-gray-500 font-normal whitespace-nowrap select-none ${opts?.align === 'right' ? 'text-right' : 'text-left'}`}>
+        {label}
+        <span onMouseDown={e => startColumnResize(col, e)}
+          className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-teal-300/70" />
+      </th>
+    )
+  }
   const [detectedPlatform, setDetectedPlatform] = useState<string | null>(null)
   // 카테고리를 나눠서(오늘 일부, 나중에 나머지) 스크랩하는 경우가 있어, 이 몰의 과거 완료 세션들을 훑어
   // "이미 스크랩해본 카테고리"를 체크박스 목록에 표시한다(app/api/scrape/categories가 계산해 내려줌).
@@ -3297,13 +3360,15 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
           </p>
           <div className="mt-1.5 border border-teal-200 bg-white rounded-xl overflow-hidden">
             <div className="h-40 min-h-[80px] max-h-[70vh] resize-y overflow-auto">
-              <table className="w-full text-xs border-collapse">
+              <table className="w-full text-xs border-collapse table-fixed">
                 <thead>
                   {/* 전체선택 체크박스를 우측 텍스트 링크 대신 아래 행 체크박스와 같은 왼쪽 칸에
                       둔다 — 실제 <thead>/<tbody>로 같은 표에 넣어야 폭이 항상 정확히 맞는다. 예전엔
                       카테고리명/URL/제외 3칸을 "발견된 카테고리 N개..." 한 문구로 묶어 보여줬는데, 상품개수/
                       확인일시/최근 스크랩/업체 컬럼이 추가되며 각자 라벨이 있는 게 명확해 위 문단으로
-                      옮기고 컬럼마다 이름을 붙였다(사용자 요청, 2026-08-17). */}
+                      옮기고 컬럼마다 이름을 붙였다(사용자 요청, 2026-08-17). URL을 카테고리 앞으로, 각
+                      컬럼을 드래그로 리사이즈 가능하게(너비는 localStorage에 저장해 로그아웃 후에도 유지)
+                      바꾼 것도 사용자 요청(2026-10-04) — table-fixed라야 th에 준 너비가 그대로 먹는다. */}
                   <tr className="sticky top-0 z-[2] bg-teal-50 border-b border-teal-100">
                     <th className="px-3 py-1.5 w-6 sticky left-0 z-[1] bg-teal-50 font-normal text-left">
                       <input type="checkbox" title="전체 선택/해제 (몰 전체상품, 제외 표시한 카테고리는 빠짐)"
@@ -3311,14 +3376,14 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                         ref={el => { if (el) el.indeterminate = selectableCategories.some(c => isCategorySelected(c.href)) && !selectableCategories.every(c => isCategorySelected(c.href)) }}
                         onChange={toggleAllCategories} />
                     </th>
-                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="이 카테고리를 스크랩할 때 적용할 정렬 순서">정렬</th>
-                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="이 카테고리에서 몇 개/몇 페이지까지만 스크랩할지 상한을 둡니다(비워두면 무제한)">스크랩 상한</th>
-                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap">카테고리</th>
-                    <th className="px-3 py-1.5 text-gray-500 font-normal text-right whitespace-nowrap" title="스크랩 미리보기로 확인된 상품 개수">상품개수</th>
-                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="상품개수를 마지막으로 확인한 시각">확인일시</th>
-                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="이 카테고리 상품이 실제로 스크랩된 가장 최근 시각">최근 스크랩</th>
-                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left whitespace-nowrap" title="가장 최근에 이 카테고리 상품을 마이그레이션한 업체">업체</th>
-                    <th className="px-3 py-1.5 text-gray-500 font-normal text-left">URL</th>
+                    {resizableCategoryTh('sort', '정렬', { title: '이 카테고리를 스크랩할 때 적용할 정렬 순서' })}
+                    {resizableCategoryTh('limit', '스크랩 상한', { title: '이 카테고리에서 몇 개/몇 페이지까지만 스크랩할지 상한을 둡니다(비워두면 무제한)' })}
+                    {resizableCategoryTh('url', 'URL')}
+                    {resizableCategoryTh('name', '카테고리')}
+                    {resizableCategoryTh('count', '상품개수', { title: '스크랩 미리보기로 확인된 상품 개수', align: 'right' })}
+                    {resizableCategoryTh('checkedAt', '확인일시', { title: '상품개수를 마지막으로 확인한 시각' })}
+                    {resizableCategoryTh('lastScraped', '최근 스크랩', { title: '이 카테고리 상품이 실제로 스크랩된 가장 최근 시각' })}
+                    {resizableCategoryTh('client', '업체', { title: '가장 최근에 이 카테고리 상품을 마이그레이션한 업체' })}
                     <th className="px-3 py-1.5 w-12 sticky right-0 bg-teal-50" />
                   </tr>
                 </thead>
@@ -3375,18 +3440,27 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                           )}
                         </div>
                       </td>
-                      <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
+                      <td className="px-3 py-1.5 overflow-hidden">
                         <button type="button" onClick={e => { e.stopPropagation(); handleOpenItem(c.href) }}
                           title={`${c.href} — 클릭하면 이 카테고리 페이지를 엽니다`}
-                          className={`hover:text-teal-600 hover:underline ${isCategoryExcluded(c.href) ? 'line-through' : ''}`}>
-                          {c.text}
+                          className="text-gray-400 hover:text-teal-600 hover:underline truncate block max-w-full">
+                          {c.href}
                         </button>
-                        {isCategoryScraped(c.href) && (
-                          <span className="ml-1.5 text-[10px] font-semibold text-teal-600" title="이 카테고리는 이전에 스크래핑을 완료한 적이 있습니다">✓ 완료</span>
-                        )}
-                        {isCategoryExcluded(c.href) && (
-                          <span className="ml-1.5 text-[10px] font-semibold text-gray-400" title="상품 카테고리가 아닌 것으로 표시해뒀습니다">제외됨</span>
-                        )}
+                      </td>
+                      <td className="px-3 py-1.5 text-gray-700 overflow-hidden">
+                        <div className="flex items-center gap-1.5">
+                          <button type="button" onClick={e => { e.stopPropagation(); handleOpenItem(c.href) }}
+                            title={`${c.href} — 클릭하면 이 카테고리 페이지를 엽니다`}
+                            className={`truncate hover:text-teal-600 hover:underline ${isCategoryExcluded(c.href) ? 'line-through' : ''}`}>
+                            {c.text}
+                          </button>
+                          {isCategoryScraped(c.href) && (
+                            <span className="shrink-0 text-[10px] font-semibold text-teal-600" title="이 카테고리는 이전에 스크래핑을 완료한 적이 있습니다">✓ 완료</span>
+                          )}
+                          {isCategoryExcluded(c.href) && (
+                            <span className="shrink-0 text-[10px] font-semibold text-gray-400" title="상품 카테고리가 아닌 것으로 표시해뒀습니다">제외됨</span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-3 py-1.5 text-right text-gray-600 whitespace-nowrap" title={count?.truncated ? truncatedTitle : undefined}>
                         {count ? `${count.count.toLocaleString()}${count.truncated ? '개 이상' : '개'}` : '-'}
@@ -3397,15 +3471,8 @@ export function ScraperPanel({ params }: { params?: Record<string, unknown> }) {
                       <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap" title={info?.lastScrapedAt ? new Date(info.lastScrapedAt).toLocaleString() : undefined}>
                         {info?.lastScrapedAt ? formatShortDate(info.lastScrapedAt) : '-'}
                       </td>
-                      <td className="px-3 py-1.5 text-gray-500 whitespace-nowrap truncate max-w-[120px]" title={info?.clientName || undefined}>
+                      <td className="px-3 py-1.5 text-gray-500 truncate" title={info?.clientName || undefined}>
                         {info?.clientName || '-'}
-                      </td>
-                      <td className="px-3 py-1.5 max-w-[320px] truncate">
-                        <button type="button" onClick={e => { e.stopPropagation(); handleOpenItem(c.href) }}
-                          title={`${c.href} — 클릭하면 이 카테고리 페이지를 엽니다`}
-                          className="text-gray-400 hover:text-teal-600 hover:underline truncate max-w-full">
-                          {c.href}
-                        </button>
                       </td>
                       <td className="px-3 py-1.5 w-12 text-right sticky right-0 bg-white group-hover:bg-gray-50">
                         <button type="button" onClick={e => { e.stopPropagation(); toggleCategoryExcluded(c.href) }}
